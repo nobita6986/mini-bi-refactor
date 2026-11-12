@@ -11,6 +11,7 @@ import {
   handleRecruitmentPostUpdate,
   handleRecruitmentPostWithdraw,
 } from "./api.ts";
+import { projectRecruitmentPostListWithFacets } from "./contract.ts";
 
 const ACTOR = {
   auth_subject: "11111111-1111-4111-8111-111111111111",
@@ -828,4 +829,119 @@ test("handleRecruitmentPostPublicFeedV1 serves public JSON feed without authenti
     },
   );
   assert.equal(leakedRes.status, 503);
+});
+
+test("handleRecruitmentPostList supports include_facets=true&page_size=10 in one repository call while preserving legacy 5-field response when omitted", async () => {
+  const facetsData = {
+    items: [SAMPLE_ITEM],
+    page_size: 10,
+    has_more: true,
+    next_cursor: `C1.1.${FILTER_HASH}.1762761600123456.${BRIEF_ID}`,
+    snapshot_token: `S1.1.${FILTER_HASH}`,
+    total_count: 25,
+    industrial_parks: [
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000302",
+        industrial_park_code: "AA_ANG",
+        display_name: "KCN Ang",
+        active: true,
+        job_count: 3,
+      },
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000301",
+        industrial_park_code: "ZZ_AN_NFD",
+        display_name: "KCN A\u0301n",
+        active: true,
+        job_count: 2,
+      },
+      {
+        industrial_park_id: PARK_ID,
+        industrial_park_code: "VP_BA_THIEN_1",
+        display_name: "KCN Bá Thiện 1",
+        active: true,
+        job_count: 20,
+      },
+    ],
+    labor_types: [
+      {
+        labor_type_key: "CHINH_THUC",
+        display_name: "Chính thức",
+        job_count: 20,
+      },
+      {
+        labor_type_key: "THOI_VU",
+        display_name: "Thời vụ",
+        job_count: 5,
+      },
+    ],
+  };
+
+  const { calls, dependencies } = makeDeps({ ok: true, data: facetsData });
+  const res = await handleRecruitmentPostList(
+    new Request(
+      "https://app.test/api/recruitment-posts?include_facets=true&page_size=10",
+    ),
+    "true",
+    dependencies,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "private, no-store");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "list");
+  assert.equal(calls[0][1].include_facets, true);
+  assert.equal(calls[0][1].page_size, 10);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.ok(projectRecruitmentPostListWithFacets(body.data) !== null);
+  assert.deepEqual(Object.keys(body.data).sort(), [
+    "has_more",
+    "industrial_parks",
+    "items",
+    "labor_types",
+    "next_cursor",
+    "page_size",
+    "snapshot_token",
+    "total_count",
+  ]);
+  assert.equal(body.data.total_count, 25);
+  assert.deepEqual(
+    body.data.industrial_parks.map(
+      (p) => `${p.display_name} (${p.industrial_park_code})`,
+    ),
+    [
+      "KCN A\u0301n (ZZ_AN_NFD)",
+      "KCN Ang (AA_ANG)",
+      "KCN Bá Thiện 1 (VP_BA_THIEN_1)",
+    ],
+  );
+  assert.equal(body.data.industrial_parks[0].active, true);
+  assert.equal(body.data.labor_types[0].job_count, 20);
+
+  // Legacy request without include_facets returns exact 5 keys and defaults to page_size=15
+  const legacyData = {
+    items: [SAMPLE_ITEM],
+    page_size: 15,
+    has_more: false,
+    next_cursor: null,
+    snapshot_token: `S1.1.${FILTER_HASH}`,
+  };
+  const legacyDeps = makeDeps({ ok: true, data: legacyData });
+  const legacyRes = await handleRecruitmentPostList(
+    new Request("https://app.test/api/recruitment-posts"),
+    "true",
+    legacyDeps.dependencies,
+  );
+  assert.equal(legacyRes.status, 200);
+  assert.equal(legacyDeps.calls.length, 1);
+  assert.equal(legacyDeps.calls[0][1].include_facets, false);
+  assert.equal(legacyDeps.calls[0][1].page_size, 15);
+  const legacyBody = await legacyRes.json();
+  assert.equal(legacyBody.ok, true);
+  assert.deepEqual(Object.keys(legacyBody.data).sort(), [
+    "has_more",
+    "items",
+    "next_cursor",
+    "page_size",
+    "snapshot_token",
+  ]);
 });

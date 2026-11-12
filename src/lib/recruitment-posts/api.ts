@@ -14,6 +14,8 @@ import {
   parseUpdateRecruitmentPostBody,
   parseUuidParam,
   parseWithdrawRecruitmentPostBody,
+  projectRecruitmentPostList,
+  projectRecruitmentPostListWithFacets,
   projectRecruitmentPostPublicFeedV1,
   recruitmentPostHttpStatusForError,
   type RecruitmentPostErrorCode,
@@ -278,7 +280,13 @@ export async function handleRecruitmentPostList(
       ...parsedQuery.value,
     });
     if (!result.ok) return recruitmentPostError(result.code);
-    return recruitmentPostOk(result.data, 200);
+    const projected = parsedQuery.value.include_facets
+      ? projectRecruitmentPostListWithFacets(result.data)
+      : projectRecruitmentPostList(result.data);
+    if (!projected) {
+      return recruitmentPostError("RECRUITMENT_POST_UNAVAILABLE");
+    }
+    return recruitmentPostOk(projected, 200);
   } catch {
     console.error("[recruitment-posts] list failed");
     return recruitmentPostError("RECRUITMENT_POST_UNAVAILABLE");

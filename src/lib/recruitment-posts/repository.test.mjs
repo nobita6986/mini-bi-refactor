@@ -394,4 +394,57 @@ test("createRecruitmentPostRepository calls all 7 RPCs with server-resolved acto
   const publicFeedRes = await publicRepo.listPublicFeedV1();
   assert.equal(publicFeedRes.ok, true);
   assert.deepEqual(publicFeedCalls, [["recruitment_post_public_feed_v1", {}]]);
+
+  // list({ include_facets: true }) calls recruitment_post_list_with_facets in a single RPC call
+  const facetsCalls = [];
+  const facetsPayload = {
+    items: [SAMPLE_ITEM],
+    page_size: 10,
+    has_more: false,
+    next_cursor: null,
+    snapshot_token: `S1.1.${FILTER_HASH}`,
+    total_count: 1,
+    industrial_parks: [
+      {
+        industrial_park_id: PARK_ID,
+        industrial_park_code: "VP_BA_THIEN_1",
+        display_name: "KCN Bá Thiện 1",
+        active: true,
+        job_count: 1,
+      },
+    ],
+    labor_types: [
+      {
+        labor_type_key: "CHINH_THUC",
+        display_name: "Chính thức",
+        job_count: 1,
+      },
+    ],
+  };
+  const facetsRepo = createRecruitmentPostRepository(async (name, args) => {
+    facetsCalls.push([name, args]);
+    return { data: facetsPayload, error: null };
+  });
+  const facetsRes = await facetsRepo.list({
+    ...ACTOR,
+    project_id: null,
+    province_id: null,
+    industrial_park_id: PARK_ID,
+    labor_type_key: "CHINH_THUC",
+    updated_from: null,
+    updated_to: null,
+    cursor: null,
+    snapshot_token: null,
+    page_size: 10,
+    include_facets: true,
+  });
+  assert.equal(facetsRes.ok, true);
+  assert.equal(facetsCalls.length, 1);
+  assert.equal(facetsCalls[0][0], "recruitment_post_list_with_facets");
+  assert.equal(facetsCalls[0][1].p_page_size, 10);
+  if (facetsRes.ok && "total_count" in facetsRes.data) {
+    assert.equal(facetsRes.data.total_count, 1);
+    assert.equal(facetsRes.data.industrial_parks.length, 1);
+    assert.equal(facetsRes.data.labor_types.length, 1);
+  }
 });

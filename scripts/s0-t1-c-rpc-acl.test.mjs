@@ -110,6 +110,8 @@ import {
   RECRUITMENT_POST_LIST_MINE_RPC_SIGNATURES,
   RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME,
   RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES,
+  RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME,
+  RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
   OFFBOARDING_REPORT_RPC_SIGNATURES,
   migrationChecksum,
@@ -1117,7 +1119,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...RECRUITMENT_LOCATION_CATALOG_RPC_SIGNATURES,
         ...RECRUITMENT_POSTS_RPC_SIGNATURES,
         ...RECRUITMENT_POST_LIST_MINE_RPC_SIGNATURES,
-        ...RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES);
+        ...RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES,
+        ...RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES);
       assert.ok(expectedSignatures.length > 0, "the explicit server/invoker allowlist is not empty");
       assert.equal(new Set(expectedSignatures).size, expectedSignatures.length, "the allowlist has no duplicates");
       const { rows: resolvedExpected } = await client.query(
@@ -1175,7 +1178,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...RECRUITMENT_LOCATION_CATALOG_RPC_SIGNATURES,
           ...RECRUITMENT_POSTS_RPC_SIGNATURES,
           ...RECRUITMENT_POST_LIST_MINE_RPC_SIGNATURES,
-          ...RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES].sort(),
+          ...RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES,
+          ...RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES].sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
       const recruitmentLocationCatalogMigration = await readFile(
@@ -1282,6 +1286,29 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `grant execute on function ${sig.toLowerCase()} to service_role;`,
           ),
           `recruitment posts public feed v1 RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const recruitmentPostListWithFacetsMigration = await readFile(
+        path.join(MIGRATION_DIR, RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
+        "utf8",
+      );
+      const recruitmentPostListWithFacetsNormalized = recruitmentPostListWithFacetsMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES) {
+        assert.ok(
+          recruitmentPostListWithFacetsNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `recruitment posts list with facets RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          recruitmentPostListWithFacetsNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `recruitment posts list with facets RPC ${sig} grants EXECUTE only to service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(

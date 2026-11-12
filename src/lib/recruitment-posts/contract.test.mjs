@@ -16,8 +16,11 @@ import {
   parseWithdrawRecruitmentPostBody,
   projectRecruitmentPostContext,
   projectRecruitmentPostGet,
+  projectRecruitmentPostIndustrialParkFacet,
   projectRecruitmentPostItem,
+  projectRecruitmentPostLaborTypeFacet,
   projectRecruitmentPostList,
+  projectRecruitmentPostListWithFacets,
   projectRecruitmentPostMutation,
   projectRecruitmentPostPublicFeedV1,
   projectRecruitmentPostPublicJobItemV1,
@@ -817,4 +820,221 @@ test("projectRecruitmentPostPublicFeedV1 enforces explicit allowlist, gender_lab
       null,
     );
   }
+});
+
+test("parseListRecruitmentPostsQuery and projectRecruitmentPostListWithFacets validate include_facets and 3 facet fields fail-closed", () => {
+  const defaultQuery = parseListRecruitmentPostsQuery(
+    new URL("https://app.test/api/recruitment-posts"),
+  );
+  assert.equal(defaultQuery.ok, true);
+  if (defaultQuery.ok) {
+    assert.equal(defaultQuery.value.include_facets, false);
+    assert.equal(defaultQuery.value.page_size, 15);
+  }
+
+  const explicitFalseQuery = parseListRecruitmentPostsQuery(
+    new URL("https://app.test/api/recruitment-posts?include_facets=false&page_size=10"),
+  );
+  assert.equal(explicitFalseQuery.ok, true);
+  if (explicitFalseQuery.ok) {
+    assert.equal(explicitFalseQuery.value.include_facets, false);
+    assert.equal(explicitFalseQuery.value.page_size, 10);
+  }
+
+  const trueQuery = parseListRecruitmentPostsQuery(
+    new URL("https://app.test/api/recruitment-posts?include_facets=true&page_size=10"),
+  );
+  assert.equal(trueQuery.ok, true);
+  if (trueQuery.ok) {
+    assert.equal(trueQuery.value.include_facets, true);
+    assert.equal(trueQuery.value.page_size, 10);
+  }
+
+  for (const invalidVal of ["", "1", "0", "yes", "TRUE"]) {
+    assert.deepEqual(
+      parseListRecruitmentPostsQuery(
+        new URL(`https://app.test/api/recruitment-posts?include_facets=${invalidVal}`),
+      ),
+      { ok: false, code: "RECRUITMENT_POST_INPUT_INVALID" },
+    );
+  }
+
+  const item = makeValidProjectedItem();
+  const validWithFacets = {
+    items: [item],
+    page_size: 10,
+    has_more: true,
+    next_cursor: `C1.1.${FILTER_HASH}.1762761600123456.${BRIEF_ID}`,
+    snapshot_token: `S1.1.${FILTER_HASH}`,
+    total_count: 3,
+    industrial_parks: [
+      {
+        industrial_park_id: PARK_ID,
+        industrial_park_code: "VP_BA_THIEN_1",
+        display_name: "KCN Bá Thiện 1",
+        active: true,
+        job_count: 3,
+      },
+    ],
+    labor_types: [
+      {
+        labor_type_key: "CHINH_THUC",
+        display_name: "Chính thức",
+        job_count: 3,
+      },
+      {
+        labor_type_key: "THOI_VU",
+        display_name: "Thời vụ",
+        job_count: 1,
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    projectRecruitmentPostListWithFacets(validWithFacets),
+    validWithFacets,
+  );
+  // 8-key payload must NOT pass legacy 5-key parser, and 5-key payload must NOT pass 8-key parser
+  assert.equal(projectRecruitmentPostList(validWithFacets), null);
+  assert.equal(
+    projectRecruitmentPostListWithFacets({
+      items: [item],
+      page_size: 10,
+      has_more: false,
+      next_cursor: null,
+      snapshot_token: `S1.1.${FILTER_HASH}`,
+    }),
+    null,
+  );
+
+  // Empty state (total_count = 0 with two empty arrays) is valid
+  const emptyWithFacets = {
+    items: [],
+    page_size: 10,
+    has_more: false,
+    next_cursor: null,
+    snapshot_token: `S1.1.${FILTER_HASH}`,
+    total_count: 0,
+    industrial_parks: [],
+    labor_types: [],
+  };
+  assert.deepEqual(
+    projectRecruitmentPostListWithFacets(emptyWithFacets),
+    emptyWithFacets,
+  );
+
+  // Reject active: false or job_count: 0 on industrial_parks facet, or mismatched total_count
+  assert.equal(
+    projectRecruitmentPostIndustrialParkFacet({
+      ...validWithFacets.industrial_parks[0],
+      active: false,
+    }),
+    null,
+  );
+  assert.equal(
+    projectRecruitmentPostIndustrialParkFacet({
+      ...validWithFacets.industrial_parks[0],
+      job_count: 0,
+    }),
+    null,
+  );
+  assert.equal(
+    projectRecruitmentPostLaborTypeFacet({
+      ...validWithFacets.labor_types[0],
+      job_count: 0,
+    }),
+    null,
+  );
+  assert.equal(
+    projectRecruitmentPostListWithFacets({
+      ...validWithFacets,
+      total_count: 2,
+    }),
+    null,
+  );
+  assert.equal(
+    projectRecruitmentPostListWithFacets({
+      ...emptyWithFacets,
+      total_count: 1,
+    }),
+    null,
+  );
+
+  // Vietnamese Intl.Collator("vi") sorting: decomposed Unicode 'KCN A\u0301n' sorts before 'KCN Ang',
+  // 'KCN Điềm Thụy' sorts between 'KCN Bá Thiện I' and 'KCN Phú Hà', and duplicate display_name ties break by industrial_park_code
+  const unsortedParksPayload = {
+    items: [item],
+    page_size: 10,
+    has_more: false,
+    next_cursor: null,
+    snapshot_token: `S1.1.${FILTER_HASH}`,
+    total_count: 6,
+    industrial_parks: [
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000305",
+        industrial_park_code: "PT_PHU_HA",
+        display_name: "KCN Phú Hà",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000302",
+        industrial_park_code: "AA_ANG",
+        display_name: "KCN Ang",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000304",
+        industrial_park_code: "DIEM_THUY",
+        display_name: "KCN Điềm Thụy",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000301",
+        industrial_park_code: "ZZ_AN_NFD",
+        display_name: "KCN A\u0301n",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000306",
+        industrial_park_code: "AA_PHU_HA_TIE",
+        display_name: "KCN Phú Hà",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: "10000000-0000-4000-8000-000000000303",
+        industrial_park_code: "VP_BA_THIEN_1",
+        display_name: "KCN Bá Thiện I",
+        active: true,
+        job_count: 1,
+      },
+    ],
+    labor_types: [
+      {
+        labor_type_key: "CHINH_THUC",
+        display_name: "Chính thức",
+        job_count: 6,
+      },
+    ],
+  };
+
+  const projectedSorted = projectRecruitmentPostListWithFacets(unsortedParksPayload);
+  assert.ok(projectedSorted !== null);
+  assert.deepEqual(
+    projectedSorted.industrial_parks.map(
+      (p) => `${p.display_name} (${p.industrial_park_code})`,
+    ),
+    [
+      "KCN A\u0301n (ZZ_AN_NFD)",
+      "KCN Ang (AA_ANG)",
+      "KCN Bá Thiện I (VP_BA_THIEN_1)",
+      "KCN Điềm Thụy (DIEM_THUY)",
+      "KCN Phú Hà (AA_PHU_HA_TIE)",
+      "KCN Phú Hà (PT_PHU_HA)",
+    ],
+  );
 });

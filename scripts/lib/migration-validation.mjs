@@ -403,6 +403,11 @@ export const RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME =
 export const RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES = Object.freeze([
   "public.recruitment_post_public_feed_v1()",
 ]);
+export const RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME =
+  "20261112150000_recruitment_post_list_with_facets.sql";
+export const RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES = Object.freeze([
+  "public.recruitment_post_list_with_facets(uuid, uuid, text, uuid, uuid, text, date, date, text, text, integer)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -657,7 +662,8 @@ export async function verifyS0T1CHistoricalCompatibility(
     recruitmentLocationCatalogApplied = false,
     recruitmentPostsApplied = false,
     recruitmentPostListMineApplied = false,
-    recruitmentPostPublicFeedV1Applied = false } = {},
+    recruitmentPostPublicFeedV1Applied = false,
+    recruitmentPostListWithFacetsApplied = false } = {},
 ) {
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
   if (baseAllowlist.length === 0) {
@@ -777,6 +783,9 @@ export async function verifyS0T1CHistoricalCompatibility(
       : []),
     ...(recruitmentPostPublicFeedV1Applied
       ? RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES
+      : []),
+    ...(recruitmentPostListWithFacetsApplied
+      ? RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES
       : []),
   ];
 
@@ -1058,6 +1067,8 @@ export async function verifyAppliedMigrationChecksum(
           appliedMap.has(RECRUITMENT_POST_LIST_MINE_MIGRATION_NAME),
         recruitmentPostPublicFeedV1Applied:
           appliedMap.has(RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME),
+        recruitmentPostListWithFacetsApplied:
+          appliedMap.has(RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
       },
     );
     if (postconditions.ok) {
