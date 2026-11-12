@@ -4,6 +4,7 @@ import {
   projectRecruitmentPostContext,
   projectRecruitmentPostGet,
   projectRecruitmentPostList,
+  projectRecruitmentPostListWithFacets,
   projectRecruitmentPostMutation,
   projectRecruitmentPostPublicFeedV1,
 } from "./contract.ts";
@@ -14,6 +15,7 @@ import type {
   RecruitmentPostErrorCode,
   RecruitmentPostGetResult,
   RecruitmentPostList,
+  RecruitmentPostListWithFacets,
   RecruitmentPostMutationResult,
   RecruitmentPostPublicFeedV1,
 } from "./contract.ts";
@@ -42,7 +44,9 @@ export type RecruitmentPostRepository = {
   ): Promise<RecruitmentPostOutcome<RecruitmentPostContext>>;
   list(
     input: RecruitmentPostActorRef & ListRecruitmentPostsQuery,
-  ): Promise<RecruitmentPostOutcome<RecruitmentPostList>>;
+  ): Promise<
+    RecruitmentPostOutcome<RecruitmentPostList | RecruitmentPostListWithFacets>
+  >;
   listMine(
     input: RecruitmentPostActorRef & ListMyRecruitmentPostsQuery,
   ): Promise<RecruitmentPostOutcome<RecruitmentPostList>>;
@@ -183,21 +187,29 @@ export function createRecruitmentPostRepository(
       );
     },
     list(input) {
+      const rpcArgs = {
+        p_auth_subject: input.auth_subject,
+        p_app_user_id: input.app_user_id,
+        p_project_id: input.project_id,
+        p_province_id: input.province_id,
+        p_industrial_park_id: input.industrial_park_id,
+        p_labor_type_key: input.labor_type_key,
+        p_updated_from: input.updated_from,
+        p_updated_to: input.updated_to,
+        p_cursor: input.cursor,
+        p_snapshot_token: input.snapshot_token,
+        p_page_size: input.page_size,
+      };
+      if (input.include_facets === true) {
+        return invoke(
+          "recruitment_post_list_with_facets",
+          rpcArgs,
+          projectRecruitmentPostListWithFacets,
+        );
+      }
       return invoke(
         "recruitment_post_list",
-        {
-          p_auth_subject: input.auth_subject,
-          p_app_user_id: input.app_user_id,
-          p_project_id: input.project_id,
-          p_province_id: input.province_id,
-          p_industrial_park_id: input.industrial_park_id,
-          p_labor_type_key: input.labor_type_key,
-          p_updated_from: input.updated_from,
-          p_updated_to: input.updated_to,
-          p_cursor: input.cursor,
-          p_snapshot_token: input.snapshot_token,
-          p_page_size: input.page_size,
-        },
+        rpcArgs,
         projectRecruitmentPostList,
       );
     },

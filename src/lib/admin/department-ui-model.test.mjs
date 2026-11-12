@@ -568,14 +568,20 @@ test("assign & end request builders emit exact contract payloads accepted by ser
     false,
   );
 
-  // End: CURRENT membership with valid effective_to within [validFrom, authorizationDate]
+  // End: CURRENT membership with valid effective_to equal to businessToday
+  const todayVn = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
   const endCurrent = buildEndAccountingMemberRequest({
     membershipId: MEMBERSHIP_ID,
     expectedPairVersion: 2,
     membershipState: "CURRENT",
     validFrom: "2026-10-10",
-    authorizationDate: "2026-10-24",
-    effectiveTo: "2026-10-22",
+    authorizationDate: todayVn,
+    effectiveTo: todayVn,
     reason: "Điều chuyển sang bộ phận khác",
     idempotencyKey: IDEMPOTENCY_KEY,
   });
@@ -597,7 +603,7 @@ test("assign & end request builders emit exact contract payloads accepted by ser
       value: {
         membership_id: MEMBERSHIP_ID,
         expected_pair_version: 2,
-        effective_to: "2026-10-22",
+        effective_to: todayVn,
         reason: "Điều chuyển sang bộ phận khác",
         idempotency_key: IDEMPOTENCY_KEY,
       },

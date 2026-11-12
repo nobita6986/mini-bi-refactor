@@ -171,7 +171,7 @@ async function seedActors() {
   }
 
   await db.query(`select public.direct_entry_designate_team_leader(
-    $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-01-01'::date, 1, 'F2 regression fixture', $5
+    $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'F2 regression fixture', $5
   )`, [ADMIN.auth, ADMIN.app, TEAM_A, LEADER_A.app, idempotencyKey("leader")]);
 }
 
@@ -552,8 +552,20 @@ test("F2 review, delegation and finality behavior regression gate", async () => 
       and outcome = 'APPLIED'`, [[staffASubmission.submission_id, staffBSubmission.submission_id]]);
   assert.ok(auditRows[0].n >= 2, "approve and reject append audit; resubmission audit is retained too");
 
-  const activeFrom = "2026-01-01T00:00:00.000Z";
-  const activeTo = "2099-12-31T23:59:59.000Z";
+  const activeFrom = null;
+  const activeTo = null;
+  await assert.rejects(
+    createDelegation(
+      ADMIN,
+      DELEGATE_A,
+      templateId,
+      TEAM_A,
+      "2026-01-01T00:00:00.000Z",
+      "2099-12-31T23:59:59.000Z",
+    ),
+    (error) => error.code === "22023",
+    "client-supplied start or expiration timestamps are rejected; server sets immediate start and open-ended effective_to",
+  );
   await assert.rejects(
     createDelegation(LEADER_A, DELEGATE_A, templateId, TEAM_A, activeFrom, activeTo),
     (error) => error.code === "42501",
@@ -664,16 +676,40 @@ test("F2 review, delegation and finality behavior regression gate", async () => 
     "revocation immediately removes delegated access",
   );
 
-  const expiredDelegation = await createDelegation(ADMIN, DELEGATE_A, templateId, TEAM_A,
-    new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() + 1_500).toISOString());
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  const expiredDelegation = await createDelegation(
+    ADMIN,
+    DELEGATE_A,
+    templateId,
+    TEAM_A,
+    null,
+    null,
+  );
+  await db.query(
+    `update public.work_report_delegations
+        set effective_from = statement_timestamp() - interval '2 hours',
+            effective_to = statement_timestamp() - interval '1 minute'
+      where delegation_id = $1::uuid`,
+    [expiredDelegation.delegation_id],
+  );
   await assert.rejects(
     db.query(`select public.work_report_decide_review(
       $1::uuid, $2::uuid, $3::uuid, 'APPROVED', null, $4::integer, $5::text
     )`, [DELEGATE_A.auth, DELEGATE_A.app, revokeObligation, revokeSubmission.version,
       idempotencyKey("expired-delegate-review")]),
     (error) => error.code === "42501",
-    "expired delegation fails closed",
+    "legacy expired delegation fails closed",
+  );
+  await db.query(
+    `select public.work_report_revoke_delegation(
+       $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::text
+     )`,
+    [
+      ADMIN.auth,
+      ADMIN.app,
+      expiredDelegation.delegation_id,
+      expiredDelegation.version ?? 1,
+      idempotencyKey("expired-delegation-cleanup-revoke"),
+    ],
   );
 
   await materialize("2099-10-23");
@@ -698,7 +734,7 @@ test("F2 review, delegation and finality behavior regression gate", async () => 
   assert.ok(expiredDelegation.delegation_id && retainedDelegation.delegation_id);
 
   await db.query(`select public.direct_entry_revoke_team_leader(
-    $1::uuid, $2::uuid, $3::uuid, '2026-10-21'::date, 2, 'F2 test revoke', $4
+    $1::uuid, $2::uuid, $3::uuid, null::date, 2, 'F2 test revoke', $4
   )`, [ADMIN.auth, ADMIN.app, TEAM_A, idempotencyKey("leader-revoke")]);
   await assert.rejects(
     decision(LEADER_A, revokeObligation, "APPROVED", null, revokeSubmission.version,

@@ -190,6 +190,8 @@ export const ATTENDANCE_MONTHLY_MATRIX_ERROR_CODES = [
   "ATTENDANCE_BRANCH_INACTIVE",
   "ATTENDANCE_BRANCH_TARGET_USER_INVALID",
   "ATTENDANCE_BRANCH_ASSIGNMENT_INVALID",
+  "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE",
+  "ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE",
   "ATTENDANCE_BRANCH_ASSIGNMENT_NOT_FOUND",
   "ATTENDANCE_BRANCH_ASSIGNMENT_OVERLAP",
   "ATTENDANCE_BRANCH_ASSIGNMENT_ALREADY_CLOSED",
@@ -274,6 +276,8 @@ const MATRIX_ERROR_HTTP_STATUS: Readonly<Record<AttendanceMonthlyMatrixErrorCode
   ATTENDANCE_BRANCH_INACTIVE: 422,
   ATTENDANCE_BRANCH_TARGET_USER_INVALID: 422,
   ATTENDANCE_BRANCH_ASSIGNMENT_INVALID: 400,
+  ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE: 422,
+  ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE: 422,
   ATTENDANCE_BRANCH_ASSIGNMENT_NOT_FOUND: 404,
   ATTENDANCE_BRANCH_ASSIGNMENT_OVERLAP: 409,
   ATTENDANCE_BRANCH_ASSIGNMENT_ALREADY_CLOSED: 409,
@@ -2006,9 +2010,22 @@ export function parseUpsertSlotPolicyProfileBody(
   };
 }
 
+function resolveBusinessTodayVn(todayVn?: string): string {
+  if (typeof todayVn === "string" && isValidIsoCalendarDate(todayVn.trim())) {
+    return todayVn.trim();
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: ATTENDANCE_BUSINESS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 export function parseAssignSlotPolicyBody(
   body: unknown,
   headerIdempotencyKey?: string | null,
+  todayVn?: string,
 ):
   | { ok: true; value: ParsedAssignSlotPolicyRequest }
   | { ok: false; code: AttendanceMonthlyMatrixErrorCode } {
@@ -2038,6 +2055,7 @@ export function parseAssignSlotPolicyBody(
     return { ok: false, code: "ATTENDANCE_SLOT_POLICY_DEFAULT_ASSIGNMENT_REDUNDANT" };
   }
 
+  const resolvedTodayVn = resolveBusinessTodayVn(todayVn);
   let validFrom: string | null = null;
   if (body.valid_from !== undefined && body.valid_from !== null) {
     if (
@@ -2049,6 +2067,12 @@ export function parseAssignSlotPolicyBody(
       return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_INVALID" };
     }
     validFrom = body.valid_from.trim();
+    if (validFrom > resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_FUTURE_DATE" };
+    }
+    if (validFrom < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_PAST_DATE" };
+    }
   }
 
   const expectedVersion =
@@ -2083,6 +2107,7 @@ export function parseAssignSlotPolicyBody(
 export function parseUnassignSlotPolicyBody(
   body: unknown,
   headerIdempotencyKey?: string | null,
+  todayVn?: string,
 ):
   | { ok: true; value: ParsedUnassignSlotPolicyRequest }
   | { ok: false; code: AttendanceMonthlyMatrixErrorCode } {
@@ -2096,6 +2121,7 @@ export function parseUnassignSlotPolicyBody(
     }
   }
 
+  const resolvedTodayVn = resolveBusinessTodayVn(todayVn);
   let validTo: string | null = null;
   if (body.valid_to !== undefined && body.valid_to !== null) {
     if (
@@ -2107,6 +2133,12 @@ export function parseUnassignSlotPolicyBody(
       return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_INVALID" };
     }
     validTo = body.valid_to.trim();
+    if (validTo > resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_FUTURE_DATE" };
+    }
+    if (validTo < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_PAST_DATE" };
+    }
   }
 
   const expectedVersion = body.expected_version;
@@ -2240,6 +2272,7 @@ export function parseUpsertBranchBody(
 export function parseAssignBranchBody(
   body: unknown,
   headerIdempotencyKey?: string | null,
+  todayVn?: string,
 ):
   | { ok: true; value: ParsedAssignBranchRequest }
   | { ok: false; code: AttendanceMonthlyMatrixErrorCode } {
@@ -2265,12 +2298,19 @@ export function parseAssignBranchBody(
     return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_INVALID" };
   }
 
+  const resolvedTodayVn = resolveBusinessTodayVn(todayVn);
   let validFrom: string | null = null;
   if (body.valid_from !== undefined && body.valid_from !== null) {
     if (typeof body.valid_from !== "string" || !isValidIsoCalendarDate(body.valid_from.trim())) {
       return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_INVALID" };
     }
     validFrom = body.valid_from.trim();
+    if (validFrom > resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE" };
+    }
+    if (validFrom < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE" };
+    }
   }
 
   const expectedVersion = body.expected_version;
@@ -2302,6 +2342,7 @@ export function parseAssignBranchBody(
 export function parseUnassignBranchBody(
   body: unknown,
   headerIdempotencyKey?: string | null,
+  todayVn?: string,
 ):
   | { ok: true; value: ParsedUnassignBranchRequest }
   | { ok: false; code: AttendanceMonthlyMatrixErrorCode } {
@@ -2315,12 +2356,19 @@ export function parseUnassignBranchBody(
     }
   }
 
+  const resolvedTodayVn = resolveBusinessTodayVn(todayVn);
   let validTo: string | null = null;
   if (body.valid_to !== undefined && body.valid_to !== null) {
     if (typeof body.valid_to !== "string" || !isValidIsoCalendarDate(body.valid_to.trim())) {
       return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_INVALID" };
     }
     validTo = body.valid_to.trim();
+    if (validTo > resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE" };
+    }
+    if (validTo < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE" };
+    }
   }
 
   const expectedVersion = body.expected_version;

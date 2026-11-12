@@ -17,6 +17,12 @@ const TEAM = "66666666-6666-4666-8666-666666666666";
 const MAPPING = "77777777-7777-4777-8777-777777777777";
 const KEY = "55555555-5555-4555-8555-555555555555";
 const IDS = ["project-1", "project-2"];
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 
 test("mapping query is bounded and sends only the trimmed fuzzy search", () => {
   assert.equal(buildMappingListQuery({ search: "x", includeHistory: false, page: 0 }), null);
@@ -86,9 +92,9 @@ test("revoke body is versionless and exactly matches the current contract", () =
     body: { mapping_id: MAPPING, effective_to: null, reason: "same-day", idempotency_key: KEY },
   });
   assert.deepEqual(Object.keys(request.body).sort(), ["effective_to", "idempotency_key", "mapping_id", "reason"]);
-  const optional = buildRevokeRequest({ mappingId: MAPPING, effectiveTo: "2026-10-15", idempotencyKey: KEY });
+  const optional = buildRevokeRequest({ mappingId: MAPPING, effectiveTo: TODAY_VN, idempotencyKey: KEY });
   assert.deepEqual(optional, { ok: true, body: {
-    mapping_id: MAPPING, effective_to: "2026-10-15", reason: null, idempotency_key: KEY,
+    mapping_id: MAPPING, effective_to: TODAY_VN, reason: null, idempotency_key: KEY,
   } });
 });
 

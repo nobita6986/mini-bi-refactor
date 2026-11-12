@@ -12,6 +12,18 @@ import { hasExactKeysWithOptionalReason, projectOptionalActionReason } from "../
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LOGIN_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function resolveBusinessTodayVn(todayVn?: string): string {
+  return todayVn && DATE.test(todayVn)
+    ? todayVn
+    : VIETNAM_DATE_FORMATTER.format(new Date());
+}
 
 export const MIN_PASSWORD_BYTES = 8;
 export const MAX_PASSWORD_BYTES = 1024;
@@ -137,28 +149,40 @@ export type CreatePersonnelFromAccountRequest = {
   /** Login ID selected in the eligible-account list; DB revalidates against Auth. */
   personnel_code: string;
   personnel_position: PersonnelPosition;
-  valid_from: string;
+  valid_from: string | null;
   reason: string | null;
   idempotency_key: string;
 };
-export function parseCreatePersonnelFromAccount(body: unknown): Parsed<CreatePersonnelFromAccountRequest> {
-  if (!isRecord(body) || !hasExactKeysWithOptionalReason(body, [
+export function parseCreatePersonnelFromAccount(
+  body: unknown,
+  todayVn?: string,
+): Parsed<CreatePersonnelFromAccountRequest> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ACCOUNT_OPERATION_INVALID" };
+  }
+  const normalized = "valid_from" in body ? body : { ...body, valid_from: null };
+  if (!hasExactKeysWithOptionalReason(normalized, [
     "account_ref", "expected_account_version", "personnel_code", "personnel_position",
     "valid_from", "reason", "idempotency_key",
   ])) {
     return { ok: false, code: "ACCOUNT_OPERATION_INVALID" };
   }
+  const businessToday = resolveBusinessTodayVn(todayVn);
   const account_ref = uuid(body.account_ref);
   const expected_account_version = version(body.expected_account_version);
   const personnel_code = typeof body.personnel_code === "string" && LOGIN_ID.test(body.personnel_code)
     ? body.personnel_code : null;
   const personnel_position = body.personnel_position === "STAFF" || body.personnel_position === "TEAM_LEADER"
     ? body.personnel_position : null;
-  const valid_from = typeof body.valid_from === "string" && DATE.test(body.valid_from) ? body.valid_from : null;
+  const omittedOrNull = body.valid_from === undefined || body.valid_from === null;
+  const valid_from = omittedOrNull
+    ? null
+    : (typeof body.valid_from === "string" && DATE.test(body.valid_from) ? body.valid_from : null);
   const reason = projectOptionalActionReason(body.reason, REASON_MAX);
   const idempotency_key = uuid(body.idempotency_key);
   if (!account_ref || expected_account_version === null || expected_account_version < 1 || !personnel_code ||
-      !personnel_position || !valid_from || !reason.ok || !idempotency_key) {
+      !personnel_position || (!omittedOrNull && (!valid_from || valid_from !== businessToday)) ||
+      !reason.ok || !idempotency_key) {
     return { ok: false, code: "ACCOUNT_OPERATION_INVALID" };
   }
   return { ok: true, value: { account_ref, expected_account_version, personnel_code,

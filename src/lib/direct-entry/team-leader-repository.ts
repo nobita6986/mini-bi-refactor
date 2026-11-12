@@ -33,11 +33,11 @@ export type TeamLeaderRepository = {
     team_id: string; search: string | null; page: number; page_size: number;
   }): Promise<TeamLeaderOutcome<TeamLeaderCandidateList>>;
   designateLeader(input: TeamLeaderActorRef & {
-    team_id: string; leader_app_user_id: string; effective_date: string;
+    team_id: string; leader_app_user_id: string; effective_date: string | null;
     expected_version: number; reason: string | null; idempotency_key: string;
   }): Promise<TeamLeaderOutcome<TeamLeaderMutation>>;
   revokeLeader(input: TeamLeaderActorRef & {
-    team_id: string; effective_date: string; expected_version: number;
+    team_id: string; effective_date: string | null; expected_version: number;
     reason: string | null; idempotency_key: string;
   }): Promise<TeamLeaderOutcome<TeamLeaderMutation>>;
 };

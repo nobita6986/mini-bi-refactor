@@ -18,6 +18,12 @@ import {
 
 const KEY = "91000000-0000-4000-8000-000000000001";
 const ACCOUNT = "92000000-0000-4000-8000-000000000001";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 
 test("D3-B UI: create requires canonical login and matching password; action reason is optional", () => {
   const ok = buildCreateAccountRequest({
@@ -60,7 +66,7 @@ test("D3-B UI: edit display name and reset password build exact bodies", () => {
 test("D3-B UI: personnel-from-account keeps display_name server-side (not a field)", () => {
   const built = buildPersonnelFromAccountRequest({
     accountRef: ACCOUNT, expectedAccountVersion: 1, loginId: "staff01",
-    personnelPosition: "STAFF", validFrom: "2026-10-01", reason: "create", idempotencyKey: KEY,
+    personnelPosition: "STAFF", validFrom: TODAY_VN, reason: "create", idempotencyKey: KEY,
   });
   assert.equal(built.ok, true);
   assert.equal("display_name" in built.body, false, "display_name must not be sent from the browser");

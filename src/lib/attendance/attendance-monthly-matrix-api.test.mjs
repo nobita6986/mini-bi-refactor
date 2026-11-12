@@ -75,6 +75,9 @@ const IDEMPOTENCY_KEY = "59000000-0000-4000-8000-0000000000e1";
 const HRP_AUTH_SUBJECT = "69000000-0000-4000-8000-0000000000f1";
 const HRP_APP_USER_ID = "79000000-0000-4000-8000-0000000000f2";
 const REQUEST_ID = "89000000-0000-4000-8000-0000000000f3";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+}).format(new Date());
 
 const ALL_SCOPE = [{ kind: "all", reference: "all", valid_from: "2026-01-01", valid_to: null }];
 const FULL_ADMIN_CAPS = ["entry_admin", "recruiter_master_manage", "team_master_manage"];
@@ -623,7 +626,7 @@ test("HRP Branch Admin contracts and handlers enforce entry_admin @ all, coordin
     makeJsonRequest("https://bi.example.com/api/admin/attendance/branches/assignments", "POST", {
       app_user_id: STAFF_USER_ID,
       branch_id: BRANCH_ID,
-      valid_from: "2026-10-01",
+      valid_from: TODAY_VN,
       expected_version: 1,
       idempotency_key: IDEMPOTENCY_KEY,
     }),
@@ -728,7 +731,7 @@ test("HRP Branch Admin contracts and handlers enforce entry_admin @ all, coordin
   assert.equal(updateOk.status, 200);
 
   const unassignParsed = parseUnassignBranchBody({
-    valid_to: "2026-10-31",
+    valid_to: TODAY_VN,
     expected_version: 1,
     idempotency_key: IDEMPOTENCY_KEY,
   });
@@ -739,7 +742,7 @@ test("HRP Branch Admin contracts and handlers enforce entry_admin @ all, coordin
       `https://bi.example.com/api/admin/attendance/branches/assignments/${ASSIGNMENT_ID}/unassign`,
       "POST",
       {
-        valid_to: "2026-10-31",
+        valid_to: TODAY_VN,
         expected_version: 1,
         idempotency_key: IDEMPOTENCY_KEY,
       },
@@ -1817,7 +1820,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
   const parsedAssignDefault = parseAssignSlotPolicyBody({
     app_user_id: STAFF_USER_ID,
     profile_id: DEFAULT_ATTENDANCE_SLOT_POLICY_PROFILE_ID,
-    valid_from: "2026-10-25",
+    valid_from: TODAY_VN,
     expected_version: 1,
     idempotency_key: IDEMPOTENCY_KEY,
   });
@@ -1832,14 +1835,14 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
   const parsedAssignValid = parseAssignSlotPolicyBody({
     app_user_id: STAFF_USER_ID,
     profile_id: PROFILE_ID,
-    valid_from: "2026-10-25",
+    valid_from: TODAY_VN,
     expected_version: 1,
     idempotency_key: IDEMPOTENCY_KEY,
   });
   assert.equal(parsedAssignValid.ok, true);
 
   const parsedUnassignValid = parseUnassignSlotPolicyBody({
-    valid_to: "2026-10-25",
+    valid_to: TODAY_VN,
     expected_version: 1,
     idempotency_key: IDEMPOTENCY_KEY,
   });
@@ -1864,7 +1867,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     makeJsonRequest("https://bi.example.com/api/admin/attendance/slot-policies/assignments", "POST", {
       app_user_id: STAFF_USER_ID,
       profile_id: PROFILE_ID,
-      valid_from: "2026-10-25",
+      valid_from: TODAY_VN,
       expected_version: 1,
       idempotency_key: IDEMPOTENCY_KEY,
     }),
@@ -1877,7 +1880,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
       `https://bi.example.com/api/admin/attendance/slot-policies/assignments/${ASSIGNMENT_ID}/unassign`,
       "POST",
       {
-        valid_to: "2026-10-25",
+        valid_to: TODAY_VN,
         expected_version: 1,
         idempotency_key: IDEMPOTENCY_KEY,
       },
@@ -2081,7 +2084,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     makeJsonRequest("https://bi.example.com/api/admin/attendance/slot-policies/assignments", "POST", {
       app_user_id: STAFF_USER_ID,
       profile_id: PROFILE_ID,
-      valid_from: "2026-10-25",
+      valid_from: TODAY_VN,
       expected_version: 1,
       idempotency_key: IDEMPOTENCY_KEY,
     }),
@@ -2130,7 +2133,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
       `https://bi.example.com/api/admin/attendance/slot-policies/assignments/${ASSIGNMENT_ID}/unassign`,
       "POST",
       {
-        valid_to: "2026-10-25",
+        valid_to: TODAY_VN,
         expected_version: 1,
         idempotency_key: IDEMPOTENCY_KEY,
       },
@@ -2227,7 +2230,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     null,
   );
 
-  assert.equal(rpcCalls.length, 6);
+  assert.equal(rpcCalls.length, 3);
   assert.equal(rpcCalls[0].name, "attendance_upsert_slot_policy_profile_admin");
   assert.deepEqual(rpcCalls[0].args, {
     p_auth_subject: AUTH_SUBJECT,
@@ -2281,8 +2284,8 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     },
   );
   assert.equal(updateDivergentProfileRes.status, 200);
-  assert.equal(rpcCalls[6].name, "attendance_upsert_slot_policy_profile_admin");
-  assert.deepEqual(rpcCalls[6].args, {
+  assert.equal(rpcCalls[3].name, "attendance_upsert_slot_policy_profile_admin");
+  assert.deepEqual(rpcCalls[3].args, {
     p_auth_subject: AUTH_SUBJECT,
     p_app_user_id: APP_USER_ID,
     p_profile_id: PROFILE_ID,
@@ -2309,36 +2312,36 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     }),
   });
 
-  assert.equal(rpcCalls[3].name, "attendance_assign_employee_slot_policy_admin");
-  assert.deepEqual(rpcCalls[3].args, {
+  assert.equal(rpcCalls[1].name, "attendance_assign_employee_slot_policy_admin");
+  assert.deepEqual(rpcCalls[1].args, {
     p_auth_subject: AUTH_SUBJECT,
     p_app_user_id: APP_USER_ID,
     p_target_app_user_id: STAFF_USER_ID,
     p_profile_id: PROFILE_ID,
-    p_effective_date: "2026-10-25",
+    p_effective_date: TODAY_VN,
     p_expected_version: 1,
     p_idempotency_key: IDEMPOTENCY_KEY,
     p_request_fingerprint: computeSlotPolicyAssignRequestFingerprint({
       app_user_id: APP_USER_ID,
       target_app_user_id: STAFF_USER_ID,
       profile_id: PROFILE_ID,
-      valid_from: "2026-10-25",
+      valid_from: TODAY_VN,
       expected_version: 1,
     }),
   });
 
-  assert.equal(rpcCalls[5].name, "attendance_unassign_employee_slot_policy_admin");
-  assert.deepEqual(rpcCalls[5].args, {
+  assert.equal(rpcCalls[2].name, "attendance_unassign_employee_slot_policy_admin");
+  assert.deepEqual(rpcCalls[2].args, {
     p_auth_subject: AUTH_SUBJECT,
     p_app_user_id: APP_USER_ID,
     p_assignment_id: ASSIGNMENT_ID,
-    p_effective_date: "2026-10-25",
+    p_effective_date: TODAY_VN,
     p_expected_version: 1,
     p_idempotency_key: IDEMPOTENCY_KEY,
     p_request_fingerprint: computeSlotPolicyUnassignRequestFingerprint({
       app_user_id: APP_USER_ID,
       assignment_id: ASSIGNMENT_ID,
-      valid_to: "2026-10-25",
+      valid_to: TODAY_VN,
       expected_version: 1,
     }),
   });

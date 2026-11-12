@@ -31,7 +31,12 @@ const TEAM2 = "88888888-8888-4888-8888-888888888888";
 const REV = "99999999-9999-4999-8999-999999999999";
 const OTHER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const MEMBERSHIP = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const DAY = "2026-02-01";
+const DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 
 test("membership failures retain safe, distinct reasons from database through UI", async () => {
   const cases = [
@@ -167,7 +172,9 @@ test("request projections are strict about keys, values and OCC", () => {
   assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, team_id: TEAM }).ok, false);
   assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, team: TEAM }).ok, false);
   assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "01/02/2026" }).ok, false);
-  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: null }).ok, false);
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "" }).ok, false);
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2099-01-01" }).ok, false);
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: null }).ok, true);
   for (const reason of [undefined, null, "", "  "]) {
     const body = { ...ASSIGN_BODY };
     if (reason === undefined) delete body.reason;
@@ -205,12 +212,20 @@ test("request projections are strict about keys, values and OCC", () => {
     assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: invalid }).ok, false,
       "unassign " + invalid);
   }
-  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2028-02-29" }).ok, true,
-    "a leap day is valid");
-  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2028-02-29" }).ok, true);
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2024-02-29" }, "2024-02-29").ok, true,
+    "a leap day is valid on that business date");
+  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2024-02-29" }, "2024-02-29").ok, true);
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2024-02-29" }, "2026-11-12").ok, false,
+    "past date is rejected");
+  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2024-02-29" }, "2026-11-12").ok, false,
+    "past date is rejected");
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2028-02-29" }).ok, false,
+    "future date is rejected");
+  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2028-02-29" }).ok, false);
 
   assert.equal(teamMembershipUnassignRequest(UNASSIGN_BODY).ok, true);
-  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: null }).ok, false);
+  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "" }).ok, false);
+  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: null }).ok, true);
   assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, team_id: TEAM }).ok, false,
     "an unassign request never carries a target team");
   assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, expected_version: -1 }).ok, false);
@@ -327,12 +342,32 @@ test("calendar-invalid dates are rejected at the boundary before session and rep
     assert.equal(unassign.calls.rpc.length, 0);
   }
 
-  const leap = deps({ ok: true, data: MUTATION });
-  const leapResponse = await assignTeamMembership(
+  const past = deps({ ok: true, data: MUTATION });
+  const pastResponse = await assignTeamMembership(
+    jsonRequest({ ...ASSIGN_BODY, valid_from: "2024-02-29" }), RECRUITER, TEAM, "true",
+    past.dependencies);
+  assert.equal(pastResponse.status, 400);
+  assert.equal((await pastResponse.json()).code, "MEMBERSHIP_INVALID");
+  assert.equal(past.calls.session, 0);
+  assert.equal(past.calls.rpc.length, 0);
+
+  const omittedDate = deps({ ok: true, data: MUTATION });
+  const omittedResponse = await unassignTeamMembership(
+    jsonRequest({ expected_version: 3, reason: "Synthetic reason", idempotency_key: KEY },
+      "/api/admin/catalog/personnel/" + RECRUITER + "/team-memberships/unassign"),
+    RECRUITER, "true", omittedDate.dependencies);
+  assert.equal(omittedResponse.status, 200);
+  assert.equal(omittedDate.calls.rpc.length, 1);
+  assert.equal(omittedDate.calls.rpc[0][1].valid_to, null);
+
+  const future = deps({ ok: true, data: MUTATION });
+  const futureResponse = await assignTeamMembership(
     jsonRequest({ ...ASSIGN_BODY, valid_from: "2028-02-29" }), RECRUITER, TEAM, "true",
-    leap.dependencies);
-  assert.equal(leapResponse.status, 200);
-  assert.equal(leap.calls.rpc.length, 1);
+    future.dependencies);
+  assert.equal(futureResponse.status, 400);
+  assert.equal((await futureResponse.json()).code, "MEMBERSHIP_INVALID");
+  assert.equal(future.calls.session, 0);
+  assert.equal(future.calls.rpc.length, 0);
 });
 
 test("an invalid recruiter path id is rejected before session", async () => {

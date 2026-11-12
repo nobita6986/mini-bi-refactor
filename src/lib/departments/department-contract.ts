@@ -531,9 +531,22 @@ function parseMatchedIdempotencyKey(
   return bodyUuid;
 }
 
+function resolveDepartmentBusinessTodayVn(todayVn?: string | null): string {
+  if (typeof todayVn === "string" && isValidIsoCalendarDate(todayVn)) {
+    return todayVn;
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 export function parseAssignAccountingMemberBody(
   body: unknown,
   idempotencyHeader: string | null,
+  todayVn?: string | null,
 ): ParseResult<ParsedAssignAccountingMemberBody> {
   if (!isRecord(body)) {
     return { ok: false, code: "DEPARTMENT_MEMBERSHIP_PAYLOAD_INVALID" };
@@ -568,12 +581,13 @@ export function parseAssignAccountingMemberBody(
     return { ok: false, code: "DEPARTMENT_MEMBERSHIP_PAYLOAD_INVALID" };
   }
 
+  const businessToday = resolveDepartmentBusinessTodayVn(todayVn);
   let effectiveFrom: string | null = null;
   if (
     Object.prototype.hasOwnProperty.call(body, "effective_from") &&
     body.effective_from !== null
   ) {
-    if (!isValidIsoCalendarDate(body.effective_from)) {
+    if (!isValidIsoCalendarDate(body.effective_from) || body.effective_from !== businessToday) {
       return { ok: false, code: "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID" };
     }
     effectiveFrom = body.effective_from;
@@ -600,6 +614,7 @@ export function parseEndAccountingMemberBody(
   membershipIdParam: unknown,
   body: unknown,
   idempotencyHeader: string | null,
+  todayVn?: string | null,
 ): ParseResult<ParsedEndAccountingMemberBody> {
   const membershipId = normalizeUuid(membershipIdParam);
   if (!membershipId) {
@@ -634,12 +649,13 @@ export function parseEndAccountingMemberBody(
     return { ok: false, code: "DEPARTMENT_MEMBERSHIP_PAYLOAD_INVALID" };
   }
 
+  const businessToday = resolveDepartmentBusinessTodayVn(todayVn);
   let effectiveTo: string | null = null;
   if (
     Object.prototype.hasOwnProperty.call(body, "effective_to") &&
     body.effective_to !== null
   ) {
-    if (!isValidIsoCalendarDate(body.effective_to)) {
+    if (!isValidIsoCalendarDate(body.effective_to) || body.effective_to !== businessToday) {
       return { ok: false, code: "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID" };
     }
     effectiveTo = body.effective_to;

@@ -904,6 +904,8 @@ export function leaveErrorMessage(code: string | null | undefined): string {
       return "Chỉ Admin hoặc Ban Giám đốc mới được cấu hình ngày và số phép tăng thâm niên tiếp theo.";
     case "LEAVE_DEPARTMENT_APPROVER_ADMIN_FORBIDDEN":
       return "Chỉ Admin hoặc Ban Giám đốc mới được cấu hình người duyệt bộ phận Marketing / IT / Kế toán.";
+    case "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN":
+      return "Ngày bắt đầu hiệu lực của người duyệt bộ phận không được vượt quá ngày nghiệp vụ hiện tại.";
     case "LEAVE_UNIT_KIND_INVALID":
       return "Đơn vị / bộ phận không hợp lệ.";
     case "LEAVE_APPROVER_USER_NOT_FOUND":

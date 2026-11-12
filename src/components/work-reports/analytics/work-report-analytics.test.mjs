@@ -115,6 +115,12 @@ test("delegation UI consumes server-projected scope/options and versioned revoke
   assert.match(delegationUi, /expected_version: item\.version/);
   assert.match(delegationUi, /\/revoke/);
   assert.match(delegationUi, /ủy quyền tiếp từ giao diện này/);
+  assert.match(delegationUi, /submitDelegationCreateAttempt/);
+  assert.match(delegationUi, /applyDelegationCreateDraftEdit/);
+  assert.match(delegationUi, /ambiguous_retry_locked/);
+  assert.match(delegationUi, /revokeIdempotencyKeysRef/);
+  assert.doesNotMatch(delegationUi, /crypto\.randomUUID\(\)/);
+  assert.doesNotMatch(delegationUi, /type="date"|type="datetime-local"|effectiveFrom|effectiveTo/);
   assert.doesNotMatch(delegationUi, /actor\.(?:role|title)|role_name|job_title|Team Leader|BoD/);
 });
 

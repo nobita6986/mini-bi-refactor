@@ -3096,12 +3096,14 @@ export function AttendanceBranchesAdminSection() {
       (activeData?.branches ?? []).find((b) => b.branch_id === assignBranchIdInput) ??
       null;
     const idempotencyKey = newAttendanceHqIntentKey();
+    const todayVn = activeData?.business_date ?? getVietnamTodayIsoDate();
 
     const built = buildAssignEmployeeToBranchPayload({
       appUserId: assignUserIdInput,
       branch: selectedBranch,
-      validFrom: assignValidFromInput,
+      validFrom: assignValidFromInput || todayVn,
       idempotencyKey,
+      todayVn,
     });
 
     if (!built.ok) {
@@ -3175,11 +3177,13 @@ export function AttendanceBranchesAdminSection() {
 
     const targetAssignment = dialogMode.assignment;
     const idempotencyKey = newAttendanceHqIntentKey();
+    const todayVn = activeData?.business_date ?? getVietnamTodayIsoDate();
 
     const built = buildUnassignEmployeeFromBranchPayload({
-      validTo: unassignValidToInput,
+      validTo: unassignValidToInput || todayVn,
       expectedVersion: targetAssignment.version,
       idempotencyKey,
+      todayVn,
     });
 
     if (!built.ok) {
@@ -3860,22 +3864,12 @@ export function AttendanceBranchesAdminSection() {
             </select>
           </div>
 
-          <div>
-            <label
-              htmlFor="assign-valid-from-input"
-              className="mb-1 block text-xs font-medium text-muted"
-            >
-              Hiệu lực từ ngày (YYYY-MM-DD)
-            </label>
-            <input
-              id="assign-valid-from-input"
-              type="date"
-              required
-              value={assignValidFromInput}
-              disabled={mutationBusy}
-              onChange={(event) => setAssignValidFromInput(event.target.value)}
-              className={INPUT_CLASS}
-            />
+          <div className="rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+            Phân công có hiệu lực ngay từ ngày nghiệp vụ hiện tại ({" "}
+            <strong className="font-mono text-foreground">
+              {activeData?.business_date ?? getVietnamTodayIsoDate()}
+            </strong>
+            ).
           </div>
 
           <div className="flex justify-end gap-2 pt-2">
@@ -3927,22 +3921,12 @@ export function AttendanceBranchesAdminSection() {
             </Alert>
           ) : null}
 
-          <div>
-            <label
-              htmlFor="unassign-valid-to-input"
-              className="mb-1 block text-xs font-medium text-muted"
-            >
-              Hiệu lực đến hết ngày (YYYY-MM-DD)
-            </label>
-            <input
-              id="unassign-valid-to-input"
-              type="date"
-              required
-              value={unassignValidToInput}
-              disabled={mutationBusy}
-              onChange={(event) => setUnassignValidToInput(event.target.value)}
-              className={INPUT_CLASS}
-            />
+          <div className="rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+            Việc kết thúc phân công có hiệu lực ngay tại ngày nghiệp vụ hiện tại ({" "}
+            <strong className="font-mono text-foreground">
+              {activeData?.business_date ?? getVietnamTodayIsoDate()}
+            </strong>
+            ).
           </div>
 
           <div className="flex justify-end gap-2 pt-2">

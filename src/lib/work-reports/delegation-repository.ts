@@ -38,8 +38,9 @@ export type WorkReportDelegationItem = {
   scope_team_id: string | null;
   scope_label: string;
   effective_from: string;
-  effective_to: string;
+  effective_to: string | null;
   state: "ACTIVE" | "REVOKED";
+  status?: "ACTIVE" | "REVOKED" | "EXPIRED";
   is_current: boolean;
   is_effective: boolean;
   revoked_at: string | null;
@@ -88,8 +89,8 @@ export type WorkReportDelegationRepository = {
       template_id: string;
       scope_kind: "all" | "team";
       scope_team_id: string | null;
-      effective_from: string;
-      effective_to: string;
+      effective_from?: string | null;
+      effective_to?: string | null;
       idempotency_key: string;
     },
   ): Promise<WorkReportDelegationRpcOutcome<WorkReportDelegationMutationResult>>;
@@ -137,8 +138,12 @@ function isDelegationItem(value: unknown): value is WorkReportDelegationItem {
       (typeof value.scope_team_id === "string" && UUID.test(value.scope_team_id))) &&
     typeof value.scope_label === "string" &&
     typeof value.effective_from === "string" &&
-    typeof value.effective_to === "string" &&
+    (value.effective_to === null || typeof value.effective_to === "string") &&
     (value.state === "ACTIVE" || value.state === "REVOKED") &&
+    (value.status === undefined ||
+      value.status === "ACTIVE" ||
+      value.status === "REVOKED" ||
+      value.status === "EXPIRED") &&
     typeof value.is_current === "boolean" &&
     typeof value.is_effective === "boolean" &&
     (value.revoked_at === null || typeof value.revoked_at === "string") &&
@@ -239,8 +244,8 @@ export function createDelegationRepository(rpc?: Rpc): WorkReportDelegationRepos
           p_template_id: input.template_id,
           p_scope_kind: input.scope_kind,
           p_scope_team_id: input.scope_team_id,
-          p_effective_from: input.effective_from,
-          p_effective_to: input.effective_to,
+          p_effective_from: input.effective_from ?? null,
+          p_effective_to: input.effective_to ?? null,
           p_idempotency_key: input.idempotency_key,
         },
         isMutationResult,

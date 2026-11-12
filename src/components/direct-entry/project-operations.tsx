@@ -161,7 +161,6 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
   );
   const [pending, setPending] = useState<PendingAssignment[]>([]);
   const [managerId, setManagerId] = useState("");
-  const [validFrom, setValidFrom] = useState("");
   const [candidates, setCandidates] = useState<ManagerCandidate[]>([]);
   const [candidateLabels, setCandidateLabels] = useState<Record<string, string>>({});
   const [candidateState, setCandidateState] = useState<CandidateState>("idle");
@@ -326,7 +325,6 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
     setLocationRadius(String(PROJECT_LOCATION_DEFAULT_RADIUS_METERS));
     setPending([]);
     setManagerId("");
-    setValidFrom("");
   }, []);
 
   /** Tai lai day du sau xung dot: khong ghi de ngam bat ky thay doi cuc bo nao. */
@@ -418,14 +416,20 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
   /** Gan NHIEU quan ly: moi lan gui dung version du an moi nhat (OCC tuan tu). */
   async function submitAssign() {
     if (!detail) return;
-    const invalid = validatePendingAssignments(pending);
+    const rowsToAssign: PendingAssignment[] =
+      pending.length > 0
+        ? pending
+        : managerId
+          ? [{ managerRecruiterId: managerId, validFrom: null }]
+          : [];
+    const invalid = validatePendingAssignments(rowsToAssign);
     if (invalid) { setNotice(invalid); return; }
     setBusy(true);
     let version = detail.project_version;
-    for (const row of pending) {
+    for (const row of rowsToAssign) {
       const key = newIdempotencyKey();
       const request = buildAssignRequest({
-        managerRecruiterId: row.managerRecruiterId, validFrom: row.validFrom, reason,
+        managerRecruiterId: row.managerRecruiterId, validFrom: row.validFrom ?? null, reason,
         expectedProjectVersion: version, idempotencyKey: key,
       });
       const { outcome, payload } = await send(
@@ -507,7 +511,6 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
     setReason("");
     setPending([]);
     setManagerId("");
-    setValidFrom("");
     setDisplayName(seed && seed.displayName ? seed.displayName : "");
     const seededLocation =
       seed && "location" in seed ? seed.location : (detail?.location ?? null);
@@ -1056,14 +1059,13 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
                     </span>
                   ) : null}
                 </Field>
-                <Field id="manager-from" label="Hiệu lực từ">
-                  <input id="manager-from" type="date" className={inputClass} value={validFrom}
-                    required onChange={(event) => setValidFrom(event.target.value)} />
-                </Field>
+                <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+                  Ngày hiệu lực phân công được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
+                </div>
                 <button type="button" className={buttonClass}
-                  disabled={!managerId || !validFrom}
+                  disabled={!managerId}
                   onClick={() => {
-                    setPending([...pending, { managerRecruiterId: managerId, validFrom }]);
+                    setPending([...pending, { managerRecruiterId: managerId, validFrom: null }]);
                     setManagerId("");
                     setCandidateSearch("");
                   }}>
@@ -1073,7 +1075,7 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
                   {pending.map((row, index) => (
                     <li key={row.managerRecruiterId + String(index)}
                       className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/5 p-2">
-                      <span>{managerLabel(row.managerRecruiterId) + " · " + row.validFrom}</span>
+                      <span>{managerLabel(row.managerRecruiterId) + (row.validFrom ? " · " + row.validFrom : "")}</span>
                       <button type="button" className={buttonClass}
                         onClick={() => setPending(pending.filter((_, i) => i !== index))}>
                         Bỏ

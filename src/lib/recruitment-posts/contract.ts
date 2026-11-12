@@ -289,6 +289,26 @@ export type RecruitmentPostList = {
   snapshot_token: string;
 };
 
+export type RecruitmentPostIndustrialParkFacet = {
+  industrial_park_id: string;
+  industrial_park_code: string;
+  display_name: string;
+  active: true;
+  job_count: number;
+};
+
+export type RecruitmentPostLaborTypeFacet = {
+  labor_type_key: string;
+  display_name: string;
+  job_count: number;
+};
+
+export type RecruitmentPostListWithFacets = RecruitmentPostList & {
+  total_count: number;
+  industrial_parks: RecruitmentPostIndustrialParkFacet[];
+  labor_types: RecruitmentPostLaborTypeFacet[];
+};
+
 export type RecruitmentPostGetResult = {
   post: RecruitmentPostItem;
 };
@@ -509,6 +529,31 @@ const LIST_KEYS = [
   "snapshot_token",
 ] as const;
 
+const LIST_WITH_FACETS_KEYS = [
+  "items",
+  "page_size",
+  "has_more",
+  "next_cursor",
+  "snapshot_token",
+  "total_count",
+  "industrial_parks",
+  "labor_types",
+] as const;
+
+const INDUSTRIAL_PARK_FACET_KEYS = [
+  "industrial_park_id",
+  "industrial_park_code",
+  "display_name",
+  "active",
+  "job_count",
+] as const;
+
+const LABOR_TYPE_FACET_KEYS = [
+  "labor_type_key",
+  "display_name",
+  "job_count",
+] as const;
+
 const GET_KEYS = ["post"] as const;
 const MUTATION_KEYS = ["post", "changed", "replayed"] as const;
 
@@ -648,6 +693,7 @@ export type ListRecruitmentPostsQuery = {
   cursor: string | null;
   snapshot_token: string | null;
   page_size: number;
+  include_facets?: boolean;
 };
 
 const ALLOWED_LIST_QUERY_KEYS = new Set([
@@ -660,6 +706,7 @@ const ALLOWED_LIST_QUERY_KEYS = new Set([
   "cursor",
   "snapshot_token",
   "page_size",
+  "include_facets",
 ]);
 
 export function parseListRecruitmentPostsQuery(
@@ -784,6 +831,19 @@ export function parseListRecruitmentPostsQuery(
     cursor = trimmed;
   }
 
+  let include_facets = false;
+  const rawIncludeFacets = url.searchParams.get("include_facets");
+  if (rawIncludeFacets !== null) {
+    const trimmed = rawIncludeFacets.trim();
+    if (trimmed === "true") {
+      include_facets = true;
+    } else if (trimmed === "false") {
+      include_facets = false;
+    } else {
+      return { ok: false, code: "RECRUITMENT_POST_INPUT_INVALID" };
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -796,6 +856,7 @@ export function parseListRecruitmentPostsQuery(
       cursor,
       snapshot_token,
       page_size,
+      include_facets,
     },
   };
 }
@@ -1983,6 +2044,161 @@ export function projectRecruitmentPostList(
     has_more: raw.has_more,
     next_cursor,
     snapshot_token: raw.snapshot_token,
+  };
+}
+
+const VIETNAMESE_COLLATOR = new Intl.Collator("vi");
+
+export function compareRecruitmentPostIndustrialParkFacets(
+  a: Pick<
+    RecruitmentPostIndustrialParkFacet,
+    "display_name" | "industrial_park_code" | "industrial_park_id"
+  >,
+  b: Pick<
+    RecruitmentPostIndustrialParkFacet,
+    "display_name" | "industrial_park_code" | "industrial_park_id"
+  >,
+): number {
+  const byName = VIETNAMESE_COLLATOR.compare(a.display_name, b.display_name);
+  if (byName !== 0) {
+    return byName;
+  }
+  if (a.industrial_park_code !== b.industrial_park_code) {
+    return a.industrial_park_code < b.industrial_park_code ? -1 : 1;
+  }
+  if (a.industrial_park_id !== b.industrial_park_id) {
+    return a.industrial_park_id < b.industrial_park_id ? -1 : 1;
+  }
+  return 0;
+}
+
+export function projectRecruitmentPostIndustrialParkFacet(
+  raw: unknown,
+): RecruitmentPostIndustrialParkFacet | null {
+  if (
+    !isPlainRecord(raw) ||
+    !hasExactKeys(raw, INDUSTRIAL_PARK_FACET_KEYS) ||
+    raw.active !== true ||
+    typeof raw.job_count !== "number" ||
+    !Number.isSafeInteger(raw.job_count) ||
+    raw.job_count < 1
+  ) {
+    return null;
+  }
+  const industrial_park_id = readUuid(raw.industrial_park_id);
+  const industrial_park_code = readCatalogCode(raw.industrial_park_code);
+  const display_name = readNonEmptyDisplayText(raw.display_name, 256);
+  if (!industrial_park_id || !industrial_park_code || !display_name) {
+    return null;
+  }
+  return {
+    industrial_park_id,
+    industrial_park_code,
+    display_name,
+    active: true,
+    job_count: raw.job_count,
+  };
+}
+
+export function projectRecruitmentPostLaborTypeFacet(
+  raw: unknown,
+): RecruitmentPostLaborTypeFacet | null {
+  if (
+    !isPlainRecord(raw) ||
+    !hasExactKeys(raw, LABOR_TYPE_FACET_KEYS) ||
+    typeof raw.job_count !== "number" ||
+    !Number.isSafeInteger(raw.job_count) ||
+    raw.job_count < 1
+  ) {
+    return null;
+  }
+  const labor_type_key = readLaborTypeKey(raw.labor_type_key);
+  const display_name = readNonEmptyDisplayText(raw.display_name, 256);
+  if (!labor_type_key || !display_name) {
+    return null;
+  }
+  return {
+    labor_type_key,
+    display_name,
+    job_count: raw.job_count,
+  };
+}
+
+export function projectRecruitmentPostListWithFacets(
+  raw: unknown,
+): RecruitmentPostListWithFacets | null {
+  if (
+    !isPlainRecord(raw) ||
+    !hasExactKeys(raw, LIST_WITH_FACETS_KEYS) ||
+    typeof raw.total_count !== "number" ||
+    !Number.isSafeInteger(raw.total_count) ||
+    raw.total_count < 0 ||
+    !Array.isArray(raw.industrial_parks) ||
+    !Array.isArray(raw.labor_types)
+  ) {
+    return null;
+  }
+
+  const base = projectRecruitmentPostList({
+    items: raw.items,
+    page_size: raw.page_size,
+    has_more: raw.has_more,
+    next_cursor: raw.next_cursor,
+    snapshot_token: raw.snapshot_token,
+  });
+  if (!base) return null;
+
+  const industrial_parks: RecruitmentPostIndustrialParkFacet[] = [];
+  const seenParkIds = new Set<string>();
+  let sumParkJobs = 0;
+  for (const item of raw.industrial_parks) {
+    const projected = projectRecruitmentPostIndustrialParkFacet(item);
+    if (!projected || seenParkIds.has(projected.industrial_park_id)) {
+      return null;
+    }
+    seenParkIds.add(projected.industrial_park_id);
+    sumParkJobs += projected.job_count;
+    industrial_parks.push(projected);
+  }
+  industrial_parks.sort(compareRecruitmentPostIndustrialParkFacets);
+
+  const labor_types: RecruitmentPostLaborTypeFacet[] = [];
+  const seenLaborKeys = new Set<string>();
+  let sumLaborJobs = 0;
+  for (const item of raw.labor_types) {
+    const projected = projectRecruitmentPostLaborTypeFacet(item);
+    if (
+      !projected ||
+      seenLaborKeys.has(projected.labor_type_key) ||
+      projected.job_count > raw.total_count
+    ) {
+      return null;
+    }
+    seenLaborKeys.add(projected.labor_type_key);
+    sumLaborJobs += projected.job_count;
+    labor_types.push(projected);
+  }
+
+  if (raw.total_count === 0) {
+    if (industrial_parks.length !== 0 || labor_types.length !== 0) {
+      return null;
+    }
+  } else {
+    if (
+      industrial_parks.length === 0 ||
+      labor_types.length === 0 ||
+      sumParkJobs !== raw.total_count ||
+      sumLaborJobs < raw.total_count
+    ) {
+      return null;
+    }
+  }
+
+  return {
+    ...base,
+    total_count: raw.total_count,
+    industrial_parks,
+    labor_types,
   };
 }
 

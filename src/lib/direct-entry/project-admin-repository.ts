@@ -71,7 +71,7 @@ export type ProjectAdminRepository = {
     reason: string | null; idempotency_key: string;
   }): Promise<ProjectAdminOutcome<AdminProjectMutation>>;
   assignManager(input: AdminActorRef & {
-    project_id: string; manager_recruiter_id: string; valid_from: string;
+    project_id: string; manager_recruiter_id: string; valid_from: string | null;
     expected_project_version: number; reason: string | null; idempotency_key: string;
   }): Promise<ProjectAdminOutcome<AdminAssignmentMutation>>;
   unassignManager(input: AdminActorRef & {

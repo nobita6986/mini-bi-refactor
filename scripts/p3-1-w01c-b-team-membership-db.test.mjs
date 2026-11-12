@@ -83,7 +83,9 @@ const RPC_PARAMS = {
 async function database() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
-  for (const name of (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort()) {
+  for (const name of (await readdir(MIGRATION_DIR))
+    .filter((n) => n.endsWith(".sql") && n < "20261112120000_wp1_s1_block_future_org_authz_assignments.sql")
+    .sort()) {
     await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
   }
   return db;
@@ -274,6 +276,37 @@ async function installLegacyFutureMoveWriter(database_) {
     "revoke all on function public.direct_entry_move_team_membership(", start);
   assert.ok(start >= 0 && end > start, "legacy move writer is present for cutover fixtures");
   await database_.exec(legacyMigration.slice(start, end));
+
+  const r1Migration = await readFile(
+    path.join(MIGRATION_DIR, "20261020200000_r1_current_state_authorization.sql"), "utf8");
+  const unassignStart = r1Migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.direct_entry_unassign_team_membership(");
+  const unassignEnd = r1Migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.direct_entry_update_draft_row(", unassignStart);
+  assert.ok(unassignStart >= 0 && unassignEnd > unassignStart, "legacy unassign writer is present for cutover fixtures");
+  await database_.exec(r1Migration.slice(unassignStart, unassignEnd));
+}
+
+async function applyWp1MigrationInTransaction(database_) {
+  const raw = await readFile(
+    path.join(MIGRATION_DIR, "20261112120000_wp1_s1_block_future_org_authz_assignments.sql"),
+    "utf8",
+  );
+  const body = raw
+    .replace(/^\s*begin\s*;/im, "")
+    .replace(/commit\s*;\s*$/im, "");
+  await database_.exec(body);
+}
+
+async function installLegacyFutureTeamLeaderWriter(database_) {
+  const hfMigration = await readFile(
+    path.join(MIGRATION_DIR, "20261103180000_hf_hrp_membership_effective_interval_alignment.sql"), "utf8");
+  const start = hfMigration.indexOf(
+    "create or replace function public.direct_entry_apply_team_leader_mutation(");
+  const end = hfMigration.indexOf(
+    "revoke all on function public.direct_entry_apply_team_leader_mutation(", start);
+  assert.ok(start >= 0 && end > start, "legacy team leader writer is present for cutover fixtures");
+  await database_.exec(hfMigration.slice(start, end));
 }
 
 test("finite move excludes historical rows and markers on every date", async () => {
@@ -478,17 +511,29 @@ test("a same-day move leaves the outgoing interval as an inert cancellation mark
 });
 
 test("future membership writes fail closed and leave no schedule or authority", async () => {
-  const before = await counts(db);
-  const version = await recruiterVersion(db, HRP_C);
-  await assert.rejects(
-    assign(db, CATALOG, { recruiter: HRP_C, team: TEAM_A, from: FUTURE, version, key: KEY("20") }),
-    (error) => error.code === "22023" && /explicit activation/.test(error.message));
-  await assert.rejects(
-    move(db, CATALOG, { recruiter: HRP_C, team: TEAM_A, from: FUTURE, version, key: KEY("20-move") }),
-    (error) => error.code === "22023" && /explicit activation/.test(error.message));
-  assert.deepEqual(await counts(db), before, "rejected future writes leave no residue");
-  assert.equal((await readMemberships(db, "current", { p_recruiter_id: HRP_C })).total, 0);
-  assert.equal((await readMemberships(db, "scheduled", { p_recruiter_id: HRP_C })).total, 0);
+  await db.exec("begin");
+  try {
+    await applyWp1MigrationInTransaction(db);
+    const before = await counts(db);
+    const version = await recruiterVersion(db, HRP_C);
+    await expectMutationError(
+      () => assign(db, CATALOG, { recruiter: HRP_C, team: TEAM_A, from: FUTURE, version, key: KEY("20") }),
+      "22023",
+    );
+    await expectMutationError(
+      () => move(db, CATALOG, { recruiter: HRP_C, team: TEAM_A, from: FUTURE, version, key: KEY("20-move") }),
+      "22023",
+    );
+    await expectMutationError(
+      () => unassign(db, CATALOG, { recruiter: HRP_C, to: FUTURE, version, key: KEY("20-unassign") }),
+      "22023",
+    );
+    assert.deepEqual(await counts(db), before, "rejected future writes leave no residue");
+    assert.equal((await readMemberships(db, "current", { p_recruiter_id: HRP_C })).total, 0);
+    assert.equal((await readMemberships(db, "scheduled", { p_recruiter_id: HRP_C })).total, 0);
+  } finally {
+    await db.exec("rollback");
+  }
 });
 
 test("legacy scheduled moves remain auditable and cancellation never promotes a revoked predecessor", async () => {
@@ -667,7 +712,7 @@ test("a stale expected version is rejected with PT409 and leaves the intervals u
   const before = await counts(db);
   const stale = await rpcError(db, "direct_entry_unassign_team_membership", {
     p_auth_subject: CATALOG.auth, p_app_user_id: CATALOG.app, p_recruiter_id: HRP_D,
-    p_valid_to: FUTURE, p_expected_version: version + 9, p_reason: REASON,
+    p_valid_to: LATER, p_expected_version: version + 9, p_reason: REASON,
     p_idempotency_key: KEY("31"),
   });
   assert.equal(stale.code, "PT409");
@@ -1499,9 +1544,31 @@ test("Team Leader scheduled succession, cancellation restoration, rollover, conf
       }
     };
 
-    // 1. Designate leader1 today and schedule leader2 as future successor (`valid_from = futureDate`).
+    // 1. Designate leader1 in pre-WP1 history; apply WP1 migration and verify live WP1 RPC rejects future and past designate/revoke, then install legacy writer for cutover fixture assertions.
     const des1 = await designateLeader(teamLeaderTest, leader1.app, PAST, 1, "81");
     assert.equal(des1.change, "designate");
+    await applyWp1MigrationInTransaction(db);
+    await expectSavepointReject(
+      () => designateLeader(teamLeaderTest, leader2.app, futureDate, 2, "82-future-reject"),
+      "22023",
+      "WP1 rejects future team leader designate",
+    );
+    await expectSavepointReject(
+      () => designateLeader(teamLeaderTest, leader2.app, PAST, 2, "82-past-reject"),
+      "22023",
+      "WP1 rejects past team leader designate",
+    );
+    await expectSavepointReject(
+      () => revokeLeader(teamLeaderTest, futureDate, 2, "82-revoke-future-reject"),
+      "22023",
+      "WP1 rejects future team leader revoke",
+    );
+    await expectSavepointReject(
+      () => revokeLeader(teamLeaderTest, PAST, 2, "82-revoke-past-reject"),
+      "22023",
+      "WP1 rejects past team leader revoke",
+    );
+    await installLegacyFutureTeamLeaderWriter(db);
     const rep1 = await designateLeader(teamLeaderTest, leader2.app, futureDate, 2, "82");
     assert.equal(rep1.change, "replace");
 

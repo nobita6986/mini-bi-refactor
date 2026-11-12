@@ -168,7 +168,7 @@ test("hotfix feature coverage: xem, doi ten, active, gan, thu hoi va lich su deu
   assert.match(source, /filterProjects\(projects, projectSearch, statusFilter\)/);
   assert.match(source, /paginateProjects\(visibleProjects, projectPage\)/);
   assert.match(source, /aria-label="Phân trang danh sách dự án"/);
-  assert.match(source, /type="date"/);
+  assert.doesNotMatch(source, /id="manager-from"\s+type="date"/);
 });
 
 test("edit trigger is an accessible pencil beside the project name, not an action button", () => {

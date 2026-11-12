@@ -156,6 +156,8 @@ export function TeamLeaderManager({
         ? candidateSnapshot.state : { kind: "loading" };
   const currentList = visibleLists.CURRENT.kind === "loaded" ? visibleLists.CURRENT.value : null;
   const currentLeaders = currentList?.leaders ?? [];
+  const scheduledList = visibleLists.SCHEDULED.kind === "loaded" ? visibleLists.SCHEDULED.value : null;
+  const hasScheduledLeaders = (scheduledList?.leaders.length ?? 0) > 0;
   const activeReadError = visibleLists[activeState].kind;
   const activeList = visibleLists[activeState].kind === "loaded"
     ? visibleLists[activeState].value : null;
@@ -338,12 +340,11 @@ export function TeamLeaderManager({
   }, [notify, onLockChange, reloadAuthoritative, updateWorkflow]);
 
   const startDesignation = () => {
-    if (!team?.active || workflow.phase !== "idle" || teamOperationLocked) return;
-    const date = currentList?.authorization_date ?? "";
+    if (!team?.active || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
     setForm({
       kind: currentLeaders.length ? "replace" : "designate",
       appUserId: "",
-      effectiveDate: date,
+      effectiveDate: "",
       reason: "",
     });
     setFormError(null);
@@ -353,8 +354,9 @@ export function TeamLeaderManager({
     setCandidateReloadToken((value) => value + 1);
   };
 
-  const startRevocation = (effectiveDate: string) => {
-    setForm({ kind: "revoke", effectiveDate, reason: "" });
+  const startRevocation = () => {
+    if (hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
+    setForm({ kind: "revoke", effectiveDate: "", reason: "" });
     setFormError(null);
   };
 
@@ -458,11 +460,20 @@ export function TeamLeaderManager({
                   {team.active ? "Nhóm đang hoạt động" : "Nhóm ngừng hoạt động"}
                 </p>
                 <button type="button" onClick={startDesignation}
-                  disabled={!team.active || !readReady || workflow.phase !== "idle" || teamOperationLocked}
+                  disabled={!team.active || !readReady || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}
                   className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50">
                   {currentLeaders.length ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
                 </button>
               </div>
+
+              {hasScheduledLeaders ? (
+                <Alert tone="warning" title="Lịch trưởng nhóm tương lai cũ đang cản thao tác gán hoặc thu hồi ngay">
+                  <p>
+                    Nhóm này còn lịch trưởng nhóm tương lai từ giai đoạn trước (xem ở mục Đã lên lịch để đối chiếu).
+                    Luồng tự hủy lịch tương lai trên giao diện đã khóa theo chính sách hiệu lực tức thì (WP1/S1); vui lòng đối chiếu và xử lý lịch tồn đọng trước khi chỉ định, thay thế hoặc thu hồi trưởng nhóm.
+                  </p>
+                </Alert>
+              ) : null}
 
               <div role="tablist" aria-label="Lịch sử trưởng nhóm" className="flex flex-wrap gap-2 overflow-x-auto whitespace-nowrap border-b border-border">
                 {STATES.map((state) => (
@@ -497,7 +508,7 @@ export function TeamLeaderManager({
                         <th scope="col" className="px-3.5 py-3">Trưởng nhóm</th>
                         <th scope="col" className="px-3.5 py-3">Từ ngày</th>
                         <th scope="col" className="px-3.5 py-3">Đến ngày</th>
-                        {activeState !== "HISTORY" ? <th scope="col" className="px-3.5 py-3 text-right">Thao tác</th> : null}
+                        {activeState === "CURRENT" ? <th scope="col" className="px-3.5 py-3 text-right">Thao tác</th> : null}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
@@ -506,15 +517,13 @@ export function TeamLeaderManager({
                           <th scope="row" data-card-header="true" className="px-3.5 py-2.5 font-medium">{leader.leader_display_name}</th>
                           <td data-label="Từ ngày" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{formatDate(leader.valid_from)}</td>
                           <td data-label="Đến ngày" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{formatDate(leader.valid_to)}</td>
-                          {activeState !== "HISTORY" ? (
+                          {activeState === "CURRENT" ? (
                             <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
                               <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
-                                <button type="button" disabled={workflow.phase !== "idle" || teamOperationLocked}
-                                  onClick={() => startRevocation(
-                                    leader.state === "SCHEDULED" ? leader.valid_from : activeList.authorization_date,
-                                  )}
+                                <button type="button" disabled={hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}
+                                  onClick={() => startRevocation()}
                                   className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50">
-                                  {leader.state === "SCHEDULED" ? "Hủy lịch" : "Thu hồi"}
+                                  Thu hồi
                                 </button>
                               </div>
                             </td>
@@ -607,13 +616,9 @@ export function TeamLeaderManager({
                         ) : null}
                       </>
                     ) : null}
-                    <label htmlFor="team-leader-effective-date" className="block text-sm font-medium">
-                      Ngày hiệu lực
-                      <input id="team-leader-effective-date" type="date" required
-                        value={form.effectiveDate}
-                        onChange={(event) => setForm({ ...form, effectiveDate: event.currentTarget.value })}
-                        className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-md border border-border bg-background px-3 text-base sm:text-sm" />
-                    </label>
+                    <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+                      Ngày hiệu lực hệ thống: <span className="font-mono font-semibold text-foreground">{form.effectiveDate || currentList?.authorization_date || "Hôm nay (giờ Việt Nam)"}</span> (áp dụng ngay khi lưu).
+                    </div>
                     <label htmlFor="team-leader-reason" className="block text-sm font-medium">
                       Lý do thay đổi (không bắt buộc)
                       <textarea id="team-leader-reason" value={form.reason} maxLength={4000} rows={3}

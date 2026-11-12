@@ -69,8 +69,11 @@ const grantBody = {
   team_id: TEAM, project_ids: ["project-1", "project-2", "project-3"],
   reason: "UAT grant", idempotency_key: KEY,
 };
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+}).format(new Date());
 const revokeBody = {
-  mapping_id: MAPPING, effective_to: "2026-10-15",
+  mapping_id: MAPPING, effective_to: TODAY_VN,
   reason: "same-day cancellation", idempotency_key: KEY,
 };
 

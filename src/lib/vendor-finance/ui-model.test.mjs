@@ -1041,10 +1041,13 @@ test("URL and request builders round-trip cleanly through canonical VFIN-02 back
   );
 
   // 9. Admin governance requests -> backend parsers
+  const todayVn = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(new Date());
   const assignAcc = buildAssignProjectAccountantRequest({
     project_id: PROJECT_ID,
     accountant_ref: ACCOUNTANT_A_REF,
-    valid_from: "2026-10-25",
+    valid_from: todayVn,
     expected_version: 0,
     reason: "Phân công kế toán dự án mới",
     idempotency_key: IDEMPOTENCY_KEY,
@@ -1060,7 +1063,7 @@ test("URL and request builders round-trip cleanly through canonical VFIN-02 back
 
   const endAcc = buildEndProjectAccountantRequest({
     expected_version: 1,
-    valid_to: "2026-10-31",
+    valid_to: todayVn,
     reason: "Bàn giao dự án sang kế toán B",
     idempotency_key: IDEMPOTENCY_KEY,
   });
@@ -1073,7 +1076,7 @@ test("URL and request builders round-trip cleanly through canonical VFIN-02 back
   const assignRole = buildAssignGlobalRoleRequest({
     account_ref: ACCOUNTANT_A_REF,
     role_code: "GLOBAL_RECONCILER",
-    valid_from: "2026-10-25",
+    valid_from: todayVn,
     expected_version: 0,
     reason: "Cấp quyền BoD đối soát toàn cục",
     idempotency_key: IDEMPOTENCY_KEY,

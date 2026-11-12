@@ -22,6 +22,18 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const LOCATION_ADDRESS_CONTROL_CHAR_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function resolveBusinessTodayVn(todayVn?: string): string {
+  return todayVn && DATE_PATTERN.test(todayVn)
+    ? todayVn
+    : VIETNAM_DATE_FORMATTER.format(new Date());
+}
 
 export type ProjectLocationView = {
   address: string | null;
@@ -350,13 +362,39 @@ export function buildSetActiveRequest(input: {
   } };
 }
 
-export type PendingAssignment = { managerRecruiterId: string; validFrom: string };
+export type PendingAssignment = { managerRecruiterId: string; validFrom?: string | null };
 
-export function validatePendingAssignments(rows: readonly PendingAssignment[]): string | null {
+function validateImmediateAssignDate(
+  rawDate: string | null | undefined,
+  todayVn?: string,
+): { ok: true; value: string | null } | { ok: false; message: string } {
+  const businessToday = resolveBusinessTodayVn(todayVn);
+  const normalized = typeof rawDate === "string" && rawDate.trim() !== ""
+    ? rawDate.trim()
+    : null;
+  if (normalized === null) {
+    return { ok: true, value: null };
+  }
+  const dateErr = validateDate(normalized);
+  if (dateErr) return { ok: false, message: dateErr };
+  if (normalized > businessToday) {
+    return { ok: false, message: "Ngày hiệu lực không được ở tương lai." };
+  }
+  if (normalized < businessToday) {
+    return { ok: false, message: "Ngày hiệu lực không được ở quá khứ." };
+  }
+  return { ok: true, value: normalized };
+}
+
+export function validatePendingAssignments(
+  rows: readonly PendingAssignment[],
+  todayVn?: string,
+): string | null {
   if (rows.length === 0) return "Cần ít nhất một quản lý dự án.";
   const seen = new Set<string>();
   for (const row of rows) {
-    const failure = validateUuid(row.managerRecruiterId) ?? validateDate(row.validFrom);
+    const dateCheck = validateImmediateAssignDate(row.validFrom, todayVn);
+    const failure = validateUuid(row.managerRecruiterId) ?? (dateCheck.ok ? null : dateCheck.message);
     if (failure) return failure;
     const key = row.managerRecruiterId.trim().toLowerCase();
     if (seen.has(key)) return "Một quản lý không được gán hai lần trong cùng một lần gửi.";
@@ -366,16 +404,18 @@ export function validatePendingAssignments(rows: readonly PendingAssignment[]): 
 }
 
 export function buildAssignRequest(input: {
-  managerRecruiterId: string; validFrom: string; reason?: string | null;
+  managerRecruiterId: string; validFrom?: string | null; todayVn?: string; reason?: string | null;
   expectedProjectVersion: number; idempotencyKey: string;
 }): RequestResult {
-  const failure = validateUuid(input.managerRecruiterId) ?? validateDate(input.validFrom)
+  const dateCheck = validateImmediateAssignDate(input.validFrom, input.todayVn);
+  const failure = validateUuid(input.managerRecruiterId)
+    ?? (dateCheck.ok ? null : dateCheck.message)
     ?? validateReason(input.reason) ?? validateVersion(input.expectedProjectVersion)
     ?? validateUuid(input.idempotencyKey);
-  if (failure) return { ok: false, message: failure };
+  if (failure || !dateCheck.ok) return { ok: false, message: failure ?? "Ngày không hợp lệ." };
   return { ok: true, body: {
     manager_recruiter_id: input.managerRecruiterId.trim(),
-    valid_from: input.validFrom.trim(), reason: normalizeOptionalActionReason(input.reason),
+    valid_from: dateCheck.value, reason: normalizeOptionalActionReason(input.reason),
     expected_project_version: input.expectedProjectVersion,
     idempotency_key: input.idempotencyKey,
   } };

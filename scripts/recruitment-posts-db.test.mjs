@@ -12,12 +12,15 @@ import {
   projectRecruitmentPostContext,
   projectRecruitmentPostGet,
   projectRecruitmentPostList,
+  projectRecruitmentPostListWithFacets,
   projectRecruitmentPostMutation,
   projectRecruitmentPostPublicFeedV1,
 } from "../src/lib/recruitment-posts/contract.ts";
 import {
   RECRUITMENT_POST_LIST_MINE_MIGRATION_NAME,
   RECRUITMENT_POST_LIST_MINE_RPC_SIGNATURES,
+  RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME,
+  RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES,
   RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME,
   RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES,
   RECRUITMENT_POSTS_MIGRATION_NAME,
@@ -139,6 +142,19 @@ const KEY = (n) => `80000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const RPC_PARAMS = {
   recruitment_post_get_context: ["p_auth_subject", "p_app_user_id"],
   recruitment_post_list: [
+    "p_auth_subject",
+    "p_app_user_id",
+    "p_project_id",
+    "p_province_id",
+    "p_industrial_park_id",
+    "p_labor_type_key",
+    "p_updated_from",
+    "p_updated_to",
+    "p_cursor",
+    "p_snapshot_token",
+    "p_page_size",
+  ],
+  recruitment_post_list_with_facets: [
     "p_auth_subject",
     "p_app_user_id",
     "p_project_id",
@@ -450,6 +466,7 @@ await assignPm(db, "PROJ_RP_B", PM_A.recruiter, { validTo: "2026-02-01", isCurre
 const { rows: parkSeedRows } = await db.query(`
   select ip.industrial_park_id,
          ip.industrial_park_code,
+         ip.display_name,
          ip.province_id,
          ip.version as park_version,
          p.province_code
@@ -503,7 +520,7 @@ test("T-ACL-01, T-ACL-02 & T-AUTH-13: 8 public RPCs are service_role-only, all 1
      where n.nspname = 'public'
        and p.proname like 'recruitment_post%'
   `);
-  assert.equal(fnDefs.length, 18);
+  assert.equal(fnDefs.length, 19);
   for (const row of fnDefs) {
     assert.equal(
       row.fn_def.includes("@"),
@@ -2063,6 +2080,500 @@ test("T-MINE-01..07: recruitment_post_list_mine creator-only PUBLISHED + WITHDRA
       schema_version: 1,
       jobs: [],
     });
+  } finally {
+    await db.exec("rollback");
+  }
+});
+
+test("T-FACETS-01..07: recruitment_post_list_with_facets ACL, >20-post fixture with out-of-page-1 facets, single/combined filters, page-2 cursor, empty filter match, multi-labor-type counting, deactivated KCN, Vietnamese sort + code tie-breaker, and legacy 5-key web compatibility", async () => {
+  assert.deepEqual(RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES, [
+    "public.recruitment_post_list_with_facets(uuid, uuid, text, uuid, uuid, text, date, date, text, text, integer)",
+  ]);
+
+  // T-FACETS-01: $self_check$ fails with 55000 if owned by NOBYPASSRLS role, and anon/authenticated are denied with 42501
+  const facetsMigrationSql = await readFile(
+    path.join(MIGRATION_DIR, RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
+    "utf8",
+  );
+  const selfCheckMatch = facetsMigrationSql.match(
+    /do \$self_check\$[\s\S]*?\$self_check\$;/,
+  );
+  assert.ok(selfCheckMatch, "Expected $self_check$ block in list_with_facets migration");
+
+  let selfCheckErr = null;
+  await db.exec("begin");
+  try {
+    await db.exec(
+      "alter function public.recruitment_post_list_with_facets(uuid, uuid, text, uuid, uuid, text, date, date, text, text, integer) owner to rp_nobypass_migrator",
+    );
+    await db.exec(selfCheckMatch[0]);
+  } catch (err) {
+    selfCheckErr = err;
+  } finally {
+    await db.exec("rollback");
+  }
+  assert.ok(selfCheckErr);
+  assert.equal(selfCheckErr.code, "55000");
+
+  for (const deniedRole of ["anon", "authenticated"]) {
+    let roleErr = null;
+    await db.exec("begin");
+    try {
+      await db.exec(`set local role ${deniedRole}`);
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_page_size: 10,
+      });
+    } catch (err) {
+      roleErr = err;
+    } finally {
+      await db.exec("rollback");
+    }
+    assert.ok(roleErr, `${deniedRole} must be denied EXECUTE on recruitment_post_list_with_facets`);
+    assert.equal(roleErr.code, "42501");
+  }
+
+  // Disabled user and unmapped actor are denied with 42501 RECRUITMENT_POST_ACCESS_DENIED
+  const disabledErr = await rpcError(db, "recruitment_post_list_with_facets", {
+    p_auth_subject: DISABLED_USER.auth,
+    p_app_user_id: DISABLED_USER.app,
+    p_page_size: 10,
+  });
+  assert.equal(disabledErr?.code, "42501");
+  assert.equal(disabledErr?.message, "RECRUITMENT_POST_ACCESS_DENIED");
+
+  await db.exec("begin");
+  try {
+    // 1. Drain all existing PUBLISHED posts -> verify empty state returns total_count: 0 and two empty arrays
+    const { rows: existingPub } = await db.query(
+      "select brief_id, version from public.recruitment_project_briefs where status = 'PUBLISHED'",
+    );
+    let seq = 9600;
+    for (const row of existingPub) {
+      seq += 1;
+      await rpc(db, "recruitment_post_withdraw", {
+        p_auth_subject: NOBITA_ADMIN.auth,
+        p_app_user_id: NOBITA_ADMIN.app,
+        p_brief_id: row.brief_id,
+        p_expected_version: row.version,
+        p_idempotency_key: KEY(seq),
+      });
+    }
+
+    await db.exec("set local role service_role");
+    const emptyFacets = await rpc(db, "recruitment_post_list_with_facets", {
+      p_auth_subject: REGULAR_STAFF.auth,
+      p_app_user_id: REGULAR_STAFF.app,
+      p_page_size: 10,
+    });
+    await db.exec("reset role");
+    const projectedEmpty = projectRecruitmentPostListWithFacets(emptyFacets);
+    assert.ok(projectedEmpty !== null);
+    assert.deepEqual(projectedEmpty.items, []);
+    assert.equal(projectedEmpty.page_size, 10);
+    assert.equal(projectedEmpty.has_more, false);
+    assert.equal(projectedEmpty.next_cursor, null);
+    assert.equal(projectedEmpty.total_count, 0);
+    assert.deepEqual(projectedEmpty.industrial_parks, []);
+    assert.deepEqual(projectedEmpty.labor_types, []);
+
+    // 2. Seed additional labor type and industrial parks for Vietnamese sort & tie-breaker + deactivated KCN tests
+    await db.query(
+      `insert into public.direct_entry_labor_types (labor_type_key, display_name, reporting_key, sort_order, active)
+       values ('KHOAN_SP', 'Khoán sản phẩm', 'khoan_sp', 40, true)
+       on conflict (labor_type_key) do nothing`,
+    );
+
+    const PARK_DIEM_THUY_ID = "10000000-0000-4000-8000-000000000311";
+    const PARK_PHU_HA_DUP_ID = "10000000-0000-4000-8000-000000000312";
+    const PARK_TO_DEACTIVATE_ID = "10000000-0000-4000-8000-000000000313";
+    const PARK_AN_NFD_ID = "10000000-0000-4000-8000-000000000314";
+    const PARK_ANG_ID = "10000000-0000-4000-8000-000000000315";
+    const PARK_AN_NFD_DISPLAY_NAME = "KCN A\u0301n";
+
+    await db.query(
+      `insert into public.industrial_parks (
+         industrial_park_id, industrial_park_code, province_id, display_name, normalized_key, active, version
+       ) values
+         ($1::uuid, 'DIEM_THUY', $6::uuid, 'KCN Điềm Thụy', 'diemthuy', true, 1),
+         ($2::uuid, 'AA_PHU_HA_TIE', $7::uuid, $8, 'phuhavp', true, 1),
+         ($3::uuid, 'SONG_KHE_TEMP', $6::uuid, 'KCN Song Khê', 'songkhe', true, 1),
+         ($4::uuid, 'ZZ_AN_NFD', $6::uuid, $9, 'kcnannfd', true, 1),
+         ($5::uuid, 'AA_ANG', $6::uuid, 'KCN Ang', 'kcnang', true, 1)`,
+      [
+        PARK_DIEM_THUY_ID,
+        PARK_PHU_HA_DUP_ID,
+        PARK_TO_DEACTIVATE_ID,
+        PARK_AN_NFD_ID,
+        PARK_ANG_ID,
+        PARK_PHU_HA.province_id,
+        PARK_BA_THIEN_1.province_id,
+        PARK_PHU_HA.display_name,
+        PARK_AN_NFD_DISPLAY_NAME,
+      ],
+    );
+
+    // 3. Create >20 PUBLISHED posts (24 posts total) in chronological order so oldest posts are outside the first 10 items:
+    // - Oldest post #1: on PARK_TO_DEACTIVATE_ID ('KCN Song Khê'), with labor_type_keys: ['KHOAN_SP'] (ONLY appears outside first 10!)
+    seq += 1;
+    const postDeactivatedPark = await rpc(db, "recruitment_post_create", {
+      p_auth_subject: PM_A.auth,
+      p_app_user_id: PM_A.app,
+      p_payload: makeCreatePayload("PROJ_RP_A", PARK_TO_DEACTIVATE_ID, {
+        general: {
+          customer_name: "Công ty KCN Sắp Tắt Danh Mục",
+          labor_type_keys: ["KHOAN_SP"],
+        },
+      }),
+      p_idempotency_key: KEY(seq),
+    });
+
+    // Deactivate PARK_TO_DEACTIVATE_ID in catalog AFTER the post is published!
+    await db.query(
+      "update public.industrial_parks set active = false, version = version + 1 where industrial_park_id = $1::uuid",
+      [PARK_TO_DEACTIVATE_ID],
+    );
+
+    // - Post #2: on PARK_DIEM_THUY_ID ('KCN Điềm Thụy'), multi-labor-type ['CHINH_THUC', 'THOI_VU'] (also outside first 10!)
+    seq += 1;
+    const postMultiLabor = await rpc(db, "recruitment_post_create", {
+      p_auth_subject: PM_A.auth,
+      p_app_user_id: PM_A.app,
+      p_payload: makeCreatePayload("PROJ_RP_A", PARK_DIEM_THUY_ID, {
+        general: {
+          customer_name: "Công ty Điềm Thụy Đa Hình Thức",
+          labor_type_keys: ["CHINH_THUC", "THOI_VU"],
+        },
+      }),
+      p_idempotency_key: KEY(seq),
+    });
+
+    // - Post #3: on PARK_PHU_HA_DUP_ID (display_name 'KCN Phú Hà', code 'AA_PHU_HA_TIE') with ['THOI_VU']
+    seq += 1;
+    await rpc(db, "recruitment_post_create", {
+      p_auth_subject: PM_A.auth,
+      p_app_user_id: PM_A.app,
+      p_payload: makeCreatePayload("PROJ_RP_A", PARK_PHU_HA_DUP_ID, {
+        general: {
+          customer_name: "Công ty Phú Hà Tie Breaker",
+          labor_type_keys: ["THOI_VU"],
+        },
+      }),
+      p_idempotency_key: KEY(seq),
+    });
+
+    // - Post #4: on PARK_ANG_ID ('KCN Ang', code 'AA_ANG') with ['THOI_VU']
+    seq += 1;
+    await rpc(db, "recruitment_post_create", {
+      p_auth_subject: PM_A.auth,
+      p_app_user_id: PM_A.app,
+      p_payload: makeCreatePayload("PROJ_RP_A", PARK_ANG_ID, {
+        general: {
+          customer_name: "Công ty KCN Ang",
+          labor_type_keys: ["THOI_VU"],
+        },
+      }),
+      p_idempotency_key: KEY(seq),
+    });
+
+    // - Post #5: on PARK_AN_NFD_ID ('KCN A\u0301n' decomposed Unicode, code 'ZZ_AN_NFD') with ['THOI_VU']
+    seq += 1;
+    await rpc(db, "recruitment_post_create", {
+      p_auth_subject: PM_A.auth,
+      p_app_user_id: PM_A.app,
+      p_payload: makeCreatePayload("PROJ_RP_A", PARK_AN_NFD_ID, {
+        general: {
+          customer_name: "Công ty KCN Án NFD",
+          labor_type_keys: ["THOI_VU"],
+        },
+      }),
+      p_idempotency_key: KEY(seq),
+    });
+
+    // - Posts #6..#12 (7 posts): on PARK_PHU_HA ('KCN Phú Hà', code 'PT_PHU_HA') with ['THOI_VU']
+    for (let i = 0; i < 7; i++) {
+      seq += 1;
+      await rpc(db, "recruitment_post_create", {
+        p_auth_subject: PM_A.auth,
+        p_app_user_id: PM_A.app,
+        p_payload: makeCreatePayload("PROJ_RP_A", PARK_PHU_HA.industrial_park_id, {
+          general: {
+            customer_name: `Công ty Phú Hà #${i + 1}`,
+            labor_type_keys: ["THOI_VU"],
+          },
+        }),
+        p_idempotency_key: KEY(seq),
+      });
+    }
+
+    // - Newest 12 posts (#13..#24): ALL on PARK_BA_THIEN_1 ('KCN Bá Thiện I') with ONLY ['CHINH_THUC']!
+    //   This guarantees the first 10 items (page 1 with page_size=10) contain ONLY PARK_BA_THIEN_1 and 'CHINH_THUC',
+    //   while all other parks and labor types only appear in items 11..24!
+    for (let i = 0; i < 12; i++) {
+      seq += 1;
+      await rpc(db, "recruitment_post_create", {
+        p_auth_subject: PM_A.auth,
+        p_app_user_id: PM_A.app,
+        p_payload: makeCreatePayload("PROJ_RP_A", PARK_BA_THIEN_1.industrial_park_id, {
+          general: {
+            customer_name: `Công ty Bá Thiện Mới Nhất #${i + 1}`,
+            labor_type_keys: ["CHINH_THUC"],
+          },
+        }),
+        p_idempotency_key: KEY(seq),
+      });
+    }
+
+    const expectedParksFacet = [
+      {
+        industrial_park_id: PARK_AN_NFD_ID,
+        industrial_park_code: "ZZ_AN_NFD",
+        display_name: PARK_AN_NFD_DISPLAY_NAME,
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: PARK_ANG_ID,
+        industrial_park_code: "AA_ANG",
+        display_name: "KCN Ang",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: PARK_BA_THIEN_1.industrial_park_id,
+        industrial_park_code: PARK_BA_THIEN_1.industrial_park_code,
+        display_name: PARK_BA_THIEN_1.display_name,
+        active: true,
+        job_count: 12,
+      },
+      {
+        industrial_park_id: PARK_DIEM_THUY_ID,
+        industrial_park_code: "DIEM_THUY",
+        display_name: "KCN Điềm Thụy",
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: PARK_PHU_HA_DUP_ID,
+        industrial_park_code: "AA_PHU_HA_TIE",
+        display_name: PARK_PHU_HA.display_name,
+        active: true,
+        job_count: 1,
+      },
+      {
+        industrial_park_id: PARK_PHU_HA.industrial_park_id,
+        industrial_park_code: PARK_PHU_HA.industrial_park_code,
+        display_name: PARK_PHU_HA.display_name,
+        active: true,
+        job_count: 7,
+      },
+      {
+        industrial_park_id: PARK_TO_DEACTIVATE_ID,
+        industrial_park_code: "SONG_KHE_TEMP",
+        display_name: "KCN Song Khê",
+        active: true,
+        job_count: 1,
+      },
+    ];
+    const expectedLaborTypesFacet = [
+      {
+        labor_type_key: "CHINH_THUC",
+        display_name: "Chính thức",
+        job_count: 13,
+      },
+      {
+        labor_type_key: "THOI_VU",
+        display_name: "Thời vụ",
+        job_count: 11,
+      },
+      {
+        labor_type_key: "KHOAN_SP",
+        display_name: "Khoán sản phẩm",
+        job_count: 1,
+      },
+    ];
+
+    // T-FACETS-02: Page 1 with page_size=10 returns only 10 items (all BA_THIEN_1 + CHINH_THUC),
+    // yet facets contain all 7 industrial parks (with 'KCN A\u0301n' sorted before 'KCN Ang') and all 3 labor types across all 24 posts!
+    const page1 = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(page1 !== null);
+    assert.equal(page1.items.length, 10);
+    assert.equal(page1.page_size, 10);
+    assert.equal(page1.has_more, true);
+    assert.ok(page1.next_cursor !== null);
+    assert.equal(
+      page1.items.every(
+        (it) =>
+          it.industrial_park.industrial_park_id ===
+            PARK_BA_THIEN_1.industrial_park_id &&
+          it.general.labor_types.length === 1 &&
+          it.general.labor_types[0].labor_type_key === "CHINH_THUC",
+      ),
+      true,
+      "First 10 items only contain KCN Bá Thiện 1 and CHINH_THUC",
+    );
+    assert.equal(page1.total_count, 24);
+    assert.deepEqual(page1.industrial_parks, expectedParksFacet);
+    assert.deepEqual(page1.labor_types, expectedLaborTypesFacet);
+
+    // T-FACETS-03: Load Page 2 and Page 3 with cursor + snapshot_token and page_size=10
+    const page2 = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_cursor: page1.next_cursor,
+        p_snapshot_token: page1.snapshot_token,
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(page2 !== null);
+    assert.equal(page2.items.length, 10);
+    assert.equal(page2.has_more, true);
+    assert.equal(page2.total_count, 24);
+    assert.deepEqual(page2.industrial_parks, expectedParksFacet);
+    assert.deepEqual(page2.labor_types, expectedLaborTypesFacet);
+
+    const page3 = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_cursor: page2.next_cursor,
+        p_snapshot_token: page2.snapshot_token,
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(page3 !== null);
+    assert.equal(page3.items.length, 4);
+    assert.equal(page3.has_more, false);
+    assert.equal(page3.next_cursor, null);
+    // Oldest item in page3 is on PARK_TO_DEACTIVATE_ID: in item projection, industrial_park.active is false (catalog truth),
+    // while in facet industrial_parks it is active: true!
+    const deactivatedParkItem = page3.items.find(
+      (it) => it.brief_id === postDeactivatedPark.post.brief_id,
+    );
+    assert.ok(deactivatedParkItem);
+    assert.equal(deactivatedParkItem.industrial_park.active, false);
+
+    // Single filter by industrial_park_id (PARK_PHU_HA -> 7 items) still returns global facets (total_count=24)
+    const filteredByPark = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_industrial_park_id: PARK_PHU_HA.industrial_park_id,
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(filteredByPark !== null);
+    assert.equal(filteredByPark.items.length, 7);
+    assert.equal(filteredByPark.has_more, false);
+    assert.equal(filteredByPark.total_count, 24);
+    assert.deepEqual(filteredByPark.industrial_parks, expectedParksFacet);
+    assert.deepEqual(filteredByPark.labor_types, expectedLaborTypesFacet);
+
+    // Single filter by labor_type_key ('KHOAN_SP' -> 1 item outside page 1 of unfiltered feed)
+    const filteredByLabor = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_labor_type_key: "KHOAN_SP",
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(filteredByLabor !== null);
+    assert.equal(filteredByLabor.items.length, 1);
+    assert.equal(filteredByLabor.items[0].brief_id, postDeactivatedPark.post.brief_id);
+    assert.equal(filteredByLabor.total_count, 24);
+
+    // Combined filter (PARK_DIEM_THUY_ID + 'CHINH_THUC' -> 1 item: postMultiLabor)
+    const filteredCombined = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_industrial_park_id: PARK_DIEM_THUY_ID,
+        p_labor_type_key: "CHINH_THUC",
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(filteredCombined !== null);
+    assert.equal(filteredCombined.items.length, 1);
+    assert.equal(filteredCombined.items[0].brief_id, postMultiLabor.post.brief_id);
+    assert.equal(filteredCombined.total_count, 24);
+
+    // Empty filter match (PARK_BA_THIEN_1 + 'KHOAN_SP' -> 0 items) still returns global facets (total_count=24)
+    const filteredNoMatch = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_industrial_park_id: PARK_BA_THIEN_1.industrial_park_id,
+        p_labor_type_key: "KHOAN_SP",
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(filteredNoMatch !== null);
+    assert.deepEqual(filteredNoMatch.items, []);
+    assert.equal(filteredNoMatch.has_more, false);
+    assert.equal(filteredNoMatch.next_cursor, null);
+    assert.equal(filteredNoMatch.total_count, 24);
+    assert.deepEqual(filteredNoMatch.industrial_parks, expectedParksFacet);
+    assert.deepEqual(filteredNoMatch.labor_types, expectedLaborTypesFacet);
+
+    // T-FACETS-05: Withdraw postMultiLabor (which had ['CHINH_THUC', 'THOI_VU'] on PARK_DIEM_THUY_ID)
+    // -> total_count drops from 24 to 23, PARK_DIEM_THUY_ID disappears from industrial_parks,
+    //    and both CHINH_THUC (13->12) and THOI_VU (11->10) decrease by 1!
+    seq += 1;
+    await rpc(db, "recruitment_post_withdraw", {
+      p_auth_subject: PM_A.auth,
+      p_app_user_id: PM_A.app,
+      p_brief_id: postMultiLabor.post.brief_id,
+      p_expected_version: 1,
+      p_idempotency_key: KEY(seq),
+    });
+
+    const afterWithdraw = projectRecruitmentPostListWithFacets(
+      await rpc(db, "recruitment_post_list_with_facets", {
+        p_auth_subject: REGULAR_STAFF.auth,
+        p_app_user_id: REGULAR_STAFF.app,
+        p_page_size: 10,
+      }),
+    );
+    assert.ok(afterWithdraw !== null);
+    assert.equal(afterWithdraw.total_count, 23);
+    assert.equal(
+      afterWithdraw.industrial_parks.some(
+        (p) => p.industrial_park_id === PARK_DIEM_THUY_ID,
+      ),
+      false,
+      "KCN Điềm Thụy must disappear from facets once its only PUBLISHED post is withdrawn",
+    );
+    assert.deepEqual(afterWithdraw.labor_types, [
+      { labor_type_key: "CHINH_THUC", display_name: "Chính thức", job_count: 12 },
+      { labor_type_key: "THOI_VU", display_name: "Thời vụ", job_count: 10 },
+      { labor_type_key: "KHOAN_SP", display_name: "Khoán sản phẩm", job_count: 1 },
+    ]);
+
+    // T-FACETS-07: Legacy Web RPC `recruitment_post_list` (default page_size=15) still returns exact 5 keys
+    // and passes existing `projectRecruitmentPostList` parser
+    const webLegacyRaw = await rpc(db, "recruitment_post_list", {
+      p_auth_subject: REGULAR_STAFF.auth,
+      p_app_user_id: REGULAR_STAFF.app,
+      p_page_size: 15,
+    });
+    assert.deepEqual(
+      Object.keys(webLegacyRaw).sort(),
+      ["has_more", "items", "next_cursor", "page_size", "snapshot_token"],
+    );
+    const webLegacyProjected = projectRecruitmentPostList(webLegacyRaw);
+    assert.ok(webLegacyProjected !== null);
+    assert.equal(webLegacyProjected.items.length, 15);
+    assert.equal(webLegacyProjected.page_size, 15);
+    assert.equal(webLegacyProjected.has_more, true);
   } finally {
     await db.exec("rollback");
   }

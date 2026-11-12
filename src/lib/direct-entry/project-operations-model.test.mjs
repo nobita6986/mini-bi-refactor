@@ -29,6 +29,9 @@ const KEY = "55555555-5555-4555-8555-555555555555";
 const RECRUITER = "66666666-6666-4666-8666-666666666666";
 const RECRUITER_2 = "88888888-8888-4888-8888-888888888888";
 const ASSIGNMENT = "77777777-7777-4777-8777-777777777777";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+}).format(new Date());
 
 const FORBIDDEN = ["actor", "auth_subject", "app_user_id", "capability",
   "capabilities", "scope", "scopes", "role", "roles", "created_by"];
@@ -144,11 +147,11 @@ test("cac hanh dong UI tao dung request va xu ly success/conflict qua executor",
   }
 
   const assign = await send("/api/direct-entry/projects/p1/managers", "POST", buildAssignRequest({
-    managerRecruiterId: RECRUITER, validFrom: "2026-10-08", reason: "phân công",
+    managerRecruiterId: RECRUITER, validFrom: TODAY_VN, reason: "phân công",
     expectedProjectVersion: 9, idempotencyKey: KEY,
   }));
   assert.deepEqual(JSON.parse(assign.calls[0].body), {
-    manager_recruiter_id: RECRUITER, valid_from: "2026-10-08", reason: "phân công",
+    manager_recruiter_id: RECRUITER, valid_from: TODAY_VN, reason: "phân công",
     expected_project_version: 9, idempotency_key: KEY,
   });
   assert.equal(assign.result.outcome.kind, "applied");
@@ -193,12 +196,12 @@ test("gan nhieu quan ly: chan trung lap va du lieu sai", () => {
     { managerRecruiterId: RECRUITER, validFrom: "2026-10-02" },
   ]), null, "khong duoc gan trung mot quan ly");
   assert.equal(validatePendingAssignments([
-    { managerRecruiterId: RECRUITER, validFrom: "2026-10-01" },
-    { managerRecruiterId: RECRUITER_2, validFrom: "2026-10-02" },
+    { managerRecruiterId: RECRUITER, validFrom: TODAY_VN },
+    { managerRecruiterId: RECRUITER_2, validFrom: TODAY_VN },
   ]), null);
 
   const bad = buildAssignRequest({ managerRecruiterId: "khong-phai-uuid",
-    validFrom: "2026-10-01", reason: "r", expectedProjectVersion: 1, idempotencyKey: KEY });
+    validFrom: TODAY_VN, reason: "r", expectedProjectVersion: 1, idempotencyKey: KEY });
   assert.equal(bad.ok, false);
 
   const badDate = buildAssignRequest({ managerRecruiterId: RECRUITER,
@@ -233,7 +236,7 @@ test("ly do thao tac tuy chon cho moi thao tac thay doi", () => {
       expectedVersion: 1, idempotencyKey: KEY }),
     () => buildSetActiveRequest({ active: false, reason: "",
       expectedVersion: 1, idempotencyKey: KEY }),
-    () => buildAssignRequest({ managerRecruiterId: RECRUITER, validFrom: "2026-10-01",
+    () => buildAssignRequest({ managerRecruiterId: RECRUITER, validFrom: TODAY_VN,
       reason: "", expectedProjectVersion: 1, idempotencyKey: KEY }),
     () => buildUnassignRequest({ reason: "", expectedVersion: 1,
       expectedProjectVersion: 1, idempotencyKey: KEY }),

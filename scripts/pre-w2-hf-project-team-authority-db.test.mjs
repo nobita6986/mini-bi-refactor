@@ -892,7 +892,7 @@ test("PRE-W2-HF Project<->Team: revoke is immediate and rejects future effective
 
     // An explicit end date at the authorization date still removes access immediately.
     const nextGrant = await grantScope(db, admin,
-      [PROJECT_MAPPED, TEAM_A, 2, PAST, "second grant", idemKey("second-grant")]);
+      [PROJECT_MAPPED, TEAM_A, 2, today, "second grant", idemKey("second-grant")]);
     const before = (await db.query(
       "select valid_from::text as valid_from, valid_to::text as valid_to, version,"
         + " revoked_by_user_id, revoke_reason_id from public.direct_entry_project_team_scopes"

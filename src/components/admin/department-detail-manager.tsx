@@ -611,11 +611,9 @@ function AccountingDepartmentMembershipsSection({
     });
   const [selectedCandidate, setSelectedCandidate] =
     useState<AccountingCandidateProjection | null>(null);
-  const [assignEffectiveFrom, setAssignEffectiveFrom] = useState("");
   const [assignReason, setAssignReason] = useState("");
 
   // End dialog state
-  const [endEffectiveTo, setEndEffectiveTo] = useState("");
   const [endReason, setEndReason] = useState("");
 
   const pendingIntentRef = useRef<{ signature: string; key: string } | null>(null);
@@ -628,7 +626,6 @@ function AccountingDepartmentMembershipsSection({
     setCandidateSearchFilter("");
     setCandidatePage(1);
     setSelectedCandidate(null);
-    setAssignEffectiveFrom("");
     setAssignReason("");
     setDialog({ kind: "assign" });
   };
@@ -837,7 +834,6 @@ function AccountingDepartmentMembershipsSection({
     if (!canManage || membership.valid_to !== null) return;
     pendingIntentRef.current = null;
     setDialogFeedback(null);
-    setEndEffectiveTo("");
     setEndReason("");
     setDialog({ kind: "end", membership });
   };
@@ -859,7 +855,7 @@ function AccountingDepartmentMembershipsSection({
       op: "assign",
       accountRef: selectedCandidate.account_ref,
       expectedPairVersion: selectedCandidate.pair_version,
-      effectiveFrom: assignEffectiveFrom.trim() || null,
+      effectiveFrom: null,
       reason: assignReason.trim(),
     });
     const intentKey =
@@ -871,7 +867,8 @@ function AccountingDepartmentMembershipsSection({
     const built = buildAssignAccountingMemberRequest({
       accountRef: selectedCandidate.account_ref,
       expectedPairVersion: selectedCandidate.pair_version,
-      effectiveFrom: assignEffectiveFrom,
+      authorizationDate: detail.authorization_date,
+      effectiveFrom: null,
       reason: assignReason,
       idempotencyKey: intentKey,
     });
@@ -939,7 +936,7 @@ function AccountingDepartmentMembershipsSection({
       op: "end",
       membershipId: target.membership_id,
       expectedPairVersion: target.pair_version,
-      effectiveTo: endEffectiveTo.trim() || null,
+      effectiveTo: null,
       reason: endReason.trim(),
     });
     const intentKey =
@@ -954,7 +951,7 @@ function AccountingDepartmentMembershipsSection({
       membershipState: target.state,
       validFrom: target.valid_from,
       authorizationDate: detail.authorization_date,
-      effectiveTo: endEffectiveTo,
+      effectiveTo: null,
       reason: endReason,
       idempotencyKey: intentKey,
     });
@@ -1466,22 +1463,11 @@ function AccountingDepartmentMembershipsSection({
             ) : null}
           </section>
 
-          <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
-            2. Ngày bắt đầu hiệu lực (tùy chọn)
-            <input
-              type="date"
-              value={assignEffectiveFrom}
-              disabled={busy}
-              onChange={(event) => {
-                pendingIntentRef.current = null;
-                setAssignEffectiveFrom(event.target.value);
-              }}
-              className={INPUT_CLASS}
-            />
-            <span className="text-xs font-normal text-muted">
-              Để trống để áp dụng ngay từ ngày hiệu lực hệ thống ({detail.authorization_date}).
-            </span>
-          </label>
+          <div className="rounded-lg border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
+            2. Ngày bắt đầu hiệu lực:{" "}
+            <strong className="font-mono text-foreground">{detail.authorization_date}</strong> (áp
+            dụng ngay theo ngày nghiệp vụ hệ thống).
+          </div>
 
           <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
             3. Lý do gán thành viên (bắt buộc)
@@ -1597,24 +1583,11 @@ function AccountingDepartmentMembershipsSection({
             </div>
 
             {dialog.membership.state === "CURRENT" ? (
-              <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
-                Ngày kết thúc hiệu lực (tùy chọn)
-                <input
-                  type="date"
-                  value={endEffectiveTo}
-                  disabled={busy}
-                  min={dialog.membership.valid_from}
-                  max={detail.authorization_date}
-                  onChange={(event) => {
-                    pendingIntentRef.current = null;
-                    setEndEffectiveTo(event.target.value);
-                  }}
-                  className={INPUT_CLASS}
-                />
-                <span className="text-xs font-normal text-muted">
-                  Để trống để kết thúc ngay trong ngày hiệu lực hệ thống ({detail.authorization_date}).
-                </span>
-              </label>
+              <div className="rounded-lg border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
+                Ngày kết thúc hiệu lực:{" "}
+                <strong className="font-mono text-foreground">{detail.authorization_date}</strong>{" "}
+                (kết thúc ngay trong ngày hiệu lực hệ thống).
+              </div>
             ) : (
               <Alert tone="info" role="status" title="Hủy lịch tham gia sắp hiệu lực">
                 Bản ghi này chưa tới ngày bắt đầu ({dialog.membership.valid_from}) nên sẽ được

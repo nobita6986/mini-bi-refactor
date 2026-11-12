@@ -606,6 +606,7 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     // -------------------------------------------------------------------------
     // 3. Employee Branch Assignment by app_user_id & Overlap Guard
     // -------------------------------------------------------------------------
+    await db.query("select set_config('direct_entry.test_authorization_date', '2026-11-01', false)");
     const assign1Key = nextUuid();
     const assign1Fp = computeBranchAssignRequestFingerprint({
       app_user_id: ACTORS.FULL_ADMIN.app,
@@ -636,6 +637,7 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     assert.equal(assign1.assignment.valid_to, null);
 
     // Overlapping assignment for STAFF_A must fail with ATTENDANCE_BRANCH_ASSIGNMENT_OVERLAP
+    await db.query("select set_config('direct_entry.test_authorization_date', '2026-11-10', false)");
     await assert.rejects(
       () =>
         callAsServiceRole(
@@ -658,6 +660,7 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     );
 
     // Assigning disabled user must fail with ATTENDANCE_BRANCH_TARGET_USER_INVALID
+    await db.query("select set_config('direct_entry.test_authorization_date', '2026-11-01', false)");
     await assert.rejects(
       () =>
         callAsServiceRole(
@@ -739,18 +742,58 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     );
     assert.equal(bnUpdatedRaw.branch.version, 2);
 
-    // 4d. Unassign STAFF_A from BN_01 on 2026-11-15 and assign to DN_NO_GPS from 2026-11-16
+    // 4d. Reject future and past valid_to / valid_from under WP1, then unassign STAFF_A from BN_01 on 2026-11-08 and assign to DN_NO_GPS from 2026-11-09
+    await db.query("select set_config('direct_entry.test_authorization_date', '2026-11-08', false)");
+    await assert.rejects(
+      () =>
+        callAsServiceRole(
+          db,
+          `select public.attendance_unassign_employee_branch_admin(
+            $1::uuid, $2::uuid, $3::uuid, '2099-01-01'::date, 1, $4::uuid, $5::text
+          ) as data`,
+          [
+            ACTORS.FULL_ADMIN.auth,
+            ACTORS.FULL_ADMIN.app,
+            assign1.assignment.assignment_id,
+            nextUuid(),
+            "a".repeat(64),
+          ],
+        ),
+      (err) =>
+        err.code === "22023" &&
+        String(err.message).includes("ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE"),
+    );
+    await assert.rejects(
+      () =>
+        callAsServiceRole(
+          db,
+          `select public.attendance_unassign_employee_branch_admin(
+            $1::uuid, $2::uuid, $3::uuid, '2026-11-05'::date, 1, $4::uuid, $5::text
+          ) as data`,
+          [
+            ACTORS.FULL_ADMIN.auth,
+            ACTORS.FULL_ADMIN.app,
+            assign1.assignment.assignment_id,
+            nextUuid(),
+            "b".repeat(64),
+          ],
+        ),
+      (err) =>
+        err.code === "22023" &&
+        String(err.message).includes("ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE"),
+    );
+
     const unassign1Key = nextUuid();
     const unassign1Fp = computeBranchUnassignRequestFingerprint({
       app_user_id: ACTORS.FULL_ADMIN.app,
       assignment_id: assign1.assignment.assignment_id,
-      valid_to: "2026-11-15",
+      valid_to: "2026-11-08",
       expected_version: 1,
     });
     const unassign1Raw = await callAsServiceRole(
       db,
       `select public.attendance_unassign_employee_branch_admin(
-        $1::uuid, $2::uuid, $3::uuid, '2026-11-15'::date, 1, $4::uuid, $5::text
+        $1::uuid, $2::uuid, $3::uuid, '2026-11-08'::date, 1, $4::uuid, $5::text
       ) as data`,
       [
         ACTORS.FULL_ADMIN.auth,
@@ -762,21 +805,22 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     );
     const unassign1 = projectUnassignBranchResult(unassign1Raw);
     assert.ok(unassign1);
-    assert.equal(unassign1.assignment.valid_to, "2026-11-15");
+    assert.equal(unassign1.assignment.valid_to, "2026-11-08");
     assert.equal(unassign1.assignment.version, 2);
 
+    await db.query("select set_config('direct_entry.test_authorization_date', '2026-11-09', false)");
     const assign2Key = nextUuid();
     const assign2Fp = computeBranchAssignRequestFingerprint({
       app_user_id: ACTORS.FULL_ADMIN.app,
       target_app_user_id: ACTORS.STAFF_A.app,
       branch_id: dnBranchId,
-      valid_from: "2026-11-16",
+      valid_from: "2026-11-09",
       expected_version: 1,
     });
     await callAsServiceRole(
       db,
       `select public.attendance_assign_employee_branch_admin(
-        $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-11-16'::date, 1, $5::uuid, $6::text
+        $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-11-09'::date, 1, $5::uuid, $6::text
       ) as data`,
       [
         ACTORS.FULL_ADMIN.auth,
@@ -787,14 +831,15 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
         assign2Fp,
       ],
     );
+    await db.query("select set_config('direct_entry.test_authorization_date', '', false)");
 
-    // 4e. STAFF_A checks in on 2026-11-17 while assigned to DN_NO_GPS (missing branch coordinates)
+    // 4e. STAFF_A checks in on 2026-11-10 while assigned to DN_NO_GPS (missing branch coordinates)
     // Must succeed, record BRANCH_NOT_CONFIGURED with distance_meters = null, and NOT fallback to HQ!
     await recordCheckInAsServiceRole(db, {
       actor: ACTORS.STAFF_A,
       latitude: HQ_HANOI.latitude,
       longitude: HQ_HANOI.longitude,
-      captured_at: "2026-11-17T01:00:00.000Z",
+      captured_at: "2026-11-10T01:00:00.000Z",
     });
 
     // 4f. STAFF_B (unassigned to any branch) checks in on 2026-11-05 near HQ_HANOI
@@ -825,7 +870,7 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     assert.ok(adminReport, "attendance_admin_report strict projection passes with branch fields");
 
     const nov17Item = adminReport.items.find(
-      (i) => i.employee_display_name === ACTORS.STAFF_A.name && i.business_date === "2026-11-17",
+      (i) => i.employee_display_name === ACTORS.STAFF_A.name && i.business_date === "2026-11-10",
     );
     assert.ok(nov17Item);
     assert.equal(nov17Item.distance_status, "BRANCH_NOT_CONFIGURED");
@@ -946,7 +991,7 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
             : 0,
       ),
     );
-    const elapsedCheckinDays = [5, 17].filter((day) => day <= completedDayCount).length;
+    const elapsedCheckinDays = [5, 10].filter((day) => day <= completedDayCount).length;
     const elapsedLeaveDays = [5, 6].filter((day) => day <= completedDayCount).length;
     const elapsedOverlapDays = [5].filter((day) => day <= completedDayCount).length;
     assert.equal(staffARow.summary.no_checkin_day_count, completedDayCount - elapsedCheckinDays);
@@ -990,7 +1035,7 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
     assert.equal(nov07Cell.has_approved_leave, false);
     assert.ok(nov07Cell.slots.every((slot) => slot.slot_status !== "LEAVE_COVERED"));
 
-    const nov17Cell = staffARow.days.find((d) => d.business_date === "2026-11-17");
+    const nov17Cell = staffARow.days.find((d) => d.business_date === "2026-11-10");
     assert.ok(nov17Cell);
     assert.equal(nov17Cell.day_status, "CHECKED_IN");
     assert.equal(nov17Cell.distance_target_kind, "BRANCH");
@@ -2724,6 +2769,9 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
       valid_from: "2026-11-01",
       expected_version: 1,
     };
+    await db.query(
+      "select set_config('direct_entry.test_authorization_date', '2026-11-01', false)",
+    );
     await callAsServiceRole(
       db,
       `select public.attendance_assign_employee_branch_admin(
@@ -2737,6 +2785,9 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
         nextUuid(),
         computeBranchAssignRequestFingerprint(assignBetaBranchBody),
       ],
+    );
+    await db.query(
+      "select set_config('direct_entry.test_authorization_date', '', false)",
     );
 
     const ctCreateBody = {

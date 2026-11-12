@@ -67,7 +67,7 @@ export type AccountOperationRepository = {
   }): Promise<AccountOperationOutcome<EditNameEnvelope>>;
   createPersonnelFromAccount(input: AccountOperationActor & {
     account_ref: string; expected_account_version: number; personnel_code: string;
-    personnel_position: "STAFF" | "TEAM_LEADER"; valid_from: string; reason: string | null; idempotency_key: string;
+    personnel_position: "STAFF" | "TEAM_LEADER"; valid_from: string | null; reason: string | null; idempotency_key: string;
   }): Promise<AccountOperationOutcome<PersonnelFromAccountEnvelope>>;
   listEligibleAccounts(input: AccountOperationActor & { page: number; page_size: number }):
     Promise<AccountOperationOutcome<EligibleAccountsEnvelope>>;

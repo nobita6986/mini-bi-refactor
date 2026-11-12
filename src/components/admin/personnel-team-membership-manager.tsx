@@ -58,7 +58,7 @@ type TeamState =
 type Operation =
   | { kind: "assign" }
   | { kind: "move"; currentTeamId: string; expectedVersion: number; validTo: string | null }
-  | { kind: "close"; membership: AdminTeamMembership; cancelScheduled: boolean };
+  | { kind: "close"; membership: AdminTeamMembership };
 
 type ScopedOperation = { recruiterId: string; value: Operation };
 type ScopedForm = { recruiterId: string; value: typeof EMPTY_FORM };
@@ -437,9 +437,9 @@ export function PersonnelTeamMembershipManager({
     ensureTeams();
   };
 
-  const startClose = (membership: AdminTeamMembership, cancelScheduled: boolean) => {
-    setActiveOperation({ kind: "close", membership, cancelScheduled });
-    setActiveForm(() => ({ ...EMPTY_FORM, date: cancelScheduled ? membership.valid_from : "" }));
+  const startClose = (membership: AdminTeamMembership) => {
+    setActiveOperation({ kind: "close", membership });
+    setActiveForm(() => EMPTY_FORM);
     setActiveWorkflow({ formError: null, message: null });
   };
 
@@ -489,6 +489,8 @@ export function PersonnelTeamMembershipManager({
   };
 
   const canAssign = canAssignMembership(visibleLists.CURRENT, visibleLists.SCHEDULED);
+  const hasScheduledConflict = visibleLists.SCHEDULED.kind === "loaded"
+    && visibleLists.SCHEDULED.list.memberships.length > 0;
   const activeListLock = locked;
   const closeDialog = () => {
     if (busy) return;
@@ -590,6 +592,17 @@ export function PersonnelTeamMembershipManager({
                 ) : null}
               </div>
 
+              {hasScheduledConflict ? (
+                <div className="mt-4" role="status">
+                  <Alert tone="warning" title="Lịch phân công tương lai cũ đang cản thao tác gán hoặc chuyển nhóm ngay">
+                    <p>
+                      Hồ sơ này còn lịch phân công tương lai từ giai đoạn trước (hiển thị ở mục Đã lên lịch để đối chiếu).
+                      Luồng tự hủy lịch tương lai trên giao diện đã khóa theo chính sách hiệu lực tức thì (WP1/S1); vui lòng đối chiếu và xử lý lịch tồn đọng trước khi gán hoặc chuyển nhóm mới.
+                    </p>
+                  </Alert>
+                </div>
+              ) : null}
+
               <div className="mt-5 grid gap-4">
                 {STATES.map((state) => (
                   <MembershipSection
@@ -599,12 +612,10 @@ export function PersonnelTeamMembershipManager({
                     page={visiblePages[state]}
                     onPage={(page) => void loadOneState(state, page)}
                     onRetry={() => void loadOneState(state, visiblePages[state])}
-                    onMove={personnel.active && (state === "CURRENT" || state === "SCHEDULED")
+                    onMove={personnel.active && state === "CURRENT" && !hasScheduledConflict
                       ? (membership) => startMove(membership) : undefined}
                     onClose={state === "CURRENT"
-                      ? (membership) => startClose(membership, false) : undefined}
-                    onCancelScheduled={state === "SCHEDULED"
-                      ? (membership) => startClose(membership, true) : undefined}
+                      ? (membership) => startClose(membership) : undefined}
                     disabled={busy || activeListLock}
                   />
                 ))}
@@ -614,8 +625,7 @@ export function PersonnelTeamMembershipManager({
                 <Card className="mt-5">
                   <CardHeader
                     title={operation.kind === "assign" ? "Gán nhóm"
-                      : operation.kind === "move" ? "Chuyển nhóm"
-                        : operation.cancelScheduled ? "Hủy lịch gán nhóm" : "Bỏ gán nhóm"}
+                      : operation.kind === "move" ? "Chuyển nhóm" : "Bỏ gán nhóm"}
                     description="Lý do thao tác không bắt buộc. Dữ liệu được kiểm tra lại trước khi lưu thay đổi."
                   />
                   {operation.kind !== "close" ? (
@@ -677,23 +687,14 @@ export function PersonnelTeamMembershipManager({
                       </label>
                     ) : (
                       <p className="text-sm">
-                        {operation.cancelScheduled
-                          ? "Lịch chưa có hiệu lực sẽ được hủy. Nếu đây là lịch chuyển nhóm, phân công trước đó sẽ tiếp tục không có ngày kết thúc khi nhóm cũ còn hợp lệ và không trùng lịch khác. Lịch sử vẫn được giữ."
-                          : `Nhóm: ${operation.membership.team_display_name}. Hồ sơ vẫn được giữ; không có dữ liệu nào bị xóa.`}
+                        {`Nhóm: ${operation.membership.team_display_name}. Hồ sơ vẫn được giữ; không có dữ liệu nào bị xóa.`}
                       </p>
                     )}
-                    <label htmlFor="membership-effective-date" className="block text-sm font-medium">
+                    <div className="rounded-md border border-border bg-surface-muted/60 px-3 py-2 text-sm text-muted">
                       {operation.kind === "close"
-                        ? operation.cancelScheduled ? "Ngày hủy lịch" : "Có hiệu lực đến ngày"
-                        : "Có hiệu lực từ ngày"} <span aria-hidden="true">*</span>
-                      <input id="membership-effective-date" type="date" required value={form.date}
-                        readOnly={operation.kind === "close" && operation.cancelScheduled}
-                        onChange={(event) => {
-                          const date = event.currentTarget.value;
-                          setActiveForm((value) => ({ ...value, date }));
-                        }}
-                        className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3" />
-                    </label>
+                        ? "Có hiệu lực đến ngày: Áp dụng ngay theo ngày nghiệp vụ hệ thống"
+                        : "Có hiệu lực từ ngày: Áp dụng ngay theo ngày nghiệp vụ hệ thống"}
+                    </div>
                     <label htmlFor="membership-reason" className="block text-sm font-medium">
                       Lý do thao tác (không bắt buộc)
                       <textarea id="membership-reason" maxLength={4000} rows={3} value={form.reason}
@@ -712,8 +713,7 @@ export function PersonnelTeamMembershipManager({
                           (operation.kind !== "close" && teamState.kind !== "loaded")}
                         className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50">
                         {busy ? "Đang xử lý…" : operation.kind === "assign" ? "Xác nhận gán"
-                          : operation.kind === "move" ? "Xác nhận chuyển"
-                            : operation.cancelScheduled ? "Xác nhận hủy lịch" : "Xác nhận bỏ gán"}
+                          : operation.kind === "move" ? "Xác nhận chuyển" : "Xác nhận bỏ gán"}
                       </button>
                     </div>
                   </form>
@@ -753,7 +753,6 @@ function MembershipSection({
   onRetry,
   onMove,
   onClose,
-  onCancelScheduled,
   disabled,
 }: {
   state: MembershipState;
@@ -763,7 +762,6 @@ function MembershipSection({
   onRetry(): void;
   onMove?: (membership: AdminTeamMembership) => void;
   onClose?: (membership: AdminTeamMembership) => void;
-  onCancelScheduled?: (membership: AdminTeamMembership) => void;
   disabled: boolean;
 }) {
   const list = readState.kind === "loaded" ? readState.list : null;
@@ -808,7 +806,7 @@ function MembershipSection({
                 <th scope="col" className="px-3.5 py-3">Hiệu lực từ</th>
                 <th scope="col" className="px-3.5 py-3">Hiệu lực đến</th>
                 <th scope="col" className="px-3.5 py-3">Trạng thái</th>
-                {state !== "HISTORY" ? <th scope="col" className="px-3.5 py-3 text-right">Thao tác</th> : null}
+                {state === "CURRENT" ? <th scope="col" className="px-3.5 py-3 text-right">Thao tác</th> : null}
               </tr></thead>
               <tbody className="divide-y divide-border">
                 {list.memberships.map((membership) => (
@@ -817,15 +815,13 @@ function MembershipSection({
                     <td data-label="Hiệu lực từ" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{formatDate(membership.valid_from)}</td>
                     <td data-label="Hiệu lực đến" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{membership.valid_to ? formatDate(membership.valid_to) : "Chưa có ngày kết thúc"}</td>
                     <td data-label="Trạng thái" className="px-3.5 py-2.5">{membership.valid_to === membership.valid_from ? "Đã hủy lịch" : stateLabel(membership.state)}</td>
-                    {state !== "HISTORY" ? (
+                    {state === "CURRENT" ? (
                       <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
                         <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
                           {onMove ? <button type="button" disabled={disabled} onClick={() => onMove(membership)}
                             className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50">Chuyển nhóm</button> : null}
                           {onClose ? <button type="button" disabled={disabled} onClick={() => onClose(membership)}
                             className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50">Bỏ gán</button> : null}
-                          {onCancelScheduled ? <button type="button" disabled={disabled} onClick={() => onCancelScheduled(membership)}
-                            className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50">Hủy lịch</button> : null}
                         </div>
                       </td>
                     ) : null}

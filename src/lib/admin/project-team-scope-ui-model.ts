@@ -43,14 +43,14 @@ export function buildGrantRequest(input: {
 }
 
 export function buildRevokeRequest(input: {
-  mappingId: string; effectiveTo: string; reason?: string | null; idempotencyKey: string;
+  mappingId: string; effectiveTo?: string | null; todayVn?: string; reason?: string | null; idempotencyKey: string;
 }): { ok: true; body: Record<string, unknown> } | { ok: false; message: string } {
   const raw = {
     mapping_id: input.mappingId,
-    effective_to: input.effectiveTo || null,
+    effective_to: input.effectiveTo ? input.effectiveTo : null,
     reason: input.reason, idempotency_key: input.idempotencyKey,
   };
-  const parsed = parseRevoke(raw);
+  const parsed = parseRevoke(raw, input.todayVn);
   if (!parsed.ok) return { ok: false, message: "Thông tin gửi lên không hợp lệ. Kiểm tra lại các trường." };
   return { ok: true, body: parsed.value };
 }

@@ -323,7 +323,7 @@ test(
       const acctDeptReason = "Bổ nhiệm Kế toán Race";
       await setup.query(
         `select public.org_department_assign_accounting_member(
-           $1::uuid, $2::uuid, $3::uuid, 0, '2026-01-01'::date, $4::text, $5::uuid, $6::text
+           $1::uuid, $2::uuid, $3::uuid, 0, null::date, $4::text, $5::uuid, $6::text
          )`,
         [
           ADMIN.auth,
@@ -335,7 +335,7 @@ test(
             actor_app_user_id: ADMIN.app,
             account_ref: ACCT.app,
             expected_pair_version: 0,
-            effective_from: "2026-01-01",
+            effective_from: null,
             reason: acctDeptReason,
           }),
         ],
@@ -344,7 +344,7 @@ test(
       const prjAcctReason = "Phân công Kế toán Race phụ trách PRJ_RACE";
       await setup.query(
         `select public.vendor_finance_assign_project_accountant_admin(
-           $1::uuid, $2::uuid, $3::text, $4::uuid, 0, '2026-01-01'::date, $5::text, $6::uuid, $7::text
+           $1::uuid, $2::uuid, $3::text, $4::uuid, 0, null::date, $5::text, $6::uuid, $7::text
          )`,
         [
           ADMIN.auth,
@@ -356,7 +356,7 @@ test(
           computeAssignProjectAccountantFingerprint({
             project_id: PRJ_RACE,
             accountant_ref: ACCT.app,
-            valid_from: "2026-01-01",
+            valid_from: null,
             expected_version: 0,
             reason: prjAcctReason,
           }),

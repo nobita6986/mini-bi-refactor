@@ -1204,7 +1204,7 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
     ACTORS.fullAdmin.app,
     "MARKETING",
     ACTORS.marketingHead.app,
-    "2026-01-01",
+    null,
     0,
     "Bổ nhiệm Trưởng phòng duyệt phép khối Marketing",
     nextIdem("set-mkt-head"),
@@ -1361,26 +1361,49 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
     "At M=12 (December), full 12 days (24 half-day units) of monthly accrual are unlocked",
   );
 
-  // 13. Future-dated Department Approver handover preserves current approver until valid_from (zero routing gap)
+  // 13. Department Approver handover rejects future valid_from and transitions immediately on handover date (zero routing gap)
   const currentMktApproverRows = await db.query(
     "select row_version from public.leave_department_approvers where unit_kind = 'MARKETING' and is_current = true",
   );
   const currentMktRowVersion = currentMktApproverRows.rows[0].row_version;
 
-  // On 2026-12-10, schedule hrViewer as the new MARKETING approver effective 2026-12-20
-  await rpc("leave_management_set_department_approver_admin", [
-    ACTORS.fullAdmin.auth,
-    ACTORS.fullAdmin.app,
-    "MARKETING",
-    ACTORS.hrViewer.app,
-    "2026-12-20",
-    currentMktRowVersion,
-    "Lên lịch bàn giao người duyệt Marketing từ ngày 20/12/2026",
-    nextIdem("sched-mkt-head"),
-    "fp-sched-mkt-head",
-  ]);
+  // On 2026-12-10, attempting to schedule hrViewer as the new MARKETING approver effective 2026-12-20 or backdate to 2026-12-01 is rejected under WP1
+  await assert.rejects(
+    () =>
+      rpc("leave_management_set_department_approver_admin", [
+        ACTORS.fullAdmin.auth,
+        ACTORS.fullAdmin.app,
+        "MARKETING",
+        ACTORS.hrViewer.app,
+        "2026-12-20",
+        currentMktRowVersion,
+        "Lên lịch bàn giao người duyệt Marketing từ ngày 20/12/2026",
+        nextIdem("sched-mkt-head-reject"),
+        "fp-sched-mkt-head-reject",
+      ]),
+    (err) =>
+      err.code === "22023" &&
+      String(err.message).includes("LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN"),
+  );
+  await assert.rejects(
+    () =>
+      rpc("leave_management_set_department_approver_admin", [
+        ACTORS.fullAdmin.auth,
+        ACTORS.fullAdmin.app,
+        "MARKETING",
+        ACTORS.hrViewer.app,
+        "2026-12-01",
+        currentMktRowVersion,
+        "Gán lùi ngày người duyệt Marketing về 01/12/2026",
+        nextIdem("past-mkt-head-reject"),
+        "fp-past-mkt-head-reject",
+      ]),
+    (err) =>
+      err.code === "22023" &&
+      String(err.message).includes("LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN"),
+  );
 
-  // On 2026-12-15 (before 2026-12-20 handover), marketingHead MUST remain active approver (not fallback!)
+  // On 2026-12-15 (before 2026-12-20 handover), marketingHead remains active approver
   await setBusinessDate(db, "2026-12-15");
   const mktDuringHandoverWait = await rpc("leave_management_get_my_summary", [
     ACTORS.marketingStaff.auth,
@@ -1390,12 +1413,12 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
   assert.equal(
     mktDuringHandoverWait.routing.route_kind,
     "DEPARTMENT_HEAD",
-    "Scheduling a future department approver must not create a routing gap before valid_from",
+    "Previous Marketing approver remains active before handover",
   );
   assert.equal(
     mktDuringHandoverWait.routing.primary_approver_app_user_id,
     ACTORS.marketingHead.app,
-    "Previous Marketing approver remains active until 2026-12-19",
+    "Previous Marketing approver remains active until handover is executed",
   );
 
   const oldHeadSummaryBeforeHandover = await rpc("leave_management_get_my_summary", [
@@ -1405,8 +1428,19 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
   ]);
   assert.equal(oldHeadSummaryBeforeHandover.authority.is_department_approver, true);
 
-  // On 2026-12-20 (handover effective date), hrViewer takes over and marketingHead ends cleanly
+  // On 2026-12-20 (handover effective date), execute immediate handover to hrViewer
   await setBusinessDate(db, "2026-12-20");
+  await rpc("leave_management_set_department_approver_admin", [
+    ACTORS.fullAdmin.auth,
+    ACTORS.fullAdmin.app,
+    "MARKETING",
+    ACTORS.hrViewer.app,
+    "2026-12-20",
+    currentMktRowVersion,
+    "Bàn giao tức thời người duyệt Marketing ngày 20/12/2026",
+    nextIdem("sched-mkt-head"),
+    "fp-sched-mkt-head",
+  ]);
   const mktOnHandoverDate = await rpc("leave_management_get_my_summary", [
     ACTORS.marketingStaff.auth,
     ACTORS.marketingStaff.app,
@@ -1416,7 +1450,7 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
   assert.equal(
     mktOnHandoverDate.routing.primary_approver_app_user_id,
     ACTORS.hrViewer.app,
-    "New Marketing approver takes over on 2026-12-20",
+    "New Marketing approver takes over immediately on 2026-12-20",
   );
 
   const oldHeadSummaryOnHandover = await rpc("leave_management_get_my_summary", [
