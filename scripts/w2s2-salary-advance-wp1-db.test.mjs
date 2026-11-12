@@ -673,7 +673,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
       const reason = `Bổ nhiệm ${acct.name} vào phòng Kế toán`;
       await db.query(
         `select public.org_department_assign_accounting_member(
-           $1::uuid, $2::uuid, $3::uuid, 0, '2026-01-01'::date, $4::text, $5::uuid, $6::text
+           $1::uuid, $2::uuid, $3::uuid, 0, null::date, $4::text, $5::uuid, $6::text
          )`,
         [
           FULL_ADMIN.auth,
@@ -685,7 +685,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
             actor_app_user_id: FULL_ADMIN.app,
             account_ref: acct.app,
             expected_pair_version: 0,
-            effective_from: "2026-01-01",
+            effective_from: null,
             reason,
           }),
         ],
@@ -700,7 +700,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
       const reason = `Cấp quyền VFIN ${roleCode}`;
       await db.query(
         `select public.vendor_finance_assign_global_role_admin(
-           $1::uuid, $2::uuid, $3::uuid, $4::text, 0, '2026-01-01'::date, $5::text, $6::uuid, $7::text
+           $1::uuid, $2::uuid, $3::uuid, $4::text, 0, null::date, $5::text, $6::uuid, $7::text
          )`,
         [
           FULL_ADMIN.auth,
@@ -712,7 +712,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
           computeAssignGlobalRoleFingerprint({
             account_ref: targetActor.app,
             role_code: roleCode,
-            valid_from: "2026-01-01",
+            valid_from: null,
             expected_version: 0,
             reason,
           }),
@@ -724,7 +724,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
     const assignAcctAReason = "Phân công Kế toán A phụ trách PRJ_1";
     const assignAcctARes = await db.query(
       `select public.vendor_finance_assign_project_accountant_admin(
-         $1::uuid, $2::uuid, $3::text, $4::uuid, 0, '2026-01-01'::date, $5::text, $6::uuid, $7::text
+         $1::uuid, $2::uuid, $3::text, $4::uuid, 0, null::date, $5::text, $6::uuid, $7::text
        ) as data`,
       [
         FULL_ADMIN.auth,
@@ -736,7 +736,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
         computeAssignProjectAccountantFingerprint({
           project_id: PRJ_1,
           accountant_ref: ACCT_A.app,
-          valid_from: "2026-01-01",
+          valid_from: null,
           expected_version: 0,
           reason: assignAcctAReason,
         }),
@@ -748,7 +748,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
     const assignAcctBPrj2Reason = "Phân công Kế toán B phụ trách PRJ_2";
     await db.query(
       `select public.vendor_finance_assign_project_accountant_admin(
-         $1::uuid, $2::uuid, $3::text, $4::uuid, 0, '2026-01-01'::date, $5::text, $6::uuid, $7::text
+         $1::uuid, $2::uuid, $3::text, $4::uuid, 0, null::date, $5::text, $6::uuid, $7::text
        )`,
       [
         FULL_ADMIN.auth,
@@ -760,7 +760,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
         computeAssignProjectAccountantFingerprint({
           project_id: PRJ_2,
           accountant_ref: ACCT_B.app,
-          valid_from: "2026-01-01",
+          valid_from: null,
           expected_version: 0,
           reason: assignAcctBPrj2Reason,
         }),
@@ -1255,7 +1255,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
     const endAcctAReason = "Bàn giao dự án Bắc từ Kế toán A sang Kế toán B";
     await db.query(
       `select public.vendor_finance_end_project_accountant_admin(
-         $1::uuid, $2::uuid, $3::uuid, 1, '2026-06-01'::date, $4::text, $5::uuid, $6::text
+         $1::uuid, $2::uuid, $3::uuid, 1, null::date, $4::text, $5::uuid, $6::text
        )`,
       [
         FULL_ADMIN.auth,
@@ -1266,7 +1266,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
         computeEndProjectAccountantFingerprint({
           assignment_id: acctAAssignmentId,
           expected_version: 1,
-          valid_to: "2026-06-01",
+          valid_to: null,
           reason: endAcctAReason,
         }),
       ],
@@ -1275,7 +1275,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
     const assignAcctBPrj1Reason = "Phân công Kế toán B tiếp nhận PRJ_1";
     await db.query(
       `select public.vendor_finance_assign_project_accountant_admin(
-         $1::uuid, $2::uuid, $3::text, $4::uuid, 1, '2026-06-01'::date, $5::text, $6::uuid, $7::text
+         $1::uuid, $2::uuid, $3::text, $4::uuid, 1, null::date, $5::text, $6::uuid, $7::text
        )`,
       [
         FULL_ADMIN.auth,
@@ -1287,7 +1287,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
         computeAssignProjectAccountantFingerprint({
           project_id: PRJ_1,
           accountant_ref: ACCT_B.app,
-          valid_from: "2026-06-01",
+          valid_from: null,
           expected_version: 1,
           reason: assignAcctBPrj1Reason,
         }),
@@ -3024,7 +3024,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
     const endAcctBPrj2Reason = "Kết thúc phân công ACCT_B trên PRJ_2 để kiểm thử cô lập scope";
     await db.query(
       `select public.vendor_finance_end_project_accountant_admin(
-         $1::uuid, $2::uuid, $3::uuid, $4::integer, '2026-06-01'::date, $5::text, $6::uuid, $7::text
+         $1::uuid, $2::uuid, $3::uuid, $4::integer, null::date, $5::text, $6::uuid, $7::text
        )`,
       [
         FULL_ADMIN.auth,
@@ -3036,7 +3036,7 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
         computeEndProjectAccountantFingerprint({
           assignment_id: acctBPrj2Rows[0].assignment_id,
           expected_version: acctBPrj2Rows[0].version,
-          valid_to: "2026-06-01",
+          valid_to: null,
           reason: endAcctBPrj2Reason,
         }),
       ],
