@@ -1808,6 +1808,81 @@ export function newClientIdempotencyKey(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+export type DepartmentApproverMutationPayload = {
+  operation: "SET_DEPARTMENT_APPROVER";
+  unit_kind: LeaveDepartmentApproverUnitKind;
+  approver_app_user_id: string;
+  valid_from: null;
+  expected_row_version: number;
+  reason: string | null;
+  idempotency_key: string;
+};
+
+export function resolveDepartmentApproverMutationPayload(input: {
+  unitKind: LeaveDepartmentApproverUnitKind;
+  approverAppUserId: string;
+  expectedRowVersion: number;
+  reason: string | null | undefined;
+  pendingPayload?: DepartmentApproverMutationPayload | null;
+  createIdempotencyKey?: () => string;
+}): DepartmentApproverMutationPayload {
+  const normalizedApprover = input.approverAppUserId.trim();
+  const normalizedReason = (input.reason ?? "").trim() || null;
+  const pending = input.pendingPayload ?? null;
+
+  if (
+    pending &&
+    pending.operation === "SET_DEPARTMENT_APPROVER" &&
+    pending.unit_kind === input.unitKind &&
+    pending.approver_app_user_id === normalizedApprover &&
+    pending.valid_from === null &&
+    pending.expected_row_version === input.expectedRowVersion &&
+    pending.reason === normalizedReason &&
+    pending.idempotency_key.trim().length > 0
+  ) {
+    return pending;
+  }
+
+  const nextKey = input.createIdempotencyKey
+    ? input.createIdempotencyKey()
+    : newClientIdempotencyKey("leave-dept-approver");
+
+  return {
+    operation: "SET_DEPARTMENT_APPROVER",
+    unit_kind: input.unitKind,
+    approver_app_user_id: normalizedApprover,
+    valid_from: null,
+    expected_row_version: input.expectedRowVersion,
+    reason: normalizedReason,
+    idempotency_key: nextKey,
+  };
+}
+
+export function isAmbiguousLeaveMutationFailure(
+  outcome:
+    | "network_error"
+    | {
+        ok: boolean;
+        status: number;
+        errorCode?: string | null;
+      },
+): boolean {
+  if (outcome === "network_error") return true;
+  if (outcome.ok) return false;
+  if (
+    outcome.status === 408 ||
+    outcome.status === 429 ||
+    outcome.status === 431 ||
+    outcome.status >= 500
+  ) {
+    return true;
+  }
+  return (
+    outcome.errorCode === "LEAVE_UNAVAILABLE" ||
+    outcome.errorCode === "LEAVE_INTERNAL_ERROR"
+  );
+}
+
 export function formatSignedHalfDayUnits(unitsDelta: number): string {
   if (!Number.isFinite(unitsDelta) || unitsDelta === 0) return "0 ngày";
   const sign = unitsDelta > 0 ? "+" : "-";

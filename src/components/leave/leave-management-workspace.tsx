@@ -66,10 +66,12 @@ import {
   leaveUnitKindLabel,
   mergeLeaveAdminKnownAccounts,
   newClientIdempotencyKey,
+  isAmbiguousLeaveMutationFailure,
   parseDaysInputToHalfDayUnits,
   parseOpeningBalanceBulkText,
   resolveAdminSelectorEmployeeOptions,
   resolveAppliedOpeningRowCount,
+  resolveDepartmentApproverMutationPayload,
   resolveKnownLeaveAccountLabel,
   resolveLeaveOpeningBalanceEmployees,
   resolveOpeningRowSelectOptions,
@@ -77,6 +79,7 @@ import {
   resolveVisibleLeaveTabs,
   todayVietnamIsoDate,
   validateApproverDecisionInput,
+  type DepartmentApproverMutationPayload,
   type LeaveAccountProjection,
   type LeaveAdminEmployeeItemProjection,
   type LeaveAdminOverviewProjection,
@@ -293,6 +296,8 @@ export function LeaveManagementWorkspace({
   const [deptApproverUserId, setDeptApproverUserId] = useState<string>("");
   const [deptReason, setDeptReason] = useState<string>("");
   const [savingDeptApprover, setSavingDeptApprover] = useState<boolean>(false);
+  const [pendingDeptApproverPayload, setPendingDeptApproverPayload] =
+    useState<DepartmentApproverMutationPayload | null>(null);
 
   // Admin Module Grant Form State
   const [grantUserId, setGrantUserId] = useState<string>("");
@@ -941,31 +946,54 @@ export function LeaveManagementWorkspace({
     const existingCurrent = adminData.department_approvers.find(
       (item) => item.unit_kind === deptUnitKind && item.is_current,
     );
+    const payload = resolveDepartmentApproverMutationPayload({
+      unitKind: deptUnitKind,
+      approverAppUserId: deptApproverUserId,
+      expectedRowVersion:
+        pendingDeptApproverPayload &&
+        pendingDeptApproverPayload.unit_kind === deptUnitKind &&
+        pendingDeptApproverPayload.approver_app_user_id === deptApproverUserId.trim() &&
+        pendingDeptApproverPayload.reason === (deptReason.trim() || null)
+          ? pendingDeptApproverPayload.expected_row_version
+          : (existingCurrent?.row_version ?? 0),
+      reason: deptReason,
+      pendingPayload: pendingDeptApproverPayload,
+    });
 
     setSavingDeptApprover(true);
     try {
       const response = await fetch("/api/leave/admin/config", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": payload.idempotency_key,
+        },
         credentials: "same-origin",
         body: JSON.stringify({
+          ...payload,
           operation: "SET_DEPARTMENT_APPROVER",
-          unit_kind: deptUnitKind,
-          approver_app_user_id: deptApproverUserId.trim(),
-          valid_from: adminData.as_of_date || todayVietnamIsoDate(),
-          expected_row_version: existingCurrent?.row_version ?? 0,
-          reason: deptReason.trim() || null,
-          idempotency_key: newClientIdempotencyKey("leave-dept-approver"),
         }),
       });
       const parsed = await parseJsonResponse(response);
       if (!parsed.ok) {
+        if (
+          isAmbiguousLeaveMutationFailure({
+            ok: false,
+            status: parsed.status,
+            errorCode: parsed.errorCode ?? null,
+          })
+        ) {
+          setPendingDeptApproverPayload(payload);
+        } else {
+          setPendingDeptApproverPayload(null);
+        }
         notify.error({
           title: "Không thể cập nhật người duyệt bộ phận",
           description: leaveErrorMessage(parsed.errorCode),
         });
         return;
       }
+      setPendingDeptApproverPayload(null);
       notify.success({
         title: "Đã lưu người duyệt bộ phận",
         description: `Đã cập nhật người duyệt cho bộ phận ${leaveUnitKindLabel(deptUnitKind)}.`,
@@ -973,6 +1001,7 @@ export function LeaveManagementWorkspace({
       setDeptReason("");
       await loadAdminConfig(adminAppliedSearch, adminPage, adminAccountStatus);
     } catch {
+      setPendingDeptApproverPayload(payload);
       notify.error({
         title: "Lỗi kết nối",
         description: "Không thể cập nhật người duyệt lúc này.",
@@ -2770,12 +2799,17 @@ export function LeaveManagementWorkspace({
                           </label>
                           <select
                             value={deptUnitKind}
-                            disabled={!authority.is_full_admin && !authority.is_bod}
-                            onChange={(e) =>
+                            disabled={
+                              savingDeptApprover ||
+                              pendingDeptApproverPayload !== null ||
+                              (!authority.is_full_admin && !authority.is_bod)
+                            }
+                            onChange={(e) => {
+                              setPendingDeptApproverPayload(null);
                               setDeptUnitKind(
                                 e.target.value as LeaveDepartmentApproverUnitKind,
-                              )
-                            }
+                              );
+                            }}
                             data-testid="leave-dept-unit-select"
                             className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
                           >
@@ -2792,8 +2826,15 @@ export function LeaveManagementWorkspace({
                           </label>
                           <select
                             value={deptApproverUserId}
-                            disabled={!authority.is_full_admin && !authority.is_bod}
-                            onChange={(e) => setDeptApproverUserId(e.target.value)}
+                            disabled={
+                              savingDeptApprover ||
+                              pendingDeptApproverPayload !== null ||
+                              (!authority.is_full_admin && !authority.is_bod)
+                            }
+                            onChange={(e) => {
+                              setPendingDeptApproverPayload(null);
+                              setDeptApproverUserId(e.target.value);
+                            }}
                             data-testid="leave-dept-approver-select"
                             className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
                           >
@@ -2813,7 +2854,7 @@ export function LeaveManagementWorkspace({
                             Hiệu lực từ ngày
                           </span>
                           <div className="flex min-h-10 items-center rounded-lg border border-border bg-surface-muted/60 px-3 py-1.5 text-sm font-mono text-foreground">
-                            {adminData.as_of_date || todayVietnamIsoDate()} (ngay lập tức)
+                            {todayVietnamIsoDate()} (ngay lập tức)
                           </div>
                         </div>
                       </div>
@@ -2824,9 +2865,16 @@ export function LeaveManagementWorkspace({
                           </label>
                           <input
                             type="text"
-                            disabled={!authority.is_full_admin && !authority.is_bod}
+                            disabled={
+                              savingDeptApprover ||
+                              pendingDeptApproverPayload !== null ||
+                              (!authority.is_full_admin && !authority.is_bod)
+                            }
                             value={deptReason}
-                            onChange={(e) => setDeptReason(e.target.value)}
+                            onChange={(e) => {
+                              setPendingDeptApproverPayload(null);
+                              setDeptReason(e.target.value);
+                            }}
                             placeholder="Nhập lý do cấu hình người duyệt bộ phận..."
                             data-testid="leave-dept-reason-input"
                             className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
@@ -2841,7 +2889,7 @@ export function LeaveManagementWorkspace({
                           }
                           data-testid="leave-save-dept-approver-btn"
                         >
-                          Lưu người duyệt
+                          {pendingDeptApproverPayload ? "Thử lại lưu người duyệt" : "Lưu người duyệt"}
                         </Button>
                       </div>
                     </form>

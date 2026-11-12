@@ -39,11 +39,13 @@ import {
   parseOpeningBalanceBulkText,
   resolveAdminSelectorEmployeeOptions,
   resolveAppliedOpeningRowCount,
+  resolveDepartmentApproverMutationPayload,
   resolveKnownLeaveAccountLabel,
   resolveLeaveAdminDropdownEmployees,
   resolveLeaveOpeningBalanceEmployees,
   resolveOpeningRowSelectOptions,
   resolveVisibleLeaveTabs,
+  isAmbiguousLeaveMutationFailure,
   validateApproverDecisionInput,
 } from "./leave-ui-model.ts";
 
@@ -1085,3 +1087,73 @@ test("Opening balance reconciliation helpers: resolveAppliedOpeningRowCount neve
     leaveErrorMessage("LEAVE_OPENING_PREVIEW_STALE").includes("Xem trước"),
   );
 });
+
+test("resolveDepartmentApproverMutationPayload sends valid_from: null, normalizes optional reason, and preserves idempotency_key on ambiguous retry", () => {
+  let seq = 0;
+  const nextKey = () => `leave-dept-approver-test-${++seq}`;
+
+  const firstAttempt = resolveDepartmentApproverMutationPayload({
+    unitKind: "MARKETING",
+    approverAppUserId: "  11111111-1111-4111-8111-111111111101  ",
+    expectedRowVersion: 2,
+    reason: "   ",
+    pendingPayload: null,
+    createIdempotencyKey: nextKey,
+  });
+
+  assert.deepEqual(firstAttempt, {
+    operation: "SET_DEPARTMENT_APPROVER",
+    unit_kind: "MARKETING",
+    approver_app_user_id: "11111111-1111-4111-8111-111111111101",
+    valid_from: null,
+    expected_row_version: 2,
+    reason: null,
+    idempotency_key: "leave-dept-approver-test-1",
+  });
+
+  assert.equal(isAmbiguousLeaveMutationFailure("network_error"), true);
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 431, errorCode: "LEAVE_INTERNAL_ERROR" }),
+    true,
+  );
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 503, errorCode: "LEAVE_UNAVAILABLE" }),
+    true,
+  );
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 422, errorCode: "LEAVE_REASON_INVALID" }),
+    false,
+  );
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 409, errorCode: "LEAVE_ROW_VERSION_CONFLICT" }),
+    false,
+  );
+
+  // Retrying after an ambiguous outcome (even if the form stayed open across midnight)
+  // reuses the exact same payload and idempotency_key
+  const retryAttempt = resolveDepartmentApproverMutationPayload({
+    unitKind: "MARKETING",
+    approverAppUserId: "11111111-1111-4111-8111-111111111101",
+    expectedRowVersion: 2,
+    reason: "",
+    pendingPayload: firstAttempt,
+    createIdempotencyKey: nextKey,
+  });
+  assert.equal(retryAttempt, firstAttempt);
+  assert.equal(retryAttempt.idempotency_key, "leave-dept-approver-test-1");
+  assert.equal(seq, 1);
+
+  // Changing inputs after clearing/unlocking generates a fresh idempotency_key
+  const changedAttempt = resolveDepartmentApproverMutationPayload({
+    unitKind: "IT",
+    approverAppUserId: "11111111-1111-4111-8111-111111111101",
+    expectedRowVersion: 0,
+    reason: "Bổ nhiệm người duyệt IT",
+    pendingPayload: firstAttempt,
+    createIdempotencyKey: nextKey,
+  });
+  assert.equal(changedAttempt.idempotency_key, "leave-dept-approver-test-2");
+  assert.equal(changedAttempt.valid_from, null);
+  assert.equal(changedAttempt.reason, "Bổ nhiệm người duyệt IT");
+});
+

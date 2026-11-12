@@ -26,6 +26,7 @@ const port = await reservePort();
 const child = spawn(
   process.execPath,
   [
+    "--max-http-header-size=32768",
     path.resolve("node_modules/next/dist/bin/next"),
     "start",
     "--hostname",
@@ -69,7 +70,36 @@ try {
     throw new Error(`GET /login returned HTTP ${response.status}: ${body}`);
   }
 
-  console.log(`Production server started and GET /login returned ${response.status}`);
+  const cookie10Kb = `sb-smoke-10k=${"x".repeat(10_240)}`;
+  const res10Kb = await fetch(`http://${host}:${port}/login`, {
+    headers: { Cookie: cookie10Kb },
+    signal: AbortSignal.timeout(2_000),
+  });
+  if (res10Kb.status !== 200) {
+    throw new Error(`GET /login with ~10 KB Cookie returned HTTP ${res10Kb.status}, expected 200`);
+  }
+
+  const cookie18Kb = `sb-smoke-18k=${"x".repeat(18_432)}`;
+  const res18Kb = await fetch(`http://${host}:${port}/login`, {
+    headers: { Cookie: cookie18Kb },
+    signal: AbortSignal.timeout(2_000),
+  });
+  if (res18Kb.status !== 200) {
+    throw new Error(`GET /login with ~18 KB Cookie returned HTTP ${res18Kb.status}, expected 200`);
+  }
+
+  const cookie36Kb = `sb-smoke-36k=${"x".repeat(36_864)}`;
+  const res36Kb = await fetch(`http://${host}:${port}/login`, {
+    headers: { Cookie: cookie36Kb },
+    signal: AbortSignal.timeout(2_000),
+  });
+  if (res36Kb.status !== 431) {
+    throw new Error(`GET /login with ~36 KB Cookie returned HTTP ${res36Kb.status}, expected 431`);
+  }
+
+  console.log(
+    `Production server started and GET /login passed header checks (base=${response.status}, 10KB=${res10Kb.status}, 18KB=${res18Kb.status}, 36KB=${res36Kb.status})`,
+  );
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   if (output.trim()) console.error(output.trim());

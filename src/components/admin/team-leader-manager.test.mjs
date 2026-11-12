@@ -40,6 +40,9 @@ test("designation, replacement and revoke preserve canonical team path, effectiv
   assert.match(component, /body: JSON\.stringify\(intent\.body\)/);
   assert.match(component, /onClick=\{\(\) => void sendIntent\(workflow\.intent!\)\}/);
   assert.match(component, /activeState === "CURRENT"/);
+  assert.match(component, /const showScheduledState = hasScheduledLeaders/);
+  assert.match(component, /const visibleStates = STATES\.filter\(\(state\) => state !== "SCHEDULED" \|\| showScheduledState\)/);
+  assert.match(component, /visibleStates\.map\(\(state\) =>/);
   assert.doesNotMatch(component, /Hủy lịch/);
   assert.match(component, /Lịch trưởng nhóm tương lai cũ đang cản thao tác gán hoặc thu hồi ngay/);
   assert.match(component, /change: form\.kind/);

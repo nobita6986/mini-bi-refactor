@@ -98,6 +98,13 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
   assert.ok(workspaceSource.includes("UPSERT_EMPLOYEE_PROFILE"));
   assert.ok(workspaceSource.includes("UPDATE_POLICY"));
   assert.ok(workspaceSource.includes("SET_DEPARTMENT_APPROVER"));
+  assert.ok(workspaceSource.includes("resolveDepartmentApproverMutationPayload"));
+  assert.ok(workspaceSource.includes("isAmbiguousLeaveMutationFailure"));
+  assert.equal(
+    workspaceSource.includes("valid_from: adminData.as_of_date || todayVietnamIsoDate()"),
+    false,
+    "Department approver mutation must not send stale adminData.as_of_date as valid_from",
+  );
   assert.ok(workspaceSource.includes("MANAGE_MODULE_GRANT"));
   assert.ok(workspaceSource.includes("/api/leave/admin/opening-balances/preview"));
   assert.ok(workspaceSource.includes("/api/leave/admin/opening-balances/apply"));

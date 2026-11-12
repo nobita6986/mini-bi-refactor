@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node --max-http-header-size=32768 node_modules/next/dist/bin/next start",
     "test:production-start": "node scripts/production-start-smoke.mjs",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",

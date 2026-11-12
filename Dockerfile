@@ -30,7 +30,7 @@ COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 COPY --from=builder --chown=node:node /app/public ./public
 USER node
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["node", "--max-http-header-size=32768", "server.js"]
 
 FROM deps AS migrations
 ENV NODE_ENV=production
