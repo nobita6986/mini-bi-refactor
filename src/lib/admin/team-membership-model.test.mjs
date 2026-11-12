@@ -28,6 +28,12 @@ const RECRUITER_A = "80fd8d2a-f45a-4596-9ebd-213fb6246041";
 const RECRUITER_B = "23f30a23-347e-4d25-b90d-41335643f9f7";
 const TEAM_A = "61f2d564-a685-4fb2-ae5e-d76b33c77240";
 const KEY = "91f6f4f5-5d32-4e59-8243-e1f8333dc801";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 const personnel = (recruiter_id, display_name) => ({
   recruiter_id,
   display_name,
@@ -146,7 +152,7 @@ test("assign and move use canonical path and exact body without a team identifie
     const result = buildAssignMembershipRequest({
       recruiterId: RECRUITER_A,
       teamId: TEAM_A,
-      validFrom: "2024-02-29",
+      validFrom: TODAY_VN,
       expectedVersion: 4,
       reason: "Điều chỉnh phân công",
       idempotencyKey: KEY,
@@ -161,6 +167,15 @@ test("assign and move use canonical path and exact body without a team identifie
     assert.equal("team_id" in result.request.body, false);
     assert.equal(result.request.idempotencyKey, KEY);
   }
+  const pastDate = buildAssignMembershipRequest({
+    recruiterId: RECRUITER_A,
+    teamId: TEAM_A,
+    validFrom: "2024-02-29",
+    expectedVersion: 4,
+    reason: "Điều chỉnh phân công",
+    idempotencyKey: KEY,
+  });
+  assert.equal(pastDate.ok, false);
   const futureDate = buildAssignMembershipRequest({
     recruiterId: RECRUITER_A,
     teamId: TEAM_A,
@@ -171,7 +186,7 @@ test("assign and move use canonical path and exact body without a team identifie
   });
   assert.equal(futureDate.ok, false);
   const noReason = buildAssignMembershipRequest({
-    recruiterId: RECRUITER_A, teamId: TEAM_A, validFrom: "2026-10-09",
+    recruiterId: RECRUITER_A, teamId: TEAM_A, validFrom: TODAY_VN,
     expectedVersion: 4, idempotencyKey: KEY,
   });
   assert.equal(noReason.ok, true);
@@ -188,7 +203,7 @@ test("assign and move use canonical path and exact body without a team identifie
   const blankReason = buildAssignMembershipRequest({
     recruiterId: RECRUITER_A,
     teamId: TEAM_A,
-    validFrom: "2026-10-09",
+    validFrom: TODAY_VN,
     expectedVersion: 4,
     reason: " ",
     idempotencyKey: KEY,
@@ -200,7 +215,7 @@ test("assign and move use canonical path and exact body without a team identifie
 test("unassign and scheduled cancellation use exact request body and valid dates", () => {
   const request = buildUnassignMembershipRequest({
     recruiterId: RECRUITER_A,
-    validTo: "2026-10-09",
+    validTo: TODAY_VN,
     expectedVersion: 4,
     reason: "Kết thúc phân công",
     idempotencyKey: KEY,
@@ -223,13 +238,13 @@ test("unassign and scheduled cancellation use exact request body and valid dates
   });
   assert.equal(invalidDate.ok, false);
   const noReason = buildUnassignMembershipRequest({
-    recruiterId: RECRUITER_A, validTo: "2026-10-09", expectedVersion: 4, idempotencyKey: KEY,
+    recruiterId: RECRUITER_A, validTo: TODAY_VN, expectedVersion: 4, idempotencyKey: KEY,
   });
   assert.equal(noReason.ok, true);
   if (noReason.ok) assert.equal(noReason.request.body.reason, null);
   const blankReason = buildUnassignMembershipRequest({
     recruiterId: RECRUITER_A,
-    validTo: "2026-10-09",
+    validTo: TODAY_VN,
     expectedVersion: 4,
     reason: "",
     idempotencyKey: KEY,
@@ -281,7 +296,7 @@ test("new mutation intent receives a fresh key while a retry keeps its original 
   const first = buildAssignMembershipRequest({
     recruiterId: RECRUITER_A,
     teamId: TEAM_A,
-    validFrom: "2024-02-29",
+    validFrom: TODAY_VN,
     expectedVersion: 4,
     reason: "Lý do đầu",
     idempotencyKey: firstKey,
@@ -289,7 +304,7 @@ test("new mutation intent receives a fresh key while a retry keeps its original 
   const changed = buildAssignMembershipRequest({
     recruiterId: RECRUITER_A,
     teamId: TEAM_A,
-    validFrom: "2026-03-01",
+    validFrom: TODAY_VN,
     expectedVersion: 4,
     reason: "Lý do đã sửa",
     idempotencyKey: changedIntentKey,

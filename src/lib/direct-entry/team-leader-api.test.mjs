@@ -19,7 +19,12 @@ const RECRUITER = "55555555-5555-4555-8555-555555555555";
 const ASSIGNMENT = "66666666-6666-4666-8666-666666666666";
 const REVISION = "77777777-7777-4777-8777-777777777777";
 const KEY = "88888888-8888-4888-8888-888888888888";
-const DAY = "2026-10-10";
+const DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 const ITEM = {
   assignment_id: ASSIGNMENT, team_id: TEAM, team_display_name: "Team",
   leader_app_user_id: TARGET, leader_recruiter_id: RECRUITER,

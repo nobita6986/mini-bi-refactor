@@ -226,13 +226,13 @@ async function seedActorsAndTeams(db) {
   // Designate LEADER_A on TEAM_A and LEADER_B on TEAM_B via canonical RPC
   await db.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-01-01'::date, 1, 'Designate Leader A', $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'Designate Leader A', $5
      )`,
     [BOD_ADMIN.auth, BOD_ADMIN.app, TEAM_A, LEADER_A.app, KEY("desig_la")],
   );
   await db.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-01-01'::date, 1, 'Designate Leader B', $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'Designate Leader B', $5
      )`,
     [BOD_ADMIN.auth, BOD_ADMIN.app, TEAM_B, LEADER_B.app, KEY("desig_lb")],
   );
@@ -989,7 +989,7 @@ test("AG-04, AG-05, AG-06, AG-07, AG-08, AG-09, AG-11, AG-16, AG-17 & SEC-WR mat
   // SEC-WR-07 & AG-17: Revoke Team Leader A -> immediate denial on overview, breakdown, and contributions
   await db.query(
     `select public.direct_entry_revoke_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, '2026-02-01'::date, 2, 'Revoke Leader A', $4
+       $1::uuid, $2::uuid, $3::uuid, null::date, 2, 'Revoke Leader A', $4
      )`,
     [BOD_ADMIN.auth, BOD_ADMIN.app, TEAM_A, KEY("revoke_la")],
   );

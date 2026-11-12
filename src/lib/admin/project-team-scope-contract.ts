@@ -280,7 +280,7 @@ export function parseRevoke(body: unknown, todayVn?: string): Parsed<RevokeReque
   const idempotency_key = uuid(body.idempotency_key);
   if (!mapping_id ||
       (effective_to_raw !== undefined && effective_to_raw !== null && effective_to === null) ||
-      (effective_to !== null && effective_to > businessToday) ||
+      (effective_to !== null && effective_to !== businessToday) ||
       !reason.ok || !idempotency_key) {
     return reject();
   }

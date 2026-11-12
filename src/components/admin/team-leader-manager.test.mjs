@@ -29,7 +29,7 @@ test("candidate lookup is on demand and renders the strict display-only three-ke
   assert.doesNotMatch(component, /<(?:td|th)[^>]*>\{leader\.(?:team_id|leader_app_user_id|leader_recruiter_id|assignment_id)\}/);
 });
 
-test("designation, replacement and revoke preserve canonical team path, effective date, reason, OCC and idempotency", () => {
+test("designation, replacement and revoke preserve canonical team path, effective date, reason, OCC and idempotency while scheduled rows are read-only", () => {
   assert.match(component, /buildTeamLeaderDesignation/);
   assert.match(component, /buildTeamLeaderRevocation/);
   assert.match(component, /expectedVersion: team\.version/);
@@ -39,7 +39,9 @@ test("designation, replacement and revoke preserve canonical team path, effectiv
   assert.match(component, /"Idempotency-Key": String\(intent\.body\.idempotency_key\)/);
   assert.match(component, /body: JSON\.stringify\(intent\.body\)/);
   assert.match(component, /onClick=\{\(\) => void sendIntent\(workflow\.intent!\)\}/);
-  assert.match(component, /leader\.state === "SCHEDULED" \? leader\.valid_from : activeList\.authorization_date/);
+  assert.match(component, /activeState === "CURRENT"/);
+  assert.doesNotMatch(component, /Hủy lịch/);
+  assert.match(component, /Lịch trưởng nhóm tương lai cũ đang cản thao tác gán hoặc thu hồi ngay/);
   assert.match(component, /change: form\.kind/);
 });
 

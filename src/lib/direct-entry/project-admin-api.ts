@@ -217,7 +217,7 @@ export function projectAdminSetActiveRequest(body: unknown): Parsed<SetActiveReq
 }
 
 export type AssignRequest = {
-  manager_recruiter_id: string; valid_from: string;
+  manager_recruiter_id: string; valid_from: string | null;
   expected_project_version: number; reason: string | null; idempotency_key: string;
 };
 export function projectAdminAssignRequest(body: unknown, todayVn?: string): Parsed<AssignRequest> {
@@ -232,13 +232,14 @@ export function projectAdminAssignRequest(body: unknown, todayVn?: string): Pars
   }
   const businessToday = resolveBusinessTodayVn(todayVn);
   const manager_recruiter_id = uuid(value.manager_recruiter_id);
-  const valid_from = value.valid_from === undefined || value.valid_from === null
-    ? businessToday
+  const omittedOrNull = value.valid_from === undefined || value.valid_from === null;
+  const valid_from = omittedOrNull
+    ? null
     : (typeof value.valid_from === "string" && DATE.test(value.valid_from) ? value.valid_from : null);
   const expected_project_version = version(value.expected_project_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!manager_recruiter_id || !valid_from || valid_from > businessToday ||
+  if (!manager_recruiter_id || (!omittedOrNull && (!valid_from || valid_from !== businessToday)) ||
       expected_project_version === null || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("PROJECT_INVALID", 400) };
   }

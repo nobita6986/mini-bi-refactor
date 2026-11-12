@@ -1204,7 +1204,7 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
     ACTORS.fullAdmin.app,
     "MARKETING",
     ACTORS.marketingHead.app,
-    "2026-01-01",
+    null,
     0,
     "Bổ nhiệm Trưởng phòng duyệt phép khối Marketing",
     nextIdem("set-mkt-head"),
@@ -1367,7 +1367,7 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
   );
   const currentMktRowVersion = currentMktApproverRows.rows[0].row_version;
 
-  // On 2026-12-10, attempting to schedule hrViewer as the new MARKETING approver effective 2026-12-20 is rejected under WP1
+  // On 2026-12-10, attempting to schedule hrViewer as the new MARKETING approver effective 2026-12-20 or backdate to 2026-12-01 is rejected under WP1
   await assert.rejects(
     () =>
       rpc("leave_management_set_department_approver_admin", [
@@ -1384,6 +1384,23 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
     (err) =>
       err.code === "22023" &&
       String(err.message).includes("LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN"),
+  );
+  await assert.rejects(
+    () =>
+      rpc("leave_management_set_department_approver_admin", [
+        ACTORS.fullAdmin.auth,
+        ACTORS.fullAdmin.app,
+        "MARKETING",
+        ACTORS.hrViewer.app,
+        "2026-12-01",
+        currentMktRowVersion,
+        "Gán lùi ngày người duyệt Marketing về 01/12/2026",
+        nextIdem("past-mkt-head-reject"),
+        "fp-past-mkt-head-reject",
+      ]),
+    (err) =>
+      err.code === "22023" &&
+      String(err.message).includes("LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN"),
   );
 
   // On 2026-12-15 (before 2026-12-20 handover), marketingHead remains active approver

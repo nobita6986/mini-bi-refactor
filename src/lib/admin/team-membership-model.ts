@@ -131,12 +131,16 @@ export function buildAssignMembershipRequest(input: {
   if (url === null) return { ok: false, message: "Hồ sơ hoặc nhóm không hợp lệ." };
   const businessToday = resolveTeamMembershipUiToday(input.todayVn);
   const rawValidFrom = typeof input.validFrom === "string" ? input.validFrom.trim() : "";
-  const effectiveValidFrom = rawValidFrom.length === 0 ? businessToday : rawValidFrom;
-  const dateFailure = !parseIsoDate(effectiveValidFrom)
-    ? "Ngày hiệu lực không hợp lệ."
-    : effectiveValidFrom > businessToday
-      ? "Ngày hiệu lực không được ở tương lai."
-      : null;
+  const effectiveValidFrom = rawValidFrom.length === 0 ? null : rawValidFrom;
+  const dateFailure = effectiveValidFrom === null
+    ? null
+    : !parseIsoDate(effectiveValidFrom)
+      ? "Ngày hiệu lực không hợp lệ."
+      : effectiveValidFrom > businessToday
+        ? "Ngày hiệu lực không được ở tương lai."
+        : effectiveValidFrom < businessToday
+          ? "Ngày hiệu lực không được ở quá khứ."
+          : null;
   const failure = dateFailure
     ?? validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu hồ sơ chưa hợp lệ. Vui lòng tải lại."
@@ -171,12 +175,16 @@ export function buildUnassignMembershipRequest(input: {
   if (url === null) return { ok: false, message: "Hồ sơ không hợp lệ." };
   const businessToday = resolveTeamMembershipUiToday(input.todayVn);
   const rawValidTo = typeof input.validTo === "string" ? input.validTo.trim() : "";
-  const effectiveValidTo = rawValidTo.length === 0 ? businessToday : rawValidTo;
-  const dateFailure = !parseIsoDate(effectiveValidTo)
-    ? "Ngày kết thúc không hợp lệ."
-    : effectiveValidTo > businessToday
-      ? "Ngày kết thúc không được ở tương lai."
-      : null;
+  const effectiveValidTo = rawValidTo.length === 0 ? null : rawValidTo;
+  const dateFailure = effectiveValidTo === null
+    ? null
+    : !parseIsoDate(effectiveValidTo)
+      ? "Ngày kết thúc không hợp lệ."
+      : effectiveValidTo > businessToday
+        ? "Ngày kết thúc không được ở tương lai."
+        : effectiveValidTo < businessToday
+          ? "Ngày kết thúc không được ở quá khứ."
+          : null;
   const failure = dateFailure
     ?? validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu hồ sơ chưa hợp lệ. Vui lòng tải lại."

@@ -367,15 +367,21 @@ export type PendingAssignment = { managerRecruiterId: string; validFrom?: string
 function validateImmediateAssignDate(
   rawDate: string | null | undefined,
   todayVn?: string,
-): { ok: true; value: string } | { ok: false; message: string } {
+): { ok: true; value: string | null } | { ok: false; message: string } {
   const businessToday = resolveBusinessTodayVn(todayVn);
   const normalized = typeof rawDate === "string" && rawDate.trim() !== ""
     ? rawDate.trim()
-    : businessToday;
+    : null;
+  if (normalized === null) {
+    return { ok: true, value: null };
+  }
   const dateErr = validateDate(normalized);
   if (dateErr) return { ok: false, message: dateErr };
   if (normalized > businessToday) {
     return { ok: false, message: "Ngày hiệu lực không được ở tương lai." };
+  }
+  if (normalized < businessToday) {
+    return { ok: false, message: "Ngày hiệu lực không được ở quá khứ." };
   }
   return { ok: true, value: normalized };
 }

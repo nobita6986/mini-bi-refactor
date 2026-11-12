@@ -10,6 +10,12 @@ import {
 const TEAM = "66666666-6666-4666-8666-666666666666";
 const KEY = "55555555-5555-4555-8555-555555555555";
 const MAPPING = "77777777-7777-4777-8777-777777777777";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 
 test("grant request accepts one bounded batch and rejects all client OCC/date fields", () => {
   const request = {
@@ -42,7 +48,7 @@ test("grant request accepts one bounded batch and rejects all client OCC/date fi
 
 test("revoke request has no client version and requires a real calendar date", () => {
   const request = {
-    mapping_id: MAPPING, effective_to: "2024-02-29",
+    mapping_id: MAPPING, effective_to: TODAY_VN,
     reason: "close mapping", idempotency_key: KEY,
   };
   assert.deepEqual(parseRevoke(request), { ok: true, value: request });
@@ -55,6 +61,7 @@ test("revoke request has no client version and requires a real calendar date", (
   assert.equal(parseRevoke({ ...request, reason: 123 }).ok, false);
   assert.equal(parseRevoke({ ...request, reason: "x".repeat(4001) }).ok, false);
   assert.equal(parseRevoke({ ...request, expected_pair_version: 3 }).ok, false);
+  assert.equal(parseRevoke({ ...request, effective_to: "2024-02-29" }).ok, false);
   assert.equal(parseRevoke({ ...request, effective_to: "2026-02-29" }).ok, false);
   assert.equal(parseRevoke({ ...request, effective_to: "2026-13-01" }).ok, false);
 });

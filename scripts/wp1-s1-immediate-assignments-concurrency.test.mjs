@@ -264,17 +264,17 @@ async function seedFixture(client) {
   // Initial Team Leader 1 on TEAM_RACE (version becomes 2)
   await client.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 1, 'Seed Leader 1', 'race-seed-tl1'
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null, 1, 'Seed Leader 1', 'race-seed-tl1'
      )`,
-    [ADMIN.auth, ADMIN.app, TEAM_RACE, LEADER_1.app, PAST],
+    [ADMIN.auth, ADMIN.app, TEAM_RACE, LEADER_1.app],
   );
 
   // Initial Marketing Approver 1 (row_version = 1)
   await client.query(
     `select public.leave_management_set_department_approver_admin(
-       $1::uuid, $2::uuid, 'MARKETING', $3::uuid, $4::date, 0, 'Seed MKT Approver 1', 'race-seed-mkt1', 'fp-race-seed-mkt1'
+       $1::uuid, $2::uuid, 'MARKETING', $3::uuid, null, 0, 'Seed MKT Approver 1', 'race-seed-mkt1', 'fp-race-seed-mkt1'
      )`,
-    [ADMIN.auth, ADMIN.app, MKT_APP_1.app, PAST],
+    [ADMIN.auth, ADMIN.app, MKT_APP_1.app],
   );
 }
 

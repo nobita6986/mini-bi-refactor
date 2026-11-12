@@ -879,10 +879,10 @@ export function buildAssignAccountingMemberRequest(input: {
     if (!isValidIsoCalendarDate(rawEffectiveFrom)) {
       return { ok: false, message: "Ngày bắt đầu hiệu lực không hợp lệ (định dạng YYYY-MM-DD)." };
     }
-    if (rawEffectiveFrom > businessToday) {
+    if (rawEffectiveFrom !== businessToday) {
       return {
         ok: false,
-        message: `Ngày bắt đầu hiệu lực không được lớn hơn ngày nghiệp vụ hiện tại (${businessToday}).`,
+        message: `Ngày bắt đầu hiệu lực phải trùng với ngày nghiệp vụ hiện tại (${businessToday}).`,
       };
     }
     effectiveFrom = rawEffectiveFrom;
@@ -957,10 +957,10 @@ export function buildEndAccountingMemberRequest(input: {
         message: `Ngày kết thúc không được nhỏ hơn ngày bắt đầu hiệu lực (${input.validFrom}).`,
       };
     }
-    if (rawEffectiveTo > businessToday) {
+    if (rawEffectiveTo !== businessToday) {
       return {
         ok: false,
-        message: `Ngày kết thúc không được lớn hơn ngày nghiệp vụ hiện tại (${businessToday}).`,
+        message: `Ngày kết thúc hiệu lực phải trùng với ngày nghiệp vụ hiện tại (${businessToday}).`,
       };
     }
     effectiveTo = rawEffectiveTo;

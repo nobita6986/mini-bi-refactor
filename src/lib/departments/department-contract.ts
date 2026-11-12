@@ -587,7 +587,7 @@ export function parseAssignAccountingMemberBody(
     Object.prototype.hasOwnProperty.call(body, "effective_from") &&
     body.effective_from !== null
   ) {
-    if (!isValidIsoCalendarDate(body.effective_from) || body.effective_from > businessToday) {
+    if (!isValidIsoCalendarDate(body.effective_from) || body.effective_from !== businessToday) {
       return { ok: false, code: "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID" };
     }
     effectiveFrom = body.effective_from;
@@ -655,7 +655,7 @@ export function parseEndAccountingMemberBody(
     Object.prototype.hasOwnProperty.call(body, "effective_to") &&
     body.effective_to !== null
   ) {
-    if (!isValidIsoCalendarDate(body.effective_to) || body.effective_to > businessToday) {
+    if (!isValidIsoCalendarDate(body.effective_to) || body.effective_to !== businessToday) {
       return { ok: false, code: "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID" };
     }
     effectiveTo = body.effective_to;

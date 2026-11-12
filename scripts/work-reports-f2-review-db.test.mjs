@@ -171,7 +171,7 @@ async function seedActors() {
   }
 
   await db.query(`select public.direct_entry_designate_team_leader(
-    $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-01-01'::date, 1, 'F2 regression fixture', $5
+    $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'F2 regression fixture', $5
   )`, [ADMIN.auth, ADMIN.app, TEAM_A, LEADER_A.app, idempotencyKey("leader")]);
 }
 
@@ -698,7 +698,7 @@ test("F2 review, delegation and finality behavior regression gate", async () => 
   assert.ok(expiredDelegation.delegation_id && retainedDelegation.delegation_id);
 
   await db.query(`select public.direct_entry_revoke_team_leader(
-    $1::uuid, $2::uuid, $3::uuid, '2026-10-21'::date, 2, 'F2 test revoke', $4
+    $1::uuid, $2::uuid, $3::uuid, null::date, 2, 'F2 test revoke', $4
   )`, [ADMIN.auth, ADMIN.app, TEAM_A, idempotencyKey("leader-revoke")]);
   await assert.rejects(
     decision(LEADER_A, revokeObligation, "APPROVED", null, revokeSubmission.version,

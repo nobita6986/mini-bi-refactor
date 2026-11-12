@@ -247,7 +247,7 @@ test("Team Leader lifecycle auto-grants and revokes only the 3 F1 capabilities w
   // Designate LEADER_A on TEAM_A via canonical RPC (4th arg is p_leader_app_user_id)
   await db.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-02-01'::date, 1, 'Designate leader A', $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'Designate leader A', $5
      )`,
     [ADMIN.auth, ADMIN.app, TEAM_A, LEADER_A.app, KEY("leader_desig_1")],
   );
@@ -268,10 +268,10 @@ test("Team Leader lifecycle auto-grants and revokes only the 3 F1 capabilities w
     "never auto-grants report_form_manage or report_delegate",
   );
 
-  // Revoke LEADER_A on the same day (2026-02-01, team version = 2) -> independent report_view stays active, generated grants close cleanly
+  // Revoke LEADER_A on the same day (team version = 2) -> independent report_view stays active, generated grants close cleanly
   await db.query(
     `select public.direct_entry_revoke_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, '2026-02-01'::date, 2, 'Revoke leader A same day', $4
+       $1::uuid, $2::uuid, $3::uuid, null::date, 2, 'Revoke leader A same day', $4
      )`,
     [ADMIN.auth, ADMIN.app, TEAM_A, KEY("leader_revoke_1")],
   );
@@ -288,10 +288,10 @@ test("Team Leader lifecycle auto-grants and revokes only the 3 F1 capabilities w
     "independent report_view grant survives leader revocation while auto-granted capabilities close",
   );
 
-  // Re-designate LEADER_A on the same day (2026-02-01, team version = 3) -> must not hit 23P01 overlap
+  // Re-designate LEADER_A on the same day (team version = 3) -> must not hit 23P01 overlap
   await db.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-02-01'::date, 3, 'Re-designate leader A', $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 3, 'Re-designate leader A', $5
      )`,
     [ADMIN.auth, ADMIN.app, TEAM_A, LEADER_A.app, KEY("leader_desig_2")],
   );
@@ -310,13 +310,13 @@ test("Team Leader lifecycle auto-grants and revokes only the 3 F1 capabilities w
 
 test("closed overlapping independent Work Reports grants are never resurrected or overwritten across designate, revoke, disable and re-designate", async () => {
   // STAFF_B1 is a valid candidate on TEAM_B (version = 1).
-  // 1) Give STAFF_B1 a CLOSED independent report_assign grant [2026-01-10, 2026-06-01) (is_current = false)
-  //    that overlaps the upcoming Team Leader assignment effective 2026-02-01, AND an ACTIVE independent
+  // 1) Give STAFF_B1 a CLOSED independent report_assign grant [2026-01-10, 2099-06-01) (is_current = false)
+  //    that overlaps the immediate Team Leader assignment effective today, AND an ACTIVE independent
   //    report_view grant [2026-01-10, null) (is_current = true).
   const { rows: closedIndRows } = await db.query(
     `insert into public.direct_entry_capability_grants
        (app_user_id, capability, valid_from, valid_to, is_current)
-     values ($1::uuid, 'report_assign', '2026-01-10'::date, '2026-06-01'::date, false)
+     values ($1::uuid, 'report_assign', '2026-01-10'::date, '2099-06-01'::date, false)
      returning grant_id, valid_from::text, valid_to::text, is_current`,
     [STAFF_B1.app],
   );
@@ -331,10 +331,10 @@ test("closed overlapping independent Work Reports grants are never resurrected o
   );
   const activeIndependentGrantId = activeIndRows[0].grant_id;
 
-  // 2) Designate STAFF_B1 on TEAM_B effective 2026-02-01 (overlaps [2026-01-10, 2026-06-01))
+  // 2) Designate STAFF_B1 on TEAM_B effective today (overlaps [2026-01-10, 2099-06-01))
   const { rows: desigB1 } = await db.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-02-01'::date, 1, 'Designate B1 with closed overlapping grant', $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'Designate B1 with closed overlapping grant', $5
      ) as result`,
     [ADMIN.auth, ADMIN.app, TEAM_B, STAFF_B1.app, KEY("leader_b1_desig_1")],
   );
@@ -354,12 +354,12 @@ test("closed overlapping independent Work Reports grants are never resurrected o
   assert.deepEqual(checkClosedAfterDesig[0], {
     grant_id: closedIndependentGrantId,
     valid_from: "2026-01-10",
-    valid_to: "2026-06-01",
+    valid_to: "2099-06-01",
     is_current: false,
     linked_to_leader: false,
   });
 
-  // Verify a separate current leader-owned report_assign grant was created starting at 2026-06-01
+  // Verify a separate current leader-owned report_assign grant was created starting at 2099-06-01
   const { rows: leaderOwnedAfterDesig } = await db.query(
     `select g.grant_id, g.valid_from::text as valid_from, g.valid_to::text as valid_to, g.is_current
        from public.work_report_team_leader_capability_grants x
@@ -369,19 +369,19 @@ test("closed overlapping independent Work Reports grants are never resurrected o
   );
   assert.equal(leaderOwnedAfterDesig.length, 1);
   assert.notEqual(leaderOwnedAfterDesig[0].grant_id, closedIndependentGrantId);
-  assert.equal(leaderOwnedAfterDesig[0].valid_from, "2026-06-01");
+  assert.equal(leaderOwnedAfterDesig[0].valid_from, "2099-06-01");
   assert.equal(leaderOwnedAfterDesig[0].valid_to, null);
   assert.equal(leaderOwnedAfterDesig[0].is_current, true);
 
-  // 3) Revoke STAFF_B1 on TEAM_B on 2026-02-15 (team version = 2)
+  // 3) Revoke STAFF_B1 on TEAM_B on the same day (team version = 2)
   await db.query(
     `select public.direct_entry_revoke_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, '2026-02-15'::date, 2, 'Revoke B1 before closed grant valid_to', $4
+       $1::uuid, $2::uuid, $3::uuid, null::date, 2, 'Revoke B1 before closed grant valid_to', $4
      )`,
     [ADMIN.auth, ADMIN.app, TEAM_B, KEY("leader_b1_revoke_1")],
   );
 
-  // Closed independent report_assign stays [2026-01-10, 2026-06-01) with is_current = false;
+  // Closed independent report_assign stays [2026-01-10, 2099-06-01) with is_current = false;
   // active independent report_view stays is_current = true; leader-owned grants are closed.
   const { rows: b1CurrentAfterRevoke } = await db.query(
     `select grant_id, capability from public.direct_entry_capability_grants
@@ -401,15 +401,15 @@ test("closed overlapping independent Work Reports grants are never resurrected o
   );
   assert.deepEqual(checkClosedAfterRevoke[0], {
     valid_from: "2026-01-10",
-    valid_to: "2026-06-01",
+    valid_to: "2099-06-01",
     is_current: false,
   });
 
-  // 4) Re-designate STAFF_B1 on TEAM_B effective 2026-03-01 (team version = 3), then disable via assignment is_current=false,
+  // 4) Re-designate STAFF_B1 on TEAM_B effective today (team version = 3), then disable via assignment is_current=false,
   //    then revoke & re-designate again -> closed independent grant remains intact and active independent grant survives.
   const { rows: desigB2 } = await db.query(
     `select public.direct_entry_designate_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-03-01'::date, 3, 'Re-designate B1', $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 3, 'Re-designate B1', $5
      ) as result`,
     [ADMIN.auth, ADMIN.app, TEAM_B, STAFF_B1.app, KEY("leader_b1_desig_2")],
   );
@@ -440,7 +440,7 @@ test("closed overlapping independent Work Reports grants are never resurrected o
   );
   await db.query(
     `select public.direct_entry_revoke_team_leader(
-       $1::uuid, $2::uuid, $3::uuid, '2026-03-10'::date, 4, 'Clean revoke B1 after disable test', $4
+       $1::uuid, $2::uuid, $3::uuid, null::date, 4, 'Clean revoke B1 after disable test', $4
      )`,
     [ADMIN.auth, ADMIN.app, TEAM_B, KEY("leader_b1_revoke_2")],
   );
@@ -1180,7 +1180,7 @@ test("F2 review, delegation, effective_report_review_scopes and finality lifecyc
   if (currentLeaderARows.length === 0) {
     await db.query(
       `select public.direct_entry_designate_team_leader(
-         $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-02-01'::date, $5, 'Ensure Leader A for F2', $6
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, $5, 'Ensure Leader A for F2', $6
        )`,
       [ADMIN.auth, ADMIN.app, TEAM_A, LEADER_A.app, teamARows[0].version, KEY("f2_leader_a")],
     );

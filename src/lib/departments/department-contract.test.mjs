@@ -27,6 +27,9 @@ const USER_REF = "33333333-3333-4333-8333-333333333333";
 const MEMBERSHIP_ID = "44444444-4444-4444-8444-444444444444";
 const IDEM_KEY = "55555555-5555-4555-8555-555555555555";
 const ACTOR_ID = "66666666-6666-4666-8666-666666666666";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+}).format(new Date());
 
 test("department query parsers enforce strict allowlisted query parameters and bounds", () => {
   assert.equal(
@@ -116,7 +119,7 @@ test("assign and end body parsers fail closed on missing, extra, wrong-type, or 
     {
       account_ref: USER_REF.toUpperCase(),
       expected_pair_version: 0,
-      effective_from: "2026-10-24",
+      effective_from: TODAY_VN,
       reason: "  Bổ nhiệm nhân sự Phòng Kế toán  ",
       idempotency_key: IDEM_KEY,
     },
@@ -127,7 +130,7 @@ test("assign and end body parsers fail closed on missing, extra, wrong-type, or 
     value: {
       account_ref: USER_REF,
       expected_pair_version: 0,
-      effective_from: "2026-10-24",
+      effective_from: TODAY_VN,
       reason: "Bổ nhiệm nhân sự Phòng Kế toán",
       idempotency_key: IDEM_KEY,
     },

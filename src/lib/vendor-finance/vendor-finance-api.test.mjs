@@ -1772,6 +1772,9 @@ test("HTTP VFIN-02 4-role authorization matrix: Full Admin, Project Accountant, 
     )).status,
     200,
   );
+  const todayVn = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(new Date());
   assert.equal(
     (await handlePostAssignProjectAccountantAdmin(
       new Request(`${ORIGIN}/api/vendor-finance/admin/project-accountants`, {
@@ -1780,7 +1783,7 @@ test("HTTP VFIN-02 4-role authorization matrix: Full Admin, Project Accountant, 
         body: JSON.stringify({
           project_id: PROJECT_ID,
           accountant_ref: ACC_A_ID,
-          valid_from: "2026-10-24",
+          valid_from: todayVn,
           expected_version: 0,
           reason: "Phân công kế toán dự án",
           idempotency_key: IDEM_1,
@@ -1799,7 +1802,7 @@ test("HTTP VFIN-02 4-role authorization matrix: Full Admin, Project Accountant, 
         body: JSON.stringify({
           account_ref: ACC_A_ID,
           role_code: "CASH_HOLDER",
-          valid_from: "2026-10-24",
+          valid_from: todayVn,
           expected_version: 0,
           reason: "Chỉ định kế toán cầm tiền",
           idempotency_key: IDEM_3,

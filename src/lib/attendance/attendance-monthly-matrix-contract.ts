@@ -191,6 +191,7 @@ export const ATTENDANCE_MONTHLY_MATRIX_ERROR_CODES = [
   "ATTENDANCE_BRANCH_TARGET_USER_INVALID",
   "ATTENDANCE_BRANCH_ASSIGNMENT_INVALID",
   "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE",
+  "ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE",
   "ATTENDANCE_BRANCH_ASSIGNMENT_NOT_FOUND",
   "ATTENDANCE_BRANCH_ASSIGNMENT_OVERLAP",
   "ATTENDANCE_BRANCH_ASSIGNMENT_ALREADY_CLOSED",
@@ -276,6 +277,7 @@ const MATRIX_ERROR_HTTP_STATUS: Readonly<Record<AttendanceMonthlyMatrixErrorCode
   ATTENDANCE_BRANCH_TARGET_USER_INVALID: 422,
   ATTENDANCE_BRANCH_ASSIGNMENT_INVALID: 400,
   ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE: 422,
+  ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE: 422,
   ATTENDANCE_BRANCH_ASSIGNMENT_NOT_FOUND: 404,
   ATTENDANCE_BRANCH_ASSIGNMENT_OVERLAP: 409,
   ATTENDANCE_BRANCH_ASSIGNMENT_ALREADY_CLOSED: 409,
@@ -2300,6 +2302,9 @@ export function parseAssignBranchBody(
     if (validFrom > resolvedTodayVn) {
       return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE" };
     }
+    if (validFrom < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE" };
+    }
   }
 
   const expectedVersion = body.expected_version;
@@ -2354,6 +2359,9 @@ export function parseUnassignBranchBody(
     validTo = body.valid_to.trim();
     if (validTo > resolvedTodayVn) {
       return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE" };
+    }
+    if (validTo < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE" };
     }
   }
 

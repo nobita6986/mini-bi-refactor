@@ -22,6 +22,12 @@ const RECRUITER_ID = "44444444-4444-4444-8444-444444444444";
 const ASSIGNMENT_ID = "55555555-5555-4555-8555-555555555555";
 const REVISION_ID = "66666666-6666-4666-8666-666666666666";
 const KEY = "77777777-7777-4777-8777-777777777777";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 const TEAM = {
   team_id: TEAM_ID, code: "team-a", display_name: "Nhóm A", active: true,
   version: 3, revision_count: 4,
@@ -110,7 +116,7 @@ test("candidate query is bounded and projection accepts exactly the three API ke
 
 test("designation, replacement and revoke requests use exact server contract bodies and paths", () => {
   const designate = buildTeamLeaderDesignation({
-    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: "2026-10-10",
+    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: TODAY_VN,
     expectedVersion: 3, reason: "Bổ nhiệm", idempotencyKey: KEY, change: "designate",
   });
   assert.equal(designate.ok, true);
@@ -120,12 +126,12 @@ test("designation, replacement and revoke requests use exact server contract bod
   ]);
   assert.equal(designate.intent.body.expected_version, 3);
   const replacement = buildTeamLeaderDesignation({
-    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: "2026-10-11",
+    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: TODAY_VN,
     expectedVersion: 3, reason: "Thay thế", idempotencyKey: KEY, change: "replace",
   });
   assert.equal(replacement.ok && replacement.intent.change, "replace");
   const revoke = buildTeamLeaderRevocation({
-    teamId: TEAM_ID, effectiveDate: "2026-10-10", expectedVersion: 3,
+    teamId: TEAM_ID, effectiveDate: TODAY_VN, expectedVersion: 3,
     reason: "Thu hồi", idempotencyKey: KEY,
   });
   assert.equal(revoke.ok, true);
@@ -134,30 +140,34 @@ test("designation, replacement and revoke requests use exact server contract bod
     "effective_date", "expected_version", "idempotency_key", "reason",
   ]);
   const noReason = buildTeamLeaderDesignation({
-    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: "2026-10-10",
+    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: TODAY_VN,
     expectedVersion: 3, idempotencyKey: KEY, change: "designate",
   });
   assert.equal(noReason.ok, true);
   if (noReason.ok) assert.equal(noReason.intent.body.reason, null);
   const blankReason = buildTeamLeaderRevocation({
-    teamId: TEAM_ID, effectiveDate: "2026-10-10", expectedVersion: 3,
+    teamId: TEAM_ID, effectiveDate: TODAY_VN, expectedVersion: 3,
     reason: "  ", idempotencyKey: KEY,
   });
   assert.equal(blankReason.ok, true);
   if (blankReason.ok) assert.equal(blankReason.intent.body.reason, null);
   assert.equal(buildTeamLeaderDesignation({
+    teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: "2026-10-10",
+    expectedVersion: 3, reason: "Reason", idempotencyKey: KEY, change: "designate",
+  }).ok, false);
+  assert.equal(buildTeamLeaderDesignation({
     teamId: TEAM_ID, leaderAppUserId: APP_USER_ID, effectiveDate: "2026-02-30",
     expectedVersion: 3, reason: "Reason", idempotencyKey: KEY, change: "designate",
   }).ok, false);
   assert.equal(buildTeamLeaderRevocation({
-    teamId: TEAM_ID, effectiveDate: "2026-10-10", expectedVersion: 0,
+    teamId: TEAM_ID, effectiveDate: TODAY_VN, expectedVersion: 0,
     reason: "Reason", idempotencyKey: KEY,
   }).ok, false);
 });
 
 test("mutation classification sanitizes denied, reserved/inactive, OCC and unavailable outcomes", () => {
   const request = buildTeamLeaderRevocation({
-    teamId: TEAM_ID, effectiveDate: "2026-10-10", expectedVersion: 3,
+    teamId: TEAM_ID, effectiveDate: TODAY_VN, expectedVersion: 3,
     reason: "Reason", idempotencyKey: KEY,
   });
   assert.ok(request.ok);

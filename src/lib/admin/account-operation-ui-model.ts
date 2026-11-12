@@ -140,18 +140,23 @@ export function buildPersonnelFromAccountRequest(input: {
   const businessToday = resolveBusinessTodayVn(input.todayVn);
   const validFrom = typeof input.validFrom === "string" && input.validFrom.trim() !== ""
     ? input.validFrom.trim()
-    : businessToday;
+    : null;
+  const dateFailure = validFrom === null
+    ? null
+    : !DATE.test(validFrom)
+      ? "Ngày hiệu lực HRP không hợp lệ."
+      : validFrom > businessToday
+        ? "Ngày hiệu lực HRP không được ở tương lai."
+        : validFrom < businessToday
+          ? "Ngày hiệu lực HRP không được ở quá khứ."
+          : null;
   const failure = validateUuid(input.accountRef)
     ?? validateVersion(input.expectedAccountVersion) ?? (input.expectedAccountVersion < 1
       ? "Dữ liệu chưa hợp lệ. Vui lòng tải lại." : null)
     ?? (LOGIN_ID.test(input.loginId) ? null : "Tài khoản không có mã đăng nhập hợp lệ.")
     ?? (input.personnelPosition !== "STAFF" && input.personnelPosition !== "TEAM_LEADER"
       ? "Vị trí nhân sự không hợp lệ." : null)
-    ?? (!DATE.test(validFrom)
-      ? "Ngày hiệu lực HRP không hợp lệ."
-      : validFrom > businessToday
-        ? "Ngày hiệu lực HRP không được ở tương lai."
-        : null)
+    ?? dateFailure
     ?? validateReason(input.reason) ?? validateUuid(input.idempotencyKey);
   if (failure) return { ok: false, message: failure };
   return {

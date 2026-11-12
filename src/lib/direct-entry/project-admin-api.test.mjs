@@ -24,6 +24,12 @@ const RECRUITER = "66666666-6666-4666-8666-666666666666";
 const ASSIGNMENT = "77777777-7777-4777-8777-777777777777";
 const REV = "99999999-9999-4999-8999-999999999999";
 const TS = "2026-10-01T00:00:00+00:00";
+const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 
 const PROJECT = { project_id: "p1", display_name: "Công ty ABC", active: true, version: 3,
   created_at: TS, updated_at: TS, revision_count: 2, active_assignment_count: 1,
@@ -143,7 +149,7 @@ test("all project mutation contracts normalize optional reasons and reject malfo
     [projectAdminCreateRequest, { project_id: "p1", display_name: "X", idempotency_key: KEY }],
     [projectAdminUpdateRequest, { expected_version: 1, display_name: "X", idempotency_key: KEY }],
     [projectAdminSetActiveRequest, { active: true, expected_version: 1, idempotency_key: KEY }],
-    [projectAdminAssignRequest, { manager_recruiter_id: RECRUITER, valid_from: "2026-10-01",
+    [projectAdminAssignRequest, { manager_recruiter_id: RECRUITER, valid_from: TODAY_VN,
       expected_project_version: 1, idempotency_key: KEY }],
     [projectAdminUnassignRequest, { expected_version: 1, expected_project_version: 1,
       idempotency_key: KEY }],
@@ -224,11 +230,11 @@ test("DEACTIVATE dung set-active(false)", async () => {
 
 test("assign/unassign dung du hai version OCC va reason; assign tra project_version", async () => {
   const assignResult = { ok: true, data: { assignment_id: ASSIGNMENT, project_id: "p1",
-    manager_recruiter_id: RECRUITER, valid_from: "2026-10-01", valid_to: null,
+    manager_recruiter_id: RECRUITER, valid_from: TODAY_VN, valid_to: null,
     version: 1, project_version: 4, already_assigned: false } };
   const d1 = deps(assignResult);
   await assignProjectManagerAdmin(jsonRequest({ manager_recruiter_id: RECRUITER,
-    valid_from: "2026-10-01", expected_project_version: 3, reason: "them ql", idempotency_key: KEY }),
+    valid_from: TODAY_VN, expected_project_version: 3, reason: "them ql", idempotency_key: KEY }),
     "p1", "true", d1.dependencies);
   const [, assignInput] = d1.calls.rpc[0];
   assert.equal(assignInput.expected_project_version, 3);

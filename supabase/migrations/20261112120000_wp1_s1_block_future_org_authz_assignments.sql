@@ -2,15 +2,20 @@
 -- Migration: 20261112120000_wp1_s1_block_future_org_authz_assignments.sql
 -- Work Package: WP1 / S1 — Block future-effective org, personnel & permission assignments
 -- Scope:
---   1. Reject future effective dates (> server business date) with ERRCODE = '22023'
---      across all organization, personnel, and permission assignment/revocation RPCs
---      that previously accepted future dates or required explicit date input when
---      standard UI date inputs are removed.
+--   1. Derive effective dates on the server (`v_today`) and reject non-current client
+--      effective dates (< or > server business date) with ERRCODE = '22023' across
+--      standard organization, personnel, and permission assignment/revocation RPCs.
 --   2. Default omitted/null effective date parameters to server business date (`v_today`)
 --      while preserving existing RPC parameter signatures.
---   3. Keep PT409 SQLSTATE on optimistic concurrency conflicts (fixing the PR #218
+--   3. Decouple idempotency request fingerprints from the server-computed effective date
+--      so retries across midnight replay the committed result instead of failing with 22023.
+--   4. Keep PT409 SQLSTATE on optimistic concurrency conflicts (fixing the PR #218
 --      regression on direct_entry_apply_team_leader_mutation).
---   4. Do not rewrite historical or pre-existing future-dated rows (reported via WP0 CAT1).
+--   5. Do not rewrite historical or pre-existing future-dated rows (reported via WP0 CAT1).
+--   6. Pending business decision (out of scope for WP1): `public.work_report_create_delegation`
+--      (`report_assign` and `report_review` temporary delegations) intentionally retains
+--      future `p_valid_from` support pending T0/Owner business decision on whether
+--      pre-vacation work-report delegations remain schedulable in advance.
 -- =============================================================================
 
 begin;
@@ -48,10 +53,6 @@ begin
   if p_recruiter_id is null or p_team_id is null then
     raise exception 'recruiter and target team required' using errcode = '22023';
   end if;
-  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
-  if p_valid_from > public.direct_entry_authorization_date() then
-    raise exception 'future team memberships require explicit activation' using errcode = '22023';
-  end if;
   if p_reason is null or length(btrim(p_reason)) not between 1 and 4000 then
     raise exception 'reason required' using errcode = '22023';
   end if;
@@ -70,6 +71,14 @@ begin
   );
   if v_prior is not null then
     return v_prior;
+  end if;
+
+  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
+  if p_valid_from > public.direct_entry_authorization_date() then
+    raise exception 'future team memberships require explicit activation' using errcode = '22023';
+  end if;
+  if p_valid_from < public.direct_entry_authorization_date() then
+    raise exception 'past team memberships are not allowed' using errcode = '22023';
   end if;
 
   v_subject := public.direct_entry_lock_membership_subject(p_recruiter_id, p_expected_version);
@@ -158,10 +167,6 @@ begin
   if p_recruiter_id is null or p_team_id is null then
     raise exception 'recruiter and target team required' using errcode = '22023';
   end if;
-  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
-  if p_valid_from > public.direct_entry_authorization_date() then
-    raise exception 'future team memberships require explicit activation' using errcode = '22023';
-  end if;
   if p_reason is null or length(btrim(p_reason)) not between 1 and 4000 then
     raise exception 'reason required' using errcode = '22023';
   end if;
@@ -180,6 +185,14 @@ begin
   );
   if v_prior is not null then
     return v_prior;
+  end if;
+
+  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
+  if p_valid_from > public.direct_entry_authorization_date() then
+    raise exception 'future team memberships require explicit activation' using errcode = '22023';
+  end if;
+  if p_valid_from < public.direct_entry_authorization_date() then
+    raise exception 'past team memberships are not allowed' using errcode = '22023';
   end if;
 
   v_subject := public.direct_entry_lock_membership_subject(p_recruiter_id, p_expected_version);
@@ -309,10 +322,6 @@ begin
   if p_recruiter_id is null then
     raise exception 'recruiter required' using errcode = '22023';
   end if;
-  p_valid_to := coalesce(p_valid_to, public.direct_entry_authorization_date());
-  if p_valid_to > public.direct_entry_authorization_date() then
-    raise exception 'future team memberships require explicit activation' using errcode = '22023';
-  end if;
   if p_reason is null or length(btrim(p_reason)) not between 1 and 4000 then
     raise exception 'reason required' using errcode = '22023';
   end if;
@@ -330,6 +339,14 @@ begin
   );
   if v_prior is not null then
     return v_prior;
+  end if;
+
+  p_valid_to := coalesce(p_valid_to, public.direct_entry_authorization_date());
+  if p_valid_to > public.direct_entry_authorization_date() then
+    raise exception 'future team memberships require explicit activation' using errcode = '22023';
+  end if;
+  if p_valid_to < public.direct_entry_authorization_date() then
+    raise exception 'past team memberships are not allowed' using errcode = '22023';
   end if;
 
   -- Close-only lock: revocation must stay possible for a person who is no longer an
@@ -554,11 +571,6 @@ begin
   if p_team_id is null then
     raise exception 'team required' using errcode = '22023';
   end if;
-  p_effective_date := coalesce(p_effective_date, v_today);
-  if p_effective_date > v_today then
-    raise exception 'future team leader assignments require explicit activation'
-      using errcode = '22023';
-  end if;
   if p_expected_version is null or p_expected_version < 1 then
     raise exception 'expected team version required' using errcode = '22023';
   end if;
@@ -602,6 +614,16 @@ begin
       raise exception 'completed idempotency result is missing' using errcode = '55000';
     end if;
     return v_prior;
+  end if;
+
+  p_effective_date := coalesce(p_effective_date, v_today);
+  if p_effective_date > v_today then
+    raise exception 'future team leader assignments require explicit activation'
+      using errcode = '22023';
+  end if;
+  if p_effective_date < v_today then
+    raise exception 'past team leader assignments are not allowed'
+      using errcode = '22023';
   end if;
 
   if v_team.version <> p_expected_version then
@@ -1466,10 +1488,6 @@ begin
 
   v_today := public.direct_entry_authorization_date();
   v_effective_from := coalesce(p_effective_from, v_today);
-  if v_effective_from > v_today then
-    raise exception 'DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID'
-      using errcode = '22023';
-  end if;
 
   select d.*
     into v_dept
@@ -1505,6 +1523,11 @@ begin
         using errcode = '23505';
     end if;
     return v_idem.result_payload || pg_catalog.jsonb_build_object('replayed', true);
+  end if;
+
+  if v_effective_from <> v_today then
+    raise exception 'DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID'
+      using errcode = '22023';
   end if;
 
   perform pg_catalog.pg_advisory_xact_lock(
@@ -1621,6 +1644,225 @@ begin
 end;
 $function$;
 
+create or replace function public.org_department_end_accounting_member(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_membership_id uuid,
+  p_expected_pair_version integer,
+  p_effective_to date,
+  p_reason text,
+  p_idempotency_key uuid,
+  p_request_fingerprint text
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_today date;
+  v_effective_to date;
+  v_reason text;
+  v_dept public.organization_departments%rowtype;
+  v_idem public.organization_department_idempotency%rowtype;
+  v_target_user_id uuid;
+  v_target public.direct_entry_app_users%rowtype;
+  v_membership public.organization_department_memberships%rowtype;
+  v_updated public.organization_department_memberships%rowtype;
+  v_current_pair_version integer;
+  v_before jsonb;
+  v_after jsonb;
+  v_base_payload jsonb;
+begin
+  perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
+
+  if p_membership_id is null
+     or p_expected_pair_version is null
+     or p_expected_pair_version < 1
+     or p_idempotency_key is null
+     or p_request_fingerprint is null
+     or p_request_fingerprint !~ '^[0-9a-f]{64}$' then
+    raise exception 'DEPARTMENT_MEMBERSHIP_PAYLOAD_INVALID'
+      using errcode = '22023';
+  end if;
+
+  v_reason := case when p_reason is null then null else pg_catalog.btrim(p_reason) end;
+  if v_reason is null
+     or pg_catalog.length(v_reason) not between 1 and 4000
+     or v_reason ~ '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' then
+    raise exception 'DEPARTMENT_MEMBERSHIP_REASON_INVALID'
+      using errcode = '22023';
+  end if;
+
+  v_today := public.direct_entry_authorization_date();
+
+  select d.*
+    into v_dept
+    from public.organization_departments d
+   where d.system_key = 'ACCOUNTING'
+   for update;
+
+  if not found then
+    raise exception 'DEPARTMENT_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('org_department_idem_v1'),
+    pg_catalog.hashtext(p_app_user_id::text)
+  );
+
+  select i.*
+    into v_idem
+    from public.organization_department_idempotency i
+   where i.actor_user_id = p_app_user_id
+     and i.idempotency_key = p_idempotency_key;
+
+  if found then
+    if v_idem.action <> 'ACCOUNTING_MEMBER_ENDED'
+       or v_idem.request_fingerprint <> p_request_fingerprint then
+      raise exception 'IDEMPOTENCY_CONFLICT'
+        using errcode = '23505';
+    end if;
+    return v_idem.result_payload || pg_catalog.jsonb_build_object('replayed', true);
+  end if;
+
+  select m.app_user_id
+    into v_target_user_id
+    from public.organization_department_memberships m
+   where m.membership_id = p_membership_id
+     and m.department_id = v_dept.department_id;
+
+  if not found then
+    raise exception 'DEPARTMENT_MEMBERSHIP_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('org_department_membership_v1'),
+    pg_catalog.hashtext(v_dept.department_id::text || ':' || v_target_user_id::text)
+  );
+
+  select u.*
+    into v_target
+    from public.direct_entry_app_users u
+   where u.app_user_id = v_target_user_id
+   for update;
+
+  if not found then
+    raise exception 'TARGET_ACCOUNT_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  select m.*
+    into v_membership
+    from public.organization_department_memberships m
+   where m.membership_id = p_membership_id
+     and m.department_id = v_dept.department_id
+   for update;
+
+  if not found then
+    raise exception 'DEPARTMENT_MEMBERSHIP_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  select coalesce(max(m.version), 0)::integer
+    into v_current_pair_version
+    from public.organization_department_memberships m
+   where m.department_id = v_dept.department_id
+     and m.app_user_id = v_target_user_id;
+
+  if v_current_pair_version <> p_expected_pair_version
+     or v_membership.version <> p_expected_pair_version then
+    raise exception 'DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
+
+  if v_membership.valid_to is not null then
+    raise exception 'DEPARTMENT_MEMBERSHIP_ALREADY_ENDED'
+      using errcode = 'PT409';
+  end if;
+
+  if p_effective_to is not null and p_effective_to <> v_today then
+    raise exception 'DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID'
+      using errcode = '22023';
+  end if;
+
+  if p_effective_to is not null and p_effective_to < v_membership.valid_from then
+    raise exception 'DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID'
+      using errcode = '22023';
+  end if;
+
+  v_effective_to := greatest(coalesce(p_effective_to, v_today), v_membership.valid_from);
+
+  v_before := public.org_department__internal_membership_projection(
+    v_membership,
+    v_current_pair_version,
+    v_today
+  );
+
+  if v_effective_to = v_membership.valid_from then
+    perform pg_catalog.set_config('org_department.membership_cancel_marker', 'on', true);
+  end if;
+
+  update public.organization_department_memberships
+     set valid_to = v_effective_to,
+         revoked_by_user_id = p_app_user_id,
+         revoke_reason = v_reason,
+         revoked_at = now(),
+         version = v_current_pair_version + 1
+   where membership_id = p_membership_id
+  returning * into v_updated;
+
+  v_after := public.org_department__internal_membership_projection(
+    v_updated,
+    v_updated.version,
+    v_today
+  );
+
+  insert into public.organization_department_audit_events (
+    department_id,
+    membership_id,
+    target_app_user_id,
+    actor_user_id,
+    action,
+    reason,
+    before_snapshot,
+    after_snapshot,
+    idempotency_key
+  ) values (
+    v_dept.department_id,
+    v_updated.membership_id,
+    v_target_user_id,
+    p_app_user_id,
+    'ACCOUNTING_MEMBER_ENDED',
+    v_reason,
+    v_before,
+    v_after,
+    p_idempotency_key
+  );
+
+  v_base_payload := pg_catalog.jsonb_build_object('membership', v_after);
+
+  insert into public.organization_department_idempotency (
+    actor_user_id,
+    idempotency_key,
+    action,
+    request_fingerprint,
+    result_payload
+  ) values (
+    p_app_user_id,
+    p_idempotency_key,
+    'ACCOUNTING_MEMBER_ENDED',
+    p_request_fingerprint,
+    v_base_payload
+  );
+
+  return v_base_payload || pg_catalog.jsonb_build_object('replayed', false);
+end;
+$function$;
+
 create or replace function public.vendor_finance_assign_project_accountant_admin(
   p_auth_subject uuid,
   p_app_user_id uuid,
@@ -1683,7 +1925,7 @@ begin
   end if;
 
   v_valid_from := coalesce(p_valid_from, v_today);
-  if v_valid_from > v_today
+  if v_valid_from <> v_today
      or pg_catalog.date_part('year', v_valid_from)::integer not between 1970 and 2999 then
     raise exception 'VENDOR_FINANCE_DATE_INVALID'
       using errcode = '22023';
@@ -1887,7 +2129,7 @@ begin
     when p_valid_to is null then greatest(v_today, v_target.valid_from)
     else p_valid_to
   end;
-  if (p_valid_to is not null and p_valid_to > v_today)
+  if (p_valid_to is not null and p_valid_to <> v_today)
      or v_valid_to < v_target.valid_from
      or pg_catalog.date_part('year', v_valid_to)::integer not between 1970 and 2999 then
     raise exception 'VENDOR_FINANCE_DATE_INVALID'
@@ -2018,7 +2260,7 @@ begin
   end if;
 
   v_valid_from := coalesce(p_valid_from, v_today);
-  if v_valid_from > v_today
+  if v_valid_from <> v_today
      or pg_catalog.date_part('year', v_valid_from)::integer not between 1970 and 2999 then
     raise exception 'VENDOR_FINANCE_DATE_INVALID'
       using errcode = '22023';
@@ -2221,7 +2463,7 @@ begin
     when p_valid_to is null then greatest(v_today, v_target.valid_from)
     else p_valid_to
   end;
-  if (p_valid_to is not null and p_valid_to > v_today)
+  if (p_valid_to is not null and p_valid_to <> v_today)
      or v_valid_to < v_target.valid_from
      or pg_catalog.date_part('year', v_valid_to)::integer not between 1970 and 2999 then
     raise exception 'VENDOR_FINANCE_DATE_INVALID'
@@ -2338,11 +2580,6 @@ begin
       using errcode = '22023';
   end if;
 
-  if v_valid_from > v_today then
-    raise exception 'LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN'
-      using errcode = '22023';
-  end if;
-
   select ir.*
     into v_existing_idem
     from public.leave_idempotency_records ir
@@ -2356,6 +2593,16 @@ begin
         using errcode = '22023';
     end if;
     return v_existing_idem.response_payload || pg_catalog.jsonb_build_object('replayed', true);
+  end if;
+
+  if v_valid_from > v_today then
+    raise exception 'LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN'
+      using errcode = '22023';
+  end if;
+
+  if v_valid_from < v_today then
+    raise exception 'LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN'
+      using errcode = '22023';
   end if;
 
   if p_approver_app_user_id is not null then
@@ -2505,7 +2752,10 @@ declare
   v_existing public.attendance_branch_assignments%rowtype;
   v_branch public.attendance_branches%rowtype;
   v_target_user public.direct_entry_app_users%rowtype;
-  v_today_vn date := (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date;
+  v_today_vn date := coalesce(
+    nullif(current_setting('direct_entry.test_authorization_date', true), '')::date,
+    (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date
+  );
   v_valid_from date := coalesce(p_valid_from, v_today_vn);
   v_inserted public.attendance_branch_assignments%rowtype;
 begin
@@ -2531,11 +2781,6 @@ begin
      or p_expected_version is null
      or p_expected_version < 1 then
     raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_INVALID'
-      using errcode = '22023';
-  end if;
-
-  if v_valid_from > v_today_vn then
-    raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE'
       using errcode = '22023';
   end if;
 
@@ -2573,6 +2818,16 @@ begin
         'version', v_existing.version
       )
     );
+  end if;
+
+  if v_valid_from > v_today_vn then
+    raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE'
+      using errcode = '22023';
+  end if;
+
+  if v_valid_from < v_today_vn then
+    raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE'
+      using errcode = '22023';
   end if;
 
   select *
@@ -2662,7 +2917,10 @@ declare
   v_can_manage boolean;
   v_existing public.attendance_branch_assignments%rowtype;
   v_current public.attendance_branch_assignments%rowtype;
-  v_today_vn date := (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date;
+  v_today_vn date := coalesce(
+    nullif(current_setting('direct_entry.test_authorization_date', true), '')::date,
+    (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date
+  );
   v_valid_to date := coalesce(p_valid_to, v_today_vn);
   v_updated public.attendance_branch_assignments%rowtype;
 begin
@@ -2687,11 +2945,6 @@ begin
      or p_expected_version is null
      or p_expected_version < 1 then
     raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_INVALID'
-      using errcode = '22023';
-  end if;
-
-  if v_valid_to > v_today_vn then
-    raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE'
       using errcode = '22023';
   end if;
 
@@ -2722,6 +2975,16 @@ begin
         'version', v_existing.version
       )
     );
+  end if;
+
+  if v_valid_to > v_today_vn then
+    raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE'
+      using errcode = '22023';
+  end if;
+
+  if v_valid_to < v_today_vn then
+    raise exception 'ATTENDANCE_BRANCH_ASSIGNMENT_PAST_DATE'
+      using errcode = '22023';
   end if;
 
   select *
@@ -2802,6 +3065,7 @@ begin
        'public.direct_entry_unassign_team_membership(uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
        'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
        'public.org_department_assign_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
+       'public.org_department_end_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
        'public.vendor_finance_assign_project_accountant_admin(uuid,uuid,text,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
        'public.vendor_finance_end_project_accountant_admin(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
        'public.vendor_finance_assign_global_role_admin(uuid,uuid,uuid,text,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
@@ -2827,6 +3091,7 @@ revoke all on function
   public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text),
   public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text),
   public.org_department_assign_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
+  public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.vendor_finance_assign_project_accountant_admin(uuid, uuid, text, uuid, integer, date, text, uuid, text),
   public.vendor_finance_end_project_accountant_admin(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.vendor_finance_assign_global_role_admin(uuid, uuid, uuid, text, integer, date, text, uuid, text),
@@ -2841,6 +3106,7 @@ grant execute on function
   public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text),
   public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text),
   public.org_department_assign_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
+  public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.vendor_finance_assign_project_accountant_admin(uuid, uuid, text, uuid, integer, date, text, uuid, text),
   public.vendor_finance_end_project_accountant_admin(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.vendor_finance_assign_global_role_admin(uuid, uuid, uuid, text, integer, date, text, uuid, text),
@@ -2861,6 +3127,7 @@ begin
     'public.direct_entry_move_team_membership(uuid,uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
     'public.direct_entry_unassign_team_membership(uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
     'public.org_department_assign_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
+    'public.org_department_end_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
     'public.vendor_finance_assign_project_accountant_admin(uuid,uuid,text,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
     'public.vendor_finance_end_project_accountant_admin(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
     'public.vendor_finance_assign_global_role_admin(uuid,uuid,uuid,text,integer,date,text,uuid,text)'::pg_catalog.regprocedure,

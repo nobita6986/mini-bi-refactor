@@ -115,6 +115,7 @@ export type LeaveErrorCode =
   | "LEAVE_SENIORITY_CONFIG_FORBIDDEN"
   | "LEAVE_DEPARTMENT_APPROVER_ADMIN_FORBIDDEN"
   | "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN"
+  | "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN"
   | "LEAVE_UNIT_KIND_INVALID"
   | "LEAVE_APPROVER_USER_NOT_FOUND"
   | "LEAVE_MODULE_GRANT_ADMIN_FORBIDDEN"
@@ -173,6 +174,7 @@ export function leaveHttpStatusForError(code: LeaveErrorCode): number {
     case "LEAVE_OPENING_BATCH_VALIDATION_FAILED":
     case "LEAVE_REPORT_EXPORT_LIMIT_EXCEEDED":
     case "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN":
+    case "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN":
       return 422;
     case "LEAVE_UNAVAILABLE":
       return 503;
@@ -1056,6 +1058,9 @@ export function parsePatchAdminConfigBody(
     }
     if (validFrom !== null && validFrom > businessToday) {
       return { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN" };
+    }
+    if (validFrom !== null && validFrom < businessToday) {
+      return { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN" };
     }
 
     const request_fingerprint = sha256Hex({

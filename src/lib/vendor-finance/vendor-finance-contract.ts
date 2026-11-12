@@ -2272,7 +2272,7 @@ export function parseAssignProjectAccountantBody(
   if (body.valid_from !== undefined && body.valid_from !== null) {
     const parsedDate = parseBusinessCalendarDate(body.valid_from);
     if (!parsedDate.ok) return parsedDate;
-    if (parsedDate.date > businessToday) {
+    if (parsedDate.date !== businessToday) {
       return { ok: false, code: "VENDOR_FINANCE_DATE_INVALID" };
     }
     validFrom = parsedDate.date;
@@ -2344,7 +2344,7 @@ export function parseEndProjectAccountantBody(
   if (body.valid_to !== undefined && body.valid_to !== null) {
     const parsedDate = parseBusinessCalendarDate(body.valid_to);
     if (!parsedDate.ok) return parsedDate;
-    if (parsedDate.date > businessToday) {
+    if (parsedDate.date !== businessToday) {
       return { ok: false, code: "VENDOR_FINANCE_DATE_INVALID" };
     }
     validTo = parsedDate.date;
@@ -2420,7 +2420,7 @@ export function parseAssignGlobalRoleBody(
   if (body.valid_from !== undefined && body.valid_from !== null) {
     const parsedDate = parseBusinessCalendarDate(body.valid_from);
     if (!parsedDate.ok) return parsedDate;
-    if (parsedDate.date > businessToday) {
+    if (parsedDate.date !== businessToday) {
       return { ok: false, code: "VENDOR_FINANCE_DATE_INVALID" };
     }
     validFrom = parsedDate.date;

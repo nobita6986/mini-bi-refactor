@@ -99,12 +99,13 @@ test("membership form captures DOM values before the queued React state updater 
   assert.match(component, /const reason = event\.currentTarget\.value;[\s\S]*reason \}\)\);/);
 });
 
-test("inactive personnel can still close membership, while assign and move require active personnel", () => {
-  assert.match(component, /onMove=\{personnel\.active && \(state === "CURRENT" \|\| state === "SCHEDULED"\)/);
+test("inactive personnel can still close membership, while assign and move require active personnel and scheduled rows are read-only with conflict alert", () => {
+  assert.match(component, /onMove=\{personnel\.active && state === "CURRENT" && !hasScheduledConflict/);
   assert.match(component, /onClose=\{state === "CURRENT"/);
-  assert.match(component, /onCancelScheduled=\{state === "SCHEDULED"/);
-  assert.match(component, /startClose\(membership, false\)/);
-  assert.match(component, /startClose\(membership, true\)/);
+  assert.doesNotMatch(component, /onCancelScheduled/);
+  assert.doesNotMatch(component, />Hủy lịch</);
+  assert.match(component, /startClose\(membership\)/);
+  assert.match(component, /Lịch phân công tương lai cũ đang cản thao tác gán hoặc chuyển nhóm ngay/);
 });
 
 test("UI never displays technical UUIDs and retains accessible state and personnel-create form scope", () => {

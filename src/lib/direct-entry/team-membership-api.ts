@@ -215,7 +215,7 @@ function resolveTeamMembershipBusinessTodayVn(todayVn?: string | null): string {
  * server-derived team id keeps that control intact.
  */
 export type AssignMembershipRequest = {
-  valid_from: string; expected_version: number; reason: string | null; idempotency_key: string;
+  valid_from: string | null; expected_version: number; reason: string | null; idempotency_key: string;
 };
 export function teamMembershipAssignRequest(
   body: unknown,
@@ -233,22 +233,20 @@ export function teamMembershipAssignRequest(
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
   const businessToday = resolveTeamMembershipBusinessTodayVn(todayVn);
-  const valid_from =
-    !hasValidFrom || value.valid_from === null
-      ? businessToday
-      : day(value.valid_from);
+  const omittedOrNull = !hasValidFrom || value.valid_from === null;
+  const parsedValidFrom = omittedOrNull ? null : day(value.valid_from);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!valid_from || valid_from > businessToday || expected_version === null || expected_version < 1 ||
-      !reason.ok || !idempotency_key) {
+  if ((!omittedOrNull && (!parsedValidFrom || parsedValidFrom !== businessToday)) ||
+      expected_version === null || expected_version < 1 || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  return { ok: true, value: { valid_from, expected_version, reason: reason.value, idempotency_key } };
+  return { ok: true, value: { valid_from: parsedValidFrom, expected_version, reason: reason.value, idempotency_key } };
 }
 
 export type UnassignMembershipRequest = {
-  valid_to: string; expected_version: number; reason: string | null; idempotency_key: string;
+  valid_to: string | null; expected_version: number; reason: string | null; idempotency_key: string;
 };
 export function teamMembershipUnassignRequest(
   body: unknown,
@@ -266,18 +264,16 @@ export function teamMembershipUnassignRequest(
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
   const businessToday = resolveTeamMembershipBusinessTodayVn(todayVn);
-  const valid_to =
-    !hasValidTo || value.valid_to === null
-      ? businessToday
-      : day(value.valid_to);
+  const omittedOrNull = !hasValidTo || value.valid_to === null;
+  const parsedValidTo = omittedOrNull ? null : day(value.valid_to);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!valid_to || valid_to > businessToday || expected_version === null || expected_version < 1 || !reason.ok ||
-      !idempotency_key) {
+  if ((!omittedOrNull && (!parsedValidTo || parsedValidTo !== businessToday)) ||
+      expected_version === null || expected_version < 1 || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  return { ok: true, value: { valid_to, expected_version, reason: reason.value, idempotency_key } };
+  return { ok: true, value: { valid_to: parsedValidTo, expected_version, reason: reason.value, idempotency_key } };
 }
 
 async function runMutation<T>(

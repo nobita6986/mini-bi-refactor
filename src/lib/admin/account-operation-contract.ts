@@ -149,7 +149,7 @@ export type CreatePersonnelFromAccountRequest = {
   /** Login ID selected in the eligible-account list; DB revalidates against Auth. */
   personnel_code: string;
   personnel_position: PersonnelPosition;
-  valid_from: string;
+  valid_from: string | null;
   reason: string | null;
   idempotency_key: string;
 };
@@ -174,13 +174,15 @@ export function parseCreatePersonnelFromAccount(
     ? body.personnel_code : null;
   const personnel_position = body.personnel_position === "STAFF" || body.personnel_position === "TEAM_LEADER"
     ? body.personnel_position : null;
-  const valid_from = body.valid_from === undefined || body.valid_from === null
-    ? businessToday
+  const omittedOrNull = body.valid_from === undefined || body.valid_from === null;
+  const valid_from = omittedOrNull
+    ? null
     : (typeof body.valid_from === "string" && DATE.test(body.valid_from) ? body.valid_from : null);
   const reason = projectOptionalActionReason(body.reason, REASON_MAX);
   const idempotency_key = uuid(body.idempotency_key);
   if (!account_ref || expected_account_version === null || expected_account_version < 1 || !personnel_code ||
-      !personnel_position || !valid_from || valid_from > businessToday || !reason.ok || !idempotency_key) {
+      !personnel_position || (!omittedOrNull && (!valid_from || valid_from !== businessToday)) ||
+      !reason.ok || !idempotency_key) {
     return { ok: false, code: "ACCOUNT_OPERATION_INVALID" };
   }
   return { ok: true, value: { account_ref, expected_account_version, personnel_code,

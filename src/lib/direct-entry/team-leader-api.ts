@@ -149,7 +149,7 @@ export function teamLeaderCandidateQuery(url: URL): Parsed<TeamLeaderCandidateQu
 }
 
 type DesignateRequest = {
-  leader_app_user_id: string; effective_date: string; expected_version: number;
+  leader_app_user_id: string; effective_date: string | null; expected_version: number;
   reason: string | null; idempotency_key: string;
 };
 type RevokeRequest = Omit<DesignateRequest, "leader_app_user_id">;
@@ -189,13 +189,12 @@ export function designateRequest(value: unknown, todayVn?: string): Parsed<Desig
   ])) return { ok: false, response: fail("LEADER_INVALID", 400) };
   const businessToday = resolveBusinessTodayVn(todayVn);
   const leader_app_user_id = uuid(value.leader_app_user_id);
-  const effective_date = value.effective_date === undefined || value.effective_date === null
-    ? businessToday
-    : date(value.effective_date);
+  const omittedOrNull = value.effective_date === undefined || value.effective_date === null;
+  const effective_date = omittedOrNull ? null : date(value.effective_date);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!leader_app_user_id || !effective_date || effective_date > businessToday ||
+  if (!leader_app_user_id || (!omittedOrNull && (!effective_date || effective_date !== businessToday)) ||
       expected_version === null || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("LEADER_INVALID", 400) };
   }
@@ -209,14 +208,13 @@ export function revokeRequest(value: unknown, todayVn?: string): Parsed<RevokeRe
     "effective_date", "expected_version", "idempotency_key", "reason",
   ])) return { ok: false, response: fail("LEADER_INVALID", 400) };
   const businessToday = resolveBusinessTodayVn(todayVn);
-  const effective_date = value.effective_date === undefined || value.effective_date === null
-    ? businessToday
-    : date(value.effective_date);
+  const omittedOrNull = value.effective_date === undefined || value.effective_date === null;
+  const effective_date = omittedOrNull ? null : date(value.effective_date);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!effective_date || effective_date > businessToday || expected_version === null ||
-      !reason.ok || !idempotency_key) {
+  if ((!omittedOrNull && (!effective_date || effective_date !== businessToday)) ||
+      expected_version === null || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("LEADER_INVALID", 400) };
   }
   return { ok: true, value: { effective_date, expected_version, reason: reason.value, idempotency_key } };

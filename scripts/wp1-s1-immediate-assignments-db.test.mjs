@@ -49,9 +49,12 @@ import {
   revokeRequest as teamLeaderRevokeRequest,
 } from "../src/lib/direct-entry/team-leader-api.ts";
 import {
+  assignTeamMembership,
   teamMembershipAssignRequest,
   teamMembershipUnassignRequest,
+  unassignTeamMembership,
 } from "../src/lib/direct-entry/team-membership-api.ts";
+import { createTeamMembershipRepository } from "../src/lib/direct-entry/team-membership-repository.ts";
 import { parsePatchAdminConfigBody } from "../src/lib/leave/leave-contract.ts";
 import {
   parseAssignGlobalRoleBody as validateAssignGlobalRoleBody,
@@ -152,6 +155,8 @@ async function setBusinessDate(db, isoDate) {
     $function$;
     revoke all on function public.direct_entry_authorization_date() from public, anon, authenticated, service_role;
   `);
+  await db.query("select set_config('direct_entry.test_authorization_date', $1, false)", [isoDate]);
+  await db.query("select set_config('leave.test_business_date', $1, false)", [isoDate]);
 }
 
 async function captureEffectiveAuthorizationSnapshot(db, asOfDate) {
@@ -240,27 +245,44 @@ async function captureEffectiveAuthorizationSnapshot(db, asOfDate) {
   };
 }
 
-test("WP1/S1: API & contract layers reject future effective/end dates and default omitted dates to server today", async () => {
+test("WP1/S1: API & contract layers reject future and past effective/end dates and keep omitted dates null for server derivation", async () => {
   const serverToday = "2026-11-12";
   const futureDate = "2026-11-13";
+  const pastDate = "2026-11-11";
   const validUuid = "2a000000-0000-4000-8000-000000000005";
   const validTeamUuid = "9a000000-0000-4000-8000-0000000000a1";
   const validIdem = "5a000000-0000-4000-8000-000000000001";
 
   // 1. Accounting department membership contract
-  const acctAssignFuture = validateAssignAccountingMemberBody(
-    {
-      account_ref: validUuid,
-      expected_pair_version: 0,
-      effective_from: futureDate,
-      reason: "Test future date rejection",
-      idempotency_key: validIdem,
-    },
-    validIdem,
-    serverToday,
-  );
-  assert.equal(acctAssignFuture.ok, false);
-  assert.equal(acctAssignFuture.code, "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID");
+  for (const invalidDate of [futureDate, pastDate]) {
+    const acctAssignInvalid = validateAssignAccountingMemberBody(
+      {
+        account_ref: validUuid,
+        expected_pair_version: 0,
+        effective_from: invalidDate,
+        reason: "Test non-today date rejection",
+        idempotency_key: validIdem,
+      },
+      validIdem,
+      serverToday,
+    );
+    assert.equal(acctAssignInvalid.ok, false);
+    assert.equal(acctAssignInvalid.code, "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID");
+
+    const acctEndInvalid = validateEndAccountingMemberBody(
+      validUuid,
+      {
+        expected_pair_version: 1,
+        effective_to: invalidDate,
+        reason: "Test non-today end rejection",
+        idempotency_key: validIdem,
+      },
+      validIdem,
+      serverToday,
+    );
+    assert.equal(acctEndInvalid.ok, false);
+    assert.equal(acctEndInvalid.code, "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID");
+  }
 
   const acctAssignDefault = validateAssignAccountingMemberBody(
     {
@@ -275,176 +297,221 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
   assert.equal(acctAssignDefault.ok, true);
   assert.equal(acctAssignDefault.value.effective_from, null);
 
-  const acctEndFuture = validateEndAccountingMemberBody(
-    validUuid,
-    {
-      expected_pair_version: 1,
-      effective_to: futureDate,
-      reason: "Test future end rejection",
-      idempotency_key: validIdem,
-    },
-    validIdem,
-    serverToday,
-  );
-  assert.equal(acctEndFuture.ok, false);
-  assert.equal(acctEndFuture.code, "DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID");
-
-  // 2. Vendor Finance governance contracts
-  assert.equal(
-    validateAssignProjectAccountantBody(
-      {
-        project_id: PROJECT_1,
-        account_ref: validUuid,
-        expected_pair_version: 0,
-        effective_from: futureDate,
-        reason: "Future project accountant",
-        idempotency_key: validIdem,
-      },
-      validIdem,
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateEndProjectAccountantBody(
-      {
-        assignment_id: validUuid,
-        expected_version: 1,
-        effective_to: futureDate,
-        reason: "Future end project accountant",
-        idempotency_key: validIdem,
-      },
-      validIdem,
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateAssignGlobalRoleBody(
-      {
-        account_ref: validUuid,
-        role_code: "VENDOR_FINANCE_GLOBAL_VIEWER",
-        expected_pair_version: 0,
-        effective_from: futureDate,
-        reason: "Future global role",
-        idempotency_key: validIdem,
-      },
-      validIdem,
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateEndGlobalRoleBody(
-      {
-        grant_id: validUuid,
-        expected_version: 1,
-        effective_to: futureDate,
-        reason: "Future end global role",
-        idempotency_key: validIdem,
-      },
-      validIdem,
-      serverToday,
-    ).ok,
-    false,
-  );
+  // 2. Vendor Finance governance contracts (future and past rejected)
+  for (const invalidDate of [futureDate, pastDate]) {
+    assert.equal(
+      validateAssignProjectAccountantBody(
+        {
+          project_id: PROJECT_1,
+          account_ref: validUuid,
+          expected_pair_version: 0,
+          effective_from: invalidDate,
+          reason: "Invalid project accountant date",
+          idempotency_key: validIdem,
+        },
+        validIdem,
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateEndProjectAccountantBody(
+        {
+          assignment_id: validUuid,
+          expected_version: 1,
+          effective_to: invalidDate,
+          reason: "Invalid end project accountant date",
+          idempotency_key: validIdem,
+        },
+        validIdem,
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateAssignGlobalRoleBody(
+        {
+          account_ref: validUuid,
+          role_code: "VENDOR_FINANCE_GLOBAL_VIEWER",
+          expected_pair_version: 0,
+          effective_from: invalidDate,
+          reason: "Invalid global role date",
+          idempotency_key: validIdem,
+        },
+        validIdem,
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateEndGlobalRoleBody(
+        {
+          grant_id: validUuid,
+          expected_version: 1,
+          effective_to: invalidDate,
+          reason: "Invalid end global role date",
+          idempotency_key: validIdem,
+        },
+        validIdem,
+        serverToday,
+      ).ok,
+      false,
+    );
+  }
 
   // 3. Attendance branch & slot policy assignment contracts
-  assert.equal(
-    validateAssignBranchBody(
-      {
-        target_app_user_id: validUuid,
-        branch_id: BRANCH_1,
-        valid_from: futureDate,
-        expected_version: 1,
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateUnassignBranchBody(
-      {
-        assignment_id: BRANCH_1,
-        valid_to: futureDate,
-        expected_version: 1,
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateAssignSlotPolicyBody(
-      {
-        target_app_user_id: validUuid,
-        profile_id: BRANCH_1,
-        valid_from: futureDate,
-        expected_version: 1,
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateUnassignSlotPolicyBody(
-      {
-        assignment_id: BRANCH_1,
-        valid_to: futureDate,
-        expected_version: 1,
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
+  for (const invalidDate of [futureDate, pastDate]) {
+    assert.equal(
+      validateAssignBranchBody(
+        {
+          target_app_user_id: validUuid,
+          branch_id: BRANCH_1,
+          valid_from: invalidDate,
+          expected_version: 1,
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateUnassignBranchBody(
+        {
+          assignment_id: BRANCH_1,
+          valid_to: invalidDate,
+          expected_version: 1,
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateAssignSlotPolicyBody(
+        {
+          target_app_user_id: validUuid,
+          profile_id: BRANCH_1,
+          valid_from: invalidDate,
+          expected_version: 1,
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateUnassignSlotPolicyBody(
+        {
+          assignment_id: BRANCH_1,
+          valid_to: invalidDate,
+          expected_version: 1,
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+  }
 
   // 4. Personnel from account & Project-Team scope contracts
-  assert.equal(
-    validateCreatePersonnelFromAccountBody(
-      {
-        app_user_id: validUuid,
-        display_name: "Test Person",
-        personnel_position: "STAFF",
-        hrp_valid_from: futureDate,
-        reason: "Future hrp_valid_from",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
-  assert.equal(
-    validateProjectTeamScopeRevokeBody(
-      {
-        project_id: PROJECT_1,
-        team_id: validTeamUuid,
-        valid_from: "2026-01-01",
-        valid_to: futureDate,
-        expected_version: 1,
-        reason: "Future revoke",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
+  for (const invalidDate of [futureDate, pastDate]) {
+    assert.equal(
+      validateCreatePersonnelFromAccountBody(
+        {
+          app_user_id: validUuid,
+          display_name: "Test Person",
+          personnel_position: "STAFF",
+          hrp_valid_from: invalidDate,
+          reason: "Non-today hrp_valid_from",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateProjectTeamScopeRevokeBody(
+        {
+          project_id: PROJECT_1,
+          team_id: validTeamUuid,
+          valid_from: "2026-01-01",
+          valid_to: invalidDate,
+          expected_version: 1,
+          reason: "Non-today revoke",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+  }
 
   // 5. Team Membership, Team Leader, Project Manager, and Leave Department Approver API request validators
-  assert.equal(
-    teamMembershipAssignRequest(
-      {
-        valid_from: futureDate,
-        expected_version: 1,
-        reason: "Future assign",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
+  for (const invalidDate of [futureDate, pastDate]) {
+    assert.equal(
+      teamMembershipAssignRequest(
+        {
+          valid_from: invalidDate,
+          expected_version: 1,
+          reason: "Non-today assign",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      teamMembershipUnassignRequest(
+        {
+          valid_to: invalidDate,
+          expected_version: 1,
+          reason: "Non-today unassign",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      teamLeaderDesignateRequest(
+        {
+          leader_app_user_id: validUuid,
+          effective_date: invalidDate,
+          expected_version: 1,
+          reason: "Non-today designate leader",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      teamLeaderRevokeRequest(
+        {
+          effective_date: invalidDate,
+          expected_version: 1,
+          reason: "Non-today revoke leader",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      projectAdminAssignRequest(
+        {
+          manager_recruiter_id: validUuid,
+          valid_from: invalidDate,
+          expected_project_version: 1,
+          reason: "Non-today PM assign",
+          idempotency_key: validIdem,
+        },
+        serverToday,
+      ).ok,
+      false,
+    );
+  }
+
   const tmAssignDefault = teamMembershipAssignRequest(
     {
       expected_version: 1,
@@ -454,20 +521,8 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
     serverToday,
   );
   assert.equal(tmAssignDefault.ok, true);
-  assert.equal(tmAssignDefault.value.valid_from, serverToday);
+  assert.equal(tmAssignDefault.value.valid_from, null);
 
-  assert.equal(
-    teamMembershipUnassignRequest(
-      {
-        valid_to: futureDate,
-        expected_version: 1,
-        reason: "Future unassign",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
   const tmUnassignDefault = teamMembershipUnassignRequest(
     {
       expected_version: 1,
@@ -477,21 +532,8 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
     serverToday,
   );
   assert.equal(tmUnassignDefault.ok, true);
-  assert.equal(tmUnassignDefault.value.valid_to, serverToday);
+  assert.equal(tmUnassignDefault.value.valid_to, null);
 
-  assert.equal(
-    teamLeaderDesignateRequest(
-      {
-        leader_app_user_id: validUuid,
-        effective_date: futureDate,
-        expected_version: 1,
-        reason: "Future designate leader",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
   const tlDesignateDefault = teamLeaderDesignateRequest(
     {
       leader_app_user_id: validUuid,
@@ -502,20 +544,8 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
     serverToday,
   );
   assert.equal(tlDesignateDefault.ok, true);
-  assert.equal(tlDesignateDefault.value.effective_date, serverToday);
+  assert.equal(tlDesignateDefault.value.effective_date, null);
 
-  assert.equal(
-    teamLeaderRevokeRequest(
-      {
-        effective_date: futureDate,
-        expected_version: 1,
-        reason: "Future revoke leader",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
   const tlRevokeDefault = teamLeaderRevokeRequest(
     {
       expected_version: 1,
@@ -525,21 +555,8 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
     serverToday,
   );
   assert.equal(tlRevokeDefault.ok, true);
-  assert.equal(tlRevokeDefault.value.effective_date, serverToday);
+  assert.equal(tlRevokeDefault.value.effective_date, null);
 
-  assert.equal(
-    projectAdminAssignRequest(
-      {
-        manager_recruiter_id: validUuid,
-        valid_from: futureDate,
-        expected_project_version: 1,
-        reason: "Future PM assign",
-        idempotency_key: validIdem,
-      },
-      serverToday,
-    ).ok,
-    false,
-  );
   const pmAssignDefault = projectAdminAssignRequest(
     {
       manager_recruiter_id: validUuid,
@@ -550,7 +567,7 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
     serverToday,
   );
   assert.equal(pmAssignDefault.ok, true);
-  assert.equal(pmAssignDefault.value.valid_from, serverToday);
+  assert.equal(pmAssignDefault.value.valid_from, null);
 
   const leaveRes = parsePatchAdminConfigBody(
     {
@@ -567,6 +584,21 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
   assert.equal(leaveRes.ok, false);
   assert.equal(leaveRes.code, "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN");
 
+  const leavePastRes = parsePatchAdminConfigBody(
+    {
+      operation: "SET_DEPARTMENT_APPROVER",
+      unit_kind: "MARKETING",
+      approver_app_user_id: validUuid,
+      valid_from: pastDate,
+      expected_row_version: 0,
+      reason: "Past leave approver",
+      idempotency_key: validIdem,
+    },
+    serverToday,
+  );
+  assert.equal(leavePastRes.ok, false);
+  assert.equal(leavePastRes.code, "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN");
+
   const leaveDefault = parsePatchAdminConfigBody(
     {
       operation: "SET_DEPARTMENT_APPROVER",
@@ -580,6 +612,23 @@ test("WP1/S1: API & contract layers reject future effective/end dates and defaul
   );
   assert.equal(leaveDefault.ok, true);
   assert.equal(leaveDefault.data.valid_from, null);
+  const leaveDefaultTomorrow = parsePatchAdminConfigBody(
+    {
+      operation: "SET_DEPARTMENT_APPROVER",
+      unit_kind: "MARKETING",
+      approver_app_user_id: validUuid,
+      expected_row_version: 0,
+      reason: "Default leave approver today",
+      idempotency_key: validIdem,
+    },
+    futureDate,
+  );
+  assert.equal(leaveDefaultTomorrow.ok, true);
+  assert.equal(
+    leaveDefault.data.request_fingerprint,
+    leaveDefaultTomorrow.data.request_fingerprint,
+    "Cross-midnight leave department approver request fingerprint must remain identical when valid_from is omitted",
+  );
 });
 
 test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Immediate Handover, and Day-Boundary Stability", async () => {
@@ -738,55 +787,86 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       "WP1 migration must produce 0 diff in effective permissions and preserve pre-existing rows untouched",
     );
 
-    // 6. Verify RPC Future-Date Rejection (`ERRCODE = '22023'`) across all WP1 RPCs
-    const assertFutureRpcRejected = async (label, sql, params) => {
+    // 6. Verify RPC Future-Date AND Past-Date Rejection (`ERRCODE = '22023'`) across all WP1 RPCs
+    const YESTERDAY = "2026-11-11";
+    const assertInvalidDateRpcRejected = async (label, sql, params) => {
       await assert.rejects(
         () => db.query(sql, params),
         (err) => err.code === "22023",
-        `${label} must reject future date with ERRCODE 22023`,
+        `${label} must reject non-today date with ERRCODE 22023`,
       );
     };
 
-    await assertFutureRpcRejected(
-      "direct_entry_assign_team_membership",
-      "select public.direct_entry_assign_team_membership($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 1, 'Reason', 'idem-f1')",
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, TEAM_B, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "direct_entry_move_team_membership",
-      "select public.direct_entry_move_team_membership($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 1, 'Reason', 'idem-f2')",
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, TEAM_B, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "direct_entry_unassign_team_membership",
-      "select public.direct_entry_unassign_team_membership($1::uuid, $2::uuid, $3::uuid, $4::date, 1, 'Reason', 'idem-f3')",
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "direct_entry_designate_team_leader",
-      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 2, 'Reason', 'idem-f4')",
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, ACTORS.leader2.app, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "direct_entry_revoke_team_leader",
-      "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, $4::date, 2, 'Reason', 'idem-f5')",
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "org_department_assign_accounting_member",
-      "select public.org_department_assign_accounting_member($1::uuid, $2::uuid, $3::uuid, 0, $4::date, 'Reason', '6a000000-0000-4000-8000-000000000001'::uuid, 'fp-f6')",
-      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.acctUser.app, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "vendor_finance_assign_global_role_admin",
-      "select public.vendor_finance_assign_global_role_admin($1::uuid, $2::uuid, $3::uuid, 'VENDOR_FINANCE_GLOBAL_VIEWER', 0, $4::date, 'Reason', '6a000000-0000-4000-8000-000000000002'::uuid, 'fp-f7')",
-      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.vfinViewer.app, TOMORROW],
-    );
-    await assertFutureRpcRejected(
-      "leave_management_set_department_approver_admin",
-      "select public.leave_management_set_department_approver_admin($1::uuid, $2::uuid, 'MARKETING', $3::uuid, $4::date, 1, 'Reason', 'idem-f8', 'fp-f8')",
-      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.mktApprover2.app, TOMORROW],
-    );
+    for (const [tag, badDate] of [
+      ["future", TOMORROW],
+      ["past", YESTERDAY],
+    ]) {
+      await assertInvalidDateRpcRejected(
+        `direct_entry_assign_team_membership (${tag})`,
+        "select public.direct_entry_assign_team_membership($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 1, 'Reason', $6)",
+        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, TEAM_B, badDate, `idem-f1-${tag}`],
+      );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_move_team_membership (${tag})`,
+        "select public.direct_entry_move_team_membership($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 1, 'Reason', $6)",
+        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, TEAM_B, badDate, `idem-f2-${tag}`],
+      );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_unassign_team_membership (${tag})`,
+        "select public.direct_entry_unassign_team_membership($1::uuid, $2::uuid, $3::uuid, $4::date, 1, 'Reason', $5)",
+        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, badDate, `idem-f3-${tag}`],
+      );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_designate_team_leader (${tag})`,
+        "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 2, 'Reason', $6)",
+        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, ACTORS.leader2.app, badDate, `idem-f4-${tag}`],
+      );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_revoke_team_leader (${tag})`,
+        "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, $4::date, 2, 'Reason', $5)",
+        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, badDate, `idem-f5-${tag}`],
+      );
+      await assertInvalidDateRpcRejected(
+        `org_department_assign_accounting_member (${tag})`,
+        "select public.org_department_assign_accounting_member($1::uuid, $2::uuid, $3::uuid, 0, $4::date, 'Reason', $5::uuid, $6)",
+        [
+          ACTORS.fullAdmin.auth,
+          ACTORS.fullAdmin.app,
+          ACTORS.acctUser.app,
+          badDate,
+          tag === "future"
+            ? "6a000000-0000-4000-8000-000000000001"
+            : "6a000000-0000-4000-8000-000000000011",
+          `fp-f6-${tag}`,
+        ],
+      );
+      await assertInvalidDateRpcRejected(
+        `vendor_finance_assign_global_role_admin (${tag})`,
+        "select public.vendor_finance_assign_global_role_admin($1::uuid, $2::uuid, $3::uuid, 'VENDOR_FINANCE_GLOBAL_VIEWER', 0, $4::date, 'Reason', $5::uuid, $6)",
+        [
+          ACTORS.fullAdmin.auth,
+          ACTORS.fullAdmin.app,
+          ACTORS.vfinViewer.app,
+          badDate,
+          tag === "future"
+            ? "6a000000-0000-4000-8000-000000000002"
+            : "6a000000-0000-4000-8000-000000000012",
+          `fp-f7-${tag}`,
+        ],
+      );
+      await assertInvalidDateRpcRejected(
+        `leave_management_set_department_approver_admin (${tag})`,
+        "select public.leave_management_set_department_approver_admin($1::uuid, $2::uuid, 'MARKETING', $3::uuid, $4::date, 1, 'Reason', $5, $6)",
+        [
+          ACTORS.fullAdmin.auth,
+          ACTORS.fullAdmin.app,
+          ACTORS.mktApprover2.app,
+          badDate,
+          `idem-f8-${tag}`,
+          `fp-f8-${tag}`,
+        ],
+      );
+    }
 
     // -------------------------------------------------------------------------
     // 7. Dedicated Suite A: Team Leader Handover (`direct_entry_apply_team_leader_mutation`)
@@ -981,6 +1061,209 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       snapshotStartOfTomorrow.leaveRoutings,
       snapshotEndOfToday.leaveRoutings,
       "Crossing a day boundary without a write must not change leave_management__internal_resolve_routing",
+    );
+
+    // -------------------------------------------------------------------------
+    // 11. Dedicated Suite D: Cross-Midnight Idempotency Replay (RPC & API)
+    //     Retrying the same request with the same Idempotency-Key after the
+    //     server business date changes from TODAY (2026-11-12) to TOMORROW (2026-11-13)
+    //     must replay the committed result rather than raising 22023.
+    // -------------------------------------------------------------------------
+    const {
+      rows: [{ result: staff1UnassignedReplayTomorrow }],
+    } = await db.query(
+      `select public.direct_entry_unassign_team_membership(
+         $1::uuid, $2::uuid, $3::uuid, null, 1, 'End team membership immediately', 'wp1-unassign-staff1'
+       ) as result`,
+      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter],
+    );
+    assert.deepEqual(
+      staff1UnassignedReplayTomorrow,
+      staff1Unassigned,
+      "Cross-midnight RPC retry of direct_entry_unassign_team_membership must return committed result",
+    );
+
+    const {
+      rows: [{ result: tlReplacedReplayTomorrow }],
+    } = await db.query(
+      `select public.direct_entry_designate_team_leader(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, null, 2, 'Immediate handover to Leader 2', 'wp1-tl-handover-1'
+       ) as result`,
+      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, ACTORS.leader2.app],
+    );
+    assert.deepEqual(
+      tlReplacedReplayTomorrow,
+      tlReplaced,
+      "Cross-midnight RPC retry of direct_entry_designate_team_leader must return committed result",
+    );
+
+    const {
+      rows: [{ result: mktHandoverReplayTomorrow }],
+    } = await db.query(
+      `select public.leave_management_set_department_approver_admin(
+         $1::uuid, $2::uuid, 'MARKETING', $3::uuid, null, 1,
+         'Immediate Marketing approver handover', 'wp1-mkt-handover-1', 'fp-mkt-handover-1'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.mktApprover2.app],
+    );
+    assert.equal(mktHandoverReplayTomorrow.replayed, true);
+    assert.equal(mktHandoverReplayTomorrow.department_approver.valid_from, TODAY);
+
+    // End-to-end API + Repository + DB cross-midnight retry for assignTeamMembership & unassignTeamMembership
+    const pgliteRepo = createTeamMembershipRepository(async (fnName, args) => {
+      try {
+        if (fnName === "direct_entry_assign_team_membership") {
+          const { rows } = await db.query(
+            `select public.direct_entry_assign_team_membership(
+               $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::int, $7::text, $8::text
+             ) as data`,
+            [
+              args.p_auth_subject,
+              args.p_app_user_id,
+              args.p_recruiter_id,
+              args.p_team_id,
+              args.p_valid_from,
+              args.p_expected_version,
+              args.p_reason,
+              args.p_idempotency_key,
+            ],
+          );
+          return { data: rows[0].data, error: null };
+        }
+        if (fnName === "direct_entry_unassign_team_membership") {
+          const { rows } = await db.query(
+            `select public.direct_entry_unassign_team_membership(
+               $1::uuid, $2::uuid, $3::uuid, $4::date, $5::int, $6::text, $7::text
+             ) as data`,
+            [
+              args.p_auth_subject,
+              args.p_app_user_id,
+              args.p_recruiter_id,
+              args.p_valid_to,
+              args.p_expected_version,
+              args.p_reason,
+              args.p_idempotency_key,
+            ],
+          );
+          return { data: rows[0].data, error: null };
+        }
+        return { data: null, error: { code: "XX000", message: "Unsupported RPC in test" } };
+      } catch (err) {
+        return { data: null, error: { code: err.code, message: err.message } };
+      }
+    });
+
+    const apiDeps = {
+      resolveSession: async () => ({
+        actor: {
+          ok: true,
+          actor: {
+            auth_subject: ACTORS.catalogOp.auth,
+            app_user_id: ACTORS.catalogOp.app,
+          },
+        },
+      }),
+      repository: pgliteRepo,
+    };
+
+    const assignKeyAcrossMidnight = "7a000000-0000-4000-8000-000000000001";
+    const makeAssignReq = () =>
+      new Request(
+        `https://app.test/api/admin/catalog/personnel/${ACTORS.staff1.recruiter}/team-memberships/${TEAM_A}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.test",
+            host: "app.test",
+            "sec-fetch-site": "same-origin",
+            "idempotency-key": assignKeyAcrossMidnight,
+          },
+          body: JSON.stringify({
+            expected_version: 2,
+            reason: "Re-assign staff1 on 2026-11-13 before midnight",
+            idempotency_key: assignKeyAcrossMidnight,
+          }),
+        },
+      );
+
+    // Execute initial assign on 2026-11-13 (TOMORROW)
+    const assignRes1 = await assignTeamMembership(
+      makeAssignReq(),
+      ACTORS.staff1.recruiter,
+      TEAM_A,
+      "true",
+      apiDeps,
+    );
+    assert.equal(assignRes1.status, 200);
+    const assignBody1 = await assignRes1.json();
+    assert.equal(assignBody1.ok, true);
+    assert.equal(assignBody1.membership.valid_from, TOMORROW);
+
+    // Advance clock across midnight to 2026-11-14 and retry the exact same API request
+    const DAY_AFTER_TOMORROW = "2026-11-14";
+    await setBusinessDate(db, DAY_AFTER_TOMORROW);
+    const assignRes2 = await assignTeamMembership(
+      makeAssignReq(),
+      ACTORS.staff1.recruiter,
+      TEAM_A,
+      "true",
+      apiDeps,
+    );
+    assert.equal(assignRes2.status, 200);
+    const assignBody2 = await assignRes2.json();
+    assert.deepEqual(
+      assignBody2,
+      assignBody1,
+      "Cross-midnight API retry of assignTeamMembership must replay 200 OK with committed payload",
+    );
+
+    // Now test unassignTeamMembership API retry across midnight (2026-11-14 -> 2026-11-15)
+    const unassignKeyAcrossMidnight = "7a000000-0000-4000-8000-000000000002";
+    const makeUnassignReq = () =>
+      new Request(
+        `https://app.test/api/admin/catalog/personnel/${ACTORS.staff1.recruiter}/team-memberships/unassign`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.test",
+            host: "app.test",
+            "sec-fetch-site": "same-origin",
+            "idempotency-key": unassignKeyAcrossMidnight,
+          },
+          body: JSON.stringify({
+            expected_version: 3,
+            reason: "Unassign staff1 before midnight",
+            idempotency_key: unassignKeyAcrossMidnight,
+          }),
+        },
+      );
+
+    const unassignRes1 = await unassignTeamMembership(
+      makeUnassignReq(),
+      ACTORS.staff1.recruiter,
+      "true",
+      apiDeps,
+    );
+    assert.equal(unassignRes1.status, 200);
+    const unassignBody1 = await unassignRes1.json();
+    assert.equal(unassignBody1.ok, true);
+    assert.equal(unassignBody1.membership.valid_to, DAY_AFTER_TOMORROW);
+
+    await setBusinessDate(db, "2026-11-15");
+    const unassignRes2 = await unassignTeamMembership(
+      makeUnassignReq(),
+      ACTORS.staff1.recruiter,
+      "true",
+      apiDeps,
+    );
+    assert.equal(unassignRes2.status, 200);
+    const unassignBody2 = await unassignRes2.json();
+    assert.deepEqual(
+      unassignBody2,
+      unassignBody1,
+      "Cross-midnight API retry of unassignTeamMembership must replay 200 OK with committed payload",
     );
   } finally {
     await db.close();

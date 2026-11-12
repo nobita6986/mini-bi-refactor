@@ -366,13 +366,13 @@ test("ACL, Full Admin & Team Leader scoping, filter_options isolation, submitted
 
     await db.query(
       `select public.direct_entry_designate_team_leader(
-         $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-01-15'::date, 1, 'Designate Leader A', $5
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'Designate Leader A', $5
        )`,
       [FULL_ADMIN.auth, FULL_ADMIN.app, TEAM_A, LEADER_A.app, nextKey("desig_a")],
     );
     await db.query(
       `select public.direct_entry_designate_team_leader(
-         $1::uuid, $2::uuid, $3::uuid, $4::uuid, '2026-01-15'::date, 1, 'Designate Leader B', $5
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, 1, 'Designate Leader B', $5
        )`,
       [FULL_ADMIN.auth, FULL_ADMIN.app, TEAM_B, LEADER_B.app, nextKey("desig_b")],
     );
@@ -936,7 +936,7 @@ test("ACL, Full Admin & Team Leader scoping, filter_options isolation, submitted
     // Revoking Team Leader A immediately removes readable submissions access
     await db.query(
       `select public.direct_entry_revoke_team_leader(
-         $1::uuid, $2::uuid, $3::uuid, '2026-02-01'::date, 2, 'Revoke Leader A', $4
+         $1::uuid, $2::uuid, $3::uuid, null::date, 2, 'Revoke Leader A', $4
        )`,
       [FULL_ADMIN.auth, FULL_ADMIN.app, TEAM_A, nextKey("revoke_a")],
     );

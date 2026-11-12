@@ -45,15 +45,15 @@ export type TeamMembershipRepository = {
     search: string | null; page: number; page_size: number;
   }): Promise<TeamMembershipOutcome<AdminTeamMembershipList>>;
   assignMembership(input: AdminActorRef & {
-    recruiter_id: string; team_id: string; valid_from: string; expected_version: number;
+    recruiter_id: string; team_id: string; valid_from: string | null; expected_version: number;
     reason: string | null; idempotency_key: string;
   }): Promise<TeamMembershipOutcome<AdminTeamMembershipMutation>>;
   moveMembership(input: AdminActorRef & {
-    recruiter_id: string; team_id: string; valid_from: string; expected_version: number;
+    recruiter_id: string; team_id: string; valid_from: string | null; expected_version: number;
     reason: string | null; idempotency_key: string;
   }): Promise<TeamMembershipOutcome<AdminTeamMembershipMutation>>;
   unassignMembership(input: AdminActorRef & {
-    recruiter_id: string; valid_to: string; expected_version: number;
+    recruiter_id: string; valid_to: string | null; expected_version: number;
     reason: string | null; idempotency_key: string;
   }): Promise<TeamMembershipOutcome<AdminTeamMembershipMutation>>;
 };

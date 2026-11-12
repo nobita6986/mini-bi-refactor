@@ -483,11 +483,14 @@ test("reconciliation, reverse, sub-ledger classification, admin governance, and 
   assert.equal(revDefaultDate.value.effective_date, null);
 
   // Admin parsers: project accountant assign/end, project-vendor link, global role assign/end
+  const todayVn = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(new Date());
   const assignPa = parseAssignProjectAccountantBody(
     {
       project_id: "PRJ_NORTH",
       accountant_ref: ACC_A,
-      valid_from: "2026-10-01",
+      valid_from: todayVn,
       expected_version: 0,
       reason: "Phân công ban đầu",
       idempotency_key: IDEM_1,
@@ -499,7 +502,7 @@ test("reconciliation, reverse, sub-ledger classification, admin governance, and 
   const endPa = parseEndProjectAccountantBody(
     {
       expected_version: 1,
-      valid_to: "2026-10-31",
+      valid_to: todayVn,
       reason: "Bàn giao cuối tháng",
       idempotency_key: IDEM_1,
     },
