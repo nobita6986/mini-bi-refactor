@@ -488,9 +488,9 @@ export function ProjectTeamScopeManager() {
               ) : dialog ? (
                 <>
                   <p>Bạn sắp thu hồi mapping <strong>{dialog.mapping.project_display_name}</strong> ↔ <strong>{dialog.mapping.team_display_name}</strong> (version {dialog.mapping.version}).</p>
-                  <label className="flex flex-col gap-1 text-sm font-medium">Ngày kết thúc (để trống = hôm nay)
-                    <input type="date" value={revokeEffectiveTo} onChange={(e) => setRevokeEffectiveTo(e.target.value)} className={input} />
-                  </label>
+                  <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+                    Hiệu lực thu hồi được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
+                  </div>
                 </>
               ) : null}
               <label className="flex flex-col gap-1 text-sm font-medium">Lý do thao tác (không bắt buộc)

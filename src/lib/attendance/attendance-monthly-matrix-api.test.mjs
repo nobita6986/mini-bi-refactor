@@ -2227,7 +2227,7 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     null,
   );
 
-  assert.equal(rpcCalls.length, 6);
+  assert.equal(rpcCalls.length, 5);
   assert.equal(rpcCalls[0].name, "attendance_upsert_slot_policy_profile_admin");
   assert.deepEqual(rpcCalls[0].args, {
     p_auth_subject: AUTH_SUBJECT,
@@ -2281,8 +2281,8 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     },
   );
   assert.equal(updateDivergentProfileRes.status, 200);
-  assert.equal(rpcCalls[6].name, "attendance_upsert_slot_policy_profile_admin");
-  assert.deepEqual(rpcCalls[6].args, {
+  assert.equal(rpcCalls[5].name, "attendance_upsert_slot_policy_profile_admin");
+  assert.deepEqual(rpcCalls[5].args, {
     p_auth_subject: AUTH_SUBJECT,
     p_app_user_id: APP_USER_ID,
     p_profile_id: PROFILE_ID,
@@ -2309,8 +2309,8 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     }),
   });
 
-  assert.equal(rpcCalls[3].name, "attendance_assign_employee_slot_policy_admin");
-  assert.deepEqual(rpcCalls[3].args, {
+  assert.equal(rpcCalls[2].name, "attendance_assign_employee_slot_policy_admin");
+  assert.deepEqual(rpcCalls[2].args, {
     p_auth_subject: AUTH_SUBJECT,
     p_app_user_id: APP_USER_ID,
     p_target_app_user_id: STAFF_USER_ID,
@@ -2327,8 +2327,8 @@ test("Multi-Profile Slot Policy Admin contracts, API handlers, and repository RP
     }),
   });
 
-  assert.equal(rpcCalls[5].name, "attendance_unassign_employee_slot_policy_admin");
-  assert.deepEqual(rpcCalls[5].args, {
+  assert.equal(rpcCalls[4].name, "attendance_unassign_employee_slot_policy_admin");
+  assert.deepEqual(rpcCalls[4].args, {
     p_auth_subject: AUTH_SUBJECT,
     p_app_user_id: APP_USER_ID,
     p_assignment_id: ASSIGNMENT_ID,

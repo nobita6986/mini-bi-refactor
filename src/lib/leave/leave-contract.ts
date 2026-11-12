@@ -114,6 +114,7 @@ export type LeaveErrorCode =
   | "LEAVE_PROFILE_OFFICIAL_DATE_INVALID"
   | "LEAVE_SENIORITY_CONFIG_FORBIDDEN"
   | "LEAVE_DEPARTMENT_APPROVER_ADMIN_FORBIDDEN"
+  | "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN"
   | "LEAVE_UNIT_KIND_INVALID"
   | "LEAVE_APPROVER_USER_NOT_FOUND"
   | "LEAVE_MODULE_GRANT_ADMIN_FORBIDDEN"
@@ -171,6 +172,7 @@ export function leaveHttpStatusForError(code: LeaveErrorCode): number {
     case "LEAVE_CARRY_OVER_EXPIRY_NOT_CONFIGURED":
     case "LEAVE_OPENING_BATCH_VALIDATION_FAILED":
     case "LEAVE_REPORT_EXPORT_LIMIT_EXCEEDED":
+    case "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN":
       return 422;
     case "LEAVE_UNAVAILABLE":
       return 503;
@@ -864,6 +866,7 @@ export function parseGetAdminOverviewQuery(
 
 export function parsePatchAdminConfigBody(
   body: unknown,
+  todayVn?: string | null,
 ): { ok: true; data: PatchAdminConfigInput } | { ok: false; code: LeaveErrorCode } {
   if (!isPlainObject(body)) {
     return { ok: false, code: "INVALID_REQUEST" };
@@ -1033,6 +1036,15 @@ export function parsePatchAdminConfigBody(
     if (approverAppUserId === undefined) {
       return { ok: false, code: "INVALID_REQUEST" };
     }
+    const businessToday =
+      typeof todayVn === "string" && isValidIsoDate(todayVn)
+        ? todayVn.trim()
+        : new Intl.DateTimeFormat("en-CA", {
+            timeZone: "Asia/Ho_Chi_Minh",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }).format(new Date());
     const validFrom =
       body.valid_from === null || body.valid_from === undefined
         ? null
@@ -1041,6 +1053,9 @@ export function parsePatchAdminConfigBody(
           : undefined;
     if (validFrom === undefined) {
       return { ok: false, code: "INVALID_REQUEST" };
+    }
+    if (validFrom !== null && validFrom > businessToday) {
+      return { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN" };
     }
 
     const request_fingerprint = sha256Hex({

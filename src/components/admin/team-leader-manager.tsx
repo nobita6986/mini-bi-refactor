@@ -607,13 +607,9 @@ export function TeamLeaderManager({
                         ) : null}
                       </>
                     ) : null}
-                    <label htmlFor="team-leader-effective-date" className="block text-sm font-medium">
-                      Ngày hiệu lực
-                      <input id="team-leader-effective-date" type="date" required
-                        value={form.effectiveDate}
-                        onChange={(event) => setForm({ ...form, effectiveDate: event.currentTarget.value })}
-                        className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-md border border-border bg-background px-3 text-base sm:text-sm" />
-                    </label>
+                    <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+                      Ngày hiệu lực hệ thống: <span className="font-mono font-semibold text-foreground">{form.effectiveDate || currentList?.authorization_date || "Hôm nay (giờ Việt Nam)"}</span> (áp dụng ngay khi lưu).
+                    </div>
                     <label htmlFor="team-leader-reason" className="block text-sm font-medium">
                       Lý do thay đổi (không bắt buộc)
                       <textarea id="team-leader-reason" value={form.reason} maxLength={4000} rows={3}

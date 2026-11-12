@@ -27,6 +27,18 @@ import {
 const LOGIN_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NAME_MAX = 256;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function resolveBusinessTodayVn(todayVn?: string): string {
+  return todayVn && DATE.test(todayVn)
+    ? todayVn
+    : VIETNAM_DATE_FORMATTER.format(new Date());
+}
 
 function passwordOk(password: string): string | null {
   if (password.length < MIN_PASSWORD_BYTES) return "Mật khẩu phải có ít nhất 8 ký tự.";
@@ -120,17 +132,26 @@ export function buildPersonnelFromAccountRequest(input: {
   expectedAccountVersion: number;
   loginId: string;
   personnelPosition: string;
-  validFrom: string;
+  validFrom?: string | null;
+  todayVn?: string;
   reason?: string | null;
   idempotencyKey: string;
 }): RequestResult {
+  const businessToday = resolveBusinessTodayVn(input.todayVn);
+  const validFrom = typeof input.validFrom === "string" && input.validFrom.trim() !== ""
+    ? input.validFrom.trim()
+    : businessToday;
   const failure = validateUuid(input.accountRef)
     ?? validateVersion(input.expectedAccountVersion) ?? (input.expectedAccountVersion < 1
       ? "Dữ liệu chưa hợp lệ. Vui lòng tải lại." : null)
     ?? (LOGIN_ID.test(input.loginId) ? null : "Tài khoản không có mã đăng nhập hợp lệ.")
     ?? (input.personnelPosition !== "STAFF" && input.personnelPosition !== "TEAM_LEADER"
       ? "Vị trí nhân sự không hợp lệ." : null)
-    ?? (DATE.test(input.validFrom) ? null : "Ngày hiệu lực HRP không hợp lệ.")
+    ?? (!DATE.test(validFrom)
+      ? "Ngày hiệu lực HRP không hợp lệ."
+      : validFrom > businessToday
+        ? "Ngày hiệu lực HRP không được ở tương lai."
+        : null)
     ?? validateReason(input.reason) ?? validateUuid(input.idempotencyKey);
   if (failure) return { ok: false, message: failure };
   return {
@@ -140,7 +161,7 @@ export function buildPersonnelFromAccountRequest(input: {
       expected_account_version: input.expectedAccountVersion,
       personnel_code: input.loginId,
       personnel_position: input.personnelPosition,
-      valid_from: input.validFrom,
+      valid_from: validFrom,
       reason: normalizeOptionalActionReason(input.reason),
       idempotency_key: input.idempotencyKey,
     },

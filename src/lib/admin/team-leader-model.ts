@@ -104,22 +104,54 @@ export type TeamLeaderIntent = {
 
 type MutationInput = {
   teamId: string;
-  effectiveDate: string;
+  effectiveDate?: string | null;
+  todayVn?: string;
   expectedVersion: number;
   reason?: string | null;
   idempotencyKey: string;
 };
 
+const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function resolveBusinessTodayVn(todayVn?: string): string {
+  return todayVn && parseIsoDate(todayVn) !== null
+    ? todayVn
+    : VIETNAM_DATE_FORMATTER.format(new Date());
+}
+
+function validateImmediateEffectiveDate(
+  rawDate: string | null | undefined,
+  todayVn?: string,
+): { ok: true; value: string } | { ok: false; message: string } {
+  const businessToday = resolveBusinessTodayVn(todayVn);
+  const normalized = typeof rawDate === "string" && rawDate.trim() !== ""
+    ? rawDate.trim()
+    : businessToday;
+  if (!parseIsoDate(normalized)) {
+    return { ok: false, message: "Ngày hiệu lực không hợp lệ." };
+  }
+  if (normalized > businessToday) {
+    return { ok: false, message: "Ngày hiệu lực không được ở tương lai." };
+  }
+  return { ok: true, value: normalized };
+}
+
 export function buildTeamLeaderDesignation(input: MutationInput & {
   leaderAppUserId: string;
   change: "designate" | "replace";
 }): { ok: true; intent: TeamLeaderIntent } | { ok: false; message: string } {
+  const effectiveDate = validateImmediateEffectiveDate(input.effectiveDate, input.todayVn);
   const failure = validateUuid(input.teamId) ?? validateUuid(input.leaderAppUserId) ??
-    (parseIsoDate(input.effectiveDate) ? null : "Ngày hiệu lực không hợp lệ.") ??
+    (effectiveDate.ok ? null : effectiveDate.message) ??
     validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu nhóm chưa hợp lệ. Vui lòng tải lại."
       : null) ?? validateReason(input.reason) ?? validateUuid(input.idempotencyKey);
-  if (failure) return { ok: false, message: failure };
+  if (failure || !effectiveDate.ok) return { ok: false, message: failure ?? "Ngày hiệu lực không hợp lệ." };
   return {
     ok: true,
     intent: {
@@ -128,7 +160,7 @@ export function buildTeamLeaderDesignation(input: MutationInput & {
       url: `/api/admin/catalog/teams/${encodeURIComponent(input.teamId)}/leaders`,
       body: {
         leader_app_user_id: input.leaderAppUserId,
-        effective_date: input.effectiveDate,
+        effective_date: effectiveDate.value,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,
@@ -140,12 +172,13 @@ export function buildTeamLeaderDesignation(input: MutationInput & {
 export function buildTeamLeaderRevocation(input: MutationInput): {
   ok: true; intent: TeamLeaderIntent;
 } | { ok: false; message: string } {
+  const effectiveDate = validateImmediateEffectiveDate(input.effectiveDate, input.todayVn);
   const failure = validateUuid(input.teamId) ??
-    (parseIsoDate(input.effectiveDate) ? null : "Ngày hiệu lực không hợp lệ.") ??
+    (effectiveDate.ok ? null : effectiveDate.message) ??
     validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu nhóm chưa hợp lệ. Vui lòng tải lại."
       : null) ?? validateReason(input.reason) ?? validateUuid(input.idempotencyKey);
-  if (failure) return { ok: false, message: failure };
+  if (failure || !effectiveDate.ok) return { ok: false, message: failure ?? "Ngày hiệu lực không hợp lệ." };
   return {
     ok: true,
     intent: {
@@ -153,7 +186,7 @@ export function buildTeamLeaderRevocation(input: MutationInput): {
       change: "revoke",
       url: `/api/admin/catalog/teams/${encodeURIComponent(input.teamId)}/leaders/revoke`,
       body: {
-        effective_date: input.effectiveDate,
+        effective_date: effectiveDate.value,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,

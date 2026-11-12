@@ -843,9 +843,22 @@ export function newDepartmentIdempotencyKey(): string {
   return newIdempotencyKey();
 }
 
+function resolveDepartmentUiBusinessToday(authorizationDate?: string | null): string {
+  if (typeof authorizationDate === "string" && isValidIsoCalendarDate(authorizationDate)) {
+    return authorizationDate;
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 export function buildAssignAccountingMemberRequest(input: {
   accountRef: string;
   expectedPairVersion: number;
+  authorizationDate?: string | null;
   effectiveFrom?: string | null;
   reason: string;
   idempotencyKey: string;
@@ -859,11 +872,18 @@ export function buildAssignAccountingMemberRequest(input: {
     return { ok: false, message: "Phiên bản đồng bộ tài khoản không hợp lệ. Vui lòng tải lại danh sách ứng viên." };
   }
 
+  const businessToday = resolveDepartmentUiBusinessToday(input.authorizationDate);
   const rawEffectiveFrom = typeof input.effectiveFrom === "string" ? input.effectiveFrom.trim() : "";
   let effectiveFrom: string | null = null;
   if (rawEffectiveFrom.length > 0) {
     if (!isValidIsoCalendarDate(rawEffectiveFrom)) {
       return { ok: false, message: "Ngày bắt đầu hiệu lực không hợp lệ (định dạng YYYY-MM-DD)." };
+    }
+    if (rawEffectiveFrom > businessToday) {
+      return {
+        ok: false,
+        message: `Ngày bắt đầu hiệu lực không được lớn hơn ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
     }
     effectiveFrom = rawEffectiveFrom;
   }
@@ -918,6 +938,7 @@ export function buildEndAccountingMemberRequest(input: {
     return { ok: false, message: "Dữ liệu ngày bắt đầu không hợp lệ. Vui lòng tải lại danh sách." };
   }
 
+  const businessToday = resolveDepartmentUiBusinessToday(input.authorizationDate);
   const rawEffectiveTo = typeof input.effectiveTo === "string" ? input.effectiveTo.trim() : "";
   let effectiveTo: string | null = null;
   if (rawEffectiveTo.length > 0) {
@@ -936,14 +957,10 @@ export function buildEndAccountingMemberRequest(input: {
         message: `Ngày kết thúc không được nhỏ hơn ngày bắt đầu hiệu lực (${input.validFrom}).`,
       };
     }
-    if (
-      typeof input.authorizationDate === "string" &&
-      isValidIsoCalendarDate(input.authorizationDate) &&
-      rawEffectiveTo > input.authorizationDate
-    ) {
+    if (rawEffectiveTo > businessToday) {
       return {
         ok: false,
-        message: `Ngày kết thúc không được lớn hơn ngày nghiệp vụ hiện tại (${input.authorizationDate}).`,
+        message: `Ngày kết thúc không được lớn hơn ngày nghiệp vụ hiện tại (${businessToday}).`,
       };
     }
     effectiveTo = rawEffectiveTo;

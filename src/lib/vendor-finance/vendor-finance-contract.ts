@@ -2210,6 +2210,18 @@ export function parseFinalizeVendorFinanceEvidenceBody(
   return { ok: true };
 }
 
+function resolveVendorFinanceBusinessTodayVn(todayVn?: string | null): string {
+  if (typeof todayVn === "string" && isRealCalendarDate(todayVn)) {
+    return todayVn;
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 // 6. Full-Admin Project Accountant Assignment & End
 export type AssignProjectAccountantBody = {
   project_id: string;
@@ -2223,6 +2235,7 @@ export type AssignProjectAccountantBody = {
 export function parseAssignProjectAccountantBody(
   body: unknown,
   idempotencyHeader: string | null,
+  todayVn?: string | null,
 ):
   | { ok: true; value: AssignProjectAccountantBody }
   | { ok: false; code: VendorFinanceErrorCode } {
@@ -2254,10 +2267,14 @@ export function parseAssignProjectAccountantBody(
     return { ok: false, code: "VENDOR_FINANCE_ASSIGNMENT_INVALID" };
   }
 
+  const businessToday = resolveVendorFinanceBusinessTodayVn(todayVn);
   let validFrom: string | null = null;
   if (body.valid_from !== undefined && body.valid_from !== null) {
     const parsedDate = parseBusinessCalendarDate(body.valid_from);
     if (!parsedDate.ok) return parsedDate;
+    if (parsedDate.date > businessToday) {
+      return { ok: false, code: "VENDOR_FINANCE_DATE_INVALID" };
+    }
     validFrom = parsedDate.date;
   }
 
@@ -2298,6 +2315,7 @@ export type EndProjectAccountantBody = {
 export function parseEndProjectAccountantBody(
   body: unknown,
   idempotencyHeader: string | null,
+  todayVn?: string | null,
 ):
   | { ok: true; value: EndProjectAccountantBody }
   | { ok: false; code: VendorFinanceErrorCode } {
@@ -2321,10 +2339,14 @@ export function parseEndProjectAccountantBody(
     return { ok: false, code: "VENDOR_FINANCE_ASSIGNMENT_INVALID" };
   }
 
+  const businessToday = resolveVendorFinanceBusinessTodayVn(todayVn);
   let validTo: string | null = null;
   if (body.valid_to !== undefined && body.valid_to !== null) {
     const parsedDate = parseBusinessCalendarDate(body.valid_to);
     if (!parsedDate.ok) return parsedDate;
+    if (parsedDate.date > businessToday) {
+      return { ok: false, code: "VENDOR_FINANCE_DATE_INVALID" };
+    }
     validTo = parsedDate.date;
   }
 
@@ -2357,6 +2379,7 @@ export type AssignGlobalRoleBody = {
 export function parseAssignGlobalRoleBody(
   body: unknown,
   idempotencyHeader: string | null,
+  todayVn?: string | null,
 ):
   | { ok: true; value: AssignGlobalRoleBody }
   | { ok: false; code: VendorFinanceErrorCode } {
@@ -2392,10 +2415,14 @@ export function parseAssignGlobalRoleBody(
     return { ok: false, code: "VENDOR_FINANCE_GLOBAL_ROLE_INVALID" };
   }
 
+  const businessToday = resolveVendorFinanceBusinessTodayVn(todayVn);
   let validFrom: string | null = null;
   if (body.valid_from !== undefined && body.valid_from !== null) {
     const parsedDate = parseBusinessCalendarDate(body.valid_from);
     if (!parsedDate.ok) return parsedDate;
+    if (parsedDate.date > businessToday) {
+      return { ok: false, code: "VENDOR_FINANCE_DATE_INVALID" };
+    }
     validFrom = parsedDate.date;
   }
 
@@ -2436,10 +2463,11 @@ export type EndGlobalRoleBody = {
 export function parseEndGlobalRoleBody(
   body: unknown,
   idempotencyHeader: string | null,
+  todayVn?: string | null,
 ):
   | { ok: true; value: EndGlobalRoleBody }
   | { ok: false; code: VendorFinanceErrorCode } {
-  const parsed = parseEndProjectAccountantBody(body, idempotencyHeader);
+  const parsed = parseEndProjectAccountantBody(body, idempotencyHeader, todayVn);
   if (!parsed.ok && parsed.code === "VENDOR_FINANCE_ASSIGNMENT_INVALID") {
     return { ok: false, code: "VENDOR_FINANCE_GLOBAL_ROLE_INVALID" };
   }

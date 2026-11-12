@@ -8,6 +8,18 @@ import { hasExactKeysWithOptionalReason, projectOptionalActionReason } from "../
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROJECT_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function resolveBusinessTodayVn(todayVn?: string): string {
+  return todayVn && DATE.test(todayVn)
+    ? todayVn
+    : VIETNAM_DATE_FORMATTER.format(new Date());
+}
 
 export type ProjectTeamScopeMapping = {
   mapping_id: string;
@@ -252,17 +264,24 @@ export type RevokeRequest = {
   reason: string | null;
   idempotency_key: string;
 };
-export function parseRevoke(body: unknown): Parsed<RevokeRequest> {
-  if (!isRecord(body) || !hasExactKeysWithOptionalReason(body, [
+export function parseRevoke(body: unknown, todayVn?: string): Parsed<RevokeRequest> {
+  if (!isRecord(body)) return reject();
+  const normalized = "effective_to" in body ? body : { ...body, effective_to: null };
+  if (!hasExactKeysWithOptionalReason(normalized, [
     "mapping_id", "effective_to", "reason", "idempotency_key",
   ])) return reject();
+  const businessToday = resolveBusinessTodayVn(todayVn);
   const mapping_id = uuid(body.mapping_id);
   const effective_to_raw = body.effective_to;
-  const effective_to = effective_to_raw === null ? null : day(effective_to_raw);
+  const effective_to = effective_to_raw === undefined || effective_to_raw === null
+    ? null
+    : day(effective_to_raw);
   const reason = projectOptionalActionReason(body.reason, 4000);
   const idempotency_key = uuid(body.idempotency_key);
-  if (!mapping_id || effective_to_raw === undefined ||
-      (effective_to_raw !== null && effective_to === null) || !reason.ok || !idempotency_key) {
+  if (!mapping_id ||
+      (effective_to_raw !== undefined && effective_to_raw !== null && effective_to === null) ||
+      (effective_to !== null && effective_to > businessToday) ||
+      !reason.ok || !idempotency_key) {
     return reject();
   }
   return { ok: true, value: { mapping_id, effective_to, reason: reason.value, idempotency_key } };

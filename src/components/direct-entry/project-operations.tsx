@@ -1056,12 +1056,11 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
                     </span>
                   ) : null}
                 </Field>
-                <Field id="manager-from" label="Hiệu lực từ">
-                  <input id="manager-from" type="date" className={inputClass} value={validFrom}
-                    required onChange={(event) => setValidFrom(event.target.value)} />
-                </Field>
+                <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+                  Ngày hiệu lực phân công được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
+                </div>
                 <button type="button" className={buttonClass}
-                  disabled={!managerId || !validFrom}
+                  disabled={!managerId}
                   onClick={() => {
                     setPending([...pending, { managerRecruiterId: managerId, validFrom }]);
                     setManagerId("");
@@ -1073,7 +1072,7 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
                   {pending.map((row, index) => (
                     <li key={row.managerRecruiterId + String(index)}
                       className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/5 p-2">
-                      <span>{managerLabel(row.managerRecruiterId) + " · " + row.validFrom}</span>
+                      <span>{managerLabel(row.managerRecruiterId) + (row.validFrom ? " · " + row.validFrom : "")}</span>
                       <button type="button" className={buttonClass}
                         onClick={() => setPending(pending.filter((_, i) => i !== index))}>
                         Bỏ

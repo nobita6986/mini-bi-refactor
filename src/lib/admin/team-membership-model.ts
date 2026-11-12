@@ -105,10 +105,23 @@ function mutationPath(recruiterId: string, teamId?: string, move = false): strin
   }`;
 }
 
+function resolveTeamMembershipUiToday(todayVn?: string | null): string {
+  if (typeof todayVn === "string" && parseIsoDate(todayVn) !== null) {
+    return todayVn;
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 export function buildAssignMembershipRequest(input: {
   recruiterId: string;
   teamId: string;
-  validFrom: string;
+  validFrom?: string | null;
+  todayVn?: string | null;
   expectedVersion: number;
   reason?: string | null;
   idempotencyKey: string;
@@ -116,7 +129,15 @@ export function buildAssignMembershipRequest(input: {
 }): { ok: true; request: MembershipMutationRequest } | { ok: false; message: string } {
   const url = mutationPath(input.recruiterId, input.teamId, input.move === true);
   if (url === null) return { ok: false, message: "Hồ sơ hoặc nhóm không hợp lệ." };
-  const failure = (parseIsoDate(input.validFrom) ? null : "Ngày hiệu lực không hợp lệ.")
+  const businessToday = resolveTeamMembershipUiToday(input.todayVn);
+  const rawValidFrom = typeof input.validFrom === "string" ? input.validFrom.trim() : "";
+  const effectiveValidFrom = rawValidFrom.length === 0 ? businessToday : rawValidFrom;
+  const dateFailure = !parseIsoDate(effectiveValidFrom)
+    ? "Ngày hiệu lực không hợp lệ."
+    : effectiveValidFrom > businessToday
+      ? "Ngày hiệu lực không được ở tương lai."
+      : null;
+  const failure = dateFailure
     ?? validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu hồ sơ chưa hợp lệ. Vui lòng tải lại."
       : null)
@@ -128,7 +149,7 @@ export function buildAssignMembershipRequest(input: {
     request: {
       url,
       body: {
-        valid_from: input.validFrom,
+        valid_from: effectiveValidFrom,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,
@@ -140,14 +161,23 @@ export function buildAssignMembershipRequest(input: {
 
 export function buildUnassignMembershipRequest(input: {
   recruiterId: string;
-  validTo: string;
+  validTo?: string | null;
+  todayVn?: string | null;
   expectedVersion: number;
   reason?: string | null;
   idempotencyKey: string;
 }): { ok: true; request: MembershipMutationRequest } | { ok: false; message: string } {
   const url = mutationPath(input.recruiterId);
   if (url === null) return { ok: false, message: "Hồ sơ không hợp lệ." };
-  const failure = (parseIsoDate(input.validTo) ? null : "Ngày kết thúc không hợp lệ.")
+  const businessToday = resolveTeamMembershipUiToday(input.todayVn);
+  const rawValidTo = typeof input.validTo === "string" ? input.validTo.trim() : "";
+  const effectiveValidTo = rawValidTo.length === 0 ? businessToday : rawValidTo;
+  const dateFailure = !parseIsoDate(effectiveValidTo)
+    ? "Ngày kết thúc không hợp lệ."
+    : effectiveValidTo > businessToday
+      ? "Ngày kết thúc không được ở tương lai."
+      : null;
+  const failure = dateFailure
     ?? validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu hồ sơ chưa hợp lệ. Vui lòng tải lại."
       : null)
@@ -159,7 +189,7 @@ export function buildUnassignMembershipRequest(input: {
     request: {
       url,
       body: {
-        valid_to: input.validTo,
+        valid_to: effectiveValidTo,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,

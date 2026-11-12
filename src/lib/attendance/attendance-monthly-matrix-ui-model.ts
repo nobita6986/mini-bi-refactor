@@ -1839,8 +1839,9 @@ export function buildUpsertBranchPayload(input: {
 export function buildAssignEmployeeToBranchPayload(input: {
   appUserId: string;
   branch: { branch_id: string; active: boolean; version: number } | null;
-  validFrom: string;
+  validFrom?: string;
   idempotencyKey: string;
+  todayVn?: string;
 }): BranchMutationPayloadResult {
   const userId = input.appUserId.trim().toLowerCase();
   if (!UUID_PATTERN.test(userId)) {
@@ -1863,13 +1864,22 @@ export function buildAssignEmployeeToBranchPayload(input: {
     return { ok: false, message: "Phiên bản chi nhánh không hợp lệ. Vui lòng tải lại." };
   }
 
-  const trimmedValidFrom = input.validFrom.trim();
+  const trimmedValidFrom = typeof input.validFrom === "string" ? input.validFrom.trim() : "";
   let validFrom: string | null = null;
   if (trimmedValidFrom !== "") {
     if (!isValidIsoCalendarDate(trimmedValidFrom)) {
       return { ok: false, message: "Ngày bắt đầu hiệu lực phải đúng định dạng YYYY-MM-DD." };
     }
+    if (input.todayVn && trimmedValidFrom > input.todayVn) {
+      return {
+        ok: false,
+        message:
+          "Không được đặt ngày hiệu lực phân công chi nhánh trong tương lai. Phân công có hiệu lực ngay từ hôm nay.",
+      };
+    }
     validFrom = trimmedValidFrom;
+  } else if (input.todayVn && isValidIsoCalendarDate(input.todayVn)) {
+    validFrom = input.todayVn;
   }
 
   const key = input.idempotencyKey.trim().toLowerCase();
@@ -1890,17 +1900,27 @@ export function buildAssignEmployeeToBranchPayload(input: {
 }
 
 export function buildUnassignEmployeeFromBranchPayload(input: {
-  validTo: string;
+  validTo?: string;
   expectedVersion: number;
   idempotencyKey: string;
+  todayVn?: string;
 }): BranchMutationPayloadResult {
-  const trimmedValidTo = input.validTo.trim();
+  const trimmedValidTo = typeof input.validTo === "string" ? input.validTo.trim() : "";
   let validTo: string | null = null;
   if (trimmedValidTo !== "") {
     if (!isValidIsoCalendarDate(trimmedValidTo)) {
       return { ok: false, message: "Ngày kết thúc hiệu lực phải đúng định dạng YYYY-MM-DD." };
     }
+    if (input.todayVn && trimmedValidTo > input.todayVn) {
+      return {
+        ok: false,
+        message:
+          "Không được đặt ngày kết thúc phân công chi nhánh trong tương lai. Việc kết thúc có hiệu lực ngay từ hôm nay.",
+      };
+    }
     validTo = trimmedValidTo;
+  } else if (input.todayVn && isValidIsoCalendarDate(input.todayVn)) {
+    validTo = input.todayVn;
   }
 
   if (
@@ -1930,6 +1950,13 @@ export function mapBranchAdminMutationError(
   status: number,
   code: string | null,
 ): { isConflict: boolean; message: string } {
+  if (code === "ATTENDANCE_BRANCH_ASSIGNMENT_FUTURE_DATE") {
+    return {
+      isConflict: false,
+      message:
+        "Không được đặt ngày hiệu lực phân công/kết thúc phân công chi nhánh trong tương lai. Mọi thay đổi có hiệu lực ngay từ hôm nay.",
+    };
+  }
   if (code === "ATTENDANCE_BRANCH_CODE_CONFLICT") {
     return {
       isConflict: true,

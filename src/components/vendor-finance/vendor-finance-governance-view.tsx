@@ -1045,7 +1045,7 @@ function AssignProjectAccountantDialog({
   const [accountantRef, setAccountantRef] = useState(
     () => eligibleAccountants[0]?.account_ref ?? "",
   );
-  const [validFrom, setValidFrom] = useState(defaultDate);
+  const validFrom = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1144,21 +1144,10 @@ function AssignProjectAccountantDialog({
           </select>
         </div>
 
-        <div>
-          <label
-            htmlFor={`${formId}-valid-from`}
-            className="block text-sm font-medium text-foreground mb-1"
-          >
-            Ngày bắt đầu hiệu lực
-          </label>
-          <input
-            id={`${formId}-valid-from`}
-            type="date"
-            value={validFrom}
-            onChange={(e) => setValidFrom(e.target.value)}
-            disabled={submitting}
-            className="min-h-11 sm:min-h-10 w-full rounded-xl border border-border bg-surface px-3 text-sm text-foreground font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
+        <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
+          Ngày bắt đầu hiệu lực:{" "}
+          <strong className="font-mono text-foreground">{validFrom}</strong> (áp dụng ngay theo
+          ngày nghiệp vụ hệ thống).
         </div>
 
         <div>
@@ -1214,7 +1203,7 @@ function EndProjectAccountantDialog({
 }) {
   const formId = useId();
   const current = project.current_assignment!;
-  const [validTo, setValidTo] = useState(defaultDate);
+  const validTo = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1287,21 +1276,10 @@ function EndProjectAccountantDialog({
           </Alert>
         ) : null}
 
-        <div>
-          <label
-            htmlFor={`${formId}-valid-to`}
-            className="block text-sm font-medium text-foreground mb-1"
-          >
-            Ngày kết thúc hiệu lực (mốc bàn giao `[valid_from, valid_to)`)
-          </label>
-          <input
-            id={`${formId}-valid-to`}
-            type="date"
-            value={validTo}
-            onChange={(e) => setValidTo(e.target.value)}
-            disabled={submitting}
-            className="min-h-11 sm:min-h-10 w-full rounded-xl border border-border bg-surface px-3 text-sm text-foreground font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
+        <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
+          Ngày kết thúc hiệu lực (mốc bàn giao <code className="font-mono">[valid_from, valid_to)</code>):{" "}
+          <strong className="font-mono text-foreground">{validTo}</strong> (áp dụng ngay theo ngày
+          nghiệp vụ hệ thống).
         </div>
 
         <div>
@@ -1365,7 +1343,7 @@ function AssignGlobalRoleDialog({
     () => availableCandidates[0]?.account.account_ref ?? "",
   );
   const [roleCode, setRoleCode] = useState<VendorFinanceGlobalRoleCode>("GLOBAL_RECONCILER");
-  const [validFrom, setValidFrom] = useState(defaultDate);
+  const validFrom = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1507,21 +1485,10 @@ function AssignGlobalRoleDialog({
           ) : null}
         </div>
 
-        <div>
-          <label
-            htmlFor={`${formId}-valid-from`}
-            className="block text-sm font-medium text-foreground mb-1"
-          >
-            Ngày bắt đầu hiệu lực
-          </label>
-          <input
-            id={`${formId}-valid-from`}
-            type="date"
-            value={validFrom}
-            onChange={(e) => setValidFrom(e.target.value)}
-            disabled={submitting}
-            className="min-h-11 sm:min-h-10 w-full rounded-xl border border-border bg-surface px-3 text-sm text-foreground font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
+        <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
+          Ngày bắt đầu hiệu lực:{" "}
+          <strong className="font-mono text-foreground">{validFrom}</strong> (áp dụng ngay theo
+          ngày nghiệp vụ hệ thống).
         </div>
 
         <div>
@@ -1583,7 +1550,7 @@ function EndGlobalRoleDialog({
   onCompleted: () => void;
 }) {
   const formId = useId();
-  const [validTo, setValidTo] = useState(defaultDate);
+  const validTo = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1654,21 +1621,10 @@ function EndGlobalRoleDialog({
           </Alert>
         ) : null}
 
-        <div>
-          <label
-            htmlFor={`${formId}-valid-to`}
-            className="block text-sm font-medium text-foreground mb-1"
-          >
-            Ngày kết thúc hiệu lực
-          </label>
-          <input
-            id={`${formId}-valid-to`}
-            type="date"
-            value={validTo}
-            onChange={(e) => setValidTo(e.target.value)}
-            disabled={submitting}
-            className="min-h-11 sm:min-h-10 w-full rounded-xl border border-border bg-surface px-3 text-sm text-foreground font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
+        <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
+          Ngày kết thúc hiệu lực:{" "}
+          <strong className="font-mono text-foreground">{validTo}</strong> (áp dụng ngay theo ngày
+          nghiệp vụ hệ thống).
         </div>
 
         <div>

@@ -291,7 +291,6 @@ export function LeaveManagementWorkspace({
   // Admin Department Approver Form State
   const [deptUnitKind, setDeptUnitKind] = useState<LeaveDepartmentApproverUnitKind>("MARKETING");
   const [deptApproverUserId, setDeptApproverUserId] = useState<string>("");
-  const [deptValidFrom, setDeptValidFrom] = useState<string>(() => todayVietnamIsoDate());
   const [deptReason, setDeptReason] = useState<string>("");
   const [savingDeptApprover, setSavingDeptApprover] = useState<boolean>(false);
 
@@ -953,7 +952,7 @@ export function LeaveManagementWorkspace({
           operation: "SET_DEPARTMENT_APPROVER",
           unit_kind: deptUnitKind,
           approver_app_user_id: deptApproverUserId.trim(),
-          valid_from: deptValidFrom,
+          valid_from: adminData.as_of_date || todayVietnamIsoDate(),
           expected_row_version: existingCurrent?.row_version ?? 0,
           reason: deptReason.trim() || null,
           idempotency_key: newClientIdempotencyKey("leave-dept-approver"),
@@ -2810,17 +2809,12 @@ export function LeaveManagementWorkspace({
                           </select>
                         </div>
                         <div>
-                          <label className="block text-xs font-medium text-muted mb-1">
+                          <span className="block text-xs font-medium text-muted mb-1">
                             Hiệu lực từ ngày
-                          </label>
-                          <input
-                            type="date"
-                            required
-                            disabled={!authority.is_full_admin && !authority.is_bod}
-                            value={deptValidFrom}
-                            onChange={(e) => setDeptValidFrom(e.target.value)}
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          />
+                          </span>
+                          <div className="flex min-h-10 items-center rounded-lg border border-border bg-surface-muted/60 px-3 py-1.5 text-sm font-mono text-foreground">
+                            {adminData.as_of_date || todayVietnamIsoDate()} (ngay lập tức)
+                          </div>
                         </div>
                       </div>
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">

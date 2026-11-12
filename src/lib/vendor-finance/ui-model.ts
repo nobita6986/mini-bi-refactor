@@ -1657,10 +1657,24 @@ export function buildClassifySubLedgerRequest(input: {
   };
 }
 
+function resolveVendorFinanceUiToday(authorizationDate?: string | null): string {
+  if (typeof authorizationDate === "string") {
+    const parsed = validateUiCalendarDate(authorizationDate);
+    if (parsed.ok) return parsed.date;
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 export function buildAssignProjectAccountantRequest(input: {
   project_id: string;
   accountant_ref: string;
   valid_from?: string | null;
+  authorization_date?: string | null;
   expected_version: number;
   reason: string;
   idempotency_key: string;
@@ -1674,10 +1688,17 @@ export function buildAssignProjectAccountantRequest(input: {
   if (!isUuidString(input.accountant_ref)) {
     return { ok: false, message: "Vui lòng chọn kế toán phụ trách thuộc Phòng Kế toán." };
   }
+  const businessToday = resolveVendorFinanceUiToday(input.authorization_date);
   let validFrom: string | null = null;
   if (typeof input.valid_from === "string" && input.valid_from.trim().length > 0) {
     const parsedDate = validateUiCalendarDate(input.valid_from);
     if (!parsedDate.ok) return { ok: false, message: parsedDate.message };
+    if (parsedDate.date > businessToday) {
+      return {
+        ok: false,
+        message: `Ngày bắt đầu hiệu lực không được vượt quá ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
+    }
     validFrom = parsedDate.date;
   }
   if (!Number.isSafeInteger(input.expected_version) || input.expected_version < 0) {
@@ -1711,6 +1732,7 @@ export function buildAssignProjectAccountantRequest(input: {
 export function buildEndProjectAccountantRequest(input: {
   expected_version: number;
   valid_to?: string | null;
+  authorization_date?: string | null;
   reason: string;
   idempotency_key: string;
 }):
@@ -1719,10 +1741,17 @@ export function buildEndProjectAccountantRequest(input: {
   if (!Number.isSafeInteger(input.expected_version) || input.expected_version < 1) {
     return { ok: false, message: "Phiên bản phân công (OCC) không hợp lệ." };
   }
+  const businessToday = resolveVendorFinanceUiToday(input.authorization_date);
   let validTo: string | null = null;
   if (typeof input.valid_to === "string" && input.valid_to.trim().length > 0) {
     const parsedDate = validateUiCalendarDate(input.valid_to);
     if (!parsedDate.ok) return { ok: false, message: parsedDate.message };
+    if (parsedDate.date > businessToday) {
+      return {
+        ok: false,
+        message: `Ngày kết thúc hiệu lực không được vượt quá ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
+    }
     validTo = parsedDate.date;
   }
   const reason = validateUiReasonText(input.reason);
@@ -1752,6 +1781,7 @@ export function buildAssignGlobalRoleRequest(input: {
   account_ref: string;
   role_code: string;
   valid_from?: string | null;
+  authorization_date?: string | null;
   expected_version: number;
   reason: string;
   idempotency_key: string;
@@ -1764,10 +1794,17 @@ export function buildAssignGlobalRoleRequest(input: {
   if (!(VFIN_UI_GLOBAL_ROLE_CODES as readonly string[]).includes(input.role_code)) {
     return { ok: false, message: "Mã vai trò tài chính toàn cục không hợp lệ." };
   }
+  const businessToday = resolveVendorFinanceUiToday(input.authorization_date);
   let validFrom: string | null = null;
   if (typeof input.valid_from === "string" && input.valid_from.trim().length > 0) {
     const parsedDate = validateUiCalendarDate(input.valid_from);
     if (!parsedDate.ok) return { ok: false, message: parsedDate.message };
+    if (parsedDate.date > businessToday) {
+      return {
+        ok: false,
+        message: `Ngày bắt đầu hiệu lực không được vượt quá ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
+    }
     validFrom = parsedDate.date;
   }
   if (!Number.isSafeInteger(input.expected_version) || input.expected_version < 0) {
@@ -1801,6 +1838,7 @@ export function buildAssignGlobalRoleRequest(input: {
 export function buildEndGlobalRoleRequest(input: {
   expected_version: number;
   valid_to?: string | null;
+  authorization_date?: string | null;
   reason: string;
   idempotency_key: string;
 }):

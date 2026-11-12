@@ -682,18 +682,13 @@ export function PersonnelTeamMembershipManager({
                           : `Nhóm: ${operation.membership.team_display_name}. Hồ sơ vẫn được giữ; không có dữ liệu nào bị xóa.`}
                       </p>
                     )}
-                    <label htmlFor="membership-effective-date" className="block text-sm font-medium">
+                    <div className="rounded-md border border-border bg-surface-muted/60 px-3 py-2 text-sm text-muted">
                       {operation.kind === "close"
-                        ? operation.cancelScheduled ? "Ngày hủy lịch" : "Có hiệu lực đến ngày"
-                        : "Có hiệu lực từ ngày"} <span aria-hidden="true">*</span>
-                      <input id="membership-effective-date" type="date" required value={form.date}
-                        readOnly={operation.kind === "close" && operation.cancelScheduled}
-                        onChange={(event) => {
-                          const date = event.currentTarget.value;
-                          setActiveForm((value) => ({ ...value, date }));
-                        }}
-                        className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3" />
-                    </label>
+                        ? operation.cancelScheduled
+                          ? `Ngày hủy lịch: ${form.date}`
+                          : "Có hiệu lực đến ngày: Áp dụng ngay theo ngày nghiệp vụ hệ thống"
+                        : "Có hiệu lực từ ngày: Áp dụng ngay theo ngày nghiệp vụ hệ thống"}
+                    </div>
                     <label htmlFor="membership-reason" className="block text-sm font-medium">
                       Lý do thao tác (không bắt buộc)
                       <textarea id="membership-reason" maxLength={4000} rows={3} value={form.reason}

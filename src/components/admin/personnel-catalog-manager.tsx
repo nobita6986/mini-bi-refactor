@@ -1005,14 +1005,9 @@ export function PersonnelCatalogManager() {
                       </span>
                     </label>
                     {dialog?.kind === "create" ? (
-                      <Field
-                        id="personnel-valid-from"
-                        label="Ngày hiệu lực HRP"
-                        type="date"
-                        value={form.validFrom}
-                        required
-                        onChange={(value) => changeForm("validFrom", value)}
-                      />
+                      <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted sm:col-span-2">
+                        Ngày hiệu lực HRP được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
+                      </div>
                     ) : null}
                   </div>
                   <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />

@@ -197,6 +197,18 @@ export function teamMembershipListQuery(url: URL): Parsed<ListMembershipQuery> {
   return { ok: true, value: { state, recruiter_id, team_id, search, page, page_size } };
 }
 
+function resolveTeamMembershipBusinessTodayVn(todayVn?: string | null): string {
+  if (typeof todayVn === "string" && day(todayVn) !== null) {
+    return todayVn;
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 /**
  * The target team is a RESOURCE id taken from the URL path, never from the body:
  * the shared client-authority validator forbids client-supplied team fields, and a
@@ -205,16 +217,30 @@ export function teamMembershipListQuery(url: URL): Parsed<ListMembershipQuery> {
 export type AssignMembershipRequest = {
   valid_from: string; expected_version: number; reason: string | null; idempotency_key: string;
 };
-export function teamMembershipAssignRequest(body: unknown): Parsed<AssignMembershipRequest> {
+export function teamMembershipAssignRequest(
+  body: unknown,
+  todayVn?: string | null,
+): Parsed<AssignMembershipRequest> {
   const value = record(body);
-  if (!value || !exact(value, ["valid_from", "expected_version", "reason", "idempotency_key"])) {
+  if (!value) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  const valid_from = day(value.valid_from);
+  const hasValidFrom = Object.prototype.hasOwnProperty.call(value, "valid_from");
+  const expectedKeys = hasValidFrom
+    ? (["valid_from", "expected_version", "reason", "idempotency_key"] as const)
+    : (["expected_version", "reason", "idempotency_key"] as const);
+  if (!exact(value, expectedKeys)) {
+    return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
+  }
+  const businessToday = resolveTeamMembershipBusinessTodayVn(todayVn);
+  const valid_from =
+    !hasValidFrom || value.valid_from === null
+      ? businessToday
+      : day(value.valid_from);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!valid_from || expected_version === null || expected_version < 1 ||
+  if (!valid_from || valid_from > businessToday || expected_version === null || expected_version < 1 ||
       !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
@@ -224,16 +250,30 @@ export function teamMembershipAssignRequest(body: unknown): Parsed<AssignMembers
 export type UnassignMembershipRequest = {
   valid_to: string; expected_version: number; reason: string | null; idempotency_key: string;
 };
-export function teamMembershipUnassignRequest(body: unknown): Parsed<UnassignMembershipRequest> {
+export function teamMembershipUnassignRequest(
+  body: unknown,
+  todayVn?: string | null,
+): Parsed<UnassignMembershipRequest> {
   const value = record(body);
-  if (!value || !exact(value, ["valid_to", "expected_version", "reason", "idempotency_key"])) {
+  if (!value) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  const valid_to = day(value.valid_to);
+  const hasValidTo = Object.prototype.hasOwnProperty.call(value, "valid_to");
+  const expectedKeys = hasValidTo
+    ? (["valid_to", "expected_version", "reason", "idempotency_key"] as const)
+    : (["expected_version", "reason", "idempotency_key"] as const);
+  if (!exact(value, expectedKeys)) {
+    return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
+  }
+  const businessToday = resolveTeamMembershipBusinessTodayVn(todayVn);
+  const valid_to =
+    !hasValidTo || value.valid_to === null
+      ? businessToday
+      : day(value.valid_to);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!valid_to || expected_version === null || expected_version < 1 || !reason.ok ||
+  if (!valid_to || valid_to > businessToday || expected_version === null || expected_version < 1 || !reason.ok ||
       !idempotency_key) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }

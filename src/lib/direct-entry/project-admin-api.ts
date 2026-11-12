@@ -23,6 +23,18 @@ import { hasExactKeysWithOptionalReason, projectOptionalActionReason } from "./a
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const REASON_MAX = 4000;
+const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function resolveBusinessTodayVn(todayVn?: string): string {
+  return todayVn && DATE.test(todayVn)
+    ? todayVn
+    : VIETNAM_DATE_FORMATTER.format(new Date());
+}
 /** Gioi han do dai search cho bo chon candidate (display_name/personnel_code toi da 256). */
 const SEARCH_MAX = 256;
 /** Giong dung check constraint cua public.direct_entry_projects.project_id (defense in depth). */
@@ -208,20 +220,26 @@ export type AssignRequest = {
   manager_recruiter_id: string; valid_from: string;
   expected_project_version: number; reason: string | null; idempotency_key: string;
 };
-export function projectAdminAssignRequest(body: unknown): Parsed<AssignRequest> {
+export function projectAdminAssignRequest(body: unknown, todayVn?: string): Parsed<AssignRequest> {
   const value = record(body);
-  if (!value || !exact(value, mutationRequestKeys(
+  if (!value) {
+    return { ok: false, response: fail("PROJECT_INVALID", 400) };
+  }
+  const normalized = "valid_from" in value ? value : { ...value, valid_from: null };
+  if (!exact(normalized, mutationRequestKeys(
     ["manager_recruiter_id", "valid_from", "expected_project_version"]))) {
     return { ok: false, response: fail("PROJECT_INVALID", 400) };
   }
+  const businessToday = resolveBusinessTodayVn(todayVn);
   const manager_recruiter_id = uuid(value.manager_recruiter_id);
-  const valid_from = typeof value.valid_from === "string" && DATE.test(value.valid_from)
-    ? value.valid_from : null;
+  const valid_from = value.valid_from === undefined || value.valid_from === null
+    ? businessToday
+    : (typeof value.valid_from === "string" && DATE.test(value.valid_from) ? value.valid_from : null);
   const expected_project_version = version(value.expected_project_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!manager_recruiter_id || !valid_from || expected_project_version === null ||
-      !reason.ok || !idempotency_key) {
+  if (!manager_recruiter_id || !valid_from || valid_from > businessToday ||
+      expected_project_version === null || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("PROJECT_INVALID", 400) };
   }
   return { ok: true, value: { manager_recruiter_id, valid_from,
