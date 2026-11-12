@@ -1045,7 +1045,6 @@ function AssignProjectAccountantDialog({
   const [accountantRef, setAccountantRef] = useState(
     () => eligibleAccountants[0]?.account_ref ?? "",
   );
-  const validFrom = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1061,7 +1060,7 @@ function AssignProjectAccountantDialog({
     const built = buildAssignProjectAccountantRequest({
       project_id: project.project_id,
       accountant_ref: accountantRef,
-      valid_from: validFrom || null,
+      valid_from: null,
       expected_version: expectedVersion,
       reason,
       idempotency_key: idempotencyKey,
@@ -1146,7 +1145,7 @@ function AssignProjectAccountantDialog({
 
         <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
           Ngày bắt đầu hiệu lực:{" "}
-          <strong className="font-mono text-foreground">{validFrom}</strong> (áp dụng ngay theo
+          <strong className="font-mono text-foreground">{defaultDate}</strong> (áp dụng ngay theo
           ngày nghiệp vụ hệ thống).
         </div>
 
@@ -1203,7 +1202,6 @@ function EndProjectAccountantDialog({
 }) {
   const formId = useId();
   const current = project.current_assignment!;
-  const validTo = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1218,7 +1216,7 @@ function EndProjectAccountantDialog({
 
     const built = buildEndProjectAccountantRequest({
       expected_version: expectedVersion,
-      valid_to: validTo || null,
+      valid_to: null,
       reason,
       idempotency_key: idempotencyKey,
     });
@@ -1278,7 +1276,7 @@ function EndProjectAccountantDialog({
 
         <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
           Ngày kết thúc hiệu lực (mốc bàn giao <code className="font-mono">[valid_from, valid_to)</code>):{" "}
-          <strong className="font-mono text-foreground">{validTo}</strong> (áp dụng ngay theo ngày
+          <strong className="font-mono text-foreground">{defaultDate}</strong> (áp dụng ngay theo ngày
           nghiệp vụ hệ thống).
         </div>
 
@@ -1343,7 +1341,6 @@ function AssignGlobalRoleDialog({
     () => availableCandidates[0]?.account.account_ref ?? "",
   );
   const [roleCode, setRoleCode] = useState<VendorFinanceGlobalRoleCode>("GLOBAL_RECONCILER");
-  const validFrom = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1368,7 +1365,7 @@ function AssignGlobalRoleDialog({
     const built = buildAssignGlobalRoleRequest({
       account_ref: accountRef,
       role_code: roleCode,
-      valid_from: validFrom || null,
+      valid_from: null,
       expected_version: Math.max(0, selectedCandidate.next_version - 1),
       reason,
       idempotency_key: idempotencyKey,
@@ -1487,7 +1484,7 @@ function AssignGlobalRoleDialog({
 
         <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
           Ngày bắt đầu hiệu lực:{" "}
-          <strong className="font-mono text-foreground">{validFrom}</strong> (áp dụng ngay theo
+          <strong className="font-mono text-foreground">{defaultDate}</strong> (áp dụng ngay theo
           ngày nghiệp vụ hệ thống).
         </div>
 
@@ -1550,7 +1547,6 @@ function EndGlobalRoleDialog({
   onCompleted: () => void;
 }) {
   const formId = useId();
-  const validTo = defaultDate;
   const [reason, setReason] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
@@ -1563,7 +1559,7 @@ function EndGlobalRoleDialog({
 
     const built = buildEndGlobalRoleRequest({
       expected_version: expectedVersion,
-      valid_to: validTo || null,
+      valid_to: null,
       reason,
       idempotency_key: idempotencyKey,
     });
@@ -1623,7 +1619,7 @@ function EndGlobalRoleDialog({
 
         <div className="rounded-xl border border-border bg-surface-muted/60 px-3.5 py-2.5 text-xs text-muted">
           Ngày kết thúc hiệu lực:{" "}
-          <strong className="font-mono text-foreground">{validTo}</strong> (áp dụng ngay theo ngày
+          <strong className="font-mono text-foreground">{defaultDate}</strong> (áp dụng ngay theo ngày
           nghiệp vụ hệ thống).
         </div>
 

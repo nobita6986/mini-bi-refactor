@@ -1699,6 +1699,12 @@ export function buildAssignProjectAccountantRequest(input: {
         message: `Ngày bắt đầu hiệu lực không được vượt quá ngày nghiệp vụ hiện tại (${businessToday}).`,
       };
     }
+    if (parsedDate.date < businessToday) {
+      return {
+        ok: false,
+        message: `Ngày bắt đầu hiệu lực không được ở quá khứ so với ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
+    }
     validFrom = parsedDate.date;
   }
   if (!Number.isSafeInteger(input.expected_version) || input.expected_version < 0) {
@@ -1752,6 +1758,12 @@ export function buildEndProjectAccountantRequest(input: {
         message: `Ngày kết thúc hiệu lực không được vượt quá ngày nghiệp vụ hiện tại (${businessToday}).`,
       };
     }
+    if (parsedDate.date < businessToday) {
+      return {
+        ok: false,
+        message: `Ngày kết thúc hiệu lực không được ở quá khứ so với ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
+    }
     validTo = parsedDate.date;
   }
   const reason = validateUiReasonText(input.reason);
@@ -1803,6 +1815,12 @@ export function buildAssignGlobalRoleRequest(input: {
       return {
         ok: false,
         message: `Ngày bắt đầu hiệu lực không được vượt quá ngày nghiệp vụ hiện tại (${businessToday}).`,
+      };
+    }
+    if (parsedDate.date < businessToday) {
+      return {
+        ok: false,
+        message: `Ngày bắt đầu hiệu lực không được ở quá khứ so với ngày nghiệp vụ hiện tại (${businessToday}).`,
       };
     }
     validFrom = parsedDate.date;

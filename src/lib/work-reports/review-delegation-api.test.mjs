@@ -138,8 +138,9 @@ const SAMPLE_DELEGATIONS_PAYLOAD = {
       scope_team_id: TEAM_A,
       scope_label: "Nhóm Tuyển Dụng A",
       effective_from: "2026-10-20T00:00:00Z",
-      effective_to: "2026-10-31T23:59:59Z",
+      effective_to: null,
       state: "ACTIVE",
+      status: "ACTIVE",
       is_current: true,
       is_effective: true,
       revoked_at: null,
@@ -368,8 +369,6 @@ test("delegation API validates capabilities, date normalization, client authorit
       template_id: TEMPLATE_ID,
       scope_kind: "team",
       scope_id: TEAM_A,
-      effective_from: "2026-10-20",
-      effective_to: "2026-10-31",
       idempotency_key: IDEMPOTENCY_KEY,
     }),
     "true",
@@ -386,8 +385,6 @@ test("delegation API validates capabilities, date normalization, client authorit
       template_id: TEMPLATE_ID,
       scope_kind: "team",
       scope_id: TEAM_A,
-      effective_from: "2026-10-20",
-      effective_to: "2026-10-31",
       idempotency_key: IDEMPOTENCY_KEY,
       role: "BoD",
     }),
@@ -397,7 +394,30 @@ test("delegation API validates capabilities, date normalization, client authorit
   assert.equal(forbiddenAuthRes.status, 400);
   assert.equal((await forbiddenAuthRes.json()).code, "CLIENT_AUTHORITY_FIELD_FORBIDDEN");
 
-  // Valid create with YYYY-MM-DD dates from <input type="date"> -> normalizes to +07:00 start/end
+  // Reject client-supplied effective_from or effective_to -> 400 WORK_REPORT_DELEGATION_INVALID
+  for (const invalidWindow of [
+    { effective_from: "2026-10-20" },
+    { effective_to: "2026-10-31" },
+    { effective_from: "2026-10-20", effective_to: "2026-10-31" },
+  ]) {
+    const windowRes = await createWorkReportDelegation(
+      postJson("http://localhost/api/work-reports/delegations", {
+        capability: "report_review",
+        delegate_app_user_id: DELEGATE_APP,
+        template_id: TEMPLATE_ID,
+        scope_kind: "team",
+        scope_id: TEAM_A,
+        ...invalidWindow,
+        idempotency_key: IDEMPOTENCY_KEY,
+      }),
+      "true",
+      deps,
+    );
+    assert.equal(windowRes.status, 400);
+    assert.equal((await windowRes.json()).code, "WORK_REPORT_DELEGATION_INVALID");
+  }
+
+  // Valid create without start/expiration dates -> server applies immediate effect (null/null passed to RPC)
   const createRes = await createWorkReportDelegation(
     postJson("http://localhost/api/work-reports/delegations", {
       capability: "report_review",
@@ -405,8 +425,6 @@ test("delegation API validates capabilities, date normalization, client authorit
       template_id: TEMPLATE_ID,
       scope_kind: "team",
       scope_id: TEAM_A,
-      effective_from: "2026-10-20",
-      effective_to: "2026-10-31",
       idempotency_key: IDEMPOTENCY_KEY,
     }),
     "true",
@@ -416,8 +434,8 @@ test("delegation API validates capabilities, date normalization, client authorit
   assert.equal(capturedCreateArgs.p_capability, "report_review");
   assert.equal(capturedCreateArgs.p_scope_kind, "team");
   assert.equal(capturedCreateArgs.p_scope_team_id, TEAM_A);
-  assert.equal(capturedCreateArgs.p_effective_from, "2026-10-20T00:00:00+07:00");
-  assert.equal(capturedCreateArgs.p_effective_to, "2026-10-31T23:59:59.999+07:00");
+  assert.equal(capturedCreateArgs.p_effective_from, null);
+  assert.equal(capturedCreateArgs.p_effective_to, null);
 
   // Revoke delegation -> 200
   const revokeRes = await revokeWorkReportDelegation(

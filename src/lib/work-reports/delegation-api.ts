@@ -1,5 +1,4 @@
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
-import { isRealCalendarDate } from "../analytics/identity/identity-shared.mjs";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
 import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
 import { readBoundedJson } from "../direct-entry/write-api.ts";
@@ -11,7 +10,6 @@ import type {
 } from "./delegation-repository.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const ALLOWED_CREATE_KEYS = new Set([
   "capability",
   "delegate_app_user_id",
@@ -87,18 +85,10 @@ function mapErrorOutcome(
   return fail(code, status);
 }
 
-function normalizeDelegationTimestamp(value: unknown, boundary: "start" | "end"): string | null {
-  if (typeof value !== "string" || value.trim().length === 0) return null;
-  const trimmed = value.trim();
-  if (DATE_ONLY.test(trimmed)) {
-    if (!isRealCalendarDate(trimmed)) return null;
-    return boundary === "start"
-      ? `${trimmed}T00:00:00+07:00`
-      : `${trimmed}T23:59:59.999+07:00`;
-  }
-  const parsed = Date.parse(trimmed);
-  if (Number.isNaN(parsed)) return null;
-  return new Date(parsed).toISOString();
+function hasClientSuppliedDelegationWindow(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string" && value.trim().length === 0) return false;
+  return true;
 }
 
 export async function listWorkReportDelegations(
@@ -206,9 +196,10 @@ export async function createWorkReportDelegation(
     scopeTeamId = rawScopeTeam;
   }
 
-  const effectiveFrom = normalizeDelegationTimestamp(body.effective_from, "start");
-  const effectiveTo = normalizeDelegationTimestamp(body.effective_to, "end");
-  if (!effectiveFrom || !effectiveTo || Date.parse(effectiveFrom) >= Date.parse(effectiveTo)) {
+  if (
+    hasClientSuppliedDelegationWindow(body.effective_from) ||
+    hasClientSuppliedDelegationWindow(body.effective_to)
+  ) {
     return fail("WORK_REPORT_DELEGATION_INVALID", 400);
   }
 
@@ -236,8 +227,8 @@ export async function createWorkReportDelegation(
       template_id: templateId,
       scope_kind: scopeKind,
       scope_team_id: scopeTeamId,
-      effective_from: effectiveFrom,
-      effective_to: effectiveTo,
+      effective_from: null,
+      effective_to: null,
       idempotency_key: idempotencyKey,
     });
     if (!result.ok) return mapErrorOutcome(result);

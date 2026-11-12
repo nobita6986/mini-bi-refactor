@@ -317,7 +317,7 @@ test("P2.5-W02: two active managers on one project both hold authority", async (
   const db = await buildDb();
   try {
     await seedActors(db);
-    const first = await assign(db, { manager: REC_A, validFrom: await shiftedDate(db, -30) });
+    const first = await assign(db, { manager: REC_A });
     assert.equal(first.version, 1);
     assert.equal(first.valid_to, null);
     const second = await assign(db, {
@@ -335,11 +335,12 @@ test("P2.5-W02: two active managers on one project both hold authority", async (
     // Adding the second manager must not rewrite the first assignment.
     const rows = await db.query(
       "select assignment_id::text as id, valid_from::text as valid_from, version" +
-      " from public.direct_entry_project_manager_assignments order by valid_from");
+      " from public.direct_entry_project_manager_assignments order by created_at, assignment_id");
     assert.equal(rows.rows.length, 2);
-    assert.equal(rows.rows[0].id, first.assignment_id);
-    assert.equal(rows.rows[0].valid_from, await shiftedDate(db, -30));
-    assert.equal(rows.rows[0].version, 1, "no last-write-wins on the first assignment");
+    const firstRow = rows.rows.find((row) => row.id === first.assignment_id);
+    assert.ok(firstRow);
+    assert.equal(firstRow.valid_from, await authorizationDate(db));
+    assert.equal(firstRow.version, 1, "no last-write-wins on the first assignment");
 
     const list = await listAssignments(db, PROJ_1);
     assert.equal(list.active_assignment_count, 2);

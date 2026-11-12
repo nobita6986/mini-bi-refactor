@@ -113,7 +113,7 @@ async function call(client, name, args) {
   return (await client.query(`select public.${name}(${placeholders}) as data`, args)).rows[0].data;
 }
 
-async function grantMapping(client, actor, project, team, expected, reason, validFrom = PAST) {
+async function grantMapping(client, actor, project, team, expected, reason, validFrom = null) {
   return call(client, "direct_entry_grant_project_team_scope",
     [actor.auth, actor.app, project, team, expected, validFrom, reason,
       `grant-${PID}-${reason.replaceAll(" ", "-")}`]);
@@ -294,7 +294,7 @@ test("PRE-W2-HF Project<->Team: batch mapping and revoke races prove the locked 
         // The revoked mapping blocks the leader unassignment too (Admin cleans up).
         const assignment = await call(observer, "direct_entry_assign_project_manager",
           [
-            ADMIN_AUTH, ADMIN_APP, PROJECT, MANAGER_RECRUITER, PAST, 1,
+            ADMIN_AUTH, ADMIN_APP, PROJECT, MANAGER_RECRUITER, today, 1,
             "seeded assignment for the denied unassign", `seed-assign-${PID}`,
           ]);
         const { rows: [{ version: projectVersion }] } = await observer.query(

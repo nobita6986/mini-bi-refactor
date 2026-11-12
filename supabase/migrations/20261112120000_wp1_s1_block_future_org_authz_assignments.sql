@@ -12,10 +12,11 @@
 --   4. Keep PT409 SQLSTATE on optimistic concurrency conflicts (fixing the PR #218
 --      regression on direct_entry_apply_team_leader_mutation).
 --   5. Do not rewrite historical or pre-existing future-dated rows (reported via WP0 CAT1).
---   6. Pending business decision (out of scope for WP1): `public.work_report_create_delegation`
---      (`report_assign` and `report_review` temporary delegations) intentionally retains
---      future `p_valid_from` support pending T0/Owner business decision on whether
---      pre-vacation work-report delegations remain schedulable in advance.
+--   6. Work Reports delegations (`public.work_report_delegations`, `report_assign` and
+--      `report_review`): take effect immediately at server creation time (`effective_from = statement_timestamp()`,
+--      `effective_to = null`) and end immediately upon revocation (`state = 'REVOKED'`,
+--      `is_current = false`, `revoked_at = statement_timestamp()`). Client-supplied
+--      start/expiration timestamps are rejected in `public.work_report_create_delegation`.
 -- =============================================================================
 
 begin;
@@ -46,15 +47,16 @@ declare
   v_prior jsonb;
   v_result jsonb;
 begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
   -- Authorization first: an actor without catalog authority always gets 42501 and
   -- learns nothing about the shape of the input.
   v_authority := public.direct_entry_assert_catalog_operator(p_auth_subject, p_app_user_id);
 
   if p_recruiter_id is null or p_team_id is null then
     raise exception 'recruiter and target team required' using errcode = '22023';
-  end if;
-  if p_reason is null or length(btrim(p_reason)) not between 1 and 4000 then
-    raise exception 'reason required' using errcode = '22023';
   end if;
   if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
     raise exception 'idempotency key required' using errcode = '22023';
@@ -162,13 +164,14 @@ declare
   v_prior jsonb;
   v_result jsonb;
 begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
   v_authority := public.direct_entry_assert_catalog_operator(p_auth_subject, p_app_user_id);
 
   if p_recruiter_id is null or p_team_id is null then
     raise exception 'recruiter and target team required' using errcode = '22023';
-  end if;
-  if p_reason is null or length(btrim(p_reason)) not between 1 and 4000 then
-    raise exception 'reason required' using errcode = '22023';
   end if;
   if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
     raise exception 'idempotency key required' using errcode = '22023';
@@ -317,13 +320,14 @@ declare
   v_prior jsonb;
   v_result jsonb;
 begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
   v_authority := public.direct_entry_assert_catalog_operator(p_auth_subject, p_app_user_id);
 
   if p_recruiter_id is null then
     raise exception 'recruiter required' using errcode = '22023';
-  end if;
-  if p_reason is null or length(btrim(p_reason)) not between 1 and 4000 then
-    raise exception 'reason required' using errcode = '22023';
   end if;
   if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
     raise exception 'idempotency key required' using errcode = '22023';
@@ -3039,6 +3043,2004 @@ begin
 end;
 $$;
 
+create or replace function public.direct_entry_assign_project_manager(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_project_id text,
+  p_manager_recruiter_id uuid,
+  p_valid_from date,
+  p_expected_project_version integer,
+  p_reason text,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_authority text;
+  v_team_id uuid;
+  v_project public.direct_entry_projects;
+  v_valid_from date;
+  v_membership_count integer;
+  v_matching_membership_count integer;
+  v_link_count integer;
+  v_enabled_link_count integer;
+  v_provider_count integer;
+  v_hrp_provider_count integer;
+  v_assignment_id uuid;
+  v_reason_id uuid;
+  v_revision_id uuid;
+  v_project_version integer;
+  v_before jsonb;
+  v_prior jsonb;
+  v_result jsonb;
+begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
+  if p_project_id is null or length(btrim(p_project_id)) = 0 then
+    raise exception 'project required' using errcode = '22023';
+  end if;
+  if p_manager_recruiter_id is null then
+    raise exception 'project manager required' using errcode = '22023';
+  end if;
+  if p_expected_project_version is null or p_expected_project_version < 1 then
+    raise exception 'expected project version required' using errcode = '22023';
+  end if;
+  if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+
+  select a.authority, a.team_id
+    into v_authority, v_team_id
+    from public.direct_entry_assert_project_operation_authority(
+      p_auth_subject, p_app_user_id
+    ) a;
+
+  v_prior := public.direct_entry_idempotency_begin(
+    p_app_user_id, 'project_manager_assignment_assign', p_idempotency_key,
+    public.direct_entry_payload_hash(jsonb_build_object(
+      'project_id', p_project_id,
+      'manager_recruiter_id', p_manager_recruiter_id,
+      'valid_from', p_valid_from,
+      'expected_project_version', p_expected_project_version
+    ))
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  v_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
+  if v_valid_from > public.direct_entry_authorization_date() then
+    raise exception 'future project manager assignments require explicit activation' using errcode = '22023';
+  end if;
+  if v_valid_from < public.direct_entry_authorization_date() then
+    raise exception 'past project manager assignments are not allowed' using errcode = '22023';
+  end if;
+
+  -- Lock project first, then the effective mapping, then the canonical leader/team and
+  -- target-recruiter authority aggregates in the same order as W01C/W01D before
+  -- validating; the mapping is re-read AFTER every lock is held.
+  v_project := public.direct_entry_lock_project(p_project_id, p_expected_project_version);
+  if not v_project.active then
+    raise exception 'project is not active' using errcode = '22023';
+  end if;
+  if v_authority = 'team_manager_assign' then
+    if not public.direct_entry_lock_project_team_scope(p_project_id, v_team_id) then
+      raise exception 'project team scope denied' using errcode = '42501';
+    end if;
+    perform public.direct_entry_lock_project_team_manager_context(
+      p_auth_subject, p_app_user_id, v_team_id, p_manager_recruiter_id
+    );
+    if not public.direct_entry_project_team_scope_effective(p_project_id, v_team_id) then
+      raise exception 'project team scope denied' using errcode = '42501';
+    end if;
+    select count(*)::int,
+           count(*) filter (where m.team_id = v_team_id)::int
+      into v_membership_count, v_matching_membership_count
+      from public.recruiter_team_memberships m
+     where m.recruiter_id = p_manager_recruiter_id
+       and m.is_current;
+    if v_membership_count <> 1 or v_matching_membership_count <> 1 then
+      raise exception 'team manager assignment denied' using errcode = '42501';
+    end if;
+    select count(*)::int
+      into v_link_count
+      from public.direct_entry_app_user_recruiter_links l
+     where l.recruiter_id = p_manager_recruiter_id
+       and l.verified
+       and l.is_current;
+    select count(*)::int
+      into v_enabled_link_count
+      from public.direct_entry_app_user_recruiter_links l
+      join public.direct_entry_app_users au on au.app_user_id = l.app_user_id
+     where l.recruiter_id = p_manager_recruiter_id
+       and l.verified
+       and l.is_current
+       and au.enabled
+       and au.auth_subject is not null;
+    select count(*)::int,
+           count(*) filter (
+             where m.provider_type = 'hrp' and m.vendor_id is null
+           )::int
+      into v_provider_count, v_hrp_provider_count
+      from public.recruiter_provider_memberships m
+     where m.recruiter_id = p_manager_recruiter_id
+       and m.is_current;
+    if v_link_count <> 1 or v_enabled_link_count <> 1
+       or v_provider_count <> 1 or v_hrp_provider_count <> 1
+       or not exists (
+         select 1 from public.recruiters r
+          where r.recruiter_id = p_manager_recruiter_id and r.active
+       ) then
+      raise exception 'team manager assignment denied' using errcode = '42501';
+    end if;
+  end if;
+  if not exists (
+    select 1 from public.recruiters r
+     where r.recruiter_id = p_manager_recruiter_id and r.active
+  ) then
+    raise exception 'project manager recruiter is not active' using errcode = '22023';
+  end if;
+  if not exists (
+    select 1 from public.direct_entry_app_user_recruiter_links l
+     where l.recruiter_id = p_manager_recruiter_id
+       and l.verified
+       and l.is_current
+  ) then
+    raise exception 'project manager has no verified account link' using errcode = '22023';
+  end if;
+  select count(*)::int
+    into v_link_count
+    from public.direct_entry_app_user_recruiter_links l
+   where l.recruiter_id = p_manager_recruiter_id
+     and l.verified and l.is_current;
+  select count(*)::int
+    into v_enabled_link_count
+    from public.direct_entry_app_user_recruiter_links l
+    join public.direct_entry_app_users au on au.app_user_id = l.app_user_id
+   where l.recruiter_id = p_manager_recruiter_id
+     and l.verified and l.is_current
+     and au.enabled and au.auth_subject is not null;
+  if v_link_count <> 1 or v_enabled_link_count <> 1 then
+    raise exception 'project manager must have exactly one enabled verified account link'
+      using errcode = '22023';
+  end if;
+  if exists (
+    select 1 from public.direct_entry_project_manager_assignments a
+     where a.project_id = p_project_id
+       and a.manager_recruiter_id = p_manager_recruiter_id
+       and a.is_current and a.revoked_at is null
+  ) then
+    raise exception 'project manager is already assigned to this project'
+      using errcode = '23505';
+  end if;
+
+  v_reason_id := public.direct_entry_reason(p_app_user_id, p_reason);
+  v_before := public.direct_entry_project_snapshot(v_project);
+  insert into public.direct_entry_project_manager_assignments
+    (project_id, manager_recruiter_id, valid_from, valid_to,
+     created_by_user_id, reason_id, version, is_current)
+  values
+    (p_project_id, p_manager_recruiter_id, v_valid_from, null,
+     p_app_user_id, v_reason_id, 1, true)
+  returning assignment_id into v_assignment_id;
+
+  select b.project_version, b.revision_id
+    into v_project_version, v_revision_id
+    from public.direct_entry_bump_project_version(
+      p_project_id, p_app_user_id, v_reason_id, v_before,
+      jsonb_set(
+        public.direct_entry_project_snapshot(v_project),
+        '{assignment_change}',
+        jsonb_build_object(
+          'change', 'ASSIGN',
+          'assignment_id', v_assignment_id,
+          'manager_recruiter_id', p_manager_recruiter_id,
+          'valid_from', v_valid_from,
+          'valid_to', null
+        ),
+        true
+      )
+    ) b;
+
+  insert into public.direct_entry_audit_events
+    (auth_subject, app_user_id, action, capability, resource_ref, scope_kind,
+     scope_team_id, outcome, reason_id, changed_fields, project_revision_id)
+  values
+    (p_auth_subject, p_app_user_id, 'project_manager_assignment_assign',
+     v_authority, v_assignment_id::text,
+     case when v_authority = 'team_manager_assign' then 'team' else 'all' end,
+     case when v_authority = 'team_manager_assign' then v_team_id else null end,
+     'APPLIED', v_reason_id,
+     array['project_id', 'manager_recruiter_id', 'valid_from'], v_revision_id);
+
+  v_result := jsonb_build_object(
+    'assignment_id', v_assignment_id,
+    'project_id', p_project_id,
+    'manager_recruiter_id', p_manager_recruiter_id,
+    'valid_from', v_valid_from,
+    'valid_to', null,
+    'version', 1,
+    'project_version', v_project_version,
+    'already_assigned', false
+  );
+  perform public.direct_entry_idempotency_finish(
+    p_app_user_id, 'project_manager_assignment_assign', p_idempotency_key, v_result
+  );
+  return v_result;
+end;
+$function$;
+
+create or replace function public.direct_entry_grant_project_team_scope(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_project_id text,
+  p_team_id uuid,
+  p_expected_pair_version integer,
+  p_effective_from date,
+  p_reason text,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_authority text;
+  v_project public.direct_entry_projects;
+  v_team public.teams;
+  v_effective_from date;
+  v_current_version integer;
+  v_payload_hash text;
+  v_prior jsonb;
+  v_reason_id uuid;
+  v_mapping public.direct_entry_project_team_scopes;
+  v_result jsonb;
+begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
+  if p_project_id is null or length(btrim(p_project_id)) = 0 then
+    raise exception 'project required' using errcode = '22023';
+  end if;
+  if p_team_id is null then
+    raise exception 'team required' using errcode = '22023';
+  end if;
+  if p_expected_pair_version is null or p_expected_pair_version < 0 then
+    raise exception 'expected mapping version required' using errcode = '22023';
+  end if;
+  if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+
+  -- Canonical Full Admin triple at effective all scope; resolved server-side only.
+  v_authority := public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
+
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'project_id', p_project_id,
+    'team_id', p_team_id,
+    'expected_pair_version', p_expected_pair_version,
+    'valid_from', p_effective_from,
+    'reason', p_reason
+  ));
+  v_prior := public.direct_entry_idempotency_begin(
+    p_app_user_id, 'project_team_scope_grant', p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  v_effective_from := coalesce(p_effective_from, public.direct_entry_authorization_date());
+  if v_effective_from > public.direct_entry_authorization_date() then
+    raise exception 'future project-team scopes require explicit activation' using errcode = '22023';
+  end if;
+  if v_effective_from < public.direct_entry_authorization_date() then
+    raise exception 'past project-team scopes are not allowed' using errcode = '22023';
+  end if;
+
+  -- Lock order: project row first, then the target team row.
+  select p.* into v_project
+    from public.direct_entry_projects p
+   where p.project_id = p_project_id
+   for update;
+  if not found then
+    raise exception 'project not found' using errcode = 'P0002';
+  end if;
+  if not v_project.active then
+    raise exception 'project is not active' using errcode = '22023';
+  end if;
+
+  select t.* into v_team
+    from public.teams t
+   where t.team_id = p_team_id
+   for update;
+  if not found then
+    raise exception 'team not found' using errcode = 'P0002';
+  end if;
+  if not v_team.active or v_team.code = '__system_vendor__' then
+    raise exception 'team is not active' using errcode = '22023';
+  end if;
+
+  select coalesce(max(s.version), 0)::int into v_current_version
+    from public.direct_entry_project_team_scopes s
+   where s.project_id = p_project_id
+     and s.team_id = p_team_id;
+  if v_current_version <> p_expected_pair_version then
+    raise exception 'project team mapping version conflict' using errcode = 'PT409';
+  end if;
+
+  v_reason_id := public.direct_entry_reason(p_app_user_id, p_reason);
+  insert into public.direct_entry_project_team_scopes (
+    project_id, team_id, valid_from, valid_to, version,
+    granted_by_user_id, reason_id, is_current
+  ) values (
+    p_project_id, p_team_id, v_effective_from, null, v_current_version + 1,
+    p_app_user_id, v_reason_id, true
+  ) returning * into v_mapping;
+
+  insert into public.direct_entry_audit_events
+    (auth_subject, app_user_id, action, capability, resource_ref, scope_kind,
+     outcome, reason_id, changed_fields)
+  values
+    (p_auth_subject, p_app_user_id, 'project_team_scope_grant', v_authority,
+     v_mapping.mapping_id::text, 'all', 'APPLIED', v_reason_id,
+     array['project_id', 'team_id', 'valid_from']);
+
+  v_result := jsonb_build_object(
+    'mapping_id', v_mapping.mapping_id,
+    'project_id', v_mapping.project_id,
+    'team_id', v_mapping.team_id,
+    'valid_from', v_mapping.valid_from,
+    'valid_to', v_mapping.valid_to,
+    'version', v_mapping.version,
+    'created', true
+  );
+  perform public.direct_entry_idempotency_finish(
+    p_app_user_id, 'project_team_scope_grant', p_idempotency_key, v_result
+  );
+  return v_result;
+end;
+$function$;
+
+create or replace function public.direct_entry_revoke_project_team_scope(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_mapping_id uuid,
+  p_expected_pair_version integer,
+  p_effective_to date,
+  p_reason text,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_authority text;
+  v_project_id text;
+  v_project public.direct_entry_projects;
+  v_mapping public.direct_entry_project_team_scopes;
+  v_revoke_to date;
+  v_payload_hash text;
+  v_prior jsonb;
+  v_reason_id uuid;
+  v_result jsonb;
+begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
+  if p_mapping_id is null then
+    raise exception 'mapping required' using errcode = '22023';
+  end if;
+  if p_expected_pair_version is null or p_expected_pair_version < 1 then
+    raise exception 'expected mapping version required' using errcode = '22023';
+  end if;
+  if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+
+  -- Canonical Full Admin triple at effective all scope; resolved server-side only.
+  v_authority := public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
+
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'mapping_id', p_mapping_id,
+    'expected_pair_version', p_expected_pair_version,
+    'effective_to', p_effective_to,
+    'reason', p_reason
+  ));
+  v_prior := public.direct_entry_idempotency_begin(
+    p_app_user_id, 'project_team_scope_revoke', p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  if p_effective_to is not null
+     and p_effective_to > public.direct_entry_authorization_date() then
+    raise exception 'revoke date must not be in the future' using errcode = '22023';
+  end if;
+  if p_effective_to is not null
+     and p_effective_to < public.direct_entry_authorization_date() then
+    raise exception 'revoke date must not be in the past' using errcode = '22023';
+  end if;
+
+  -- Mapping identity is immutable: this unlocked read discovers only the project.
+  -- Lock order is always project row first, mapping row second.
+  select s.project_id into v_project_id
+    from public.direct_entry_project_team_scopes s
+   where s.mapping_id = p_mapping_id;
+  if v_project_id is null then
+    raise exception 'project team mapping not found' using errcode = 'P0002';
+  end if;
+
+  select p.* into v_project
+    from public.direct_entry_projects p
+   where p.project_id = v_project_id
+   for update;
+  if not found then
+    raise exception 'project not found' using errcode = 'P0002';
+  end if;
+
+  select s.* into v_mapping
+    from public.direct_entry_project_team_scopes s
+   where s.mapping_id = p_mapping_id
+   for update;
+  if not found then
+    raise exception 'project team mapping not found' using errcode = 'P0002';
+  end if;
+  if not v_mapping.is_current or v_mapping.revoked_at is not null then
+    raise exception 'project team mapping is already revoked' using errcode = '22023';
+  end if;
+  if v_mapping.version <> p_expected_pair_version then
+    raise exception 'project team mapping version conflict' using errcode = 'PT409';
+  end if;
+
+  -- An explicit end date must not precede the grant. valid_to = valid_from is the
+  -- audited same-day cancellation marker and is only armed here.
+  if p_effective_to is not null and p_effective_to < v_mapping.valid_from then
+    raise exception 'revoke date must not precede the mapping start' using errcode = '22023';
+  end if;
+  v_revoke_to := greatest(
+    coalesce(p_effective_to, public.direct_entry_authorization_date()),
+    v_mapping.valid_from
+  );
+
+  v_reason_id := public.direct_entry_reason(p_app_user_id, p_reason);
+  if v_revoke_to = v_mapping.valid_from then
+    perform set_config('direct_entry.project_team_scope_marker', 'on', true);
+  end if;
+  update public.direct_entry_project_team_scopes
+     set valid_to = v_revoke_to,
+         revoked_by_user_id = p_app_user_id,
+         revoked_at = now(),
+         revoke_reason_id = v_reason_id,
+         version = version + 1
+   where mapping_id = p_mapping_id
+  returning * into v_mapping;
+
+  insert into public.direct_entry_audit_events
+    (auth_subject, app_user_id, action, capability, resource_ref, scope_kind,
+     outcome, reason_id, changed_fields)
+  values
+    (p_auth_subject, p_app_user_id, 'project_team_scope_revoke', v_authority,
+     p_mapping_id::text, 'all', 'APPLIED', v_reason_id, array['valid_to']);
+
+  v_result := jsonb_build_object(
+    'mapping_id', v_mapping.mapping_id,
+    'project_id', v_mapping.project_id,
+    'team_id', v_mapping.team_id,
+    'valid_to', v_mapping.valid_to,
+    'version', v_mapping.version,
+    'revoked', true
+  );
+  perform public.direct_entry_idempotency_finish(
+    p_app_user_id, 'project_team_scope_revoke', p_idempotency_key, v_result
+  );
+  return v_result;
+end;
+$function$;
+
+create or replace function public.direct_entry_revoke_project_team_scope(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_mapping_id uuid,
+  p_effective_to date,
+  p_reason text,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_authority text;
+  v_project_id text;
+  v_mapping public.direct_entry_project_team_scopes;
+  v_revoke_to date;
+  v_payload_hash text;
+  v_prior jsonb;
+  v_reason_id uuid;
+  v_result jsonb;
+begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
+  if p_mapping_id is null then
+    raise exception 'mapping required' using errcode = '22023';
+  end if;
+  if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+
+  v_authority := public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'mapping_id', p_mapping_id,
+    'effective_to', p_effective_to,
+    'reason', p_reason
+  ));
+  v_prior := public.direct_entry_idempotency_begin(
+    p_app_user_id, 'project_team_scope_revoke_v2', p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  if p_effective_to is not null
+     and p_effective_to > public.direct_entry_authorization_date() then
+    raise exception 'revoke date must not be in the future' using errcode = '22023';
+  end if;
+  if p_effective_to is not null
+     and p_effective_to < public.direct_entry_authorization_date() then
+    raise exception 'revoke date must not be in the past' using errcode = '22023';
+  end if;
+
+  select s.project_id into v_project_id
+    from public.direct_entry_project_team_scopes s
+   where s.mapping_id = p_mapping_id;
+  if v_project_id is null then
+    raise exception 'project team mapping not found' using errcode = 'P0002';
+  end if;
+
+  -- Immutable mapping identity; project then mapping row is the migration #94 lock order.
+  perform p.project_id
+    from public.direct_entry_projects p
+   where p.project_id = v_project_id
+   for update;
+  if not found then
+    raise exception 'project not found' using errcode = 'P0002';
+  end if;
+  select s.* into v_mapping
+    from public.direct_entry_project_team_scopes s
+   where s.mapping_id = p_mapping_id
+   for update;
+  if not found then
+    raise exception 'project team mapping not found' using errcode = 'P0002';
+  end if;
+  if not v_mapping.is_current or v_mapping.revoked_at is not null then
+    raise exception 'project team mapping is already revoked' using errcode = '22023';
+  end if;
+  if p_effective_to is not null and p_effective_to < v_mapping.valid_from then
+    raise exception 'revoke date must not precede the mapping start' using errcode = '22023';
+  end if;
+  v_revoke_to := greatest(
+    coalesce(p_effective_to, public.direct_entry_authorization_date()),
+    v_mapping.valid_from
+  );
+
+  v_reason_id := public.direct_entry_reason(p_app_user_id, p_reason);
+  if v_revoke_to = v_mapping.valid_from then
+    perform set_config('direct_entry.project_team_scope_marker', 'on', true);
+  end if;
+  update public.direct_entry_project_team_scopes
+     set valid_to = v_revoke_to,
+         revoked_by_user_id = p_app_user_id,
+         revoked_at = now(),
+         revoke_reason_id = v_reason_id,
+         version = version + 1
+   where mapping_id = p_mapping_id
+  returning * into v_mapping;
+
+  insert into public.direct_entry_audit_events
+    (auth_subject, app_user_id, action, capability, resource_ref, scope_kind,
+     outcome, reason_id, changed_fields)
+  values
+    (p_auth_subject, p_app_user_id, 'project_team_scope_revoke', v_authority,
+     p_mapping_id::text, 'all', 'APPLIED', v_reason_id, array['valid_to']);
+
+  v_result := jsonb_build_object(
+    'mapping_id', v_mapping.mapping_id,
+    'project_id', v_mapping.project_id,
+    'team_id', v_mapping.team_id,
+    'valid_to', v_mapping.valid_to,
+    'version', v_mapping.version,
+    'revoked', true
+  );
+  perform public.direct_entry_idempotency_finish(
+    p_app_user_id, 'project_team_scope_revoke_v2', p_idempotency_key, v_result
+  );
+  return v_result;
+end;
+$function$;
+
+create or replace function public.direct_entry_account_operation_create_personnel(
+  p_auth_subject uuid,
+  p_actor_app_user_id uuid,
+  p_account_ref uuid,
+  p_expected_account_version integer,
+  p_personnel_code text,
+  p_personnel_position text,
+  p_valid_from date,
+  p_reason text,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_action text := 'personnel_created';
+  v_code text := lower(btrim(p_personnel_code));
+  v_login_id text;
+  v_position text := p_personnel_position;
+  v_account public.direct_entry_app_users;
+  v_payload_hash text;
+  v_prior jsonb;
+  v_reason_id uuid;
+  v_recruiter public.recruiters;
+  v_membership_id uuid;
+  v_link_id uuid;
+  v_personnel_revision_id uuid;
+  v_app_user_revision_id uuid;
+  v_result jsonb;
+  v_capability text;
+  v_today date := public.direct_entry_authorization_date();
+  v_valid_from date;
+  v_next_capability_start date;
+  v_next_scope_start date;
+begin
+  if p_reason is not null and length(p_reason) > 4000 then
+    raise exception 'reason exceeds maximum length' using errcode = '22023';
+  end if;
+  p_reason := nullif(btrim(p_reason), '');
+  if p_account_ref is null or p_expected_account_version is null or p_expected_account_version < 1 then
+    raise exception 'account reference or version invalid' using errcode = '22023';
+  end if;
+  if v_code is null or not public.direct_entry_is_canonical_login_id(v_code) then
+    raise exception 'personnel code must be the account login ID' using errcode = '22023';
+  end if;
+  if v_position is null or v_position not in ('STAFF', 'TEAM_LEADER') then
+    raise exception 'personnel position is invalid' using errcode = '22023';
+  end if;
+  if p_idempotency_key is null or length(btrim(p_idempotency_key)) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+
+  perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_actor_app_user_id);
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'account_ref', p_account_ref, 'expected_account_version', p_expected_account_version,
+    'personnel_code', v_code, 'personnel_position', v_position,
+    'valid_from', p_valid_from, 'reason', p_reason
+  ));
+  v_prior := public.direct_entry_idempotency_begin(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then return v_prior; end if;
+
+  v_valid_from := coalesce(p_valid_from, v_today);
+  if v_valid_from <> v_today then
+    raise exception 'provider valid from is invalid' using errcode = '22023';
+  end if;
+
+  select u.* into v_account
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_account_ref
+   for update;
+  if not found then raise exception 'account not found' using errcode = 'P0002'; end if;
+  if not v_account.enabled then raise exception 'account is not enabled' using errcode = '23514'; end if;
+  select lower(nullif(split_part(u.email, '@', 1), '')) into v_login_id
+    from auth.users u where u.id = v_account.auth_subject;
+  if v_login_id is null or not public.direct_entry_is_canonical_login_id(v_login_id)
+     or v_code <> v_login_id then
+    raise exception 'personnel code does not match account login ID' using errcode = '22023';
+  end if;
+  if lower(btrim(v_account.display_name)) = v_login_id then
+    raise exception 'account real name must be updated before personnel creation' using errcode = '23514';
+  end if;
+  if exists (
+    select 1 from public.direct_entry_app_user_recruiter_links l
+     where l.app_user_id = p_account_ref and l.verified
+       and l.is_current
+  ) then raise exception 'account already has an effective recruiter link' using errcode = '23514'; end if;
+  if v_account.version <> p_expected_account_version then
+    raise exception 'app user version conflict' using errcode = 'PT409';
+  end if;
+  if exists (
+    select 1 from public.recruiters r
+     where r.personnel_code is not null
+       and lower(public.recruitment_dimension_key(r.personnel_code))
+           = lower(public.recruitment_dimension_key(v_code))
+  ) then raise exception 'personnel code already exists' using errcode = '23505'; end if;
+
+  v_reason_id := public.direct_entry_reason(p_actor_app_user_id, p_reason);
+  insert into public.recruiters (display_name, personnel_code, personnel_position, active, version)
+  values (v_account.display_name, v_code, v_position, true, 1)
+  returning * into v_recruiter;
+  insert into public.recruiter_provider_memberships (recruiter_id, provider_type, valid_from, vendor_id, is_current)
+  values (v_recruiter.recruiter_id, 'hrp', v_valid_from, null, true)
+  returning membership_id into v_membership_id;
+  insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current)
+  values (p_account_ref, v_recruiter.recruiter_id, true, v_valid_from, true)
+  returning link_id into v_link_id;
+
+  foreach v_capability in array array[
+    'entry_create', 'entry_own', 'submission_create', 'change_request_create',
+    'employment_status.request', 'document_upload', 'document_view'
+  ]::text[]
+  loop
+    if not exists (
+      select 1 from public.direct_entry_capability_grants g
+       where g.app_user_id = p_account_ref and g.capability = v_capability
+         and g.is_current
+    ) then
+      select min(g.valid_from) into v_next_capability_start
+        from public.direct_entry_capability_grants g
+       where g.app_user_id = p_account_ref and g.capability = v_capability
+         and g.valid_from > v_today;
+      insert into public.direct_entry_capability_grants
+        (app_user_id, capability, valid_from, valid_to, is_current)
+      values (p_account_ref, v_capability, v_today, v_next_capability_start, true);
+      insert into public.direct_entry_audit_events (
+        auth_subject, app_user_id, action, capability, resource_ref, outcome, reason_id, changed_fields
+      ) values (
+        p_auth_subject, p_actor_app_user_id, 'capability_default_grant', v_capability,
+        p_account_ref::text, 'APPLIED', v_reason_id, array['valid_from', 'valid_to']
+      );
+    end if;
+  end loop;
+
+  if not exists (
+    select 1 from public.direct_entry_scope_grants g
+     where g.app_user_id = p_account_ref and g.scope_kind = 'own'
+       and g.is_current
+  ) then
+    select min(g.valid_from) into v_next_scope_start
+      from public.direct_entry_scope_grants g
+     where g.app_user_id = p_account_ref and g.scope_kind = 'own'
+       and g.valid_from > v_today;
+    insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, valid_to, is_current)
+    values (p_account_ref, 'own', v_today, v_next_scope_start, true);
+    insert into public.direct_entry_audit_events (
+      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
+    ) values (
+      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
+      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
+    );
+  end if;
+
+  update public.direct_entry_app_users set version = version + 1, updated_at = now()
+   where app_user_id = p_account_ref returning version into v_account.version;
+  insert into public.direct_entry_app_user_revisions (
+    app_user_id, version, actor_user_id, action, before_snapshot, after_snapshot, reason_id
+  ) values (
+    p_account_ref, v_account.version, p_actor_app_user_id, 'link_create',
+    jsonb_build_object('recruiter_id', null), jsonb_build_object('recruiter_id', v_recruiter.recruiter_id), v_reason_id
+  ) returning revision_id into v_app_user_revision_id;
+  insert into public.direct_entry_audit_events (
+    auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id,
+    changed_fields, app_user_revision_id
+  ) values (
+    p_auth_subject, p_actor_app_user_id, 'link_create', 'entry_admin', p_account_ref::text,
+    'all', 'APPLIED', v_reason_id, array['recruiter_link'], v_app_user_revision_id
+  );
+  v_personnel_revision_id := public.direct_entry_write_personnel_revision(
+    v_recruiter.recruiter_id, v_recruiter.version, p_actor_app_user_id, v_reason_id,
+    null, public.direct_entry_personnel_snapshot(v_recruiter)
+  );
+  insert into public.direct_entry_audit_events (
+    auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id,
+    changed_fields, personnel_revision_id
+  ) values (
+    p_auth_subject, p_actor_app_user_id, v_action, 'entry_admin', v_recruiter.recruiter_id::text,
+    'all', 'APPLIED', v_reason_id, array['display_name', 'personnel_code', 'personnel_position', 'active'],
+    v_personnel_revision_id
+  );
+  v_result := jsonb_build_object(
+    'recruiter_id', v_recruiter.recruiter_id, 'display_name', v_recruiter.display_name,
+    'personnel_code', v_recruiter.personnel_code, 'personnel_position', v_recruiter.personnel_position,
+    'version', v_recruiter.version, 'link_id', v_link_id, 'membership_id', v_membership_id,
+    'app_user_version', v_account.version, 'app_user_revision_id', v_app_user_revision_id,
+    'personnel_revision_id', v_personnel_revision_id
+  );
+  perform public.direct_entry_idempotency_finish(p_actor_app_user_id, v_action, p_idempotency_key, v_result);
+  return v_result;
+end;
+$function$;
+
+create or replace function public.attendance_assign_employee_slot_policy_admin(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_target_app_user_id uuid,
+  p_profile_id uuid,
+  p_effective_date date,
+  p_expected_version integer,
+  p_idempotency_key uuid,
+  p_request_fingerprint text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_can_manage boolean;
+  v_today_vn date := coalesce(
+    nullif(current_setting('direct_entry.test_authorization_date', true), '')::date,
+    (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date
+  );
+  v_effective_date date := coalesce(p_effective_date, v_today_vn);
+  v_existing public.attendance_slot_policy_assignments%rowtype;
+  v_target_user public.direct_entry_app_users%rowtype;
+  v_profile public.attendance_slot_policy_profiles%rowtype;
+  v_open public.attendance_slot_policy_assignments%rowtype;
+  v_saved public.attendance_slot_policy_assignments%rowtype;
+  v_ident record;
+begin
+  v_can_manage := public.attendance__internal_assert_report_reader(
+    p_auth_subject,
+    p_app_user_id
+  );
+
+  if not v_can_manage then
+    raise exception 'ATTENDANCE_SLOT_POLICY_WRITE_DENIED'
+      using errcode = '42501';
+  end if;
+
+  if p_idempotency_key is null
+     or p_request_fingerprint is null
+     or p_request_fingerprint !~ '^[0-9a-f]{64}$' then
+    raise exception 'ATTENDANCE_IDEMPOTENCY_INVALID'
+      using errcode = '22023';
+  end if;
+
+  if p_target_app_user_id is null
+     or p_profile_id is null then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_INVALID'
+      using errcode = '22023';
+  end if;
+
+  perform pg_advisory_xact_lock(
+    hashtext('attendance_slot_policy_assignments_user'),
+    hashtext(p_target_app_user_id::text)
+  );
+
+  select *
+    into v_existing
+  from public.attendance_slot_policy_assignments a
+  where a.idempotency_key = p_idempotency_key;
+
+  if found then
+    if v_existing.request_fingerprint <> p_request_fingerprint then
+      raise exception 'IDEMPOTENCY_CONFLICT'
+        using errcode = 'PT409';
+    end if;
+
+    select *
+      into v_profile
+    from public.attendance_slot_policy_profiles pr
+    where pr.profile_id = v_existing.profile_id;
+
+    select *
+      into v_target_user
+    from public.direct_entry_app_users u
+    where u.app_user_id = v_existing.app_user_id;
+
+    select *
+      into v_ident
+    from public.attendance__internal_resolve_employee_identity(v_existing.app_user_id);
+
+    return jsonb_build_object(
+      'replayed', true,
+      'assignment', jsonb_build_object(
+        'assignment_id', v_existing.assignment_id,
+        'app_user_id', v_existing.app_user_id,
+        'employee_display_name', v_ident.employee_display_name,
+        'personnel_code', v_ident.personnel_code,
+        'enabled', v_target_user.enabled,
+        'profile_id', v_profile.profile_id,
+        'profile_code', v_profile.profile_code,
+        'profile_name', v_profile.display_name,
+        'valid_from', pg_catalog.to_char(v_existing.valid_from, 'YYYY-MM-DD'),
+        'valid_to', case when v_existing.valid_to is null then null else pg_catalog.to_char(v_existing.valid_to, 'YYYY-MM-DD') end,
+        'superseded_same_day', v_existing.superseded_same_day,
+        'effective', (
+          not v_existing.superseded_same_day
+          and v_existing.valid_from <= v_today_vn
+          and (v_existing.valid_to is null or v_today_vn <= v_existing.valid_to)
+          and v_profile.active = true
+        ),
+        'version', v_existing.version
+      )
+    );
+  end if;
+
+  if v_effective_date > v_today_vn then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_FUTURE_DATE'
+      using errcode = '22023',
+            detail = 'Slot policy profile assignment takes effect immediately and cannot be scheduled in the future.';
+  end if;
+
+  if v_effective_date < v_today_vn then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_PAST_DATE'
+      using errcode = '22023',
+            detail = 'Slot policy profile assignment takes effect immediately today and cannot retroactively alter past dates.';
+  end if;
+
+  select *
+    into v_target_user
+  from public.direct_entry_app_users u
+  where u.app_user_id = p_target_app_user_id
+  for update;
+
+  if not found or v_target_user.enabled is distinct from true then
+    raise exception 'ATTENDANCE_SLOT_POLICY_TARGET_USER_INVALID'
+      using errcode = '22023';
+  end if;
+
+  select *
+    into v_profile
+  from public.attendance_slot_policy_profiles pr
+  where pr.profile_id = p_profile_id
+  for share;
+
+  if not found then
+    raise exception 'ATTENDANCE_SLOT_POLICY_PROFILE_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  if v_profile.is_default then
+    raise exception 'ATTENDANCE_SLOT_POLICY_DEFAULT_ASSIGNMENT_REDUNDANT'
+      using errcode = '22023';
+  end if;
+
+  if not v_profile.active then
+    raise exception 'ATTENDANCE_SLOT_POLICY_PROFILE_INACTIVE'
+      using errcode = '22023';
+  end if;
+
+  select *
+    into v_open
+  from public.attendance_slot_policy_assignments a
+  where a.app_user_id = p_target_app_user_id
+    and a.valid_to is null
+    and not a.superseded_same_day
+  order by a.valid_from desc, a.assigned_at desc
+  limit 1
+  for update;
+
+  if p_expected_version is null or p_expected_version < 0 then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_INVALID'
+      using errcode = '22023';
+  end if;
+
+  if (v_open.assignment_id is null and p_expected_version <> 0)
+     or (v_open.assignment_id is not null and v_open.version <> p_expected_version) then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
+
+  if v_open.assignment_id is not null then
+    if v_open.valid_from > v_effective_date then
+      raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_DATE_ORDER_INVALID'
+        using errcode = '22023';
+    end if;
+
+    if v_open.valid_from = v_effective_date then
+      update public.attendance_slot_policy_assignments a
+      set valid_to = v_effective_date,
+          superseded_same_day = true,
+          revoked_by_user_id = p_app_user_id,
+          revoked_at = clock_timestamp(),
+          version = a.version + 1,
+          updated_at = clock_timestamp()
+      where a.assignment_id = v_open.assignment_id;
+    else
+      update public.attendance_slot_policy_assignments a
+      set valid_to = (v_effective_date - 1),
+          superseded_same_day = false,
+          revoked_by_user_id = p_app_user_id,
+          revoked_at = clock_timestamp(),
+          version = a.version + 1,
+          updated_at = clock_timestamp()
+      where a.assignment_id = v_open.assignment_id;
+    end if;
+  end if;
+
+  begin
+    insert into public.attendance_slot_policy_assignments (
+      app_user_id,
+      profile_id,
+      valid_from,
+      valid_to,
+      superseded_same_day,
+      version,
+      assigned_by_user_id,
+      assigned_at,
+      idempotency_key,
+      request_fingerprint
+    )
+    values (
+      p_target_app_user_id,
+      p_profile_id,
+      v_effective_date,
+      null,
+      false,
+      1,
+      p_app_user_id,
+      clock_timestamp(),
+      p_idempotency_key,
+      p_request_fingerprint
+    )
+    returning * into v_saved;
+  exception
+    when exclusion_violation or unique_violation then
+      raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_OVERLAP'
+        using errcode = 'PT409';
+  end;
+
+  select *
+    into v_ident
+  from public.attendance__internal_resolve_employee_identity(p_target_app_user_id);
+
+  insert into public.direct_entry_audit_events (
+    auth_subject,
+    app_user_id,
+    action,
+    capability,
+    resource_ref,
+    scope_kind,
+    outcome,
+    changed_fields
+  )
+  values (
+    p_auth_subject,
+    p_app_user_id,
+    'attendance_slot_policy_assign',
+    'entry_admin',
+    'attendance_slot_policy_assignment:' || v_saved.assignment_id::text,
+    'all',
+    'APPLIED',
+    array[
+      'target_app_user_id:' || p_target_app_user_id::text,
+      'profile_code:' || v_profile.profile_code,
+      'valid_from:' || v_saved.valid_from::text
+    ]
+  );
+
+  return jsonb_build_object(
+    'replayed', false,
+    'assignment', jsonb_build_object(
+      'assignment_id', v_saved.assignment_id,
+      'app_user_id', v_saved.app_user_id,
+      'employee_display_name', v_ident.employee_display_name,
+      'personnel_code', v_ident.personnel_code,
+      'enabled', v_target_user.enabled,
+      'profile_id', v_profile.profile_id,
+      'profile_code', v_profile.profile_code,
+      'profile_name', v_profile.display_name,
+      'valid_from', pg_catalog.to_char(v_saved.valid_from, 'YYYY-MM-DD'),
+      'valid_to', case when v_saved.valid_to is null then null else pg_catalog.to_char(v_saved.valid_to, 'YYYY-MM-DD') end,
+      'superseded_same_day', v_saved.superseded_same_day,
+      'effective', (
+        not v_saved.superseded_same_day
+        and v_saved.valid_from <= v_today_vn
+        and (v_saved.valid_to is null or v_today_vn <= v_saved.valid_to)
+        and v_profile.active = true
+      ),
+      'version', v_saved.version
+    )
+  );
+end;
+$$;
+
+create or replace function public.attendance_unassign_employee_slot_policy_admin(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_assignment_id uuid,
+  p_effective_date date,
+  p_expected_version integer,
+  p_idempotency_key uuid,
+  p_request_fingerprint text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_can_manage boolean;
+  v_today_vn date := coalesce(
+    nullif(current_setting('direct_entry.test_authorization_date', true), '')::date,
+    (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date
+  );
+  v_effective_date date := coalesce(p_effective_date, v_today_vn);
+  v_existing public.attendance_slot_policy_assignments%rowtype;
+  v_current public.attendance_slot_policy_assignments%rowtype;
+  v_updated public.attendance_slot_policy_assignments%rowtype;
+  v_profile public.attendance_slot_policy_profiles%rowtype;
+  v_target_user public.direct_entry_app_users%rowtype;
+  v_ident record;
+begin
+  v_can_manage := public.attendance__internal_assert_report_reader(
+    p_auth_subject,
+    p_app_user_id
+  );
+
+  if not v_can_manage then
+    raise exception 'ATTENDANCE_SLOT_POLICY_WRITE_DENIED'
+      using errcode = '42501';
+  end if;
+
+  if p_idempotency_key is null
+     or p_request_fingerprint is null
+     or p_request_fingerprint !~ '^[0-9a-f]{64}$' then
+    raise exception 'ATTENDANCE_IDEMPOTENCY_INVALID'
+      using errcode = '22023';
+  end if;
+
+  if p_assignment_id is null
+     or p_expected_version is null
+     or p_expected_version < 1 then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_INVALID'
+      using errcode = '22023';
+  end if;
+
+  perform pg_advisory_xact_lock(
+    hashtext('attendance_slot_policy_assignments_unassign'),
+    hashtext(p_assignment_id::text)
+  );
+
+  select *
+    into v_existing
+  from public.attendance_slot_policy_assignments a
+  where a.revoke_idempotency_key = p_idempotency_key;
+
+  if found then
+    if v_existing.revoke_request_fingerprint <> p_request_fingerprint then
+      raise exception 'IDEMPOTENCY_CONFLICT'
+        using errcode = 'PT409';
+    end if;
+
+    select *
+      into v_profile
+    from public.attendance_slot_policy_profiles pr
+    where pr.profile_id = v_existing.profile_id;
+
+    select *
+      into v_target_user
+    from public.direct_entry_app_users u
+    where u.app_user_id = v_existing.app_user_id;
+
+    select *
+      into v_ident
+    from public.attendance__internal_resolve_employee_identity(v_existing.app_user_id);
+
+    return jsonb_build_object(
+      'replayed', true,
+      'assignment', jsonb_build_object(
+        'assignment_id', v_existing.assignment_id,
+        'app_user_id', v_existing.app_user_id,
+        'employee_display_name', v_ident.employee_display_name,
+        'personnel_code', v_ident.personnel_code,
+        'enabled', v_target_user.enabled,
+        'profile_id', v_profile.profile_id,
+        'profile_code', v_profile.profile_code,
+        'profile_name', v_profile.display_name,
+        'valid_from', pg_catalog.to_char(v_existing.valid_from, 'YYYY-MM-DD'),
+        'valid_to', case when v_existing.valid_to is null then null else pg_catalog.to_char(v_existing.valid_to, 'YYYY-MM-DD') end,
+        'superseded_same_day', v_existing.superseded_same_day,
+        'effective', false,
+        'version', v_existing.version
+      )
+    );
+  end if;
+
+  if v_effective_date > v_today_vn then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_FUTURE_DATE'
+      using errcode = '22023',
+            detail = 'Slot policy profile unassignment takes effect immediately and cannot be scheduled in the future.';
+  end if;
+
+  if v_effective_date < v_today_vn then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_PAST_DATE'
+      using errcode = '22023',
+            detail = 'Slot policy profile unassignment takes effect immediately today and cannot retroactively alter past dates.';
+  end if;
+
+  select *
+    into v_current
+  from public.attendance_slot_policy_assignments a
+  where a.assignment_id = p_assignment_id
+  for update;
+
+  if not found then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  if v_current.version <> p_expected_version then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
+
+  if v_current.valid_to is not null or v_current.superseded_same_day then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_ALREADY_CLOSED'
+      using errcode = 'PT409';
+  end if;
+
+  if v_effective_date < v_current.valid_from then
+    raise exception 'ATTENDANCE_SLOT_POLICY_ASSIGNMENT_RANGE_INVALID'
+      using errcode = '22023';
+  end if;
+
+  if v_effective_date = v_current.valid_from then
+    update public.attendance_slot_policy_assignments a
+    set valid_to = v_effective_date,
+        superseded_same_day = true,
+        revoked_by_user_id = p_app_user_id,
+        revoked_at = clock_timestamp(),
+        revoke_idempotency_key = p_idempotency_key,
+        revoke_request_fingerprint = p_request_fingerprint,
+        version = a.version + 1,
+        updated_at = clock_timestamp()
+    where a.assignment_id = p_assignment_id
+    returning * into v_updated;
+  else
+    update public.attendance_slot_policy_assignments a
+    set valid_to = (v_effective_date - 1),
+        superseded_same_day = false,
+        revoked_by_user_id = p_app_user_id,
+        revoked_at = clock_timestamp(),
+        revoke_idempotency_key = p_idempotency_key,
+        revoke_request_fingerprint = p_request_fingerprint,
+        version = a.version + 1,
+        updated_at = clock_timestamp()
+    where a.assignment_id = p_assignment_id
+    returning * into v_updated;
+  end if;
+
+  select *
+    into v_profile
+  from public.attendance_slot_policy_profiles pr
+  where pr.profile_id = v_updated.profile_id;
+
+  select *
+    into v_target_user
+  from public.direct_entry_app_users u
+  where u.app_user_id = v_updated.app_user_id;
+
+  select *
+    into v_ident
+  from public.attendance__internal_resolve_employee_identity(v_updated.app_user_id);
+
+  insert into public.direct_entry_audit_events (
+    auth_subject,
+    app_user_id,
+    action,
+    capability,
+    resource_ref,
+    scope_kind,
+    outcome,
+    changed_fields
+  )
+  values (
+    p_auth_subject,
+    p_app_user_id,
+    'attendance_slot_policy_unassign',
+    'entry_admin',
+    'attendance_slot_policy_assignment:' || v_updated.assignment_id::text,
+    'all',
+    'APPLIED',
+    array[
+      'target_app_user_id:' || v_updated.app_user_id::text,
+      'profile_code:' || v_profile.profile_code,
+      'valid_to:' || v_updated.valid_to::text,
+      'superseded_same_day:' || v_updated.superseded_same_day::text
+    ]
+  );
+
+  return jsonb_build_object(
+    'replayed', false,
+    'assignment', jsonb_build_object(
+      'assignment_id', v_updated.assignment_id,
+      'app_user_id', v_updated.app_user_id,
+      'employee_display_name', v_ident.employee_display_name,
+      'personnel_code', v_ident.personnel_code,
+      'enabled', v_target_user.enabled,
+      'profile_id', v_profile.profile_id,
+      'profile_code', v_profile.profile_code,
+      'profile_name', v_profile.display_name,
+      'valid_from', pg_catalog.to_char(v_updated.valid_from, 'YYYY-MM-DD'),
+      'valid_to', case when v_updated.valid_to is null then null else pg_catalog.to_char(v_updated.valid_to, 'YYYY-MM-DD') end,
+      'superseded_same_day', v_updated.superseded_same_day,
+      'effective', false,
+      'version', v_updated.version
+    )
+  );
+end;
+$$;
+
+alter table public.work_report_delegations
+  alter column effective_to drop not null;
+
+create or replace function public.work_report__internal_is_delegation_effective(
+  p_delegation_id uuid,
+  p_as_of timestamptz default statement_timestamp()
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_del public.work_report_delegations%rowtype;
+begin
+  select * into v_del
+    from public.work_report_delegations d
+   where d.delegation_id = p_delegation_id;
+  if not found then
+    return false;
+  end if;
+  if v_del.state <> 'ACTIVE' or not v_del.is_current then
+    return false;
+  end if;
+  if p_as_of < v_del.effective_from
+     or (v_del.effective_to is not null and p_as_of > v_del.effective_to) then
+    return false;
+  end if;
+  if not exists (
+    select 1 from public.direct_entry_app_users u
+     where u.app_user_id = v_del.delegate_app_user_id and u.enabled
+  ) then
+    return false;
+  end if;
+  if not exists (
+    select 1 from public.work_report_templates t
+     where t.template_id = v_del.template_id
+       and t.status = 'ACTIVE'
+       and t.current_published_version_id is not null
+  ) then
+    return false;
+  end if;
+  if v_del.scope_kind = 'team' then
+    if not exists (
+      select 1 from public.teams tm where tm.team_id = v_del.scope_team_id and tm.active
+    ) then
+      return false;
+    end if;
+    if public.work_report_current_team(v_del.delegate_app_user_id) is distinct from v_del.scope_team_id
+       and not exists (
+         select 1 from public.direct_entry_scope_grants sg
+          where sg.app_user_id = v_del.delegate_app_user_id
+            and sg.scope_kind = 'team'
+            and sg.team_id = v_del.scope_team_id
+            and sg.is_current
+       ) then
+      return false;
+    end if;
+  end if;
+  if not public.work_report__internal_has_direct_scope(
+    v_del.grantor_user_id, 'report_delegate', v_del.scope_kind, v_del.scope_team_id
+  ) then
+    return false;
+  end if;
+  if not public.work_report__internal_has_direct_scope(
+    v_del.grantor_user_id, v_del.capability, v_del.scope_kind, v_del.scope_team_id
+  ) then
+    return false;
+  end if;
+  return true;
+end;
+$function$;
+
+create or replace function public.work_report__internal_resolve_capability_authority(
+  p_app_user_id uuid,
+  p_capability text,
+  p_template_id uuid,
+  p_team_id uuid,
+  p_as_of timestamptz default statement_timestamp()
+)
+returns table(
+  acting_scope_kind text,
+  acting_team_id uuid,
+  delegation_id uuid
+)
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_delegation_id uuid;
+  v_del_scope_kind text;
+  v_del_team_id uuid;
+begin
+  if public.work_report__internal_has_direct_capability(p_app_user_id, p_capability) then
+    if public.direct_entry_has_scope(p_app_user_id, 'all') then
+      return query select 'all'::text, null::uuid, null::uuid;
+      return;
+    end if;
+    if p_team_id is not null and exists (
+      select 1
+        from public.direct_entry_scope_grants s
+        join public.teams t on t.team_id = s.team_id and t.active
+       where s.app_user_id = p_app_user_id
+         and s.scope_kind = 'team'
+         and s.team_id = p_team_id
+         and s.is_current
+    ) then
+      return query select 'team'::text, p_team_id, null::uuid;
+      return;
+    end if;
+  end if;
+
+  if p_capability in ('report_assign', 'report_review') and p_template_id is not null then
+    select d.delegation_id,
+           d.scope_kind,
+           case when d.scope_kind = 'team' then d.scope_team_id else null end
+      into v_delegation_id, v_del_scope_kind, v_del_team_id
+      from public.work_report_delegations d
+     where d.delegate_app_user_id = p_app_user_id
+       and d.capability = p_capability
+       and d.template_id = p_template_id
+       and d.state = 'ACTIVE'
+       and d.is_current
+       and p_as_of >= d.effective_from
+       and (d.effective_to is null or p_as_of <= d.effective_to)
+       and (
+         d.scope_kind = 'all'
+         or (d.scope_kind = 'team' and p_team_id is not null and d.scope_team_id = p_team_id)
+       )
+       and public.work_report__internal_is_delegation_effective(d.delegation_id, p_as_of)
+     order by case when d.scope_kind = 'all' then 0 else 1 end, d.created_at desc, d.delegation_id desc
+     limit 1;
+
+    if v_delegation_id is not null then
+      return query select v_del_scope_kind, v_del_team_id, v_delegation_id;
+      return;
+    end if;
+  end if;
+end;
+$function$;
+
+create or replace function public.work_report__internal_has_any_capability_authority(
+  p_app_user_id uuid,
+  p_capability text,
+  p_as_of timestamptz default statement_timestamp()
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+begin
+  if public.work_report__internal_has_direct_capability(p_app_user_id, p_capability) then
+    if public.direct_entry_has_scope(p_app_user_id, 'all') then
+      return true;
+    end if;
+    if exists (
+      select 1
+        from public.direct_entry_scope_grants s
+        join public.teams t on t.team_id = s.team_id and t.active
+       where s.app_user_id = p_app_user_id
+         and s.scope_kind = 'team'
+         and s.is_current
+    ) then
+      return true;
+    end if;
+  end if;
+
+  if p_capability in ('report_assign', 'report_review') and exists (
+    select 1
+      from public.work_report_delegations d
+     where d.delegate_app_user_id = p_app_user_id
+       and d.capability = p_capability
+       and d.state = 'ACTIVE'
+       and d.is_current
+       and p_as_of >= d.effective_from
+       and (d.effective_to is null or p_as_of <= d.effective_to)
+       and public.work_report__internal_is_delegation_effective(d.delegation_id, p_as_of)
+  ) then
+    return true;
+  end if;
+
+  return false;
+end;
+$function$;
+
+create or replace function public.work_report_create_delegation(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_capability text,
+  p_delegate_app_user_id uuid,
+  p_template_id uuid,
+  p_scope_kind text,
+  p_scope_id uuid,
+  p_effective_from timestamptz default null,
+  p_effective_to timestamptz default null,
+  p_idempotency_key text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_template public.work_report_templates%rowtype;
+  v_delegation_id uuid;
+  v_effective_from timestamptz;
+  v_request_hash text;
+  v_prior jsonb;
+  v_result jsonb;
+begin
+  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, 'report_delegate');
+
+  if p_capability is null or p_capability not in ('report_assign', 'report_review') then
+    raise exception 'WORK_REPORT_DELEGATION_CAPABILITY_INVALID' using errcode = '22023';
+  end if;
+
+  if not public.work_report__internal_has_direct_capability(p_app_user_id, p_capability) then
+    raise exception 'WORK_REPORT_CAPABILITY_DENIED' using errcode = '42501';
+  end if;
+
+  if p_delegate_app_user_id is null
+     or p_template_id is null
+     or p_scope_kind is null
+     or p_scope_kind not in ('all', 'team')
+     or p_effective_from is not null
+     or p_effective_to is not null
+     or length(coalesce(p_idempotency_key, '')) not between 1 and 128 then
+    raise exception 'WORK_REPORT_DELEGATION_INVALID' using errcode = '22023';
+  end if;
+
+  if (p_scope_kind = 'all' and p_scope_id is not null)
+     or (p_scope_kind = 'team' and p_scope_id is null) then
+    raise exception 'WORK_REPORT_DELEGATION_SCOPE_INVALID' using errcode = '22023';
+  end if;
+
+  if p_delegate_app_user_id = p_app_user_id then
+    raise exception 'WORK_REPORT_SELF_DELEGATION_FORBIDDEN' using errcode = '22023';
+  end if;
+
+  if not public.work_report__internal_has_direct_scope(p_app_user_id, 'report_delegate', p_scope_kind, p_scope_id)
+     or not public.work_report__internal_has_direct_scope(p_app_user_id, p_capability, p_scope_kind, p_scope_id) then
+    raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
+  end if;
+
+  v_request_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'capability', p_capability,
+    'delegate_app_user_id', p_delegate_app_user_id,
+    'template_id', p_template_id,
+    'scope_kind', p_scope_kind,
+    'scope_id', p_scope_id
+  ));
+  v_prior := public.direct_entry_idempotency_begin(p_app_user_id, 'work_report_delegation_create', p_idempotency_key, v_request_hash);
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  if not exists (
+    select 1 from public.direct_entry_app_users u
+     where u.app_user_id = p_delegate_app_user_id and u.enabled
+  ) then
+    raise exception 'WORK_REPORT_DELEGATE_NOT_AVAILABLE' using errcode = '42501';
+  end if;
+
+  if p_scope_kind = 'team' then
+    if public.work_report_current_team(p_delegate_app_user_id) is distinct from p_scope_id
+       and not exists (
+         select 1
+           from public.direct_entry_scope_grants sg
+          where sg.app_user_id = p_delegate_app_user_id
+            and sg.scope_kind = 'team'
+            and sg.team_id = p_scope_id
+            and sg.is_current
+       ) then
+      raise exception 'WORK_REPORT_DELEGATE_OUTSIDE_SCOPE' using errcode = '42501';
+    end if;
+  end if;
+
+  select * into v_template
+    from public.work_report_templates
+   where template_id = p_template_id
+   for share;
+  if not found or v_template.status <> 'ACTIVE' or v_template.current_published_version_id is null then
+    raise exception 'WORK_REPORT_TEMPLATE_NOT_ACTIVE' using errcode = '22023';
+  end if;
+
+  v_effective_from := statement_timestamp();
+
+  insert into public.work_report_delegations
+    (grantor_user_id, delegate_app_user_id, capability, template_id, template_version_id,
+     scope_kind, scope_team_id, effective_from, effective_to, state, is_current, version)
+  values
+    (p_app_user_id, p_delegate_app_user_id, p_capability, p_template_id, v_template.current_published_version_id,
+     p_scope_kind, p_scope_id, v_effective_from, null, 'ACTIVE', true, 1)
+  returning delegation_id into v_delegation_id;
+
+  insert into public.work_report_audit_events
+    (action, actor_user_id, capability, scope_kind, scope_team_id, template_id, outcome, metadata_json)
+  values
+    ('DELEGATION_CREATE', p_app_user_id, 'report_delegate', p_scope_kind, p_scope_id, p_template_id, 'APPLIED',
+     jsonb_build_object(
+       'delegation_id', v_delegation_id,
+       'delegated_capability', p_capability,
+       'delegate_app_user_id', p_delegate_app_user_id,
+       'effective_from', v_effective_from,
+       'effective_to', null
+     ));
+
+  v_result := jsonb_build_object(
+    'delegation_id', v_delegation_id,
+    'status', 'ACTIVE',
+    'state', 'ACTIVE',
+    'effective_from', v_effective_from,
+    'effective_to', null,
+    'version', 1
+  );
+  perform public.direct_entry_idempotency_finish(p_app_user_id, 'work_report_delegation_create', p_idempotency_key, v_result);
+  return v_result;
+end;
+$function$;
+
+create or replace function public.work_report_list_delegations(
+  p_auth_subject uuid,
+  p_app_user_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_all_scope boolean;
+  v_as_of timestamptz := statement_timestamp();
+begin
+  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, 'report_delegate');
+  v_all_scope := public.direct_entry_has_scope(p_app_user_id, 'all');
+
+  if not v_all_scope and not exists (
+    select 1
+      from public.direct_entry_scope_grants s
+      join public.teams t on t.team_id = s.team_id and t.active
+     where s.app_user_id = p_app_user_id
+       and s.scope_kind = 'team'
+       and s.is_current
+  ) then
+    raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
+  end if;
+
+  return jsonb_build_object(
+    'items', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'delegation_id', d.delegation_id,
+        'grantor_user_id', d.grantor_user_id,
+        'grantor_display_name', coalesce(public.work_report__internal_user_display_name(gu.app_user_id), gu.display_name),
+        'capability', d.capability,
+        'delegate_app_user_id', d.delegate_app_user_id,
+        'delegate_display_name', coalesce(public.work_report__internal_user_display_name(du.app_user_id), du.display_name),
+        'template_id', d.template_id,
+        'template_code', t.template_code,
+        'template_name', t.display_name,
+        'template_version_id', d.template_version_id,
+        'scope_kind', d.scope_kind,
+        'scope_id', d.scope_team_id,
+        'scope_team_id', d.scope_team_id,
+        'scope_label', case when d.scope_kind = 'all' then 'Toàn công ty' else coalesce(tm.display_name, tm.code, 'Nhóm') end,
+        'effective_from', d.effective_from,
+        'effective_to', d.effective_to,
+        'revoked_at', d.revoked_at,
+        'state', d.state,
+        'status', case
+          when d.state = 'REVOKED' or not d.is_current then 'REVOKED'
+          when d.effective_to is not null and v_as_of > d.effective_to then 'EXPIRED'
+          else 'ACTIVE'
+        end,
+        'is_current', d.is_current,
+        'version', d.version,
+        'created_at', d.created_at
+      ) order by d.created_at desc, d.delegation_id desc)
+        from public.work_report_delegations d
+        join public.direct_entry_app_users gu on gu.app_user_id = d.grantor_user_id
+        join public.direct_entry_app_users du on du.app_user_id = d.delegate_app_user_id
+        join public.work_report_templates t on t.template_id = d.template_id
+        left join public.teams tm on tm.team_id = d.scope_team_id
+       where v_all_scope
+          or d.grantor_user_id = p_app_user_id
+          or (
+            d.scope_kind = 'team'
+            and exists (
+              select 1
+                from public.direct_entry_scope_grants s
+                join public.teams scoped_team on scoped_team.team_id = s.team_id and scoped_team.active
+               where s.app_user_id = p_app_user_id
+                 and s.scope_kind = 'team'
+                 and s.team_id = d.scope_team_id
+                 and s.is_current
+            )
+          )
+    ), '[]'::jsonb),
+    'options', jsonb_build_object(
+      'delegates', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'app_user_id', del_opt.app_user_id,
+          'display_name', del_opt.display_name
+        ) order by del_opt.display_name, del_opt.app_user_id)
+          from (
+            select u.app_user_id,
+                   coalesce(public.work_report__internal_user_display_name(u.app_user_id), u.display_name) as display_name
+              from public.direct_entry_app_users u
+             where u.enabled
+               and u.app_user_id <> p_app_user_id
+               and (
+                 v_all_scope
+                 or exists (
+                   select 1
+                     from public.direct_entry_scope_grants s
+                     join public.teams scoped_team on scoped_team.team_id = s.team_id and scoped_team.active
+                    where s.app_user_id = p_app_user_id
+                      and s.scope_kind = 'team'
+                      and s.is_current
+                      and s.team_id = public.work_report_current_team(u.app_user_id)
+                 )
+               )
+          ) del_opt
+      ), '[]'::jsonb),
+      'templates', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'template_id', t.template_id,
+          'version_id', t.current_published_version_id,
+          'name', t.display_name,
+          'template_code', t.template_code,
+          'display_name', t.display_name
+        ) order by t.template_code)
+          from public.work_report_templates t
+         where t.status = 'ACTIVE'
+           and t.current_published_version_id is not null
+      ), '[]'::jsonb),
+      'scopes', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'scope_kind', sc.scope_kind,
+          'scope_id', sc.scope_id,
+          'label', sc.label
+        ) order by sc.sort_order, sc.label)
+          from (
+            select 0 as sort_order, 'all'::text as scope_kind, null::uuid as scope_id, 'Toàn công ty'::text as label
+             where v_all_scope
+            union all
+            select 1 as sort_order, 'team'::text as scope_kind, t.team_id as scope_id, coalesce(t.display_name, t.code) as label
+              from public.teams t
+             where t.active
+               and (
+                 v_all_scope
+                 or exists (
+                   select 1
+                     from public.direct_entry_scope_grants s
+                    where s.app_user_id = p_app_user_id
+                      and s.scope_kind = 'team'
+                      and s.team_id = t.team_id
+                      and s.is_current
+                 )
+               )
+          ) sc
+      ), '[]'::jsonb),
+      'capabilities', coalesce((
+        select jsonb_agg(cap order by cap)
+          from unnest(array['report_assign', 'report_review']::text[]) as cap
+         where public.work_report__internal_has_direct_capability(p_app_user_id, cap)
+      ), '[]'::jsonb)
+    )
+  );
+end;
+$function$;
+
+create or replace function public.direct_entry_resolve_actor_context(p_auth_subject uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_app_user_id uuid;
+  v_enabled boolean;
+  v_review_scopes jsonb;
+  v_team_leader_team_id uuid := null;
+  v_allowed_worker_tabs jsonb := '[]'::jsonb;
+begin
+  select u.app_user_id, u.enabled
+    into v_app_user_id, v_enabled
+    from public.direct_entry_app_users u
+   where u.auth_subject = p_auth_subject;
+  if not found then return null; end if;
+
+  select case when not u.enabled then '[]'::jsonb else coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'kind', s.kind,
+      'team_id', s.team_id,
+      'label', s.label
+    ) order by case when s.kind = 'all' then 0 else 1 end, s.label, s.team_id)
+      from (
+        select distinct
+          raw_scopes.kind,
+          raw_scopes.team_id,
+          raw_scopes.label
+        from (
+          select 'all'::text as kind, null::uuid as team_id, 'Toàn công ty'::text as label
+           where public.direct_entry_has_capability(u.app_user_id, 'report_review')
+             and public.direct_entry_has_scope(u.app_user_id, 'all')
+          union all
+          select 'team'::text as kind, t.team_id, coalesce(t.display_name, t.code) as label
+            from public.direct_entry_scope_grants g
+            join public.teams t on t.team_id = g.team_id and t.active
+           where public.direct_entry_has_capability(u.app_user_id, 'report_review')
+             and g.app_user_id = u.app_user_id
+             and g.scope_kind = 'team'
+             and public.direct_entry__internal_team_scope_grant_effective(g.grant_id)
+          union all
+          select d.scope_kind as kind,
+                 case when d.scope_kind = 'team' then d.scope_team_id else null end as team_id,
+                 case when d.scope_kind = 'all' then 'Toàn công ty' else coalesce(tm.display_name, tm.code, 'Nhóm') end as label
+            from public.work_report_delegations d
+            left join public.teams tm on tm.team_id = d.scope_team_id
+           where d.delegate_app_user_id = u.app_user_id
+             and d.capability = 'report_review'
+             and d.state = 'ACTIVE'
+             and d.is_current
+             and statement_timestamp() >= d.effective_from
+             and (d.effective_to is null or statement_timestamp() <= d.effective_to)
+             and public.work_report__internal_is_delegation_effective(d.delegation_id, statement_timestamp())
+        ) raw_scopes
+      ) s
+  ), '[]'::jsonb) end
+    into v_review_scopes
+    from public.direct_entry_app_users u
+   where u.app_user_id = v_app_user_id;
+
+  if v_enabled and public.direct_entry_has_capability(v_app_user_id, 'team_manager_assign') then
+    begin
+      v_team_leader_team_id := public.direct_entry_assert_team_leader_current_team(
+        p_auth_subject, v_app_user_id, null
+      );
+    exception when insufficient_privilege then
+      v_team_leader_team_id := null;
+    end;
+  end if;
+
+  if v_enabled then
+    select coalesce(
+      jsonb_agg(t.tab_id order by t.ord),
+      '[]'::jsonb
+    )
+    into v_allowed_worker_tabs
+    from (
+      select 'uploader'::text as tab_id, 1 as ord
+       where (
+         (
+           select count(*)::integer
+             from public.direct_entry_scope_grants g
+            where g.app_user_id = v_app_user_id
+              and g.scope_kind = 'own'
+              and g.team_id is null
+              and g.is_current
+         ) = 1
+         and public.direct_entry_has_capability(v_app_user_id, 'submission_create')
+       )
+       or public.direct_entry_actor_has_project_assignment(v_app_user_id)
+      union all
+      select 'recruited'::text as tab_id, 2 as ord
+       where (
+         select count(*)::integer
+           from public.direct_entry_app_user_recruiter_links l
+          where l.app_user_id = v_app_user_id
+            and l.verified
+            and l.is_current
+       ) = 1
+       and exists (
+         select 1
+           from public.direct_entry_app_user_recruiter_links l
+           join public.recruiters r
+             on r.recruiter_id = l.recruiter_id
+            and r.active
+          where l.app_user_id = v_app_user_id
+            and l.verified
+            and l.is_current
+       )
+      union all
+      select 'managed'::text as tab_id, 3 as ord
+       where public.direct_entry_actor_has_project_assignment(v_app_user_id)
+      union all
+      select 'team'::text as tab_id, 4 as ord
+       where v_team_leader_team_id is not null
+      union all
+      select 'all'::text as tab_id, 5 as ord
+       where public.direct_entry_has_scope(v_app_user_id, 'all')
+         and (
+           public.direct_entry_has_capability(v_app_user_id, 'entry_admin')
+           or public.direct_entry_has_capability(v_app_user_id, 'change_review')
+         )
+    ) t;
+  end if;
+
+  return (
+    select jsonb_build_object(
+      'auth_subject', u.auth_subject,
+      'app_user_id', u.app_user_id,
+      'display_name', u.display_name,
+      'enabled', u.enabled,
+      'capabilities', coalesce((
+        select jsonb_agg(distinct g.capability order by g.capability)
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = u.app_user_id
+           and public.direct_entry__internal_capability_grant_effective(g.grant_id)
+      ), '[]'::jsonb),
+      'recruiter_links', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'app_user_id', l.app_user_id, 'recruiter_id', l.recruiter_id, 'verified', l.verified,
+          'valid_from', l.valid_from, 'valid_to', l.valid_to
+        ) order by l.valid_from, l.recruiter_id)
+          from public.direct_entry_app_user_recruiter_links l
+          join public.recruiters r on r.recruiter_id = l.recruiter_id and r.active
+         where l.app_user_id = u.app_user_id and l.verified and l.is_current and u.enabled
+      ), '[]'::jsonb),
+      'teams', coalesce((
+        select jsonb_agg(jsonb_build_object('team_id', t.team_id, 'code', t.code,
+          'display', t.display_name, 'active', t.active) order by t.team_id)
+          from public.teams t
+         where t.active and exists (
+           select 1 from public.direct_entry_scope_grants g
+            where g.app_user_id = u.app_user_id and g.scope_kind = 'team'
+              and g.team_id = t.team_id
+              and public.direct_entry__internal_team_scope_grant_effective(g.grant_id)
+         )
+      ), '[]'::jsonb),
+      'team_scope_grants', coalesce((
+        select jsonb_agg(jsonb_build_object('team_id', g.team_id,
+          'valid_from', g.valid_from, 'valid_to', g.valid_to) order by g.valid_from, g.team_id)
+          from public.direct_entry_scope_grants g
+          join public.teams t on t.team_id = g.team_id and t.active
+         where g.app_user_id = u.app_user_id
+           and g.scope_kind = 'team'
+           and public.direct_entry__internal_team_scope_grant_effective(g.grant_id)
+      ), '[]'::jsonb),
+      'all_scope_grants', coalesce((
+        select jsonb_agg(jsonb_build_object('valid_from', g.valid_from, 'valid_to', g.valid_to) order by g.valid_from)
+          from public.direct_entry_scope_grants g
+         where g.app_user_id = u.app_user_id and g.scope_kind = 'all' and g.is_current and u.enabled
+      ), '[]'::jsonb),
+      'allowed_worker_tabs', v_allowed_worker_tabs
+    ) || case
+      when jsonb_array_length(v_review_scopes) > 0 then jsonb_build_object('effective_report_review_scopes', v_review_scopes)
+      else '{}'::jsonb
+    end
+    from public.direct_entry_app_users u where u.app_user_id = v_app_user_id
+  );
+end;
+$function$;
+
 do $owner_align$
 declare
   v_base_owner_oid oid;
@@ -3064,6 +5066,11 @@ begin
        'public.direct_entry_move_team_membership(uuid,uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
        'public.direct_entry_unassign_team_membership(uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
        'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
+       'public.direct_entry_assign_project_manager(uuid,uuid,text,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
+       'public.direct_entry_grant_project_team_scope(uuid,uuid,text,uuid,integer,date,text,text)'::pg_catalog.regprocedure,
+       'public.direct_entry_revoke_project_team_scope(uuid,uuid,uuid,integer,date,text,text)'::pg_catalog.regprocedure,
+       'public.direct_entry_revoke_project_team_scope(uuid,uuid,uuid,date,text,text)'::pg_catalog.regprocedure,
+       'public.direct_entry_account_operation_create_personnel(uuid,uuid,uuid,integer,text,text,date,text,text)'::pg_catalog.regprocedure,
        'public.org_department_assign_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
        'public.org_department_end_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
        'public.vendor_finance_assign_project_accountant_admin(uuid,uuid,text,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
@@ -3072,7 +5079,15 @@ begin
        'public.vendor_finance_end_global_role_admin(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
        'public.leave_management_set_department_approver_admin(uuid,uuid,text,uuid,date,integer,text,text,text)'::pg_catalog.regprocedure,
        'public.attendance_assign_employee_branch_admin(uuid,uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
-       'public.attendance_unassign_employee_branch_admin(uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure
+       'public.attendance_unassign_employee_branch_admin(uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
+       'public.attendance_assign_employee_slot_policy_admin(uuid,uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
+       'public.attendance_unassign_employee_slot_policy_admin(uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
+       'public.work_report__internal_is_delegation_effective(uuid,timestamptz)'::pg_catalog.regprocedure,
+       'public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)'::pg_catalog.regprocedure,
+       'public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)'::pg_catalog.regprocedure,
+       'public.work_report_create_delegation(uuid,uuid,text,uuid,uuid,text,uuid,timestamptz,timestamptz,text)'::pg_catalog.regprocedure,
+       'public.work_report_list_delegations(uuid,uuid)'::pg_catalog.regprocedure,
+       'public.direct_entry_resolve_actor_context(uuid)'::pg_catalog.regprocedure
      )
   loop
     if v_proc_owner_oid is distinct from v_base_owner_oid
@@ -3083,13 +5098,22 @@ begin
 end
 $owner_align$;
 
-revoke all on function public.direct_entry_apply_team_leader_mutation(uuid, uuid, uuid, uuid, date, integer, text, text, text, text)
-  from public, anon, authenticated, service_role;
+revoke all on function
+  public.direct_entry_apply_team_leader_mutation(uuid, uuid, uuid, uuid, date, integer, text, text, text, text),
+  public.direct_entry_grant_project_team_scope(uuid, uuid, text, uuid, integer, date, text, text),
+  public.direct_entry_revoke_project_team_scope(uuid, uuid, uuid, integer, date, text, text),
+  public.work_report__internal_is_delegation_effective(uuid, timestamptz),
+  public.work_report__internal_resolve_capability_authority(uuid, text, uuid, uuid, timestamptz),
+  public.work_report__internal_has_any_capability_authority(uuid, text, timestamptz)
+from public, anon, authenticated, service_role;
 
 revoke all on function
   public.direct_entry_assign_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text),
   public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text),
   public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text),
+  public.direct_entry_assign_project_manager(uuid, uuid, text, uuid, date, integer, text, text),
+  public.direct_entry_revoke_project_team_scope(uuid, uuid, uuid, date, text, text),
+  public.direct_entry_account_operation_create_personnel(uuid, uuid, uuid, integer, text, text, date, text, text),
   public.org_department_assign_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.vendor_finance_assign_project_accountant_admin(uuid, uuid, text, uuid, integer, date, text, uuid, text),
@@ -3098,13 +5122,21 @@ revoke all on function
   public.vendor_finance_end_global_role_admin(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.leave_management_set_department_approver_admin(uuid, uuid, text, uuid, date, integer, text, text, text),
   public.attendance_assign_employee_branch_admin(uuid, uuid, uuid, uuid, date, integer, uuid, text),
-  public.attendance_unassign_employee_branch_admin(uuid, uuid, uuid, date, integer, uuid, text)
+  public.attendance_unassign_employee_branch_admin(uuid, uuid, uuid, date, integer, uuid, text),
+  public.attendance_assign_employee_slot_policy_admin(uuid, uuid,uuid, uuid, date, integer, uuid, text),
+  public.attendance_unassign_employee_slot_policy_admin(uuid, uuid, uuid, date, integer, uuid, text),
+  public.work_report_create_delegation(uuid, uuid, text, uuid, uuid, text, uuid, timestamptz, timestamptz, text),
+  public.work_report_list_delegations(uuid, uuid),
+  public.direct_entry_resolve_actor_context(uuid)
 from public, anon, authenticated, service_role;
 
 grant execute on function
   public.direct_entry_assign_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text),
   public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text),
   public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text),
+  public.direct_entry_assign_project_manager(uuid, uuid, text, uuid, date, integer, text, text),
+  public.direct_entry_revoke_project_team_scope(uuid, uuid, uuid, date, text, text),
+  public.direct_entry_account_operation_create_personnel(uuid, uuid, uuid, integer, text, text, date, text, text),
   public.org_department_assign_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.vendor_finance_assign_project_accountant_admin(uuid, uuid, text, uuid, integer, date, text, uuid, text),
@@ -3113,12 +5145,18 @@ grant execute on function
   public.vendor_finance_end_global_role_admin(uuid, uuid, uuid, integer, date, text, uuid, text),
   public.leave_management_set_department_approver_admin(uuid, uuid, text, uuid, date, integer, text, text, text),
   public.attendance_assign_employee_branch_admin(uuid, uuid, uuid, uuid, date, integer, uuid, text),
-  public.attendance_unassign_employee_branch_admin(uuid, uuid, uuid, date, integer, uuid, text)
+  public.attendance_unassign_employee_branch_admin(uuid, uuid, uuid, date, integer, uuid, text),
+  public.attendance_assign_employee_slot_policy_admin(uuid, uuid, uuid, uuid, date, integer, uuid, text),
+  public.attendance_unassign_employee_slot_policy_admin(uuid, uuid, uuid, date, integer, uuid, text),
+  public.work_report_create_delegation(uuid, uuid, text, uuid, uuid, text, uuid, timestamptz, timestamptz, text),
+  public.work_report_list_delegations(uuid, uuid),
+  public.direct_entry_resolve_actor_context(uuid)
 to service_role;
 
 do $self_check$
 declare
   v_rpc_fn regprocedure;
+  v_internal_fn regprocedure;
   v_secdef boolean;
   v_config text;
 begin
@@ -3126,6 +5164,9 @@ begin
     'public.direct_entry_assign_team_membership(uuid,uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
     'public.direct_entry_move_team_membership(uuid,uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
     'public.direct_entry_unassign_team_membership(uuid,uuid,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
+    'public.direct_entry_assign_project_manager(uuid,uuid,text,uuid,date,integer,text,text)'::pg_catalog.regprocedure,
+    'public.direct_entry_revoke_project_team_scope(uuid,uuid,uuid,date,text,text)'::pg_catalog.regprocedure,
+    'public.direct_entry_account_operation_create_personnel(uuid,uuid,uuid,integer,text,text,date,text,text)'::pg_catalog.regprocedure,
     'public.org_department_assign_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
     'public.org_department_end_accounting_member(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
     'public.vendor_finance_assign_project_accountant_admin(uuid,uuid,text,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
@@ -3134,7 +5175,12 @@ begin
     'public.vendor_finance_end_global_role_admin(uuid,uuid,uuid,integer,date,text,uuid,text)'::pg_catalog.regprocedure,
     'public.leave_management_set_department_approver_admin(uuid,uuid,text,uuid,date,integer,text,text,text)'::pg_catalog.regprocedure,
     'public.attendance_assign_employee_branch_admin(uuid,uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
-    'public.attendance_unassign_employee_branch_admin(uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure
+    'public.attendance_unassign_employee_branch_admin(uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
+    'public.attendance_assign_employee_slot_policy_admin(uuid,uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
+    'public.attendance_unassign_employee_slot_policy_admin(uuid,uuid,uuid,date,integer,uuid,text)'::pg_catalog.regprocedure,
+    'public.work_report_create_delegation(uuid,uuid,text,uuid,uuid,text,uuid,timestamptz,timestamptz,text)'::pg_catalog.regprocedure,
+    'public.work_report_list_delegations(uuid,uuid)'::pg_catalog.regprocedure,
+    'public.direct_entry_resolve_actor_context(uuid)'::pg_catalog.regprocedure
   ]
   loop
     select p.prosecdef,
@@ -3158,29 +5204,23 @@ begin
     end if;
   end loop;
 
-  if pg_catalog.has_function_privilege(
-       'public',
-       'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
-       'EXECUTE'
-     )
-     or pg_catalog.has_function_privilege(
-       'anon',
-       'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
-       'EXECUTE'
-     )
-     or pg_catalog.has_function_privilege(
-       'authenticated',
-       'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
-       'EXECUTE'
-     )
-     or pg_catalog.has_function_privilege(
-       'service_role',
-       'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
-       'EXECUTE'
-     ) then
-    raise exception 'WP1-S1 internal helper EXECUTE privilege drift on direct_entry_apply_team_leader_mutation'
-      using errcode = '55000';
-  end if;
+  foreach v_internal_fn in array array[
+    'public.direct_entry_apply_team_leader_mutation(uuid,uuid,uuid,uuid,date,integer,text,text,text,text)'::pg_catalog.regprocedure,
+    'public.direct_entry_grant_project_team_scope(uuid,uuid,text,uuid,integer,date,text,text)'::pg_catalog.regprocedure,
+    'public.direct_entry_revoke_project_team_scope(uuid,uuid,uuid,integer,date,text,text)'::pg_catalog.regprocedure,
+    'public.work_report__internal_is_delegation_effective(uuid,timestamptz)'::pg_catalog.regprocedure,
+    'public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)'::pg_catalog.regprocedure,
+    'public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)'::pg_catalog.regprocedure
+  ]
+  loop
+    if pg_catalog.has_function_privilege('public', v_internal_fn, 'EXECUTE')
+       or pg_catalog.has_function_privilege('anon', v_internal_fn, 'EXECUTE')
+       or pg_catalog.has_function_privilege('authenticated', v_internal_fn, 'EXECUTE')
+       or pg_catalog.has_function_privilege('service_role', v_internal_fn, 'EXECUTE') then
+      raise exception 'WP1-S1 internal helper EXECUTE privilege drift on %', v_internal_fn
+        using errcode = '55000';
+    end if;
+  end loop;
 end
 $self_check$;
 

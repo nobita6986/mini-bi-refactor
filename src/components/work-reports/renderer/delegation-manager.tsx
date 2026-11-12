@@ -14,13 +14,15 @@ type Delegation = {
   delegate_display_name: string;
   template_id: string;
   template_name: string;
-  template_version_id: string;
+  template_version_id?: string;
   scope_kind: "all" | "team";
   scope_id: string | null;
   scope_label: string;
   effective_from: string;
-  effective_to: string;
-  status: string;
+  effective_to: string | null;
+  revoked_at?: string | null;
+  state?: string;
+  status?: string;
   version: number;
 };
 type Data = {
@@ -66,8 +68,6 @@ export function DelegationManager() {
   const [templateId, setTemplateId] = useState("");
   const [scopeIndex, setScopeIndex] = useState("");
   const [capability, setCapability] = useState<DelegatedCapability | "">("");
-  const [effectiveFrom, setEffectiveFrom] = useState("");
-  const [effectiveTo, setEffectiveTo] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,9 +99,8 @@ export function DelegationManager() {
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!data || !capability || !delegateId || !templateId || !selectedScope ||
-        !effectiveFrom || !effectiveTo || effectiveTo < effectiveFrom) {
-      setError("Chọn quyền, người nhận, mẫu, phạm vi và thời hạn hợp lệ.");
+    if (!data || !capability || !delegateId || !templateId || !selectedScope) {
+      setError("Chọn quyền, người nhận, mẫu và phạm vi hợp lệ.");
       return;
     }
     setBusy(true); setError(null);
@@ -112,7 +111,7 @@ export function DelegationManager() {
         headers: { "Content-Type": "application/json", "Idempotency-Key": idempotency_key },
         body: JSON.stringify({ capability, delegate_app_user_id: delegateId, template_id: templateId,
           scope_kind: selectedScope.scope_kind, scope_id: selectedScope.scope_kind === "team" ? selectedScope.scope_id : null,
-          effective_from: effectiveFrom, effective_to: effectiveTo, idempotency_key }),
+          idempotency_key }),
       });
       await readBody(response);
       notify.success({ title: "Đã tạo ủy quyền." });
@@ -144,7 +143,7 @@ export function DelegationManager() {
   }
 
   return <div className="space-y-5">
-    <StatusBanner tone="info" title="Ủy quyền có thời hạn">Danh sách người nhận, mẫu và phạm vi do máy chủ cung cấp. Quyền được kiểm tra lại ở mọi thao tác; ủy quyền không thể được ủy quyền tiếp từ giao diện này.</StatusBanner>
+    <StatusBanner tone="info" title="Ủy quyền hiệu lực ngay theo thời gian máy chủ">Danh sách người nhận, mẫu và phạm vi do máy chủ cung cấp. Ủy quyền có hiệu lực ngay khi tạo và kết thúc ngay khi thu hồi; quyền được kiểm tra lại ở mọi thao tác, ủy quyền không thể được ủy quyền tiếp từ giao diện này.</StatusBanner>
     {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
     <div className="flex justify-end"><Button variant="secondary" disabled={loading || busy} onClick={() => void refresh()}>Tải lại</Button></div>
     {loading && !data ? <p role="status" className="text-sm text-muted">Đang tải danh sách ủy quyền…</p> : null}
@@ -164,18 +163,21 @@ export function DelegationManager() {
           <label className="block space-y-1.5 text-sm font-medium">Phạm vi<select required className={inputClass} value={scopeIndex} onChange={(event) => setScopeIndex(event.target.value)}>
             <option value="">Chọn phạm vi</option>{data.options.scopes.map((item, index) => <option key={`${item.scope_kind}:${item.scope_id ?? "all"}`} value={index}>{item.label}</option>)}
           </select></label>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="space-y-1.5 text-sm font-medium">Có hiệu lực từ<input required type="date" className={inputClass} value={effectiveFrom} onChange={(event) => setEffectiveFrom(event.target.value)} /></label>
-            <label className="space-y-1.5 text-sm font-medium">Đến hết ngày<input required type="date" min={effectiveFrom || undefined} className={inputClass} value={effectiveTo} onChange={(event) => setEffectiveTo(event.target.value)} /></label>
-          </div>
+          <p className="rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
+            Thời điểm bắt đầu hiệu lực được máy chủ ghi nhận ngay khi tạo; quyền được ủy nhiệm có hiệu lực đến khi thu hồi.
+          </p>
           <Button type="submit" variant="primary" disabled={busy}>{busy ? "Đang lưu…" : "Tạo ủy quyền"}</Button>
         </form> : <StatusBanner>Máy chủ chưa cấp lựa chọn để tạo ủy quyền trong phạm vi hiện tại.</StatusBanner>}
       <section className="space-y-3" aria-labelledby="work-report-delegations-title">
         <div><h2 id="work-report-delegations-title" className="text-lg font-semibold">Ủy quyền đã tạo</h2><p className="text-sm text-muted">Chỉ hiển thị các ủy quyền trong phạm vi máy chủ cho phép.</p></div>
-        {data.items.length === 0 ? <p className="rounded-xl border border-border p-4 text-sm text-muted">Chưa có ủy quyền.</p> : <ul className="space-y-3">{data.items.map((item) => <li key={item.delegation_id} className="flex flex-col gap-3 rounded-xl border border-border p-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1"><h3 className="font-semibold">{item.delegate_display_name} · {item.capability === "report_review" ? "Duyệt báo cáo" : "Giao báo cáo"}</h3><p className="text-sm text-muted">{item.template_name} · {item.scope_label}</p><p className="text-xs text-muted">{item.effective_from} – {item.effective_to} · {item.status}</p></div>
-          {item.status !== "REVOKED" && <Button variant="secondary" disabled={busy} onClick={() => void revoke(item)}>Thu hồi</Button>}
-        </li>)}</ul>}
+        {data.items.length === 0 ? <p className="rounded-xl border border-border p-4 text-sm text-muted">Chưa có ủy quyền.</p> : <ul className="space-y-3">{data.items.map((item) => {
+          const itemStatus = item.status ?? item.state ?? "ACTIVE";
+          const endLabel = item.effective_to ?? (item.revoked_at ? `Thu hồi lúc ${item.revoked_at}` : "Đến khi thu hồi");
+          return <li key={item.delegation_id} className="flex flex-col gap-3 rounded-xl border border-border p-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1"><h3 className="font-semibold">{item.delegate_display_name} · {item.capability === "report_review" ? "Duyệt báo cáo" : "Giao báo cáo"}</h3><p className="text-sm text-muted">{item.template_name} · {item.scope_label}</p><p className="text-xs text-muted">{item.effective_from} – {endLabel} · {itemStatus}</p></div>
+            {itemStatus !== "REVOKED" && item.state !== "REVOKED" && <Button variant="secondary" disabled={busy} onClick={() => void revoke(item)}>Thu hồi</Button>}
+          </li>;
+        })}</ul>}
       </section>
     </> : null}
   </div>;

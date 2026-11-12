@@ -2070,6 +2070,9 @@ export function parseAssignSlotPolicyBody(
     if (validFrom > resolvedTodayVn) {
       return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_FUTURE_DATE" };
     }
+    if (validFrom < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_PAST_DATE" };
+    }
   }
 
   const expectedVersion =
@@ -2132,6 +2135,9 @@ export function parseUnassignSlotPolicyBody(
     validTo = body.valid_to.trim();
     if (validTo > resolvedTodayVn) {
       return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_FUTURE_DATE" };
+    }
+    if (validTo < resolvedTodayVn) {
+      return { ok: false, code: "ATTENDANCE_SLOT_POLICY_ASSIGNMENT_PAST_DATE" };
     }
   }
 

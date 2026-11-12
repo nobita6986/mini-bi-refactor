@@ -62,6 +62,17 @@ import {
   parseEndGlobalRoleBody as validateEndGlobalRoleBody,
   parseEndProjectAccountantBody as validateEndProjectAccountantBody,
 } from "../src/lib/vendor-finance/vendor-finance-contract.ts";
+import {
+  buildAssignGlobalRoleRequest,
+  buildAssignProjectAccountantRequest,
+  buildEndGlobalRoleRequest,
+  buildEndProjectAccountantRequest,
+} from "../src/lib/vendor-finance/ui-model.ts";
+import {
+  RECRUITMENT_DAILY_TEMPLATE_SCHEMA,
+} from "../src/lib/work-reports/contracts.ts";
+import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
+import { createWorkReportDelegation } from "../src/lib/work-reports/delegation-api.ts";
 import { AUTH_PROLOGUE } from "./lib/s04c-read-fixture.mjs";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
@@ -629,6 +640,130 @@ test("WP1/S1: API & contract layers reject future and past effective/end dates a
     leaveDefaultTomorrow.data.request_fingerprint,
     "Cross-midnight leave department approver request fingerprint must remain identical when valid_from is omitted",
   );
+
+  // 6. Vendor Finance UI model builders reject both future and past dates and accept null
+  for (const invalidDate of [futureDate, pastDate]) {
+    assert.equal(
+      buildAssignProjectAccountantRequest({
+        project_id: PROJECT_1,
+        accountant_ref: validUuid,
+        valid_from: invalidDate,
+        authorization_date: serverToday,
+        expected_version: 0,
+        reason: "Non-today project accountant UI request",
+        idempotency_key: validIdem,
+      }).ok,
+      false,
+    );
+    assert.equal(
+      buildEndProjectAccountantRequest({
+        expected_version: 1,
+        valid_to: invalidDate,
+        authorization_date: serverToday,
+        reason: "Non-today end project accountant UI request",
+        idempotency_key: validIdem,
+      }).ok,
+      false,
+    );
+    assert.equal(
+      buildAssignGlobalRoleRequest({
+        account_ref: validUuid,
+        role_code: "GLOBAL_VIEWER",
+        valid_from: invalidDate,
+        authorization_date: serverToday,
+        expected_version: 0,
+        reason: "Non-today global role UI request",
+        idempotency_key: validIdem,
+      }).ok,
+      false,
+    );
+    assert.equal(
+      buildEndGlobalRoleRequest({
+        expected_version: 1,
+        valid_to: invalidDate,
+        authorization_date: serverToday,
+        reason: "Non-today end global role UI request",
+        idempotency_key: validIdem,
+      }).ok,
+      false,
+    );
+  }
+
+  const vfinAssignUiNull = buildAssignProjectAccountantRequest({
+    project_id: PROJECT_1,
+    accountant_ref: validUuid,
+    valid_from: null,
+    authorization_date: serverToday,
+    expected_version: 0,
+    reason: "Null date project accountant UI request",
+    idempotency_key: validIdem,
+  });
+  assert.equal(vfinAssignUiNull.ok, true);
+  assert.equal(vfinAssignUiNull.request.body.valid_from, null);
+
+  const vfinEndUiNull = buildEndProjectAccountantRequest({
+    expected_version: 1,
+    valid_to: null,
+    authorization_date: serverToday,
+    reason: "Null date end project accountant UI request",
+    idempotency_key: validIdem,
+  });
+  assert.equal(vfinEndUiNull.ok, true);
+  assert.equal(vfinEndUiNull.request.body.valid_to, null);
+
+  // 7. Work Reports Delegation API rejects client-supplied effective_from / effective_to
+  for (const badPayload of [
+    {
+      capability: "report_review",
+      delegate_app_user_id: validUuid,
+      template_id: validUuid,
+      scope_kind: "team",
+      scope_id: validTeamUuid,
+      idempotency_key: validIdem,
+      effective_from: `${serverToday}T00:00:00.000Z`,
+    },
+    {
+      capability: "report_assign",
+      delegate_app_user_id: validUuid,
+      template_id: validUuid,
+      scope_kind: "team",
+      scope_id: validTeamUuid,
+      idempotency_key: validIdem,
+      effective_to: `${futureDate}T23:59:59.000Z`,
+    },
+  ]) {
+    const req = new Request("https://app.test/api/work-reports/delegations", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.test",
+        host: "app.test",
+        "sec-fetch-site": "same-origin",
+        "idempotency-key": validIdem,
+      },
+      body: JSON.stringify(badPayload),
+    });
+    const res = await createWorkReportDelegation(req, "true", {
+      resolveSession: async () => ({
+        actor: {
+          ok: true,
+          actor: {
+            auth_subject: ACTORS.leader1.auth,
+            app_user_id: ACTORS.leader1.app,
+            capabilities: ["report_assign", "report_review"],
+          },
+        },
+      }),
+      repository: {
+        create: async () => {
+          throw new Error("repository.create must not be called when client sends effective_from/effective_to");
+        },
+      },
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.code, "WORK_REPORT_DELEGATION_INVALID");
+  }
 });
 
 test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Immediate Handover, and Day-Boundary Stability", async () => {
@@ -657,6 +792,11 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
        values ($1::uuid, 'WP1_TM_A', 'Team Alpha WP1', true, 1),
               ($2::uuid, 'WP1_TM_B', 'Team Beta WP1', true, 1)`,
       [TEAM_A, TEAM_B],
+    );
+    await db.query(
+      `insert into public.direct_entry_projects (project_id, display_name, active, version)
+       values ($1, 'WP1 Project 01', true, 1)`,
+      [PROJECT_1],
     );
 
     for (const actor of Object.values(ACTORS)) {
@@ -866,7 +1006,103 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
           `fp-f8-${tag}`,
         ],
       );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_grant_project_team_scope (${tag})`,
+        "select public.direct_entry_grant_project_team_scope($1::uuid, $2::uuid, $3::text, $4::uuid, 0, $5::date, 'Reason', $6::text)",
+        [
+          ACTORS.fullAdmin.auth,
+          ACTORS.fullAdmin.app,
+          PROJECT_1,
+          TEAM_A,
+          badDate,
+          `idem-f9-${tag}`,
+        ],
+      );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_assign_project_manager (${tag})`,
+        "select public.direct_entry_assign_project_manager($1::uuid, $2::uuid, $3::text, $4::uuid, $5::date, 1, 'Reason', $6::text)",
+        [
+          ACTORS.fullAdmin.auth,
+          ACTORS.fullAdmin.app,
+          PROJECT_1,
+          ACTORS.leader1.recruiter,
+          badDate,
+          `idem-f10-${tag}`,
+        ],
+      );
+      await assertInvalidDateRpcRejected(
+        `direct_entry_account_operation_create_personnel (${tag})`,
+        "select public.direct_entry_account_operation_create_personnel($1::uuid, $2::uuid, $3::uuid, 1, 'PC-01', 'STAFF', $4::date, 'Reason', $5::text)",
+        [
+          ACTORS.fullAdmin.auth,
+          ACTORS.fullAdmin.app,
+          ACTORS.vfinViewer.app,
+          badDate,
+          `idem-f11-${tag}`,
+        ],
+      );
     }
+
+    // Grant report_delegate to leader1 & leader2 for work_report_create_delegation tests
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'report_delegate', $3::date, true),
+              ($2::uuid, 'report_delegate', $3::date, true)`,
+      [ACTORS.leader1.app, ACTORS.leader2.app, PAST],
+    );
+
+    const TEMPLATE_1 = "30000000-0000-4000-8000-000000000001";
+    const TEMPLATE_VER_1 = "40000000-0000-4000-8000-000000000001";
+    await db.query(
+      `insert into public.work_report_templates (template_id, template_code, display_name, default_frequency, status, version, created_by_user_id)
+       values ($1::uuid, 'WP1_DAILY_TPL', 'WP1 Daily Template', 'DAILY', 'ACTIVE', 1, $2::uuid)`,
+      [TEMPLATE_1, ACTORS.fullAdmin.app],
+    );
+    await db.query(
+      `insert into public.work_report_template_versions (version_id, template_id, version_no, status, schema_json, metric_contract_json, schema_checksum, requires_review, published_by_user_id, published_at)
+       values ($1::uuid, $2::uuid, 1, 'PUBLISHED', $3::jsonb, $4::jsonb, repeat('a', 64), true, $5::uuid, now())`,
+      [
+        TEMPLATE_VER_1,
+        TEMPLATE_1,
+        JSON.stringify(RECRUITMENT_DAILY_TEMPLATE_SCHEMA),
+        JSON.stringify(buildWorkReportMetricContract(RECRUITMENT_DAILY_TEMPLATE_SCHEMA)),
+        ACTORS.fullAdmin.app,
+      ],
+    );
+    await db.query(
+      `update public.work_report_templates set current_published_version_id = $1::uuid where template_id = $2::uuid`,
+      [TEMPLATE_VER_1, TEMPLATE_1],
+    );
+
+    // Verify work_report_create_delegation rejects client-supplied effective_from / effective_to
+    await assertInvalidDateRpcRejected(
+      "work_report_create_delegation (client effective_from)",
+      `select public.work_report_create_delegation(
+         $1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, $6::timestamptz, null, 'fp-del-bad-from'
+       )`,
+      [
+        ACTORS.leader1.auth,
+        ACTORS.leader1.app,
+        ACTORS.staff1.app,
+        TEMPLATE_1,
+        TEAM_A,
+        `${TODAY}T00:00:00Z`,
+      ],
+    );
+    await assertInvalidDateRpcRejected(
+      "work_report_create_delegation (client effective_to)",
+      `select public.work_report_create_delegation(
+         $1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid, 'team', $5::uuid, null, $6::timestamptz, 'fp-del-bad-to'
+       )`,
+      [
+        ACTORS.leader1.auth,
+        ACTORS.leader1.app,
+        ACTORS.staff1.app,
+        TEMPLATE_1,
+        TEAM_A,
+        `${TOMORROW}T23:59:59Z`,
+      ],
+    );
 
     // -------------------------------------------------------------------------
     // 7. Dedicated Suite A: Team Leader Handover (`direct_entry_apply_team_leader_mutation`)
@@ -1264,6 +1500,336 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       unassignBody2,
       unassignBody1,
       "Cross-midnight API retry of unassignTeamMembership must replay 200 OK with committed payload",
+    );
+
+    // -------------------------------------------------------------------------
+    // 12. Dedicated Suite E: Project-Team Scope & PM Assignment Immediate Effect + Cross-Midnight Retry
+    // -------------------------------------------------------------------------
+    await setBusinessDate(db, "2026-11-15");
+    const {
+      rows: [{ result: ptScopeGranted }],
+    } = await db.query(
+      `select public.direct_entry_grant_project_team_scope(
+         $1::uuid, $2::uuid, $3::text, $4::uuid, 0, null, 'Grant project-team scope immediately', 'wp1-pt-scope-1'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, PROJECT_1, TEAM_A],
+    );
+    assert.equal(ptScopeGranted.valid_from, "2026-11-15");
+    assert.equal(ptScopeGranted.valid_to, null);
+    assert.equal(ptScopeGranted.created, true);
+
+    const {
+      rows: [{ result: pmAssigned }],
+    } = await db.query(
+      `select public.direct_entry_assign_project_manager(
+         $1::uuid, $2::uuid, $3::text, $4::uuid, null, 1, 'Assign PM immediately', 'wp1-pm-assign-1'
+       ) as result`,
+      [ACTORS.leader2.auth, ACTORS.leader2.app, PROJECT_1, ACTORS.leader2.recruiter],
+    );
+    assert.equal(pmAssigned.manager_recruiter_id, ACTORS.leader2.recruiter);
+    assert.equal(pmAssigned.valid_from, "2026-11-15");
+    assert.equal(pmAssigned.valid_to, null);
+    assert.equal(pmAssigned.already_assigned, false);
+
+    // Advance date across midnight to 2026-11-16 and replay both with the same Idempotency-Key
+    await setBusinessDate(db, "2026-11-16");
+    const {
+      rows: [{ result: ptScopeReplay }],
+    } = await db.query(
+      `select public.direct_entry_grant_project_team_scope(
+         $1::uuid, $2::uuid, $3::text, $4::uuid, 0, null, 'Grant project-team scope immediately', 'wp1-pt-scope-1'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, PROJECT_1, TEAM_A],
+    );
+    assert.deepEqual(
+      ptScopeReplay,
+      ptScopeGranted,
+      "Cross-midnight retry of direct_entry_grant_project_team_scope must replay committed result",
+    );
+
+    const {
+      rows: [{ result: pmAssignReplay }],
+    } = await db.query(
+      `select public.direct_entry_assign_project_manager(
+         $1::uuid, $2::uuid, $3::text, $4::uuid, null, 1, 'Assign PM immediately', 'wp1-pm-assign-1'
+       ) as result`,
+      [ACTORS.leader2.auth, ACTORS.leader2.app, PROJECT_1, ACTORS.leader2.recruiter],
+    );
+    assert.deepEqual(
+      pmAssignReplay,
+      pmAssigned,
+      "Cross-midnight retry of direct_entry_assign_project_manager must replay committed result",
+    );
+
+    // -------------------------------------------------------------------------
+    // 13. Dedicated Suite F: Work Reports Delegation (`report_assign` & `report_review`)
+    //     - Server records `effective_from` immediately on creation; `effective_to` is null
+    //     - Retry with same `Idempotency-Key` returns committed result
+    //     - Delegated permission persists across day boundaries ("quyền vẫn còn qua ngày")
+    //     - Revocation ends delegated permission immediately (`state = 'REVOKED'`, `is_current = false`, `revoked_at` set)
+    //     - Direct permissions of the delegate continue to work after delegation revocation
+    // -------------------------------------------------------------------------
+    // Re-assign staff1 to TEAM_A on 2026-11-16 so staff1 is an active member of TEAM_A
+    await db.query(
+      `select public.direct_entry_assign_team_membership(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, null, 4, 'Re-assign staff1 to TEAM_A for delegation test', 'wp1-staff1-rejoin-team-a'
+       )`,
+      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, ACTORS.staff1.recruiter, TEAM_A],
+    );
+
+    const delAssignIdem = "8a000000-0000-4000-8000-000000000011";
+    const delReviewIdem = "8a000000-0000-4000-8000-000000000012";
+
+    const {
+      rows: [{ result: delAssignCreated }],
+    } = await db.query(
+      `select public.work_report_create_delegation(
+         $1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid,
+         'team', $5::uuid, null, null, $6::text
+       ) as result`,
+      [ACTORS.leader2.auth, ACTORS.leader2.app, ACTORS.staff1.app, TEMPLATE_1, TEAM_A, delAssignIdem],
+    );
+    assert.ok(delAssignCreated.delegation_id);
+    assert.equal(typeof delAssignCreated.effective_from, "string");
+    assert.equal(delAssignCreated.effective_to, null);
+    assert.equal(delAssignCreated.state, "ACTIVE");
+    assert.equal(delAssignCreated.status, "ACTIVE");
+    assert.equal(delAssignCreated.version, 1);
+
+    const {
+      rows: [{ result: delReviewCreated }],
+    } = await db.query(
+      `select public.work_report_create_delegation(
+         $1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid,
+         'team', $5::uuid, null, null, $6::text
+       ) as result`,
+      [ACTORS.leader2.auth, ACTORS.leader2.app, ACTORS.staff1.app, TEMPLATE_1, TEAM_A, delReviewIdem],
+    );
+    assert.ok(delReviewCreated.delegation_id);
+    assert.equal(typeof delReviewCreated.effective_from, "string");
+    assert.equal(delReviewCreated.effective_to, null);
+    assert.equal(delReviewCreated.state, "ACTIVE");
+    assert.equal(delReviewCreated.status, "ACTIVE");
+
+    // Retry with same Idempotency-Key returns committed result
+    const {
+      rows: [{ result: delAssignReplayed }],
+    } = await db.query(
+      `select public.work_report_create_delegation(
+         $1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid,
+         'team', $5::uuid, null, null, $6::text
+       ) as result`,
+      [ACTORS.leader2.auth, ACTORS.leader2.app, ACTORS.staff1.app, TEMPLATE_1, TEAM_A, delAssignIdem],
+    );
+    assert.deepEqual(delAssignReplayed, delAssignCreated);
+
+    // Advance business date to next day (2026-11-17) and verify open-ended delegations remain active across days
+    await setBusinessDate(db, "2026-11-17");
+
+    const {
+      rows: [{ ctx: staff1CtxWithDelegation }],
+    } = await db.query(
+      "select public.direct_entry_resolve_actor_context($1::uuid) as ctx",
+      [ACTORS.staff1.auth],
+    );
+    assert.ok(
+      Array.isArray(staff1CtxWithDelegation.effective_report_review_scopes) &&
+        staff1CtxWithDelegation.effective_report_review_scopes.some(
+          (s) => s.kind === "team" && s.team_id === TEAM_A,
+        ),
+      "Delegate must retain effective_report_review_scopes for TEAM_A across day boundary",
+    );
+
+    const {
+      rows: [{ has_assign: hasDelegatedAssign, has_review: hasDelegatedReview }],
+    } = await db.query(
+      `select public.work_report__internal_has_any_capability_authority($1::uuid, 'report_assign') as has_assign,
+              public.work_report__internal_has_any_capability_authority($1::uuid, 'report_review') as has_review`,
+      [ACTORS.staff1.app],
+    );
+    assert.equal(hasDelegatedAssign, true, "Delegate must retain report_assign authority across day boundary");
+    assert.equal(hasDelegatedReview, true, "Delegate must retain report_review authority across day boundary");
+
+    const { rows: staff1ReviewAuthRows } = await db.query(
+      `select acting_scope_kind, acting_team_id::text, delegation_id::text
+         from public.work_report__internal_resolve_capability_authority(
+           $1::uuid, 'report_review', $2::uuid, $3::uuid
+         )`,
+      [ACTORS.staff1.app, TEMPLATE_1, TEAM_A],
+    );
+    assert.deepEqual(staff1ReviewAuthRows, [
+      {
+        acting_scope_kind: "team",
+        acting_team_id: TEAM_A,
+        delegation_id: delReviewCreated.delegation_id,
+      },
+    ]);
+
+    const { rows: staff1DelegatedAssignAuthRows } = await db.query(
+      `select acting_scope_kind, acting_team_id::text, delegation_id::text
+         from public.work_report__internal_resolve_capability_authority(
+           $1::uuid, 'report_assign', $2::uuid, $3::uuid
+         )`,
+      [ACTORS.staff1.app, TEMPLATE_1, TEAM_A],
+    );
+    assert.deepEqual(staff1DelegatedAssignAuthRows, [
+      {
+        acting_scope_kind: "team",
+        acting_team_id: TEAM_A,
+        delegation_id: delAssignCreated.delegation_id,
+      },
+    ]);
+
+    // Also grant staff1 a direct `report_assign` capability + TEAM_A scope grant before revoking delegations
+    // so we verify direct permissions of the delegate continue to work after delegation revocation
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, valid_to, is_current)
+       values ($1::uuid, 'report_assign', '2026-11-17'::date, null, true)`,
+      [ACTORS.staff1.app],
+    );
+    await db.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, valid_to, is_current)
+       values ($1::uuid, 'team', $2::uuid, '2026-11-17'::date, null, true)`,
+      [ACTORS.staff1.app, TEAM_A],
+    );
+
+    // Revoke both delegations and verify immediate termination + history timestamp (`revoked_at`)
+    const revAssignIdem = "8a000000-0000-4000-8000-000000000021";
+    const revReviewIdem = "8a000000-0000-4000-8000-000000000022";
+
+    const {
+      rows: [{ result: delAssignRevoked }],
+    } = await db.query(
+      `select public.work_report_revoke_delegation(
+         $1::uuid, $2::uuid, $3::uuid, 1, $4::text
+       ) as result`,
+      [
+        ACTORS.leader2.auth,
+        ACTORS.leader2.app,
+        delAssignCreated.delegation_id,
+        revAssignIdem,
+      ],
+    );
+    assert.equal(delAssignRevoked.state, "REVOKED");
+    assert.equal(delAssignRevoked.status, "REVOKED");
+    assert.equal(delAssignRevoked.version, 2);
+
+    // Retry revoke with same Idempotency-Key returns committed result
+    const {
+      rows: [{ result: delAssignRevokeReplay }],
+    } = await db.query(
+      `select public.work_report_revoke_delegation(
+         $1::uuid, $2::uuid, $3::uuid, 1, $4::text
+       ) as result`,
+      [
+        ACTORS.leader2.auth,
+        ACTORS.leader2.app,
+        delAssignCreated.delegation_id,
+        revAssignIdem,
+      ],
+    );
+    assert.deepEqual(delAssignRevokeReplay, delAssignRevoked);
+
+    const {
+      rows: [{ result: delReviewRevoked }],
+    } = await db.query(
+      `select public.work_report_revoke_delegation(
+         $1::uuid, $2::uuid, $3::uuid, 1, $4::text
+       ) as result`,
+      [
+        ACTORS.leader2.auth,
+        ACTORS.leader2.app,
+        delReviewCreated.delegation_id,
+        revReviewIdem,
+      ],
+    );
+    assert.equal(delReviewRevoked.state, "REVOKED");
+    assert.equal(delReviewRevoked.status, "REVOKED");
+    assert.equal(delReviewRevoked.version, 2);
+
+    // Verify DB history columns on revoked rows (`state = 'REVOKED'`, `is_current = false`, `revoked_at` populated, `effective_to` null)
+    const { rows: revokedDelRows } = await db.query(
+      `select delegation_id::text, state, is_current, effective_to, revoked_at, revoked_by_user_id::text
+         from public.work_report_delegations
+        where delegation_id = any($1::uuid[])
+        order by capability`,
+      [[delAssignCreated.delegation_id, delReviewCreated.delegation_id]],
+    );
+    assert.equal(revokedDelRows.length, 2);
+    for (const row of revokedDelRows) {
+      assert.equal(row.state, "REVOKED");
+      assert.equal(row.is_current, false);
+      assert.equal(row.effective_to, null);
+      assert.ok(row.revoked_at !== null, "Server must record revoked_at timestamp for history");
+      assert.equal(row.revoked_by_user_id, ACTORS.leader2.app);
+    }
+
+    // Verify delegated report_review on TEAM_A is gone immediately, while direct permissions (entry_own + direct report_assign on TEAM_A) still work
+    const {
+      rows: [{ ctx: staff1CtxAfterRevoke }],
+    } = await db.query(
+      "select public.direct_entry_resolve_actor_context($1::uuid) as ctx",
+      [ACTORS.staff1.auth],
+    );
+    assert.equal(
+      staff1CtxAfterRevoke.capabilities.includes("report_review"),
+      false,
+      "Revoked report_review delegation must not be in capabilities",
+    );
+    assert.equal(
+      staff1CtxAfterRevoke.effective_report_review_scopes,
+      undefined,
+      "Revoked delegation effective_report_review_scopes must be removed immediately",
+    );
+    assert.ok(
+      staff1CtxAfterRevoke.capabilities.includes("entry_own"),
+      "Delegate direct capability entry_own must still work after delegation revocation",
+    );
+    assert.ok(
+      staff1CtxAfterRevoke.capabilities.includes("report_assign"),
+      "Delegate direct capability report_assign must still work after delegation revocation",
+    );
+    assert.ok(
+      staff1CtxAfterRevoke.teams.some((t) => t.team_id === TEAM_A),
+      "Delegate direct scope TEAM_A must still work after delegation revocation",
+    );
+
+    const {
+      rows: [{ has_assign: hasAssignAfterRevoke, has_review: hasReviewAfterRevoke }],
+    } = await db.query(
+      `select public.work_report__internal_has_any_capability_authority($1::uuid, 'report_assign') as has_assign,
+              public.work_report__internal_has_any_capability_authority($1::uuid, 'report_review') as has_review`,
+      [ACTORS.staff1.app],
+    );
+    assert.equal(hasAssignAfterRevoke, true, "Direct report_assign authority must remain true after delegation revocation");
+    assert.equal(hasReviewAfterRevoke, false, "Delegated report_review authority must become false immediately on revocation");
+
+    const { rows: staff1DirectAssignOnTeamA } = await db.query(
+      `select acting_scope_kind, acting_team_id::text, delegation_id::text
+         from public.work_report__internal_resolve_capability_authority(
+           $1::uuid, 'report_assign', $2::uuid, $3::uuid
+         )`,
+      [ACTORS.staff1.app, TEMPLATE_1, TEAM_A],
+    );
+    assert.deepEqual(staff1DirectAssignOnTeamA, [
+      {
+        acting_scope_kind: "team",
+        acting_team_id: TEAM_A,
+        delegation_id: null,
+      },
+    ]);
+
+    const { rows: staff1RevokedReviewOnTeamA } = await db.query(
+      `select acting_scope_kind, acting_team_id::text, delegation_id::text
+         from public.work_report__internal_resolve_capability_authority(
+           $1::uuid, 'report_review', $2::uuid, $3::uuid
+         )`,
+      [ACTORS.staff1.app, TEMPLATE_1, TEAM_A],
+    );
+    assert.equal(
+      staff1RevokedReviewOnTeamA.length,
+      0,
+      "Revoked report_review on TEAM_A must immediately return 0 authority rows",
     );
   } finally {
     await db.close();

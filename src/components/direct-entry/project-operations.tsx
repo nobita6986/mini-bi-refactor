@@ -161,7 +161,6 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
   );
   const [pending, setPending] = useState<PendingAssignment[]>([]);
   const [managerId, setManagerId] = useState("");
-  const [validFrom, setValidFrom] = useState("");
   const [candidates, setCandidates] = useState<ManagerCandidate[]>([]);
   const [candidateLabels, setCandidateLabels] = useState<Record<string, string>>({});
   const [candidateState, setCandidateState] = useState<CandidateState>("idle");
@@ -326,7 +325,6 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
     setLocationRadius(String(PROJECT_LOCATION_DEFAULT_RADIUS_METERS));
     setPending([]);
     setManagerId("");
-    setValidFrom("");
   }, []);
 
   /** Tai lai day du sau xung dot: khong ghi de ngam bat ky thay doi cuc bo nao. */
@@ -418,14 +416,20 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
   /** Gan NHIEU quan ly: moi lan gui dung version du an moi nhat (OCC tuan tu). */
   async function submitAssign() {
     if (!detail) return;
-    const invalid = validatePendingAssignments(pending);
+    const rowsToAssign: PendingAssignment[] =
+      pending.length > 0
+        ? pending
+        : managerId
+          ? [{ managerRecruiterId: managerId, validFrom: null }]
+          : [];
+    const invalid = validatePendingAssignments(rowsToAssign);
     if (invalid) { setNotice(invalid); return; }
     setBusy(true);
     let version = detail.project_version;
-    for (const row of pending) {
+    for (const row of rowsToAssign) {
       const key = newIdempotencyKey();
       const request = buildAssignRequest({
-        managerRecruiterId: row.managerRecruiterId, validFrom: row.validFrom, reason,
+        managerRecruiterId: row.managerRecruiterId, validFrom: row.validFrom ?? null, reason,
         expectedProjectVersion: version, idempotencyKey: key,
       });
       const { outcome, payload } = await send(
@@ -507,7 +511,6 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
     setReason("");
     setPending([]);
     setManagerId("");
-    setValidFrom("");
     setDisplayName(seed && seed.displayName ? seed.displayName : "");
     const seededLocation =
       seed && "location" in seed ? seed.location : (detail?.location ?? null);
@@ -1062,7 +1065,7 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
                 <button type="button" className={buttonClass}
                   disabled={!managerId}
                   onClick={() => {
-                    setPending([...pending, { managerRecruiterId: managerId, validFrom }]);
+                    setPending([...pending, { managerRecruiterId: managerId, validFrom: null }]);
                     setManagerId("");
                     setCandidateSearch("");
                   }}>

@@ -1276,7 +1276,7 @@ test("F2 review, delegation, effective_report_review_scopes and finality lifecyc
   const { rows: delRows } = await db.query(
     `select public.work_report_create_delegation(
        $1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid,
-       (now() - interval '1 hour'), (now() + interval '1 day'), $6
+       null, null, $6
      ) as result`,
     [ADMIN.auth, ADMIN.app, STAFF_A2.app, tplId, TEAM_A, KEY("f2_del_a2")],
   );
