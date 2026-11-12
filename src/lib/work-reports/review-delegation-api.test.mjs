@@ -9,6 +9,11 @@ import {
 } from "./delegation-api.ts";
 import { createDelegationRepository } from "./delegation-repository.ts";
 import {
+  applyDelegationCreateDraftEdit,
+  createInitialDelegationCreateDraftState,
+  submitDelegationCreateAttempt,
+} from "./delegation-ui-model.ts";
+import {
   decideWorkReportReview,
   getWorkReportReviewSubmission,
   listPendingWorkReportReviews,
@@ -121,6 +126,8 @@ const SAMPLE_DECISION_RESULT = {
   delegation_id: null,
 };
 
+const REVOKED_DELEGATION_ID = "b0000000-0000-4000-8000-000000000002";
+
 const SAMPLE_DELEGATIONS_PAYLOAD = {
   items: [
     {
@@ -146,6 +153,30 @@ const SAMPLE_DELEGATIONS_PAYLOAD = {
       revoked_at: null,
       version: 1,
       created_at: "2026-10-20T01:00:00Z",
+    },
+    {
+      delegation_id: REVOKED_DELEGATION_ID,
+      grantor_user_id: APP,
+      grantor_display_name: "Team Leader A",
+      delegate_app_user_id: DELEGATE_APP,
+      delegate_display_name: "Delegate A",
+      capability: "report_assign",
+      template_id: TEMPLATE_ID,
+      template_code: "RECRUITMENT_DAILY_V1",
+      template_name: "Báo cáo tuyển dụng ngày",
+      scope_kind: "team",
+      scope_id: TEAM_A,
+      scope_team_id: TEAM_A,
+      scope_label: "Nhóm Tuyển Dụng A",
+      effective_from: "2026-10-19T00:00:00Z",
+      effective_to: null,
+      state: "REVOKED",
+      status: "REVOKED",
+      is_current: false,
+      is_effective: false,
+      revoked_at: "2026-10-20T05:00:00Z",
+      version: 2,
+      created_at: "2026-10-19T01:00:00Z",
     },
   ],
   options: {
@@ -349,7 +380,7 @@ test("delegation API validates capabilities, date normalization, client authorit
   });
   const deps = { resolveSession: activeSession, repository: repo };
 
-  // List delegations -> 200
+  // List delegations -> 200 with both active (is_effective: true) and revoked (is_effective: false) items
   const listRes = await listWorkReportDelegations(
     new Request("http://localhost/api/work-reports/delegations"),
     "true",
@@ -358,7 +389,12 @@ test("delegation API validates capabilities, date normalization, client authorit
   assert.equal(listRes.status, 200);
   const listBody = await listRes.json();
   assert.equal(listBody.ok, true);
-  assert.equal(listBody.data.items.length, 1);
+  assert.equal(listBody.data.items.length, 2);
+  assert.equal(listBody.data.items[0].state, "ACTIVE");
+  assert.equal(listBody.data.items[0].is_effective, true);
+  assert.equal(listBody.data.items[1].state, "REVOKED");
+  assert.equal(listBody.data.items[1].is_effective, false);
+  assert.equal(listBody.data.items[1].revoked_at, "2026-10-20T05:00:00Z");
   assert.deepEqual(listBody.data.options.capabilities, ["report_assign", "report_review"]);
 
   // Reject delegating report_delegate -> 400 WORK_REPORT_DELEGATION_INVALID
@@ -451,4 +487,124 @@ test("delegation API validates capabilities, date normalization, client authorit
   const revokeBody = await revokeRes.json();
   assert.equal(revokeBody.state, "REVOKED");
   assert.equal(revokeBody.version, 2);
+});
+
+test("delegation create draft preserves Idempotency-Key and payload across lost-response / 5xx retries and only rotates on field edit, 4xx or success", async () => {
+  let seq = 0;
+  const nextKey = () => `c0000000-0000-4000-8000-${String(++seq).padStart(12, "0")}`;
+
+  let state = createInitialDelegationCreateDraftState(nextKey);
+  assert.equal(state.idempotency_key, "c0000000-0000-4000-8000-000000000001");
+
+  // Editing fields before submit rotates idempotency_key
+  state = applyDelegationCreateDraftEdit(state, { capability: "report_review" }, nextKey);
+  state = applyDelegationCreateDraftEdit(state, { delegate_id: DELEGATE_APP }, nextKey);
+  state = applyDelegationCreateDraftEdit(state, { template_id: TEMPLATE_ID }, nextKey);
+  state = applyDelegationCreateDraftEdit(state, { scope_index: "0" }, nextKey);
+  const keyBeforeSubmit = state.idempotency_key;
+  assert.equal(keyBeforeSubmit, "c0000000-0000-4000-8000-000000000005");
+
+  const selectedScope = {
+    scope_kind: "team",
+    scope_id: TEAM_A,
+    label: "Nhóm Tuyển Dụng A",
+  };
+  const capturedRequests = [];
+
+  // 1. Network loss on first attempt -> locks state & preserves key + payload
+  const lostAttempt = await submitDelegationCreateAttempt({
+    state,
+    selectedScope,
+    nextIdempotencyKey: nextKey,
+    fetchImpl: async (url, init) => {
+      capturedRequests.push({
+        url,
+        headers: init.headers,
+        body: JSON.parse(String(init.body)),
+      });
+      throw new Error("Socket hang up after server commit");
+    },
+  });
+  assert.equal(lostAttempt.ok, false);
+  assert.equal(lostAttempt.next_state.ambiguous_retry_locked, true);
+  assert.equal(lostAttempt.next_state.idempotency_key, keyBeforeSubmit);
+  assert.deepEqual(lostAttempt.next_state.locked_payload, {
+    capability: "report_review",
+    delegate_app_user_id: DELEGATE_APP,
+    template_id: TEMPLATE_ID,
+    scope_kind: "team",
+    scope_id: TEAM_A,
+    idempotency_key: keyBeforeSubmit,
+  });
+
+  // 2. While locked after lost response, attempting to edit fields must NOT mutate payload or rotate key
+  const blockedEditState = applyDelegationCreateDraftEdit(
+    lostAttempt.next_state,
+    { capability: "report_assign", delegate_id: ASSIGNEE_APP },
+    nextKey,
+  );
+  assert.deepEqual(blockedEditState, lostAttempt.next_state);
+  assert.equal(blockedEditState.idempotency_key, keyBeforeSubmit);
+
+  // 3. Transient 503 on second retry -> still preserves the exact same Idempotency-Key and payload
+  const unavailableRetry = await submitDelegationCreateAttempt({
+    state: blockedEditState,
+    selectedScope: undefined, // Even if options are temporarily unavailable, locked_payload is used
+    nextIdempotencyKey: nextKey,
+    fetchImpl: async (url, init) => {
+      capturedRequests.push({
+        url,
+        headers: init.headers,
+        body: JSON.parse(String(init.body)),
+      });
+      return new Response(
+        JSON.stringify({ ok: false, code: "WORK_REPORT_UNAVAILABLE" }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+  assert.equal(unavailableRetry.ok, false);
+  assert.equal(unavailableRetry.next_state.ambiguous_retry_locked, true);
+  assert.equal(unavailableRetry.next_state.idempotency_key, keyBeforeSubmit);
+
+  // 4. Third retry receives 200 OK -> sends the exact same key & payload, then unlocks and rotates key
+  const okRetry = await submitDelegationCreateAttempt({
+    state: unavailableRetry.next_state,
+    selectedScope,
+    nextIdempotencyKey: nextKey,
+    fetchImpl: async (url, init) => {
+      capturedRequests.push({
+        url,
+        headers: init.headers,
+        body: JSON.parse(String(init.body)),
+      });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          delegation_id: DELEGATION_ID,
+          state: "ACTIVE",
+          version: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+  assert.equal(okRetry.ok, true);
+  assert.equal(okRetry.next_state.ambiguous_retry_locked, false);
+  assert.equal(okRetry.next_state.locked_payload, null);
+  assert.notEqual(okRetry.next_state.idempotency_key, keyBeforeSubmit);
+
+  // Verify all 3 attempts sent the exact same Idempotency-Key and payload
+  assert.equal(capturedRequests.length, 3);
+  for (const req of capturedRequests) {
+    assert.equal(req.headers["Idempotency-Key"], keyBeforeSubmit);
+    assert.deepEqual(req.body, {
+      capability: "report_review",
+      delegate_app_user_id: DELEGATE_APP,
+      template_id: TEMPLATE_ID,
+      scope_kind: "team",
+      scope_id: TEAM_A,
+      idempotency_key: keyBeforeSubmit,
+    });
+  }
 });

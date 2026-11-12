@@ -72,7 +72,18 @@ import {
   RECRUITMENT_DAILY_TEMPLATE_SCHEMA,
 } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
-import { createWorkReportDelegation } from "../src/lib/work-reports/delegation-api.ts";
+import {
+  createWorkReportDelegation,
+  listWorkReportDelegations,
+  revokeWorkReportDelegation,
+} from "../src/lib/work-reports/delegation-api.ts";
+import { createDelegationRepository } from "../src/lib/work-reports/delegation-repository.ts";
+import {
+  applyDelegationCreateDraftEdit,
+  createInitialDelegationCreateDraftState,
+  isDelegationViewData,
+  submitDelegationCreateAttempt,
+} from "../src/lib/work-reports/delegation-ui-model.ts";
 import { AUTH_PROLOGUE } from "./lib/s04c-read-fixture.mjs";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
@@ -1830,6 +1841,220 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       staff1RevokedReviewOnTeamA.length,
       0,
       "Revoked report_review on TEAM_A must immediately return 0 authority rows",
+    );
+
+    // -------------------------------------------------------------------------
+    // 14. Dedicated Suite G: Full UI Draft -> API -> Repository -> Named-Parameter SQL Integration
+    //     for Work Reports Delegation (`createDelegationRepository` + `p_scope_team_id` + `is_effective` + Retry Safety)
+    //     - Calls PostgreSQL RPCs using the exact named parameters sent by `createDelegationRepository`
+    //       (`p_scope_team_id => $7`, etc.), catching any parameter name mismatch between TS and SQL.
+    //     - Simulates a lost response after server commit on `submitDelegationCreateAttempt`:
+    //       verifies `ambiguous_retry_locked` freezes payload & `Idempotency-Key`, retry replays 200 OK
+    //       without creating a duplicate delegation record, and revoking the single delegation removes all
+    //       delegated review authority.
+    //     - Calls `listWorkReportDelegations` when DB has both active (`is_effective: true`) and revoked
+    //       (`is_effective: false`, `revoked_at !== null`) delegations and verifies 200 OK parser acceptance.
+    // -------------------------------------------------------------------------
+    const pgliteNamedRpcCalls = [];
+    const pgliteNamedRpc = async (name, args = {}) => {
+      const entries = Object.entries(args);
+      pgliteNamedRpcCalls.push({ name, paramNames: entries.map(([k]) => k) });
+      const namedCall = entries
+        .map(([paramName], idx) => `${paramName} => $${idx + 1}`)
+        .join(", ");
+      try {
+        const { rows } = await db.query(
+          `select public.${name}(${namedCall}) as data`,
+          entries.map(([, value]) => value),
+        );
+        return { data: rows[0]?.data ?? null, error: null };
+      } catch (err) {
+        return {
+          data: null,
+          error: { code: err.code, message: err.message },
+        };
+      }
+    };
+
+    const delegationRepo = createDelegationRepository(pgliteNamedRpc);
+    const delegationApiDeps = {
+      resolveSession: async () => ({
+        actor: {
+          ok: true,
+          actor: {
+            auth_subject: ACTORS.leader2.auth,
+            app_user_id: ACTORS.leader2.app,
+          },
+        },
+      }),
+      repository: delegationRepo,
+    };
+
+    // Prepare UI draft state for creating a `report_review` delegation to `staff1` on `TEAM_A`
+    let uiKeySeq = 0;
+    const nextUiKey = () => `9b000000-0000-4000-8000-${String(++uiKeySeq).padStart(12, "0")}`;
+    let draft = createInitialDelegationCreateDraftState(nextUiKey);
+    draft = applyDelegationCreateDraftEdit(draft, { capability: "report_review" }, nextUiKey);
+    draft = applyDelegationCreateDraftEdit(draft, { delegate_id: ACTORS.staff1.app }, nextUiKey);
+    draft = applyDelegationCreateDraftEdit(draft, { template_id: TEMPLATE_1 }, nextUiKey);
+    draft = applyDelegationCreateDraftEdit(draft, { scope_index: "0" }, nextUiKey);
+    const committedAttemptKey = draft.idempotency_key;
+    const selectedTeamScope = {
+      scope_kind: "team",
+      scope_id: TEAM_A,
+      label: "Team A",
+    };
+
+    // First attempt: API + Repository + SQL commit the delegation row, then response is lost on network
+    let dropResponseAfterCommit = true;
+    const e2eFetch = async (url, init = {}) => {
+      const req = new Request(`https://app.test${url}`, {
+        method: init.method ?? "GET",
+        headers: {
+          origin: "https://app.test",
+          host: "app.test",
+          "sec-fetch-site": "same-origin",
+          ...(init.headers ?? {}),
+        },
+        body: init.body,
+      });
+      const res = await createWorkReportDelegation(req, "true", delegationApiDeps);
+      assert.equal(res.status, 200, "Underlying API -> Repository -> SQL create must succeed (200)");
+      if (dropResponseAfterCommit) {
+        dropResponseAfterCommit = false;
+        throw new Error("Simulated lost HTTP response after DB commit");
+      }
+      return res;
+    };
+
+    const lostUiAttempt = await submitDelegationCreateAttempt({
+      state: draft,
+      selectedScope: selectedTeamScope,
+      fetchImpl: e2eFetch,
+      nextIdempotencyKey: nextUiKey,
+    });
+    assert.equal(lostUiAttempt.ok, false);
+    assert.equal(lostUiAttempt.next_state.ambiguous_retry_locked, true);
+    assert.equal(lostUiAttempt.next_state.idempotency_key, committedAttemptKey);
+
+    // Verify `createDelegationRepository` passed `p_scope_team_id` by name to SQL
+    const createCall = pgliteNamedRpcCalls.find((c) => c.name === "work_report_create_delegation");
+    assert.ok(createCall, "work_report_create_delegation must be invoked via named RPC");
+    assert.ok(
+      createCall.paramNames.includes("p_scope_team_id"),
+      "Repository must pass p_scope_team_id and SQL RPC must accept p_scope_team_id",
+    );
+
+    // Attempting to edit the form while locked after lost response must be blocked
+    const afterBlockedEdit = applyDelegationCreateDraftEdit(
+      lostUiAttempt.next_state,
+      { capability: "report_assign" },
+      nextUiKey,
+    );
+    assert.equal(afterBlockedEdit.idempotency_key, committedAttemptKey);
+    assert.equal(afterBlockedEdit.capability, "report_review");
+
+    // Second attempt (user clicks retry): re-sends the exact same Idempotency-Key & payload and succeeds (200)
+    const replayedUiAttempt = await submitDelegationCreateAttempt({
+      state: afterBlockedEdit,
+      selectedScope: selectedTeamScope,
+      fetchImpl: e2eFetch,
+      nextIdempotencyKey: nextUiKey,
+    });
+    assert.equal(replayedUiAttempt.ok, true);
+    assert.equal(replayedUiAttempt.submitted_payload.idempotency_key, committedAttemptKey);
+    assert.equal(replayedUiAttempt.next_state.ambiguous_retry_locked, false);
+    assert.notEqual(replayedUiAttempt.next_state.idempotency_key, committedAttemptKey);
+
+    // Verify only ONE active delegation row was created despite the lost response + retry
+    const { rows: activeReviewDelegationsAfterRetry } = await db.query(
+      `select delegation_id::text
+         from public.work_report_delegations
+        where delegate_app_user_id = $1::uuid
+          and capability = 'report_review'
+          and state = 'ACTIVE'
+          and is_current = true`,
+      [ACTORS.staff1.app],
+    );
+    assert.equal(
+      activeReviewDelegationsAfterRetry.length,
+      1,
+      "Lost response + retry must create only 1 active delegation row",
+    );
+    const e2eCreatedDelegationId = activeReviewDelegationsAfterRetry[0].delegation_id;
+
+    // Call `listWorkReportDelegations` via API -> Repository -> SQL when DB has both active and revoked rows
+    const listApiRes = await listWorkReportDelegations(
+      new Request("https://app.test/api/work-reports/delegations"),
+      "true",
+      delegationApiDeps,
+    );
+    assert.equal(
+      listApiRes.status,
+      200,
+      "listWorkReportDelegations must return 200 OK when both active and revoked delegations exist",
+    );
+    const listApiBody = await listApiRes.json();
+    assert.equal(listApiBody.ok, true);
+    assert.equal(
+      isDelegationViewData(listApiBody.data),
+      true,
+      "UI parser isDelegationViewData must accept SQL list payload",
+    );
+    const listedActive = listApiBody.data.items.find(
+      (item) => item.delegation_id === e2eCreatedDelegationId,
+    );
+    const listedRevoked = listApiBody.data.items.filter((item) => item.state === "REVOKED");
+    assert.ok(listedActive, "Active delegation must be present in list response");
+    assert.equal(listedActive.state, "ACTIVE");
+    assert.equal(listedActive.status, "ACTIVE");
+    assert.equal(listedActive.is_current, true);
+    assert.equal(listedActive.is_effective, true);
+    assert.equal(listedActive.revoked_at, null);
+    assert.ok(listedRevoked.length >= 2, "Revoked delegations must be present in list response");
+    for (const revItem of listedRevoked) {
+      assert.equal(revItem.state, "REVOKED");
+      assert.equal(revItem.status, "REVOKED");
+      assert.equal(revItem.is_current, false);
+      assert.equal(revItem.is_effective, false);
+      assert.equal(typeof revItem.revoked_at, "string");
+    }
+
+    // Revoke that single delegation via API -> Repository -> Named-Parameter SQL and verify delegate loses review authority
+    const revokeApiKey = "9b000000-0000-4000-8000-000000000099";
+    const revokeApiRes = await revokeWorkReportDelegation(
+      new Request(
+        `https://app.test/api/work-reports/delegations/${e2eCreatedDelegationId}/revoke`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.test",
+            host: "app.test",
+            "sec-fetch-site": "same-origin",
+            "idempotency-key": revokeApiKey,
+          },
+          body: JSON.stringify({
+            expected_version: listedActive.version,
+            idempotency_key: revokeApiKey,
+          }),
+        },
+      ),
+      e2eCreatedDelegationId,
+      "true",
+      delegationApiDeps,
+    );
+    assert.equal(revokeApiRes.status, 200);
+    const {
+      rows: [{ has_review: hasReviewAfterSingleRevoke }],
+    } = await db.query(
+      `select public.work_report__internal_has_any_capability_authority($1::uuid, 'report_review') as has_review`,
+      [ACTORS.staff1.app],
+    );
+    assert.equal(
+      hasReviewAfterSingleRevoke,
+      false,
+      "Revoking the single delegation after retry must leave 0 active delegated review authority",
     );
   } finally {
     await db.close();

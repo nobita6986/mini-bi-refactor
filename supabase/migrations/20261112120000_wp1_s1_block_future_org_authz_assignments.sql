@@ -4570,6 +4570,19 @@ begin
 end;
 $function$;
 
+drop function if exists public.work_report_create_delegation(
+  uuid,
+  uuid,
+  text,
+  uuid,
+  uuid,
+  text,
+  uuid,
+  timestamptz,
+  timestamptz,
+  text
+);
+
 create or replace function public.work_report_create_delegation(
   p_auth_subject uuid,
   p_app_user_id uuid,
@@ -4577,7 +4590,7 @@ create or replace function public.work_report_create_delegation(
   p_delegate_app_user_id uuid,
   p_template_id uuid,
   p_scope_kind text,
-  p_scope_id uuid,
+  p_scope_team_id uuid,
   p_effective_from timestamptz default null,
   p_effective_to timestamptz default null,
   p_idempotency_key text default null
@@ -4615,8 +4628,8 @@ begin
     raise exception 'WORK_REPORT_DELEGATION_INVALID' using errcode = '22023';
   end if;
 
-  if (p_scope_kind = 'all' and p_scope_id is not null)
-     or (p_scope_kind = 'team' and p_scope_id is null) then
+  if (p_scope_kind = 'all' and p_scope_team_id is not null)
+     or (p_scope_kind = 'team' and p_scope_team_id is null) then
     raise exception 'WORK_REPORT_DELEGATION_SCOPE_INVALID' using errcode = '22023';
   end if;
 
@@ -4624,8 +4637,8 @@ begin
     raise exception 'WORK_REPORT_SELF_DELEGATION_FORBIDDEN' using errcode = '22023';
   end if;
 
-  if not public.work_report__internal_has_direct_scope(p_app_user_id, 'report_delegate', p_scope_kind, p_scope_id)
-     or not public.work_report__internal_has_direct_scope(p_app_user_id, p_capability, p_scope_kind, p_scope_id) then
+  if not public.work_report__internal_has_direct_scope(p_app_user_id, 'report_delegate', p_scope_kind, p_scope_team_id)
+     or not public.work_report__internal_has_direct_scope(p_app_user_id, p_capability, p_scope_kind, p_scope_team_id) then
     raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
   end if;
 
@@ -4634,7 +4647,7 @@ begin
     'delegate_app_user_id', p_delegate_app_user_id,
     'template_id', p_template_id,
     'scope_kind', p_scope_kind,
-    'scope_id', p_scope_id
+    'scope_id', p_scope_team_id
   ));
   v_prior := public.direct_entry_idempotency_begin(p_app_user_id, 'work_report_delegation_create', p_idempotency_key, v_request_hash);
   if v_prior is not null then
@@ -4649,13 +4662,13 @@ begin
   end if;
 
   if p_scope_kind = 'team' then
-    if public.work_report_current_team(p_delegate_app_user_id) is distinct from p_scope_id
+    if public.work_report_current_team(p_delegate_app_user_id) is distinct from p_scope_team_id
        and not exists (
          select 1
            from public.direct_entry_scope_grants sg
           where sg.app_user_id = p_delegate_app_user_id
             and sg.scope_kind = 'team'
-            and sg.team_id = p_scope_id
+            and sg.team_id = p_scope_team_id
             and sg.is_current
        ) then
       raise exception 'WORK_REPORT_DELEGATE_OUTSIDE_SCOPE' using errcode = '42501';
@@ -4677,13 +4690,13 @@ begin
      scope_kind, scope_team_id, effective_from, effective_to, state, is_current, version)
   values
     (p_app_user_id, p_delegate_app_user_id, p_capability, p_template_id, v_template.current_published_version_id,
-     p_scope_kind, p_scope_id, v_effective_from, null, 'ACTIVE', true, 1)
+     p_scope_kind, p_scope_team_id, v_effective_from, null, 'ACTIVE', true, 1)
   returning delegation_id into v_delegation_id;
 
   insert into public.work_report_audit_events
     (action, actor_user_id, capability, scope_kind, scope_team_id, template_id, outcome, metadata_json)
   values
-    ('DELEGATION_CREATE', p_app_user_id, 'report_delegate', p_scope_kind, p_scope_id, p_template_id, 'APPLIED',
+    ('DELEGATION_CREATE', p_app_user_id, 'report_delegate', p_scope_kind, p_scope_team_id, p_template_id, 'APPLIED',
      jsonb_build_object(
        'delegation_id', v_delegation_id,
        'delegated_capability', p_capability,
@@ -4760,6 +4773,7 @@ begin
           else 'ACTIVE'
         end,
         'is_current', d.is_current,
+        'is_effective', public.work_report__internal_is_delegation_effective(d.delegation_id, v_as_of),
         'version', d.version,
         'created_at', d.created_at
       ) order by d.created_at desc, d.delegation_id desc)
