@@ -83,10 +83,21 @@ user_signals as (
       join public.recruiters r on r.recruiter_id = rl.recruiter_id and r.active = true
       join public.direct_entry_project_manager_assignments pma on pma.manager_recruiter_id = rl.recruiter_id
       join public.direct_entry_projects prj on prj.project_id = pma.project_id and prj.active = true
-      where rl.app_user_id = u.app_user_id and rl.is_current = true and rl.verified = true
-        and pma.is_current = true and pma.revoked_at is null
+      where rl.app_user_id = u.app_user_id and rl.verified = true
+        and rl.valid_from <= p.as_of_date
+        and ((rl.created_at at time zone 'Asia/Ho_Chi_Minh')::date > rl.valid_from or rl.created_at <= p.as_of_ts)
+        and (rl.valid_to is null or (rl.valid_to > rl.valid_from and p.as_of_date < rl.valid_to))
+        and (rl.is_current = true or rl.valid_to is not null)
         and pma.valid_from <= p.as_of_date
-        and (pma.valid_to is null or (pma.valid_to > pma.valid_from and p.as_of_date < pma.valid_to))
+        and ((pma.created_at at time zone 'Asia/Ho_Chi_Minh')::date > pma.valid_from or pma.created_at <= p.as_of_ts)
+        and (
+          (pma.revoked_at is not null and p.as_of_ts < pma.revoked_at)
+          or (
+            pma.revoked_at is null
+            and (pma.valid_to is null or (pma.valid_to > pma.valid_from and p.as_of_date < pma.valid_to))
+            and (pma.is_current = true or pma.valid_to is not null)
+          )
+        )
     ) as is_project_manager,
 
     exists (
@@ -94,9 +105,15 @@ user_signals as (
       from public.vendor_finance_project_accountants vfpa
       join public.direct_entry_projects prj on prj.project_id = vfpa.project_id and prj.active = true
       where vfpa.accountant_user_id = u.app_user_id
-        and vfpa.ended_at is null
         and vfpa.valid_from <= p.as_of_date
-        and (vfpa.valid_to is null or (vfpa.valid_to > vfpa.valid_from and p.as_of_date < vfpa.valid_to))
+        and ((vfpa.created_at at time zone 'Asia/Ho_Chi_Minh')::date > vfpa.valid_from or vfpa.created_at <= p.as_of_ts)
+        and (
+          (vfpa.ended_at is not null and p.as_of_ts < vfpa.ended_at)
+          or (
+            vfpa.ended_at is null
+            and (vfpa.valid_to is null or (vfpa.valid_to > vfpa.valid_from and p.as_of_date < vfpa.valid_to))
+          )
+        )
     ) as is_project_accountant,
     exists (
       select 1
@@ -104,16 +121,28 @@ user_signals as (
       join public.organization_departments od on od.department_id = odm.department_id and od.is_active = true
       where odm.app_user_id = u.app_user_id and od.code = 'ACCOUNTING'
         and odm.valid_from <= p.as_of_date
-        and (odm.valid_to is null or (odm.valid_to > odm.valid_from and p.as_of_date < odm.valid_to))
-        and (odm.revoked_at is null or p.as_of_ts < odm.revoked_at)
+        and ((odm.created_at at time zone 'Asia/Ho_Chi_Minh')::date > odm.valid_from or odm.created_at <= p.as_of_ts)
+        and (
+          (odm.revoked_at is not null and p.as_of_ts < odm.revoked_at)
+          or (
+            odm.revoked_at is null
+            and (odm.valid_to is null or (odm.valid_to > odm.valid_from and p.as_of_date < odm.valid_to))
+          )
+        )
     ) as is_accounting_dept,
     coalesce((
       select string_agg(vfgr.role_code, ',' order by vfgr.role_code)
       from public.vendor_finance_global_roles vfgr
       where vfgr.app_user_id = u.app_user_id
-        and vfgr.ended_at is null
         and vfgr.valid_from <= p.as_of_date
-        and (vfgr.valid_to is null or (vfgr.valid_to > vfgr.valid_from and p.as_of_date < vfgr.valid_to))
+        and ((vfgr.created_at at time zone 'Asia/Ho_Chi_Minh')::date > vfgr.valid_from or vfgr.created_at <= p.as_of_ts)
+        and (
+          (vfgr.ended_at is not null and p.as_of_ts < vfgr.ended_at)
+          or (
+            vfgr.ended_at is null
+            and (vfgr.valid_to is null or (vfgr.valid_to > vfgr.valid_from and p.as_of_date < vfgr.valid_to))
+          )
+        )
     ), '') as vfin_global_roles,
 
     coalesce((

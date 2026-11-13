@@ -10,6 +10,7 @@
 with params as materialized (
   select
     coalesce(nullif(current_setting('wp2a.as_of_ts', true), '')::timestamptz, pg_catalog.transaction_timestamp()) as as_of_ts,
+    pg_catalog.transaction_timestamp() as current_ts,
     (coalesce(nullif(current_setting('wp2a.as_of_ts', true), '')::timestamptz, pg_catalog.transaction_timestamp()) at time zone 'Asia/Ho_Chi_Minh')::date as as_of_date,
     (pg_catalog.transaction_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date as current_bkk_date,
     nullif(current_setting('wp2a.app_user_id', true), '')::uuid as target_app_user_id
@@ -17,6 +18,7 @@ with params as materialized (
 eligible_users as materialized (
   select
     p.as_of_ts,
+    p.current_ts,
     p.as_of_date,
     p.current_bkk_date,
     u.app_user_id,
@@ -66,7 +68,7 @@ curr_r1_capabilities as materialized (
       else max(cg.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + is_current; legacy_r1_no_date_check)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -100,7 +102,7 @@ curr_r1_scopes as materialized (
       else max(sg.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + is_current; legacy_r1_no_date_check)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -155,7 +157,7 @@ curr_recruiter_links as materialized (
       else max(rl.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + is_current + r.active)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -193,7 +195,7 @@ curr_team_leader_assignments as materialized (
       else max(tla.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + is_current + t.active; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -232,7 +234,7 @@ curr_project_manager_assignments as materialized (
       else max(pma.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + rl.is_current + pma.is_current + prj.active; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -274,7 +276,7 @@ curr_org_dept_memberships as materialized (
       else max(odm.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + od.is_active; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -314,7 +316,7 @@ curr_leave_grants as materialized (
       else max(lmg.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + is_current; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -351,7 +353,7 @@ curr_leave_grants as materialized (
       else max(lda.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + is_current; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -387,7 +389,7 @@ curr_vendor_finance_grants as materialized (
       else max(vfgr.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + ended_at_is_null; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -424,7 +426,7 @@ curr_vendor_finance_grants as materialized (
       else max(vfpa.valid_to)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + ended_at_is_null + prj.active; interval_reconstructible)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -497,7 +499,7 @@ curr_work_report_delegations as materialized (
       else max((wrd.effective_to at time zone 'Asia/Ho_Chi_Minh')::date)::text
     end as valid_to,
     case
-      when u.as_of_date < u.current_bkk_date
+      when u.as_of_ts < pg_catalog.transaction_timestamp()
       then 'CURRENT_STATE_ONLY (u.enabled + gu.enabled + is_current + state)'
       else 'POINT_IN_TIME_CURRENT'
     end::text as reconstructibility
@@ -596,6 +598,7 @@ curr_raw_grants as (
   select * from curr_work_report_delegations
 ),
 curr_module_ops_raw as (
+  -- 1a/1b/1c. Legacy Dashboard widening: any curr_r1_scopes(all) unlocks all 3 Dashboard ops in current baseline
   select
     s.as_of_ts,
     s.as_of_date,
@@ -661,7 +664,12 @@ curr_module_ops_raw as (
     rl.valid_to,
     rl.reconstructibility
   from curr_recruiter_links rl
-  where not exists (
+  where (
+    select count(*)
+    from curr_recruiter_links rl2
+    where rl2.app_user_id = rl.app_user_id
+  ) = 1
+    and not exists (
     select 1
     from curr_r1_scopes s_other
     where s_other.app_user_id = rl.app_user_id
@@ -670,6 +678,7 @@ curr_module_ops_raw as (
 
   union all
 
+  -- 2. Workforce Offboarding (`all` = Full Admin or BoD entry_privileged_edit; `team` = canonical Team Leader)
   select
     s.as_of_ts,
     s.as_of_date,
@@ -680,23 +689,56 @@ curr_module_ops_raw as (
     'op:workforce:offboarding_view'::text as action_code,
     'all'::text as scope_kind,
     '*'::text as scope_ref,
-    'derived:canAccessOffboardingReport+offboarding_report_read'::text as grant_source,
+    'derived:direct_entry_offboarding_authority'::text as grant_source,
     s.valid_from,
     s.valid_to,
     s.reconstructibility
   from curr_r1_scopes s
   where s.scope_kind = 'all'
     and (
-      (
-        exists (select 1 from curr_r1_capabilities c where c.app_user_id = s.app_user_id and c.action_code = 'cap:report_view')
-        and exists (select 1 from curr_r1_capabilities c where c.app_user_id = s.app_user_id and c.action_code = 'cap:report_analytics_view')
-      )
-      or exists (select 1 from curr_r1_capabilities c where c.app_user_id = s.app_user_id and c.action_code = 'cap:entry_privileged_edit')
+      exists (select 1 from curr_r1_capabilities c where c.app_user_id = s.app_user_id and c.action_code = 'cap:entry_privileged_edit')
       or exists (select 1 from curr_full_admin_users fa where fa.app_user_id = s.app_user_id)
     )
 
   union all
 
+  select
+    tla.as_of_ts,
+    tla.as_of_date,
+    tla.app_user_id,
+    tla.user_created_date,
+    'MODULE_OP'::text as row_layer,
+    'workforce'::text as module_code,
+    'op:workforce:offboarding_view'::text as action_code,
+    'team'::text as scope_kind,
+    tla.scope_ref,
+    'derived:direct_entry_offboarding_authority'::text as grant_source,
+    tla.valid_from,
+    tla.valid_to,
+    case
+      when s.reconstructibility <> 'POINT_IN_TIME_CURRENT' then s.reconstructibility
+      else tla.reconstructibility
+    end as reconstructibility
+  from curr_team_leader_assignments tla
+  join curr_r1_scopes s
+    on s.app_user_id = tla.app_user_id
+   and s.scope_kind = 'team'
+   and s.scope_ref = tla.scope_ref
+  where exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:team_manager_assign')
+    and not exists (
+      select 1
+      from curr_r1_scopes s_all
+      where s_all.app_user_id = tla.app_user_id
+        and s_all.scope_kind = 'all'
+        and (
+          exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:entry_privileged_edit')
+          or exists (select 1 from curr_full_admin_users fa where fa.app_user_id = tla.app_user_id)
+        )
+    )
+
+  union all
+
+  -- 3. Direct Entry Workers All Tab
   select
     s.as_of_ts,
     s.as_of_date,
@@ -713,13 +755,16 @@ curr_module_ops_raw as (
     s.reconstructibility
   from curr_r1_scopes s
   where s.scope_kind = 'all'
-    and (
-      exists (select 1 from curr_r1_capabilities c where c.app_user_id = s.app_user_id and c.action_code in ('cap:entry_privileged_edit', 'cap:change_review'))
-      or exists (select 1 from curr_full_admin_users fa where fa.app_user_id = s.app_user_id)
+    and exists (
+      select 1
+      from curr_r1_capabilities c
+      where c.app_user_id = s.app_user_id
+        and c.action_code in ('cap:entry_admin', 'cap:change_review')
     )
 
   union all
 
+  -- 4. Attendance Report
   select
     s.as_of_ts,
     s.as_of_date,
@@ -762,12 +807,31 @@ curr_module_ops_raw as (
     tla.valid_to,
     tla.reconstructibility
   from curr_team_leader_assignments tla
+  join curr_r1_scopes s
+    on s.app_user_id = tla.app_user_id
+   and s.scope_kind = 'team'
+   and s.scope_ref = tla.scope_ref
   where exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:team_manager_assign')
     and exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:report_view')
     and exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:report_analytics_view')
+    and not exists (
+      select 1
+      from curr_r1_scopes s_all
+      where s_all.app_user_id = tla.app_user_id
+        and s_all.scope_kind = 'all'
+        and (
+          exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:entry_privileged_edit')
+          or exists (select 1 from curr_full_admin_users fa where fa.app_user_id = tla.app_user_id)
+          or (
+            exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:report_view')
+            and exists (select 1 from curr_r1_capabilities c where c.app_user_id = tla.app_user_id and c.action_code = 'cap:report_analytics_view')
+          )
+        )
+    )
 
   union all
 
+  -- 5. Leave (current snapshot does not filter shared-service flag on explicit grants/TL rows)
   select
     lg.as_of_ts,
     lg.as_of_date,
@@ -824,6 +888,7 @@ curr_module_ops_raw as (
 
   union all
 
+  -- 6. Vendor Finance & Salary Advance & Recruitment Posts PM
   select
     vf.as_of_ts,
     vf.as_of_date,
@@ -891,6 +956,7 @@ curr_module_ops_raw as (
 
   union all
 
+  -- 7. Work Reports
   select
     s.as_of_ts,
     s.as_of_date,
@@ -977,6 +1043,7 @@ curr_module_ops_raw as (
 
   union all
 
+  -- 8. Admin & Catalog & Location Catalog & Recruitment Posts & Audit & History & Duplicate CCCD
   select
     s.as_of_ts,
     s.as_of_date,
@@ -1107,8 +1174,7 @@ from (
   union all
   select * from curr_module_ops_raw
 ) combined
-where (select target_app_user_id from params) is null
-   or app_user_id = (select target_app_user_id from params)
+where ((select target_app_user_id from params) is null or app_user_id = (select target_app_user_id from params))
 group by
   as_of_ts,
   as_of_date,
@@ -1126,3 +1192,4 @@ order by
   action_code,
   scope_kind,
   scope_ref;
+

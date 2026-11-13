@@ -387,23 +387,122 @@ test("WP2A-2: All 9 authority sources, 23 capabilities under all scope, and mult
   }
 });
 
-test("WP2A-3: Orphan scope=all narrows, explicit BoD grant restores, and fallback team scope recovers", async () => {
+test("WP2A-3: Reporting capability+scope+1:1 link rules, strict fallback, offboarding, and workers_all_tab", async () => {
   const db = await bootDb();
   try {
     const bodOrphan = makeUuid("30000001", 1);
-    const bodFallback = makeUuid("30000002", 2);
+    const bodNoCapWithTeam = makeUuid("30000002", 2);
+    const fbTeamValid = makeUuid("30000003", 3);
+    const fbRecValid = makeUuid("30000004", 4);
+    const teamNoCap = makeUuid("30000005", 5);
+    const teamWrongCap = makeUuid("30000006", 6);
+    const recAmb1to2 = makeUuid("30000007", 7);
+    const recAmb2to1a = makeUuid("30000008", 8);
+    const recAmb2to1b = makeUuid("30000009", 9);
+    const teamPositive = makeUuid("3000000a", 10);
+    const recPositive = makeUuid("3000000b", 11);
+    const offboardAnalytics = makeUuid("3000000c", 12);
+    const workersPrivEdit = makeUuid("3000000d", 13);
+
     const teamA = makeUuid("30000010", 1);
-    await createUser(db, bodOrphan, "BOD Orphan");
-    await createUser(db, bodFallback, "BOD Orphan With Team Fallback");
+    const rFb = makeUuid("30000020", 1);
+    const rAmb1 = makeUuid("30000020", 2);
+    const rAmb2 = makeUuid("30000020", 3);
+    const rShared = makeUuid("30000020", 4);
+    const rPos = makeUuid("30000020", 5);
+
+    for (const [id, name] of [
+      [bodOrphan, "BOD Orphan"],
+      [bodNoCapWithTeam, "BOD Zero-Cap Team"],
+      [fbTeamValid, "Fallback Valid Team"],
+      [fbRecValid, "Fallback Valid Recruited"],
+      [teamNoCap, "Team No Cap"],
+      [teamWrongCap, "Team Wrong Cap"],
+      [recAmb1to2, "Rec Ambiguous 1to2"],
+      [recAmb2to1a, "Rec Ambiguous 2to1 A"],
+      [recAmb2to1b, "Rec Ambiguous 2to1 B"],
+      [teamPositive, "Team Positive"],
+      [recPositive, "Rec Positive"],
+      [offboardAnalytics, "Offboard Analytics Only"],
+      [workersPrivEdit, "Workers Priv Edit Only"],
+    ]) {
+      await createUser(db, id, name);
+    }
     await createTeam(db, teamA, "TM_3A");
+    for (const [rid, code] of [
+      [rFb, "R3_FB"],
+      [rAmb1, "R3_AMB1"],
+      [rAmb2, "R3_AMB2"],
+      [rShared, "R3_SHARED"],
+      [rPos, "R3_POS"],
+    ]) {
+      await createRecruiter(db, rid, code);
+    }
 
     await db.query(
       `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current)
-       values ($1::uuid, 'all', null, $3::date, true),
-              ($2::uuid, 'all', null, $3::date, true),
-              ($2::uuid, 'team', $4::uuid, $3::date, true)`,
-      [bodOrphan, bodFallback, PAST_DATE, teamA]
+       values ($1::uuid, 'all', null, $10::date, true),
+              ($2::uuid, 'all', null, $10::date, true),
+              ($2::uuid, 'team', $11::uuid, $10::date, true),
+              ($3::uuid, 'all', null, $10::date, true),
+              ($3::uuid, 'team', $11::uuid, $10::date, true),
+              ($4::uuid, 'all', null, $10::date, true),
+              ($4::uuid, 'team', $11::uuid, $10::date, true),
+              ($5::uuid, 'team', $11::uuid, $10::date, true),
+              ($6::uuid, 'team', $11::uuid, $10::date, true),
+              ($7::uuid, 'team', $11::uuid, $10::date, true),
+              ($8::uuid, 'all', null, $10::date, true),
+              ($9::uuid, 'all', null, $10::date, true)`,
+      [
+        bodOrphan,
+        bodNoCapWithTeam,
+        fbTeamValid,
+        fbRecValid,
+        teamNoCap,
+        teamWrongCap,
+        teamPositive,
+        offboardAnalytics,
+        workersPrivEdit,
+        PAST_DATE,
+        teamA,
+      ]
     );
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'entry_team', $10::date, true),
+              ($2::uuid, 'entry_own', $10::date, true),
+              ($3::uuid, 'catalog_master_manage', $10::date, true),
+              ($4::uuid, 'entry_own', $10::date, true),
+              ($5::uuid, 'entry_own', $10::date, true),
+              ($6::uuid, 'entry_own', $10::date, true),
+              ($7::uuid, 'report_view', $10::date, true),
+              ($8::uuid, 'report_view', $10::date, true),
+              ($9::uuid, 'report_view', $10::date, true),
+              ($9::uuid, 'report_analytics_view', $10::date, true),
+              ($11::uuid, 'entry_privileged_edit', $10::date, true)`,
+      [
+        fbTeamValid,
+        fbRecValid,
+        teamWrongCap,
+        recAmb1to2,
+        recAmb2to1a,
+        recAmb2to1b,
+        teamPositive,
+        recPositive,
+        offboardAnalytics,
+        PAST_DATE,
+        workersPrivEdit,
+      ]
+    );
+
+    await linkRecruiter(db, fbRecValid, rFb);
+    await linkRecruiter(db, recPositive, rPos);
+    await db.query(`alter table public.direct_entry_app_user_recruiter_links disable trigger user`);
+    await linkRecruiter(db, recAmb1to2, rAmb1);
+    await linkRecruiter(db, recAmb1to2, rAmb2);
+    await linkRecruiter(db, recAmb2to1a, rShared);
+    await linkRecruiter(db, recAmb2to1b, rShared);
+    await db.query(`alter table public.direct_entry_app_user_recruiter_links enable trigger user`);
 
     const diffOrphan = await getDiff(db, AS_OF_TODAY_TS, bodOrphan);
     assert.equal(diffOrphan.length, 4);
@@ -416,14 +515,59 @@ test("WP2A-3: Orphan scope=all narrows, explicit BoD grant restores, and fallbac
               ($1::uuid, 'report_analytics_view', $2::date, true)`,
       [bodOrphan, PAST_DATE]
     );
-    const diffRestored = await getDiff(db, AS_OF_TODAY_TS, bodOrphan);
-    assert.equal(diffRestored.length, 0);
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, bodOrphan)).length, 0);
 
-    // Fallback user keeps team Dashboard fallback while dropping invalid all scope
-    const diffFb = await getDiff(db, AS_OF_TODAY_TS, bodFallback);
-    assert.ok(diffFb.some((r) => r.diff_classification === "EXPECTED_FIX_ORPHAN_ALL_SCOPE" && r.scope_kind === "all"));
-    assert.ok(diffFb.some((r) => r.diff_classification === "EXPECTED_FIX_DASHBOARD_FALLBACK_AFTER_INVALID_ALL_SCOPE" && r.scope_kind === "team" && r.scope_ref === teamA));
-    assert.ok(!diffFb.some((r) => r.diff_classification.startsWith("UNEXPECTED_")));
+    // Zero-cap scope='all' + scope='team' must NOT gain fallback team Dashboard access!
+    const candNoCapFb = await getCandidate(db, AS_OF_TODAY_TS, bodNoCapWithTeam);
+    assert.ok(!candNoCapFb.some((r) => r.row_layer === "MODULE_OP"));
+    assert.ok(candNoCapFb.every((r) => r.action_code === "scope:team"));
+    const diffNoCapFb = await getDiff(db, AS_OF_TODAY_TS, bodNoCapWithTeam);
+    assert.equal(diffNoCapFb.length, 4);
+    assert.ok(diffNoCapFb.every((r) => r.diff_classification === "EXPECTED_FIX_ORPHAN_ALL_SCOPE" && r.scope_kind === "all"));
+
+    // Valid fallback to team (holds entry_team) & fallback past unauthorized all+team to recruited (holds entry_own + 1:1 link)
+    const diffFbTeam = await getDiff(db, AS_OF_TODAY_TS, fbTeamValid);
+    assert.ok(diffFbTeam.some((r) => r.diff_classification === "EXPECTED_FIX_DASHBOARD_FALLBACK_AFTER_INVALID_ALL_SCOPE" && r.scope_kind === "team" && r.scope_ref === teamA));
+    assert.ok(!diffFbTeam.some((r) => r.diff_classification.startsWith("UNEXPECTED_")));
+
+    const candFbRec = await getCandidate(db, AS_OF_TODAY_TS, fbRecValid);
+    assert.ok(candFbRec.some((r) => r.action_code === "op:dashboard:view_general" && r.scope_kind === "recruited" && r.scope_ref === rFb));
+    const diffFbRec = await getDiff(db, AS_OF_TODAY_TS, fbRecValid);
+    assert.ok(diffFbRec.some((r) => r.diff_classification === "EXPECTED_FIX_DASHBOARD_FALLBACK_AFTER_INVALID_ALL_SCOPE" && r.scope_kind === "recruited" && r.scope_ref === rFb));
+    assert.ok(!diffFbRec.some((r) => r.diff_classification.startsWith("UNEXPECTED_")));
+
+    // Negative team (0 caps & wrong-module cap) and ambiguous recruiter links (1:2 & 2:1)
+    for (const negTeamUser of [teamNoCap, teamWrongCap]) {
+      const c = await getCandidate(db, AS_OF_TODAY_TS, negTeamUser);
+      assert.ok(!c.some((r) => r.action_code === "op:dashboard:view_general"));
+      const d = await getDiff(db, AS_OF_TODAY_TS, negTeamUser);
+      assert.ok(d.some((r) => r.diff_classification === "EXPECTED_FIX_REPORTING_SCOPE_WITHOUT_CAPABILITY" && r.scope_kind === "team"));
+    }
+    for (const ambUser of [recAmb1to2, recAmb2to1a, recAmb2to1b]) {
+      const c = await getCandidate(db, AS_OF_TODAY_TS, ambUser);
+      assert.ok(!c.some((r) => r.action_code === "op:dashboard:view_general"));
+      const d = await getDiff(db, AS_OF_TODAY_TS, ambUser);
+      if (ambUser === recAmb1to2) {
+        // Legacy Dashboard already checks 1 user -> 1 recruiter count = 1, so both curr and cand withhold @recruited
+        assert.equal(d.length, 0);
+      } else {
+        // Legacy Dashboard misses 2 users -> 1 recruiter (2:1) ambiguity; Candidate blocks and classifies it
+        assert.ok(d.some((r) => r.diff_classification === "EXPECTED_FIX_AMBIGUOUS_RECRUITER_LINK" && r.action_code === "op:dashboard:view_general" && r.scope_kind === "recruited"));
+        assert.ok(!d.some((r) => r.diff_classification.startsWith("UNEXPECTED_")));
+      }
+    }
+
+    // Positive team (report_view) and recruited (report_view + 1:1) cases
+    assert.ok((await getCandidate(db, AS_OF_TODAY_TS, teamPositive)).some((r) => r.action_code === "op:dashboard:view_general" && r.scope_kind === "team"));
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, teamPositive)).length, 0);
+    assert.ok((await getCandidate(db, AS_OF_TODAY_TS, recPositive)).some((r) => r.action_code === "op:dashboard:view_general" && r.scope_kind === "recruited"));
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, recPositive)).length, 0);
+
+    // Tightened offboarding_view (report_view+analytics alone denied) and workers_all_tab (entry_privileged_edit alone denied)
+    assert.ok(!(await getCandidate(db, AS_OF_TODAY_TS, offboardAnalytics)).some((r) => r.action_code === "op:workforce:offboarding_view"));
+    const candPriv = await getCandidate(db, AS_OF_TODAY_TS, workersPrivEdit);
+    assert.ok(candPriv.some((r) => r.action_code === "op:workforce:offboarding_view" && r.scope_kind === "all"));
+    assert.ok(!candPriv.some((r) => r.action_code === "op:direct_entry:workers_all_tab"));
   } finally {
     await db.close();
   }
@@ -834,6 +978,369 @@ test("WP2A-10: EXPLAIN ANALYZE BUFFERS cost benchmark on 80-user synthetic datas
         assert.ok(Number(root["Execution Time"]) < 2000, `${label} took ${root["Execution Time"]}ms (<2000ms expected)`);
       }
     });
+  } finally {
+    await db.close();
+  }
+});
+
+test("WP2A-11: Intra-day historical reconstruction (before/at/after revoke, same-day grant+revoke, handover) and limitation labels", async () => {
+  const db = await bootDb();
+  try {
+    const pmPrior = makeUuid("b0000001", 1);
+    const pmSameDay = makeUuid("b0000002", 2);
+    const pmNext = makeUuid("b0000003", 3);
+    const tl1 = makeUuid("b0000004", 4);
+    const tl2 = makeUuid("b0000005", 5);
+    const leaveOp = makeUuid("b0000006", 6);
+    const acctUser = makeUuid("b0000007", 7);
+    const grantor = makeUuid("b0000008", 8);
+
+    const recPm1 = makeUuid("b0000020", 1);
+    const recPmSame = makeUuid("b0000020", 2);
+    const recPmNext = makeUuid("b0000020", 3);
+    const recTl1 = makeUuid("b0000020", 4);
+    const recTl2 = makeUuid("b0000020", 5);
+    const teamH = makeUuid("b0000010", 1);
+    const teamCancel = makeUuid("b0000010", 2);
+
+    for (const [id, name] of [
+      [pmPrior, "PM Prior Revoked Same Day"],
+      [pmSameDay, "PM Same Day Grant Revoke"],
+      [pmNext, "PM Handover Target"],
+      [tl1, "TL1 Rev Handover"],
+      [tl2, "TL2 Rev Handover"],
+      [leaveOp, "Leave Same Day Operator"],
+      [acctUser, "Acct VFin Same Day"],
+      [grantor, "Grantor Admin"],
+    ]) {
+      await createUser(db, id, name);
+    }
+    await createTeam(db, teamH, "TM_11H");
+    await createTeam(db, teamCancel, "TM_11C");
+    for (const [rid, code] of [
+      [recPm1, "R11_PM1"],
+      [recPmSame, "R11_PMS"],
+      [recPmNext, "R11_PM2"],
+      [recTl1, "R11_TL1"],
+      [recTl2, "R11_TL2"],
+    ]) {
+      await createRecruiter(db, rid, code);
+    }
+    await linkRecruiter(db, pmPrior, recPm1);
+    await linkRecruiter(db, pmSameDay, recPmSame);
+    await linkRecruiter(db, pmNext, recPmNext);
+    await linkRecruiter(db, tl1, recTl1);
+    await linkRecruiter(db, tl2, recTl2);
+
+    await db.query(
+      `insert into public.direct_entry_projects (project_id, display_name, active, version)
+       values ('PROJ_11A', 'Project 11A', true, 1), ('PROJ_11B', 'Project 11B', true, 1)`
+    );
+
+    // 1) PM active since PAST_DATE, revoked at 15:00 TODAY (`valid_to = TODAY, is_current = false, revoked_at = 15:00+07`)
+    //    PLUS PM handover `pmNext` starting at 15:00 TODAY on PROJ_11A
+    await db.query(
+      `insert into public.direct_entry_project_manager_assignments (project_id, manager_recruiter_id, valid_from, valid_to, is_current, version, created_at, revoked_at)
+       values ('PROJ_11A', $1::uuid, $3::date, $4::date, false, 1, '2026-10-01T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz),
+              ('PROJ_11A', $2::uuid, $4::date, null, true, 2, '2026-11-12T15:00:00+07:00'::timestamptz, null)`,
+      [recPm1, recPmNext, PAST_DATE, TODAY]
+    );
+
+    // 2) Same-day PM grant at 08:00 TODAY -> revoked at 15:00 TODAY (`valid_from = TODAY, valid_to = TODAY`)
+    await db.query(
+      `insert into public.direct_entry_project_manager_assignments (project_id, manager_recruiter_id, valid_from, valid_to, is_current, version, created_at, revoked_at)
+       values ('PROJ_11B', $1::uuid, $2::date, $2::date, false, 1, '2026-11-12T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [recPmSame, TODAY]
+    );
+
+    // 3) Same-day TL handover via direct_entry_team_leader_revisions (`tl1` at 08:00 -> `tl2` at 15:00)
+    await db.query(`SELECT set_config('direct_entry.team_leader_marker', 'on', false)`);
+    await db.query(
+      `insert into public.direct_entry_team_leader_assignments (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, created_at)
+       values ($1::uuid, $2::uuid, $4::uuid, $6::date, $6::date, false, '2026-11-12T08:00:00+07:00'::timestamptz),
+              ($1::uuid, $3::uuid, $5::uuid, $6::date, null, true, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [teamH, tl1, tl2, recTl1, recTl2, TODAY]
+    );
+    await db.query(
+      `insert into public.direct_entry_team_leader_revisions (team_id, version, actor_user_id, action, before_snapshot, after_snapshot, created_at)
+       values ($1::uuid, 1, $6::uuid, 'ASSIGN', null, jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $2::text, 'leader_recruiter_id', $4::text, 'valid_from', $7::text, 'version', 1), '2026-11-12T08:00:00+07:00'::timestamptz),
+              ($1::uuid, 2, $6::uuid, 'HANDOVER', jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $2::text, 'leader_recruiter_id', $4::text), jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $3::text, 'leader_recruiter_id', $5::text, 'valid_from', $7::text, 'version', 2), '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [teamH, tl1, tl2, recTl1, recTl2, grantor, TODAY]
+    );
+
+    // 3b) Active TL (`tl1`) with a cancelled future TL replacement (`tl2`) on `teamCancel`
+    await db.query(
+      `insert into public.direct_entry_team_leader_assignments (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, created_at)
+       values ($1::uuid, $2::uuid, $4::uuid, $6::date, null, true, '2026-10-01T08:00:00+07:00'::timestamptz),
+              ($1::uuid, $3::uuid, $5::uuid, $7::date, $7::date, false, '2026-10-10T18:34:19+07:00'::timestamptz)`,
+      [teamCancel, tl1, tl2, recTl1, recTl2, PAST_DATE, FUTURE_DATE]
+    );
+    await db.query(
+      `insert into public.direct_entry_team_leader_revisions (team_id, version, actor_user_id, action, before_snapshot, after_snapshot, created_at)
+       values ($1::uuid, 1, $6::uuid, 'transition', null, jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $2::text, 'leader_recruiter_id', $4::text, 'valid_from', $7::text, 'valid_to', null, 'version', 1), '2026-10-01T08:00:00+07:00'::timestamptz),
+              ($1::uuid, 2, $6::uuid, 'replace', jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $2::text, 'leader_recruiter_id', $4::text, 'valid_from', $7::text, 'valid_to', null), jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $3::text, 'leader_recruiter_id', $5::text, 'valid_from', $8::text, 'valid_to', null, 'version', 2), '2026-10-10T18:34:19+07:00'::timestamptz),
+              ($1::uuid, 3, $6::uuid, 'revoke', jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $3::text, 'leader_recruiter_id', $5::text, 'valid_from', $8::text, 'valid_to', null), jsonb_build_object('team_id', $1::text, 'leader_app_user_id', $3::text, 'leader_recruiter_id', $5::text, 'valid_from', $8::text, 'valid_to', $8::text, 'version', 3), '2026-10-10T18:34:38+07:00'::timestamptz)`,
+      [teamCancel, tl1, tl2, recTl1, recTl2, grantor, PAST_DATE, FUTURE_DATE]
+    );
+
+    // 4) Same-day Leave Dept Approver handover (`tl1` at 08:00 -> `tl2` at 15:00) & Leave Module Grant grant at 08:00 + revoke at 15:00
+    await db.query(
+      `insert into public.leave_department_approvers (unit_kind, approver_app_user_id, valid_from, valid_to, is_current, reason, created_at, updated_at)
+       values ('IT', $1::uuid, $3::date, $3::date, false, 'Morning IT approver', '2026-11-12T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz),
+              ('IT', $2::uuid, $3::date, null, true, 'Afternoon IT approver', '2026-11-12T15:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [tl1, tl2, TODAY]
+    );
+    const lmgId = makeUuid("b0000099", 1);
+    await db.query(
+      `insert into public.leave_module_grants (grant_id, app_user_id, role_code, valid_from, valid_to, is_current, reason, created_at, updated_at)
+       values ($1::uuid, $2::uuid, 'HR_LEAVE_OPERATOR', $3::date, $4::date, false, 'Same-day grant+revoke', '2026-11-12T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [lmgId, leaveOp, TODAY, TOMORROW]
+    );
+    await db.query(
+      `insert into public.leave_audit_events (event_type, actor_app_user_id, target_app_user_id, reason, payload, created_at)
+       values ('MODULE_GRANT_REVOKE', $1::uuid, $2::uuid, 'Same-day revoke', jsonb_build_object('grant_id', $3::text), '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [grantor, leaveOp, lmgId]
+    );
+
+    // 5) Same-day ACCOUNTING dept + VFin Project Accountant & Global Role (`08:00` -> `15:00`, `valid_to = TODAY`)
+    const acctDeptId = await getDepartmentId(db, "ACCOUNTING");
+    await db.query(`SELECT set_config('org_department.membership_cancel_marker', 'on', false)`);
+    await db.query(
+      `insert into public.organization_department_memberships (department_id, app_user_id, valid_from, valid_to, version, granted_by_user_id, grant_reason, revoked_by_user_id, revoke_reason, created_at, revoked_at)
+       values ($1::uuid, $2::uuid, $3::date, $3::date, 1, $4::uuid, 'Same-day acct', $4::uuid, 'Same-day revoke acct', '2026-11-12T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [acctDeptId, acctUser, TODAY, grantor]
+    );
+    await db.query(`SELECT set_config('vendor_finance.admin_write_marker', 'on', false)`);
+    await db.query(
+      `insert into public.vendor_finance_project_accountants (project_id, accountant_user_id, version, valid_from, valid_to, assigned_by_user_id, assign_reason, ended_by_user_id, end_reason, created_at, ended_at)
+       values ('PROJ_11A', $1::uuid, 1, $2::date, $2::date, $3::uuid, 'Same-day PA', $3::uuid, 'Same-day revoke PA', '2026-11-12T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [acctUser, TODAY, grantor]
+    );
+    await db.query(
+      `insert into public.vendor_finance_global_roles (app_user_id, role_code, version, valid_from, valid_to, granted_by_user_id, grant_reason, ended_by_user_id, end_reason, created_at, ended_at)
+       values ($1::uuid, 'GLOBAL_VIEWER', 1, $2::date, $2::date, $3::uuid, 'Same-day VFin', $3::uuid, 'Same-day revoke VFin', '2026-11-12T08:00:00+07:00'::timestamptz, '2026-11-12T15:00:00+07:00'::timestamptz)`,
+      [acctUser, TODAY, grantor]
+    );
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'entry_own', $2::date, true)`,
+      [pmPrior, PAST_DATE]
+    );
+
+    const T_BEFORE_START = "2026-11-12T07:59:59+07:00";
+    const T_MORNING = "2026-11-12T09:00:00+07:00";
+    const T_EXACT_REVOKE = "2026-11-12T15:00:00+07:00";
+    const T_AFTER_REVOKE = "2026-11-12T16:00:00+07:00";
+
+    // At 07:59: pmPrior active; same-day grants NOT active yet
+    assert.ok((await getCandidate(db, T_BEFORE_START, pmPrior)).some((r) => r.action_code === "assignment:project_manager"));
+    assert.ok(!(await getCandidate(db, T_BEFORE_START, pmSameDay)).some((r) => r.action_code === "assignment:project_manager"));
+    assert.ok(!(await getCandidate(db, T_BEFORE_START, leaveOp)).some((r) => r.action_code === "leave_role:HR_LEAVE_OPERATOR"));
+
+    // At 09:00: pmPrior, pmSameDay, tl1, leaveOp, acctUser ALL active! pmNext & tl2 ABSENT!
+    const pmPriorMorning = await getCandidate(db, T_MORNING, pmPrior);
+    assert.ok(pmPriorMorning.some((r) => r.action_code === "assignment:project_manager" && r.scope_ref === "PROJ_11A"));
+    assert.ok(pmPriorMorning.some((r) => r.action_code === "op:vendor_finance:pm_project_view" && r.scope_ref === "PROJ_11A"));
+    assert.ok(pmPriorMorning.some((r) => r.action_code === "op:salary_advance:pm_request" && r.scope_ref === "PROJ_11A"));
+    assert.ok(pmPriorMorning.some((r) => r.action_code === "op:recruitment_posts:pm_manage_project" && r.scope_ref === "PROJ_11A"));
+    // Date-only capability on past as_of_ts MUST disclose LIMITATION_DATE_GRANULARITY_ONLY (never POINT_IN_TIME_CURRENT)
+    const capRowMorning = pmPriorMorning.find((r) => r.action_code === "cap:entry_own");
+    assert.ok(capRowMorning.reconstructibility.includes("LIMITATION_DATE_GRANULARITY_ONLY"));
+    assert.ok(!pmPriorMorning.some((r) => r.reconstructibility === "POINT_IN_TIME_CURRENT"));
+
+    // Diff for pmPrior at 09:00 explains intra-day historical reconstruction cleanly without UNEXPECTED_*
+    const pmPriorMorningDiff = await getDiff(db, T_MORNING, pmPrior);
+    assert.ok(pmPriorMorningDiff.some((r) => r.action_code === "assignment:project_manager" && r.diff_classification === "EXPECTED_FIX_HISTORICAL_INTRADAY_RECONSTRUCTED"));
+    assert.ok(!pmPriorMorningDiff.some((r) => r.diff_classification.startsWith("UNEXPECTED_")));
+
+    assert.ok((await getCandidate(db, T_MORNING, pmSameDay)).some((r) => r.action_code === "assignment:project_manager" && r.scope_ref === "PROJ_11B"));
+    assert.ok(!(await getCandidate(db, T_MORNING, pmNext)).some((r) => r.action_code === "assignment:project_manager"));
+
+    const tl1Morning = await getCandidate(db, T_MORNING, tl1);
+    assert.ok(tl1Morning.some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamH));
+    assert.ok(tl1Morning.some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamCancel));
+    assert.ok(tl1Morning.some((r) => r.action_code === "department_approver:IT"));
+    const tl2Morning = await getCandidate(db, T_MORNING, tl2);
+    assert.ok(!tl2Morning.some((r) => r.action_code === "assignment:team_leader"));
+    assert.ok(!tl2Morning.some((r) => r.action_code === "department_approver:IT"));
+    const tl2MorningDiff = await getDiff(db, T_MORNING, tl2);
+    assert.ok(tl2MorningDiff.some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamH && r.diff_classification === "EXPECTED_FIX_HISTORICAL_INTRADAY_CREATED_AFTER_ASOF"));
+    assert.ok(!tl2MorningDiff.some((r) => r.diff_classification.startsWith("UNEXPECTED_")));
+
+    assert.ok((await getCandidate(db, T_MORNING, leaveOp)).some((r) => r.action_code === "leave_role:HR_LEAVE_OPERATOR"));
+    const acctMorning = await getCandidate(db, T_MORNING, acctUser);
+    assert.ok(acctMorning.some((r) => r.action_code === "dept_member:ACCOUNTING"));
+    assert.ok(acctMorning.some((r) => r.action_code === "op:vendor_finance:project_ledger_operate" && r.scope_ref === "PROJ_11A"));
+    assert.ok(acctMorning.some((r) => r.action_code === "vfin_role:GLOBAL_VIEWER"));
+
+    // At 15:00 exact and 16:00: revoked rows gone; handover targets active; cancelled future replacement on teamCancel stays excluded!
+    for (const ts of [T_EXACT_REVOKE, T_AFTER_REVOKE]) {
+      assert.ok(!(await getCandidate(db, ts, pmPrior)).some((r) => r.action_code === "assignment:project_manager"));
+      assert.ok(!(await getCandidate(db, ts, pmSameDay)).some((r) => r.action_code === "assignment:project_manager"));
+      assert.ok((await getCandidate(db, ts, pmNext)).some((r) => r.action_code === "assignment:project_manager" && r.scope_ref === "PROJ_11A"));
+      assert.ok(!(await getCandidate(db, ts, tl1)).some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamH));
+      assert.ok((await getCandidate(db, ts, tl1)).some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamCancel));
+      assert.ok(!(await getCandidate(db, ts, tl1)).some((r) => r.action_code === "department_approver:IT"));
+      assert.ok((await getCandidate(db, ts, tl2)).some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamH));
+      assert.ok(!(await getCandidate(db, ts, tl2)).some((r) => r.action_code === "assignment:team_leader" && r.scope_ref === teamCancel));
+      assert.ok((await getCandidate(db, ts, tl2)).some((r) => r.action_code === "department_approver:IT"));
+      assert.ok(!(await getCandidate(db, ts, leaveOp)).some((r) => r.action_code === "leave_role:HR_LEAVE_OPERATOR"));
+      assert.ok(!(await getCandidate(db, ts, acctUser)).some((r) => r.action_code === "op:vendor_finance:project_ledger_operate"));
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test("WP2A-12: Strict EXPECTED_FIX_* classifier refuses to mask simulated Candidate bugs", async () => {
+  const db = await bootDb();
+  try {
+    const validAll = makeUuid("c0000001", 1);
+    const validPm = makeUuid("c0000002", 2);
+    const validPa = makeUuid("c0000003", 3);
+    const validDel = makeUuid("c0000004", 4);
+    const grantor = makeUuid("c0000005", 5);
+    const invalidFbUser = makeUuid("c0000006", 6);
+
+    const teamA = makeUuid("c0000010", 1);
+    const recPm = makeUuid("c0000020", 1);
+    const tplId = makeUuid("c0000030", 1);
+    const verId = makeUuid("c0000031", 1);
+
+    for (const [id, name] of [
+      [validAll, "Valid All Dash"],
+      [validPm, "Valid PM 1to1"],
+      [validPa, "Valid PA Dept"],
+      [validDel, "Valid Delegate"],
+      [grantor, "Valid Grantor"],
+      [invalidFbUser, "Zero-Cap Fallback Bug Target"],
+    ]) {
+      await createUser(db, id, name);
+    }
+    await createTeam(db, teamA, "TM_12A");
+    await createRecruiter(db, recPm, "R12_PM");
+    await linkRecruiter(db, validPm, recPm);
+
+    await db.query(
+      `insert into public.direct_entry_projects (project_id, display_name, active, version)
+       values ('PROJ_12A', 'Project 12A', true, 1)`
+    );
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'report_view', $3::date, true),
+              ($1::uuid, 'report_analytics_view', $3::date, true),
+              ($2::uuid, 'entry_admin', $3::date, true),
+              ($2::uuid, 'recruiter_master_manage', $3::date, true),
+              ($2::uuid, 'team_master_manage', $3::date, true),
+              ($4::uuid, 'entry_own', $3::date, true),
+              ($5::uuid, 'report_view', $3::date, true)`,
+      [validAll, grantor, PAST_DATE, validPm, validDel]
+    );
+    await db.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current)
+       values ($1::uuid, 'all', null, $4::date, true),
+              ($2::uuid, 'all', null, $4::date, true),
+              ($3::uuid, 'team', $5::uuid, $4::date, true)`,
+      [validAll, grantor, validDel, PAST_DATE, teamA]
+    );
+    await db.query(
+      `insert into public.direct_entry_project_manager_assignments (project_id, manager_recruiter_id, valid_from, is_current, version)
+       values ('PROJ_12A', $1::uuid, $2::date, true, 1)`,
+      [recPm, PAST_DATE]
+    );
+    const acctDeptId = await getDepartmentId(db, "ACCOUNTING");
+    await db.query(
+      `insert into public.organization_department_memberships (department_id, app_user_id, valid_from, version, granted_by_user_id, grant_reason)
+       values ($1::uuid, $2::uuid, $3::date, 1, $4::uuid, 'Valid PA dept')`,
+      [acctDeptId, validPa, PAST_DATE, grantor]
+    );
+    await db.query(`SELECT set_config('vendor_finance.admin_write_marker', 'on', false)`);
+    await db.query(
+      `insert into public.vendor_finance_project_accountants (project_id, accountant_user_id, version, valid_from, assigned_by_user_id, assign_reason)
+       values ('PROJ_12A', $1::uuid, 1, $2::date, $3::uuid, 'Valid PA')`,
+      [validPa, PAST_DATE, grantor]
+    );
+    await seedTemplate(db, { templateId: tplId, versionId: verId, grantorId: grantor });
+    await db.query(
+      `insert into public.work_report_delegations
+         (grantor_user_id, delegate_app_user_id, capability, template_id, template_version_id, scope_kind, scope_team_id, effective_from, effective_to, state, is_current, version)
+       values ($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, '2026-10-01T00:00:00Z'::timestamptz, null, 'ACTIVE', true, 1)`,
+      [grantor, validDel, tplId, verId, teamA]
+    );
+    // invalidFbUser holds scope='all' + scope='team' with ZERO capabilities
+    await db.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current)
+       values ($1::uuid, 'all', null, $2::date, true),
+              ($1::uuid, 'team', $3::uuid, $2::date, true)`,
+      [invalidFbUser, PAST_DATE, teamA]
+    );
+
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, validAll)).length, 0);
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, validPm)).length, 0);
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, validPa)).length, 0);
+    assert.equal((await getDiff(db, AS_OF_TODAY_TS, validDel)).length, 0);
+
+    // Simulate Candidate bugs inside a rolled-back transaction:
+    // 1) Drop ALL rows for validAll, validPm, validPa, validDel
+    // 2) Inject an invalid Dashboard @ team fallback row for zero-cap invalidFbUser
+    await db.query("BEGIN");
+    try {
+      await db.query(`
+        create or replace function public.direct_entry_authz_resolve_candidate_access(
+          p_as_of_ts timestamptz default pg_catalog.transaction_timestamp(),
+          p_app_user_id uuid default null
+        )
+        returns table (
+          as_of_ts timestamptz, as_of_date date, app_user_id uuid, user_created_date date,
+          row_layer text, module_code text, action_code text, scope_kind text,
+          scope_ref text, grant_source text, valid_from text, valid_to text, reconstructibility text
+        )
+        language sql stable security definer set search_path = pg_catalog, public
+        as $bug$
+          select
+            coalesce(p_as_of_ts, pg_catalog.transaction_timestamp()),
+            (coalesce(p_as_of_ts, pg_catalog.transaction_timestamp()) at time zone 'Asia/Ho_Chi_Minh')::date,
+            '${invalidFbUser}'::uuid,
+            '2026-01-01'::date,
+            'MODULE_OP'::text,
+            'dashboard'::text,
+            'op:dashboard:view_general'::text,
+            'team'::text,
+            '${teamA}'::text,
+            'simulated:bug_fallback'::text,
+            '2026-10-01'::text,
+            'infinity'::text,
+            'POINT_IN_TIME_CURRENT'::text
+          where p_app_user_id is null or p_app_user_id = '${invalidFbUser}'::uuid;
+        $bug$;
+      `);
+
+      const simDiff = (await db.query(
+        `select * from public.direct_entry_authz_compare_shadow_access($1::timestamptz, null)`,
+        [AS_OF_TODAY_TS]
+      )).rows;
+
+      for (const uid of [validAll, validPm, validPa, validDel]) {
+        const userDiffs = simDiff.filter((r) => r.app_user_id === uid);
+        assert.ok(userDiffs.length > 0, `Simulated drop must emit diffs for ${uid}`);
+        assert.ok(
+          userDiffs.every((r) => r.diff_classification === "UNEXPECTED_REGRESSION_CHECK_REQUIRED"),
+          `Simulated bug for ${uid} was masked as EXPECTED_FIX_*: ${JSON.stringify(userDiffs)}`
+        );
+      }
+
+      const fbGainDiff = simDiff.filter(
+        (r) => r.app_user_id === invalidFbUser && r.diff_status === "GAINED_IN_CANDIDATE" && r.action_code === "op:dashboard:view_general"
+      );
+      assert.equal(fbGainDiff.length, 1);
+      assert.equal(
+        fbGainDiff[0].diff_classification,
+        "UNEXPECTED_WIDENING_CHECK_REQUIRED",
+        "Fabricated fallback for zero-cap user must NOT be classified as EXPECTED_FIX_DASHBOARD_FALLBACK_AFTER_INVALID_ALL_SCOPE"
+      );
+    } finally {
+      await db.query("ROLLBACK");
+    }
   } finally {
     await db.close();
   }
