@@ -104,6 +104,7 @@ const TEST_WEIGHTS = {
   "test:recruitment-location-catalog": 9.0,
   "test:recruitment-posts": 14.0,
   "test:wp1-s1-immediate-assignments": 10.0,
+  "test:wp2a-effective-access-shadow": 8.0,
 };
 
 const target = process.argv[2];

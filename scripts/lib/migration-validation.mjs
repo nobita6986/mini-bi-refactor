@@ -408,6 +408,13 @@ export const RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME =
 export const RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES = Object.freeze([
   "public.recruitment_post_list_with_facets(uuid, uuid, text, uuid, uuid, text, date, date, text, text, integer)",
 ]);
+export const WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME =
+  "20261113120000_wp2a_effective_access_candidate_shadow.sql";
+export const WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_authz_resolve_candidate_access(timestamp with time zone, uuid)",
+  "public.direct_entry_authz_resolve_current_snapshot(timestamp with time zone, uuid)",
+  "public.direct_entry_authz_compare_shadow_access(timestamp with time zone, uuid)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -663,7 +670,8 @@ export async function verifyS0T1CHistoricalCompatibility(
     recruitmentPostsApplied = false,
     recruitmentPostListMineApplied = false,
     recruitmentPostPublicFeedV1Applied = false,
-    recruitmentPostListWithFacetsApplied = false } = {},
+    recruitmentPostListWithFacetsApplied = false,
+    wp2aEffectiveAccessShadowApplied = false } = {},
 ) {
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
   if (baseAllowlist.length === 0) {
@@ -786,6 +794,9 @@ export async function verifyS0T1CHistoricalCompatibility(
       : []),
     ...(recruitmentPostListWithFacetsApplied
       ? RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES
+      : []),
+    ...(wp2aEffectiveAccessShadowApplied
+      ? WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES
       : []),
   ];
 
@@ -1069,6 +1080,8 @@ export async function verifyAppliedMigrationChecksum(
           appliedMap.has(RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME),
         recruitmentPostListWithFacetsApplied:
           appliedMap.has(RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
+        wp2aEffectiveAccessShadowApplied:
+          appliedMap.has(WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME),
       },
     );
     if (postconditions.ok) {
