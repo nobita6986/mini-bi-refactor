@@ -7,6 +7,7 @@ import {
   DepartmentSelectPicker,
   type SelectedDepartmentOption,
 } from "@/components/admin/org-entity-picker";
+import { useWp4WorkspaceGuard } from "@/components/admin/wp4-workspace-guard";
 import { ErrorState } from "@/components/reporting/error-state";
 import { Alert } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/ui/badge";
@@ -53,10 +54,27 @@ type PersonDetailLoadState =
   | { kind: "error"; message: string; retryable: boolean };
 
 type PersonDialogState =
-  | { kind: "edit" }
-  | { kind: "assign-dept" }
-  | { kind: "transfer-dept" }
-  | { kind: "end-dept" };
+  | {
+      kind: "edit";
+      baselinePersonId: string;
+      baselinePersonVersion: number;
+      conflictLocked: boolean;
+    }
+  | {
+      kind: "assign-dept";
+      baselinePersonId: string;
+      baselinePersonVersion: number;
+      conflictLocked: boolean;
+    }
+  | {
+      kind: "transfer-dept" | "end-dept";
+      baselinePersonId: string;
+      baselinePersonVersion: number;
+      baselineDepartmentId: string;
+      baselineDepartmentName: string;
+      baselineMembershipId: string;
+      conflictLocked: boolean;
+    };
 
 type PendingDetailIntent = {
   url: string;
@@ -73,6 +91,8 @@ export function PersonDetailManager({ personId }: { personId: string }) {
   const [state, setState] = useState<PersonDetailLoadState>({ kind: "loading" });
   const [reloadToken, setReloadToken] = useState(0);
   const reqSeqRef = useRef(0);
+  const lastPersonIdRef = useRef(personId);
+  const workspaceGuard = useWp4WorkspaceGuard();
 
   const [dialog, setDialog] = useState<PersonDialogState | null>(null);
   const [employeeCode, setEmployeeCode] = useState("");
@@ -89,16 +109,65 @@ export function PersonDetailManager({ personId }: { personId: string }) {
   const [busy, setBusy] = useState(false);
   const [pendingIntent, setPendingIntent] = useState<PendingDetailIntent | null>(null);
 
-  const handleSessionLost = useCallback((message: string, unauthenticated = false) => {
+  const handleSessionLost = useCallback(
+    (message: string, unauthenticated = false) => {
+      workspaceGuard.invalidateSession();
+      reqSeqRef.current += 1;
+      setBusy(false);
+      setDialog(null);
+      setPendingIntent(null);
+      setConflictMsg(null);
+      setActiveHeadBlockMsg(null);
+      setFormError(null);
+      setSelectedTargetDept(null);
+      setState({ kind: "denied", message, unauthenticated });
+    },
+    [workspaceGuard],
+  );
+
+  const handlePickerSessionLost = useCallback(
+    (message: string) => {
+      handleSessionLost(message, false);
+    },
+    [handleSessionLost],
+  );
+
+  const handleSelectTargetDept = useCallback((dept: SelectedDepartmentOption | null) => {
+    setSelectedTargetDept(dept);
+  }, []);
+
+  const closeDialog = useCallback(() => {
     setDialog(null);
     setPendingIntent(null);
-    setState({ kind: "denied", message, unauthenticated });
+    setConflictMsg(null);
+    setActiveHeadBlockMsg(null);
+    setFormError(null);
+    setSelectedTargetDept(null);
   }, []);
 
   useEffect(() => {
+    const personChanged = lastPersonIdRef.current !== personId;
+    if (personChanged) {
+      lastPersonIdRef.current = personId;
+      workspaceGuard.invalidateSession();
+    }
     const reqSeq = ++reqSeqRef.current;
-    const controller = new AbortController();
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
     void (async () => {
+      if (personChanged) {
+        setDialog(null);
+        setPendingIntent(null);
+        setConflictMsg(null);
+        setActiveHeadBlockMsg(null);
+        setFormError(null);
+        setBusy(false);
+        setSelectedTargetDept(null);
+      }
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== reqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       setState({ kind: "loading" });
       let response: Response;
       try {
@@ -109,8 +178,11 @@ export function PersonDetailManager({ personId }: { personId: string }) {
           headers: { Accept: "application/json" },
         });
       } catch (error) {
+        tracked.release();
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (reqSeq !== reqSeqRef.current) return;
+        if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== reqSeqRef.current) {
+          return;
+        }
         setState({
           kind: "error",
           message: "Không thể kết nối máy chủ để tải chi tiết Nhân sự nội bộ.",
@@ -119,8 +191,16 @@ export function PersonDetailManager({ personId }: { personId: string }) {
         return;
       }
 
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== reqSeqRef.current) {
+        tracked.release();
+        return;
+      }
+
       const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted || reqSeq !== reqSeqRef.current) return;
+      tracked.release();
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== reqSeqRef.current) {
+        return;
+      }
 
       if (response.status !== 200) {
         const failure = classifyPersonOrgReadError(response.status, payload);
@@ -157,16 +237,20 @@ export function PersonDetailManager({ personId }: { personId: string }) {
       });
     })();
 
-    return () => controller.abort();
-  }, [handleSessionLost, personId, reloadToken]);
+    return () => {
+      reqSeqRef.current += 1;
+      controller.abort();
+      tracked.release();
+    };
+  }, [handleSessionLost, personId, reloadToken, workspaceGuard]);
 
   const reloadDetail = useCallback(() => {
-    setPendingIntent(null);
+    if (busy || pendingIntent !== null) return;
     setConflictMsg(null);
     setActiveHeadBlockMsg(null);
     setFormError(null);
     setReloadToken((v) => v + 1);
-  }, []);
+  }, [busy, pendingIntent]);
 
   const person = state.kind === "ready" ? state.person : null;
 
@@ -176,7 +260,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
   );
 
   const openEditDialog = () => {
-    if (!person) return;
+    if (!person || busy || pendingIntent !== null) return;
     setEmployeeCode(person.employee_code);
     setFullName(person.full_name);
     setJoinedOn(person.joined_on ?? "");
@@ -186,17 +270,43 @@ export function PersonDetailManager({ personId }: { personId: string }) {
     setConflictMsg(null);
     setActiveHeadBlockMsg(null);
     setPendingIntent(null);
-    setDialog({ kind: "edit" });
+    setDialog({
+      kind: "edit",
+      baselinePersonId: person.person_id,
+      baselinePersonVersion: person.version,
+      conflictLocked: false,
+    });
   };
 
   const openDeptDialog = (kind: "assign-dept" | "transfer-dept" | "end-dept") => {
+    if (!person || busy || pendingIntent !== null) return;
     setSelectedTargetDept(null);
     setReason("");
     setFormError(null);
     setConflictMsg(null);
     setActiveHeadBlockMsg(null);
     setPendingIntent(null);
-    setDialog({ kind });
+    if (kind === "assign-dept") {
+      setDialog({
+        kind,
+        baselinePersonId: person.person_id,
+        baselinePersonVersion: person.version,
+        conflictLocked: false,
+      });
+      return;
+    }
+    if (!person.active_department) {
+      return;
+    }
+    setDialog({
+      kind,
+      baselinePersonId: person.person_id,
+      baselinePersonVersion: person.version,
+      baselineDepartmentId: person.active_department.department_id,
+      baselineDepartmentName: person.active_department.name,
+      baselineMembershipId: person.active_department.membership_id,
+      conflictLocked: false,
+    });
   };
 
   const dispatchIntent = async (
@@ -206,14 +316,18 @@ export function PersonDetailManager({ personId }: { personId: string }) {
     body: Record<string, unknown>,
     idempotencyKey: string,
   ) => {
+    if (busy) return;
     setBusy(true);
     setFormError(null);
     setConflictMsg(null);
     setActiveHeadBlockMsg(null);
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
     try {
       const response = await fetch(url, {
         method,
         cache: "no-store",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
@@ -221,7 +335,9 @@ export function PersonDetailManager({ personId }: { personId: string }) {
         },
         body: JSON.stringify(body),
       });
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       const payload: unknown = await response.json().catch(() => null);
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       const outcome = classifyPersonOrgMutationResponse(response.status, payload, op);
 
       if (outcome.kind === "applied") {
@@ -229,8 +345,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
           title: outcome.message,
           dedupeKey: `wp4-person-detail:${personId}:${op}`,
         });
-        setPendingIntent(null);
-        setDialog(null);
+        closeDialog();
         setReloadToken((v) => v + 1);
         return;
       }
@@ -259,10 +374,12 @@ export function PersonDetailManager({ personId }: { personId: string }) {
       }
       if (outcome.kind === "conflict") {
         setConflictMsg(outcome.message);
+        setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
         return;
       }
       setFormError(outcome.message);
     } catch {
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       setPendingIntent({
         url,
         method,
@@ -273,18 +390,85 @@ export function PersonDetailManager({ personId }: { personId: string }) {
           "Mất kết nối trong lúc lưu thay đổi. Đã giữ nguyên dữ liệu và khóa idempotency; bạn có thể thử lại đúng yêu cầu hoặc tải lại để đối chiếu.",
       });
     } finally {
-      setBusy(false);
+      tracked.release();
+      if (workspaceGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
+    }
+  };
+
+  const reconcileFromServer = async () => {
+    if (busy) return;
+    setBusy(true);
+    setFormError(null);
+    const reqSeq = ++reqSeqRef.current;
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
+    try {
+      const response = await fetch(
+        `/api/admin/organization/persons/${encodeURIComponent(personId)}`,
+        {
+          method: "GET",
+          cache: "no-store",
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== reqSeqRef.current) {
+        return;
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== reqSeqRef.current) {
+        return;
+      }
+      if (response.status !== 200) {
+        const failure = classifyPersonOrgReadError(response.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          handleSessionLost(failure.message, failure.kind === "unauthenticated");
+          return;
+        }
+        if (failure.kind === "not-found") {
+          setState({ kind: "not-found", message: failure.message });
+          closeDialog();
+          return;
+        }
+        setFormError(failure.message);
+        return;
+      }
+      const projected = projectPersonDetailEnvelope(payload, personId);
+      if (!projected) {
+        setFormError(
+          "Phản hồi chi tiết nhân sự không hợp lệ; yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+        );
+        return;
+      }
+      setState({
+        kind: "ready",
+        person: projected.person,
+        authorizationDate: projected.authorization_date,
+      });
+      closeDialog();
+    } catch {
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
+      setFormError(
+        "Không thể kết nối máy chủ để đối chiếu. Yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+      );
+    } finally {
+      tracked.release();
+      if (workspaceGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
     }
   };
 
   const submitDialog = (event: FormEvent) => {
     event.preventDefault();
-    if (!person || !dialog || busy || pendingIntent) return;
+    if (!dialog || busy || pendingIntent || dialog.conflictLocked) return;
     const idempotencyKey = newOrgIdempotencyKey();
 
     if (dialog.kind === "edit") {
       const req = buildUpdatePersonRequest({
-        expectedPersonVersion: person.version,
+        expectedPersonVersion: dialog.baselinePersonVersion,
         employeeCode,
         fullName,
         joinedOn: joinedOn || null,
@@ -297,7 +481,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
         return;
       }
       void dispatchIntent(
-        `/api/admin/organization/persons/${encodeURIComponent(person.person_id)}`,
+        `/api/admin/organization/persons/${encodeURIComponent(dialog.baselinePersonId)}`,
         "PATCH",
         "update",
         req.body,
@@ -312,8 +496,8 @@ export function PersonDetailManager({ personId }: { personId: string }) {
         return;
       }
       const req = buildAssignPersonDepartmentRequest({
-        personId: person.person_id,
-        expectedPersonVersion: person.version,
+        personId: dialog.baselinePersonId,
+        expectedPersonVersion: dialog.baselinePersonVersion,
         reason,
         idempotencyKey,
       });
@@ -332,18 +516,14 @@ export function PersonDetailManager({ personId }: { personId: string }) {
     }
 
     if (dialog.kind === "transfer-dept") {
-      if (!person.active_department) {
-        setFormError("Nhân sự chưa có phòng ban hiện hành để chuyển.");
-        return;
-      }
       if (!selectedTargetDept) {
         setFormError("Vui lòng chọn phòng ban đích từ danh sách.");
         return;
       }
       const req = buildTransferPersonDepartmentRequest({
         targetDepartmentRef: selectedTargetDept.department_id,
-        expectedPersonVersion: person.version,
-        expectedCurrentMembershipId: person.active_department.membership_id,
+        expectedPersonVersion: dialog.baselinePersonVersion,
+        expectedCurrentMembershipId: dialog.baselineMembershipId,
         reason,
         idempotencyKey,
       });
@@ -352,7 +532,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
         return;
       }
       void dispatchIntent(
-        `/api/admin/organization/persons/${encodeURIComponent(person.person_id)}/transfer-department`,
+        `/api/admin/organization/persons/${encodeURIComponent(dialog.baselinePersonId)}/transfer-department`,
         "POST",
         "transfer-department",
         req.body,
@@ -362,12 +542,8 @@ export function PersonDetailManager({ personId }: { personId: string }) {
     }
 
     if (dialog.kind === "end-dept") {
-      if (!person.active_department) {
-        setFormError("Nhân sự không có thành viên phòng ban đang hiệu lực.");
-        return;
-      }
       const req = buildEndPersonDepartmentRequest({
-        expectedPersonVersion: person.version,
+        expectedPersonVersion: dialog.baselinePersonVersion,
         reason,
         idempotencyKey,
       });
@@ -376,7 +552,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
         return;
       }
       void dispatchIntent(
-        `/api/admin/departments/${encodeURIComponent(person.active_department.department_id)}/memberships/${encodeURIComponent(person.active_department.membership_id)}/end`,
+        `/api/admin/departments/${encodeURIComponent(dialog.baselineDepartmentId)}/memberships/${encodeURIComponent(dialog.baselineMembershipId)}/end`,
         "POST",
         "end-department",
         req.body,
@@ -386,6 +562,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
   };
 
   const isDialogLocked = busy || pendingIntent !== null;
+  const isFormInputLocked = isDialogLocked || Boolean(dialog?.conflictLocked);
   const statusMeta = person ? personStatusBadge(person.status) : null;
 
   return (
@@ -404,7 +581,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
           variant="secondary"
           size="sm"
           onClick={reloadDetail}
-          disabled={state.kind === "loading"}
+          disabled={state.kind === "loading" || state.kind === "denied" || isDialogLocked || dialog !== null}
         >
           Tải lại hồ sơ
         </Button>
@@ -471,7 +648,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
             }
             description={`Ngày gia nhập: ${formatOrgDate(person.joined_on)} · Ngày hiệu lực tổ chức: ${formatOrgDate(state.kind === "ready" ? state.authorizationDate : null)}`}
             actions={
-              <Button variant="primary" size="md" onClick={openEditDialog}>
+              <Button variant="primary" size="md" onClick={openEditDialog} disabled={isDialogLocked}>
                 Sửa hồ sơ
               </Button>
             }
@@ -539,6 +716,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                       <Button
                         variant="secondary"
                         size="sm"
+                        disabled={isDialogLocked}
                         onClick={() => openDeptDialog("transfer-dept")}
                       >
                         Chuyển phòng ban
@@ -546,6 +724,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                       <Button
                         variant="danger"
                         size="sm"
+                        disabled={isDialogLocked}
                         onClick={() => openDeptDialog("end-dept")}
                       >
                         Kết thúc phòng ban
@@ -564,6 +743,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                     <Button
                       variant="primary"
                       size="sm"
+                      disabled={isDialogLocked}
                       onClick={() => openDeptDialog("assign-dept")}
                     >
                       Gán phòng ban
@@ -770,12 +950,11 @@ export function PersonDetailManager({ personId }: { personId: string }) {
       <FormDialog
         open={dialog !== null}
         onOpenChange={(nextOpen) => {
-          if (!nextOpen && !busy) {
-            setDialog(null);
-            setPendingIntent(null);
+          if (!nextOpen && !isDialogLocked) {
+            closeDialog();
           }
         }}
-        closeDisabled={busy}
+        closeDisabled={isDialogLocked}
         title={
           dialog?.kind === "edit"
             ? "Sửa hồ sơ Nhân sự nội bộ"
@@ -808,7 +987,12 @@ export function PersonDetailManager({ personId }: { personId: string }) {
               >
                 {busy ? "Đang thử lại…" : "Thử lại đúng yêu cầu"}
               </Button>
-              <Button variant="secondary" size="sm" disabled={busy} onClick={reloadDetail}>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={() => void reconcileFromServer()}
+              >
                 Tải lại để đối chiếu
               </Button>
             </div>
@@ -819,7 +1003,12 @@ export function PersonDetailManager({ personId }: { personId: string }) {
           <Alert tone="warning" role="alert" title="Hồ sơ vừa được cập nhật">
             <p>{conflictMsg}</p>
             <div className="mt-2">
-              <Button variant="secondary" size="sm" onClick={reloadDetail}>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={() => void reconcileFromServer()}
+              >
                 Tải bản mới nhất
               </Button>
             </div>
@@ -860,7 +1049,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  disabled={isDialogLocked}
+                  disabled={isFormInputLocked}
                   value={employeeCode}
                   onChange={(event) => setEmployeeCode(event.target.value)}
                   placeholder="Nhập mã nhân sự nội bộ (2–64 ký tự)"
@@ -880,7 +1069,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                   type="text"
                   required
                   maxLength={FULL_NAME_MAX_LENGTH}
-                  disabled={isDialogLocked}
+                  disabled={isFormInputLocked}
                   value={fullName}
                   onChange={(event) => setFullName(event.target.value)}
                   className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30 disabled:opacity-60"
@@ -898,7 +1087,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                   <input
                     id="edit-person-joined-on"
                     type="date"
-                    disabled={isDialogLocked}
+                    disabled={isFormInputLocked}
                     value={joinedOn}
                     onChange={(event) => setJoinedOn(event.target.value)}
                     className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 font-mono text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30 disabled:opacity-60"
@@ -914,7 +1103,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
                   </label>
                   <select
                     id="edit-person-status"
-                    disabled={isDialogLocked}
+                    disabled={isFormInputLocked}
                     value={personStatus}
                     onChange={(event) => setPersonStatus(event.target.value as PersonStatus)}
                     className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30 disabled:opacity-60"
@@ -939,23 +1128,21 @@ export function PersonDetailManager({ personId }: { personId: string }) {
               id="person-target-department"
               label={dialog.kind === "assign-dept" ? "Chọn phòng ban" : "Chọn phòng ban đích"}
               selectedId={selectedTargetDept?.department_id ?? null}
-              onSelect={(dept) => setSelectedTargetDept(dept)}
+              onSelect={handleSelectTargetDept}
               excludeDepartmentId={
-                dialog.kind === "transfer-dept"
-                  ? person?.active_department?.department_id ?? null
-                  : null
+                dialog.kind === "transfer-dept" ? dialog.baselineDepartmentId : null
               }
               allowClear={false}
               emptyLabel="Không có phòng ban khả dụng"
-              disabled={isDialogLocked}
-              onSessionLost={(msg) => handleSessionLost(msg)}
+              disabled={isFormInputLocked}
+              onSessionLost={handlePickerSessionLost}
             />
           ) : null}
 
-          {dialog?.kind === "end-dept" && person?.active_department ? (
+          {dialog?.kind === "end-dept" && person ? (
             <Alert tone="warning" title="Xác nhận kết thúc phòng ban hiện hành">
               Nhân sự <strong>{person.full_name}</strong> sẽ kết thúc tư cách thành viên tại{" "}
-              <strong>{person.active_department.name}</strong> ngay lập tức. Nếu đang giữ chức
+              <strong>{dialog.baselineDepartmentName}</strong> ngay lập tức. Nếu đang giữ chức
               danh Trưởng phòng, vui lòng kết thúc chức danh Trưởng phòng trước.
             </Alert>
           ) : null}
@@ -972,7 +1159,7 @@ export function PersonDetailManager({ personId }: { personId: string }) {
               required
               rows={2}
               maxLength={REASON_MAX_LENGTH}
-              disabled={isDialogLocked}
+              disabled={isFormInputLocked}
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               placeholder="Nhập lý do thay đổi (1–500 ký tự)…"
@@ -990,15 +1177,16 @@ export function PersonDetailManager({ personId }: { personId: string }) {
             <Button
               type="button"
               variant="secondary"
-              disabled={busy}
+              disabled={isDialogLocked}
               onClick={() => {
-                setDialog(null);
-                setPendingIntent(null);
+                if (!isDialogLocked) {
+                  closeDialog();
+                }
               }}
             >
               Hủy
             </Button>
-            <Button type="submit" variant="primary" disabled={isDialogLocked}>
+            <Button type="submit" variant="primary" disabled={isFormInputLocked}>
               {busy ? "Đang lưu…" : "Xác nhận"}
             </Button>
           </div>

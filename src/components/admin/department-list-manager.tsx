@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+
+import { useWp4WorkspaceGuard } from "@/components/admin/wp4-workspace-guard";
 
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
@@ -61,9 +63,9 @@ type DepartmentListLoadState =
   | { kind: "error"; message: string; retryable: boolean };
 
 type DepartmentDialogState =
-  | { kind: "create" }
-  | { kind: "rename"; department: DepartmentProjection }
-  | { kind: "toggle"; department: DepartmentProjection; nextActive: boolean }
+  | { kind: "create"; conflictLocked: boolean }
+  | { kind: "rename"; department: DepartmentProjection; conflictLocked: boolean }
+  | { kind: "toggle"; department: DepartmentProjection; nextActive: boolean; conflictLocked: boolean }
   | null;
 
 type PendingDepartmentIntent = {
@@ -87,6 +89,8 @@ export function DepartmentListManager() {
   const [state, setState] = useState<DepartmentListLoadState>({ kind: "loading" });
   const [includeInactive, setIncludeInactive] = useState(true);
   const [reloadToken, setReloadToken] = useState(0);
+  const listReqSeqRef = useRef(0);
+  const workspaceGuard = useWp4WorkspaceGuard();
 
   const [dialog, setDialog] = useState<DepartmentDialogState>(null);
   const [codeInput, setCodeInput] = useState("");
@@ -96,9 +100,32 @@ export function DepartmentListManager() {
   const [pendingIntent, setPendingIntent] = useState<PendingDepartmentIntent | null>(null);
   const [feedback, setFeedback] = useState<DialogFeedback>(null);
 
+  const resetDialogState = useCallback(() => {
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog(null);
+  }, []);
+
+  const handleSessionLost = useCallback(
+    (message: string) => {
+      workspaceGuard.invalidateSession();
+      listReqSeqRef.current += 1;
+      setBusy(false);
+      resetDialogState();
+      setState({ kind: "denied", message });
+    },
+    [resetDialogState, workspaceGuard],
+  );
+
   useEffect(() => {
-    const controller = new AbortController();
+    const reqSeq = ++listReqSeqRef.current;
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
     void (async () => {
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       setState({ kind: "loading" });
       const query = buildDepartmentListQuery({ includeInactive });
       let response: Response;
@@ -110,7 +137,11 @@ export function DepartmentListManager() {
           headers: { Accept: "application/json" },
         });
       } catch (error) {
+        tracked.release();
         if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
+          return;
+        }
         setState({
           kind: "error",
           message: "Không thể kết nối tới máy chủ để tải danh sách Phòng ban.",
@@ -119,13 +150,21 @@ export function DepartmentListManager() {
         return;
       }
 
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
+
       const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted) return;
+      tracked.release();
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
+        return;
+      }
 
       if (response.status !== 200) {
         const failure = classifyDepartmentReadError(response.status, payload);
         if (failure.kind === "unauthenticated" || failure.kind === "denied") {
-          setState({ kind: "denied", message: failure.message });
+          handleSessionLost(failure.message);
           return;
         }
         setState({
@@ -149,57 +188,124 @@ export function DepartmentListManager() {
       setState({ kind: "ready", list: projected });
     })();
 
-    return () => controller.abort();
-  }, [includeInactive, reloadToken]);
+    return () => {
+      listReqSeqRef.current += 1;
+      controller.abort();
+      tracked.release();
+    };
+  }, [handleSessionLost, includeInactive, reloadToken, workspaceGuard]);
 
   const reloadList = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setState({ kind: "loading" });
     setReloadToken((value) => value + 1);
   };
 
-  const resetDialogState = () => {
-    setPendingIntent(null);
-    setFeedback(null);
-    setDialog(null);
-  };
-
   const openCreateDialog = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setCodeInput("");
     setNameInput("");
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog({ kind: "create" });
+    setDialog({ kind: "create", conflictLocked: false });
   };
 
   const openRenameDialog = (department: DepartmentProjection) => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setCodeInput(department.code);
     setNameInput(department.name);
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog({ kind: "rename", department });
+    setDialog({ kind: "rename", department, conflictLocked: false });
   };
 
   const openToggleDialog = (department: DepartmentProjection) => {
+    if (busy || pendingIntent?.uncertain === true) return;
     if (!canToggleDepartmentActive(department)) return;
     setCodeInput(department.code);
     setNameInput(department.name);
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog({ kind: "toggle", department, nextActive: !department.is_active });
+    setDialog({ kind: "toggle", department, nextActive: !department.is_active, conflictLocked: false });
+  };
+
+  const reconcileListFromServer = async () => {
+    if (busy) return;
+    setBusy(true);
+    const reqSeq = ++listReqSeqRef.current;
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
+    const query = buildDepartmentListQuery({ includeInactive });
+    try {
+      const response = await fetch(`/api/admin/departments?${query.toString()}`, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
+        return;
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
+        return;
+      }
+      if (response.status !== 200) {
+        const failure = classifyDepartmentReadError(response.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          handleSessionLost(failure.message);
+          return;
+        }
+        setFeedback({
+          tone: "warning",
+          message: failure.message,
+          needsReload: true,
+        });
+        return;
+      }
+      const projected = projectDepartmentListEnvelope(payload);
+      if (!projected) {
+        setFeedback({
+          tone: "warning",
+          message:
+            "Phản hồi danh sách Phòng ban không hợp lệ; yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+          needsReload: true,
+        });
+        return;
+      }
+      setState({ kind: "ready", list: projected });
+      resetDialogState();
+    } catch {
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
+      setFeedback({
+        tone: "warning",
+        message:
+          "Không thể kết nối máy chủ để đối chiếu. Yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+        needsReload: true,
+      });
+    } finally {
+      tracked.release();
+      if (workspaceGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
+    }
   };
 
   const executeIntent = async (intent: PendingDepartmentIntent) => {
     setBusy(true);
     setFeedback(null);
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
     try {
       let response: Response;
       try {
         response = await fetch(intent.url, {
           method: intent.method,
           cache: "no-store",
+          signal: controller.signal,
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
@@ -208,6 +314,7 @@ export function DepartmentListManager() {
           body: JSON.stringify(intent.body),
         });
       } catch {
+        if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
         setPendingIntent({ ...intent, uncertain: true });
         setFeedback({
           tone: "warning",
@@ -218,7 +325,9 @@ export function DepartmentListManager() {
         return;
       }
 
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       const payload: unknown = await response.json().catch(() => null);
+      if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       const outcome = resolveWp3DepartmentMutationResult(
         response.status,
         payload,
@@ -232,14 +341,14 @@ export function DepartmentListManager() {
           : intent.successMessage;
         notify.success({ title: msg });
         resetDialogState();
-        reloadList();
+        setState({ kind: "loading" });
+        setReloadToken((value) => value + 1);
         return;
       }
 
       const { failure } = outcome;
       if (failure.kind === "session-lost") {
-        resetDialogState();
-        setState({ kind: "denied", message: failure.message });
+        handleSessionLost(failure.message);
         return;
       }
 
@@ -254,13 +363,19 @@ export function DepartmentListManager() {
       }
 
       setPendingIntent(null);
+      if (failure.kind === "conflict") {
+        setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
+      }
       setFeedback({
         tone: failure.kind === "conflict" ? "warning" : "error",
         message: failure.message,
         needsReload: failure.needsReload,
       });
     } finally {
-      setBusy(false);
+      tracked.release();
+      if (workspaceGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -272,6 +387,8 @@ export function DepartmentListManager() {
       void executeIntent(pendingIntent);
       return;
     }
+
+    if (dialog.conflictLocked) return;
 
     const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
 
@@ -352,7 +469,8 @@ export function DepartmentListManager() {
     void executeIntent(nextIntent);
   };
 
-  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const dialogLocked = busy || pendingIntent?.uncertain === true;
+  const fieldsLocked = dialogLocked || Boolean(dialog?.conflictLocked);
 
   return (
     <PageShell
@@ -369,12 +487,12 @@ export function DepartmentListManager() {
               variant="secondary"
               size="md"
               onClick={reloadList}
-              disabled={state.kind === "loading"}
+              disabled={state.kind === "loading" || state.kind === "denied" || dialogLocked}
             >
               Làm mới
             </Button>
             {state.kind !== "denied" ? (
-              <Button variant="primary" size="md" onClick={openCreateDialog}>
+              <Button variant="primary" size="md" onClick={openCreateDialog} disabled={dialogLocked}>
                 Tạo phòng ban tùy chỉnh
               </Button>
             ) : null}
@@ -443,10 +561,10 @@ export function DepartmentListManager() {
               description="Thử chuyển bộ lọc sang bao gồm phòng ngừng hoạt động hoặc tạo phòng ban tùy chỉnh mới."
             />
             <div className="flex justify-center gap-2">
-              <Button variant="secondary" onClick={reloadList}>
+              <Button variant="secondary" onClick={reloadList} disabled={dialogLocked}>
                 Thử tải lại
               </Button>
-              <Button variant="primary" onClick={openCreateDialog}>
+              <Button variant="primary" onClick={openCreateDialog} disabled={dialogLocked}>
                 Tạo phòng ban tùy chỉnh
               </Button>
             </div>
@@ -551,6 +669,7 @@ export function DepartmentListManager() {
                           <Button
                             variant="secondary"
                             size="sm"
+                            disabled={dialogLocked}
                             onClick={() => openRenameDialog(department)}
                           >
                             Đổi tên
@@ -559,6 +678,7 @@ export function DepartmentListManager() {
                             <Button
                               variant={department.is_active ? "secondary" : "primary"}
                               size="sm"
+                              disabled={dialogLocked}
                               onClick={() => openToggleDialog(department)}
                             >
                               {department.is_active ? "Ngừng hoạt động" : "Kích hoạt lại"}
@@ -591,7 +711,7 @@ export function DepartmentListManager() {
       <FormDialog
         open={dialog !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) {
+          if (!open && !dialogLocked) {
             resetDialogState();
           }
         }}
@@ -618,7 +738,7 @@ export function DepartmentListManager() {
                 : undefined
         }
         descriptionId="department-list-dialog-desc"
-        closeDisabled={busy}
+        closeDisabled={dialogLocked}
         dataTestId="department-list-dialog"
       >
         {dialog ? (
@@ -633,6 +753,7 @@ export function DepartmentListManager() {
                   maxLength={DEPARTMENT_CODE_MAX_LENGTH}
                   placeholder="VD: VAN_HANH_MIEN_NAM"
                   onChange={(event) => {
+                    if (fieldsLocked) return;
                     setPendingIntent(null);
                     setCodeInput(event.target.value);
                   }}
@@ -658,6 +779,7 @@ export function DepartmentListManager() {
                   maxLength={DEPARTMENT_NAME_MAX_LENGTH}
                   placeholder="Nhập tên phòng ban…"
                   onChange={(event) => {
+                    if (fieldsLocked) return;
                     setPendingIntent(null);
                     setNameInput(event.target.value);
                   }}
@@ -682,6 +804,7 @@ export function DepartmentListManager() {
                 maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
                 placeholder="Nhập lý do thay đổi cơ cấu phòng ban…"
                 onChange={(event) => {
+                  if (fieldsLocked) return;
                   setPendingIntent(null);
                   setReasonInput(event.target.value);
                 }}
@@ -702,10 +825,7 @@ export function DepartmentListManager() {
                       variant="secondary"
                       size="sm"
                       disabled={busy}
-                      onClick={() => {
-                        resetDialogState();
-                        reloadList();
-                      }}
+                      onClick={() => void reconcileListFromServer()}
                     >
                       Tải lại để đối chiếu
                     </Button>
@@ -718,8 +838,12 @@ export function DepartmentListManager() {
               <Button
                 variant="secondary"
                 size="md"
-                disabled={busy}
-                onClick={resetDialogState}
+                disabled={dialogLocked}
+                onClick={() => {
+                  if (!dialogLocked) {
+                    resetDialogState();
+                  }
+                }}
               >
                 Hủy
               </Button>
@@ -728,7 +852,7 @@ export function DepartmentListManager() {
                 variant={dialog.kind === "toggle" && !dialog.nextActive ? "danger" : "primary"}
                 size="md"
                 loading={busy}
-                disabled={busy}
+                disabled={busy || (dialog.conflictLocked && !pendingIntent?.uncertain)}
               >
                 {pendingIntent?.uncertain
                   ? "Thử gửi lại cùng yêu cầu"

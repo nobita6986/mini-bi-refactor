@@ -40,7 +40,7 @@ export default async function AdminOrganizationPersonDetailPage({
       if (!safeId) {
         notFound();
       }
-      return <PersonDetailManager personId={safeId} />;
+      return <PersonDetailManager key={safeId} personId={safeId} />;
     }
   }
 }

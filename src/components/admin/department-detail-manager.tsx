@@ -8,6 +8,10 @@ import {
   PersonSearchPicker,
   type SelectedDepartmentOption,
 } from "@/components/admin/org-entity-picker";
+import {
+  useWp4WorkspaceGuard,
+  type Wp4WorkspaceGuard,
+} from "@/components/admin/wp4-workspace-guard";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { Alert } from "@/components/ui/alert";
@@ -126,6 +130,14 @@ type DialogFeedback = {
   needsReload: boolean;
 } | null;
 
+function useLatestSessionLostHandler(onSessionLost: (message: string) => void) {
+  const ref = useRef(onSessionLost);
+  useEffect(() => {
+    ref.current = onSessionLost;
+  }, [onSessionLost]);
+  return ref;
+}
+
 export function DepartmentDetailManager({
   departmentId,
 }: {
@@ -136,12 +148,35 @@ export function DepartmentDetailManager({
     kind: "loading",
   });
   const [detailReloadToken, setDetailReloadToken] = useState(0);
+  const detailReqSeqRef = useRef(0);
+  const lastDeptIdRef = useRef(normalizedDepartmentId);
+  const workspaceGuard = useWp4WorkspaceGuard();
+
+  const handleSessionLost = useCallback(
+    (message: string) => {
+      workspaceGuard.invalidateSession();
+      detailReqSeqRef.current += 1;
+      setDetailState({ kind: "denied", message });
+    },
+    [workspaceGuard],
+  );
 
   useEffect(() => {
+    const deptChanged = lastDeptIdRef.current !== normalizedDepartmentId;
+    if (deptChanged) {
+      lastDeptIdRef.current = normalizedDepartmentId;
+      workspaceGuard.invalidateSession();
+    }
     if (!normalizedDepartmentId) return;
 
-    const controller = new AbortController();
+    const reqSeq = ++detailReqSeqRef.current;
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
     void (async () => {
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== detailReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       setDetailState({ kind: "loading" });
       let response: Response;
       try {
@@ -155,7 +190,11 @@ export function DepartmentDetailManager({
           },
         );
       } catch (error) {
+        tracked.release();
         if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== detailReqSeqRef.current) {
+          return;
+        }
         setDetailState({
           kind: "error",
           message: "Không thể kết nối tới máy chủ để tải thông tin Phòng ban.",
@@ -164,13 +203,21 @@ export function DepartmentDetailManager({
         return;
       }
 
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== detailReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
+
       const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted) return;
+      tracked.release();
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== detailReqSeqRef.current) {
+        return;
+      }
 
       if (response.status !== 200) {
         const failure = classifyDepartmentReadError(response.status, payload);
         if (failure.kind === "unauthenticated" || failure.kind === "denied") {
-          setDetailState({ kind: "denied", message: failure.message });
+          handleSessionLost(failure.message);
           return;
         }
         if (failure.kind === "not-found") {
@@ -198,18 +245,63 @@ export function DepartmentDetailManager({
       setDetailState({ kind: "ready", detail: projected });
     })();
 
-    return () => controller.abort();
-  }, [normalizedDepartmentId, detailReloadToken]);
+    return () => {
+      detailReqSeqRef.current += 1;
+      controller.abort();
+      tracked.release();
+    };
+  }, [detailReloadToken, handleSessionLost, normalizedDepartmentId, workspaceGuard]);
 
-  const reloadDetail = () => {
+  const reloadDetail = useCallback(() => {
     if (!normalizedDepartmentId) return;
     setDetailState({ kind: "loading" });
     setDetailReloadToken((value) => value + 1);
-  };
+  }, [normalizedDepartmentId]);
 
-  const handleSessionLost = useCallback((message: string) => {
-    setDetailState({ kind: "denied", message });
-  }, []);
+  const reconcileDepartmentDetail = useCallback(async (): Promise<boolean> => {
+    if (!normalizedDepartmentId) return false;
+    const reqSeq = ++detailReqSeqRef.current;
+    const tracked = workspaceGuard.trackController();
+    const controller: AbortController = tracked.controller;
+    try {
+      const response = await fetch(
+        `/api/admin/departments/${encodeURIComponent(normalizedDepartmentId)}`,
+        {
+          method: "GET",
+          cache: "no-store",
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== detailReqSeqRef.current) {
+        return false;
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== detailReqSeqRef.current) {
+        return false;
+      }
+      if (response.status !== 200) {
+        const failure = classifyDepartmentReadError(response.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          handleSessionLost(failure.message);
+          return false;
+        }
+        if (failure.kind === "not-found") {
+          setDetailState({ kind: "not-found", message: failure.message });
+          return true;
+        }
+        return false;
+      }
+      const projected = projectDepartmentDetailEnvelope(payload, normalizedDepartmentId);
+      if (!projected) return false;
+      setDetailState({ kind: "ready", detail: projected });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      tracked.release();
+    }
+  }, [handleSessionLost, normalizedDepartmentId, workspaceGuard]);
 
   const handleChildMutated = useCallback(() => {
     setDetailReloadToken((value) => value + 1);
@@ -291,13 +383,17 @@ export function DepartmentDetailManager({
         <div className="space-y-6">
           <DepartmentGovernanceHeaderCard
             detail={effectiveState.detail}
+            workspaceGuard={workspaceGuard}
             onReloadDetail={reloadDetail}
+            onReconcileDetail={reconcileDepartmentDetail}
             onSessionLost={handleSessionLost}
           />
 
           <DepartmentHeadManagementSection
             detail={effectiveState.detail}
             parentReloadToken={detailReloadToken}
+            workspaceGuard={workspaceGuard}
+            onReconcileDetail={reconcileDepartmentDetail}
             onMutated={handleChildMutated}
             onSessionLost={handleSessionLost}
           />
@@ -305,6 +401,8 @@ export function DepartmentDetailManager({
           <DepartmentPersonMembershipsSection
             detail={effectiveState.detail}
             parentReloadToken={detailReloadToken}
+            workspaceGuard={workspaceGuard}
+            onReconcileDetail={reconcileDepartmentDetail}
             onMutated={handleChildMutated}
             onSessionLost={handleSessionLost}
           />
@@ -340,58 +438,128 @@ type Wp3DialogPendingIntent<T> = {
   uncertain: boolean;
 };
 
+type HeaderDialogState =
+  | {
+      kind: "rename";
+      baselineDepartmentId: string;
+      baselineDepartmentVersion: number;
+      baselineName: string;
+      baselineIsActive: boolean;
+      conflictLocked: boolean;
+    }
+  | {
+      kind: "toggle";
+      baselineDepartmentId: string;
+      baselineDepartmentVersion: number;
+      baselineName: string;
+      baselineIsActive: boolean;
+      nextActive: boolean;
+      conflictLocked: boolean;
+    }
+  | null;
+
 function DepartmentGovernanceHeaderCard({
   detail,
+  workspaceGuard,
   onReloadDetail,
+  onReconcileDetail,
   onSessionLost,
 }: {
   detail: DepartmentDetailProjection;
+  workspaceGuard?: Wp4WorkspaceGuard;
   onReloadDetail: () => void;
+  onReconcileDetail?: () => Promise<boolean>;
   onSessionLost: (message: string) => void;
 }) {
   const notify = useNotify();
+  const fallbackGuard = useWp4WorkspaceGuard();
+  const activeGuard = workspaceGuard ?? fallbackGuard;
+  const onSessionLostRef = useLatestSessionLostHandler(onSessionLost);
   const department = detail.department;
   const isCustom = canToggleDepartmentActive(department);
 
-  const [dialog, setDialog] = useState<"rename" | "toggle" | null>(null);
+  const [dialog, setDialog] = useState<HeaderDialogState>(null);
   const [nameInput, setNameInput] = useState(department.name);
   const [reasonInput, setReasonInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingIntent, setPendingIntent] = useState<Wp3DialogPendingIntent<unknown> | null>(null);
   const [feedback, setFeedback] = useState<DialogFeedback>(null);
 
-  const resetDialog = () => {
+  const resetDialog = useCallback(() => {
     setPendingIntent(null);
     setFeedback(null);
     setDialog(null);
-  };
+  }, []);
 
   const openRename = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setNameInput(department.name);
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog("rename");
+    setDialog({
+      kind: "rename",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentVersion: department.version,
+      baselineName: department.name,
+      baselineIsActive: department.is_active,
+      conflictLocked: false,
+    });
   };
 
   const openToggle = () => {
-    if (!isCustom) return;
+    if (!isCustom || busy || pendingIntent?.uncertain === true) return;
     setNameInput(department.name);
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog("toggle");
+    setDialog({
+      kind: "toggle",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentVersion: department.version,
+      baselineName: department.name,
+      baselineIsActive: department.is_active,
+      nextActive: !department.is_active,
+      conflictLocked: false,
+    });
+  };
+
+  const handleReconcile = async () => {
+    if (busy) return;
+    setBusy(true);
+    const epochBefore = activeGuard.getEpoch();
+    try {
+      const ok = onReconcileDetail ? await onReconcileDetail() : false;
+      if (!activeGuard.isActive(epochBefore)) return;
+      if (ok) {
+        resetDialog();
+      } else {
+        setFeedback({
+          tone: "warning",
+          message:
+            "Không thể tải dữ liệu đối chiếu lúc này. Yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+          needsReload: true,
+        });
+      }
+    } finally {
+      if (activeGuard.isActive(epochBefore)) {
+        setBusy(false);
+      }
+    }
   };
 
   const executeIntent = async (intent: Wp3DialogPendingIntent<unknown>) => {
     setBusy(true);
     setFeedback(null);
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
     try {
       let response: Response;
       try {
         response = await fetch(intent.url, {
           method: intent.method,
           cache: "no-store",
+          signal: controller.signal,
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
@@ -400,6 +568,7 @@ function DepartmentGovernanceHeaderCard({
           body: JSON.stringify(intent.body),
         });
       } catch {
+        if (!activeGuard.isActive(tracked.epoch, controller)) return;
         setPendingIntent({ ...intent, uncertain: true });
         setFeedback({
           tone: "warning",
@@ -410,7 +579,9 @@ function DepartmentGovernanceHeaderCard({
         return;
       }
 
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
       const payload: unknown = await response.json().catch(() => null);
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
       const outcome: DepartmentWp3MutationResult<unknown> = resolveWp3DepartmentMutationResult(
         response.status,
         payload,
@@ -426,7 +597,7 @@ function DepartmentGovernanceHeaderCard({
       const { failure } = outcome;
       if (failure.kind === "session-lost") {
         resetDialog();
-        onSessionLost(failure.message);
+        onSessionLostRef.current(failure.message);
         return;
       }
       if (failure.kind === "uncertain" && failure.preserveIdempotencyKey) {
@@ -439,13 +610,19 @@ function DepartmentGovernanceHeaderCard({
         return;
       }
       setPendingIntent(null);
+      if (failure.kind === "conflict") {
+        setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
+      }
       setFeedback({
         tone: failure.kind === "conflict" ? "warning" : "error",
         message: failure.message,
         needsReload: failure.needsReload,
       });
     } finally {
-      setBusy(false);
+      tracked.release();
+      if (activeGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -456,12 +633,13 @@ function DepartmentGovernanceHeaderCard({
       void executeIntent(pendingIntent);
       return;
     }
+    if (dialog.conflictLocked) return;
 
     const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
-    const nextActive = dialog === "toggle" ? !department.is_active : department.is_active;
+    const nextActive = dialog.kind === "toggle" ? dialog.nextActive : dialog.baselineIsActive;
     const built = buildUpdateDepartmentRequest({
-      expectedDepartmentVersion: department.version,
-      name: dialog === "rename" ? nameInput : department.name,
+      expectedDepartmentVersion: dialog.baselineDepartmentVersion,
+      name: dialog.kind === "rename" ? nameInput : dialog.baselineName,
       isActive: nextActive,
       reason: reasonInput,
       idempotencyKey,
@@ -471,25 +649,26 @@ function DepartmentGovernanceHeaderCard({
       return;
     }
     const intent: Wp3DialogPendingIntent<unknown> = {
-      url: `/api/admin/departments/${encodeURIComponent(department.department_id)}`,
+      url: `/api/admin/departments/${encodeURIComponent(dialog.baselineDepartmentId)}`,
       method: "PATCH",
       idempotencyKey: built.idempotencyKey,
       body: built.body,
       expectCreated: false,
       projector: projectDepartmentMutationEnvelope,
       successMessage:
-        dialog === "rename"
+        dialog.kind === "rename"
           ? `Đã đổi tên phòng ban thành “${built.body.name}”.`
           : nextActive
-            ? `Đã kích hoạt lại phòng ban “${department.name}”.`
-            : `Đã ngừng hoạt động phòng ban “${department.name}”.`,
+            ? `Đã kích hoạt lại phòng ban “${dialog.baselineName}”.`
+            : `Đã ngừng hoạt động phòng ban “${dialog.baselineName}”.`,
       uncertain: false,
     };
     setPendingIntent(intent);
     void executeIntent(intent);
   };
 
-  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const dialogLocked = busy || pendingIntent?.uncertain === true;
+  const fieldsLocked = dialogLocked || Boolean(dialog?.conflictLocked);
 
   return (
     <Card data-testid="department-governance-header">
@@ -510,16 +689,17 @@ function DepartmentGovernanceHeaderCard({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={onReloadDetail}>
+            <Button variant="secondary" size="sm" disabled={dialogLocked} onClick={onReloadDetail}>
               Tải lại
             </Button>
-            <Button variant="secondary" size="sm" onClick={openRename}>
+            <Button variant="secondary" size="sm" disabled={dialogLocked} onClick={openRename}>
               Đổi tên
             </Button>
             {isCustom ? (
               <Button
                 variant={department.is_active ? "secondary" : "primary"}
                 size="sm"
+                disabled={dialogLocked}
                 onClick={openToggle}
               >
                 {department.is_active ? "Ngừng hoạt động" : "Kích hoạt lại"}
@@ -560,23 +740,25 @@ function DepartmentGovernanceHeaderCard({
       <FormDialog
         open={dialog !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) resetDialog();
+          if (!open && !dialogLocked) resetDialog();
         }}
         title={
-          dialog === "rename"
+          dialog?.kind === "rename"
             ? "Đổi tên phòng ban"
-            : department.is_active
-              ? "Ngừng hoạt động phòng ban tùy chỉnh"
-              : "Kích hoạt lại phòng ban tùy chỉnh"
+            : dialog?.kind === "toggle"
+              ? dialog.baselineIsActive
+                ? "Ngừng hoạt động phòng ban tùy chỉnh"
+                : "Kích hoạt lại phòng ban tùy chỉnh"
+              : "Phòng ban"
         }
         description="Thay đổi có hiệu lực ngay sau khi xác nhận."
         descriptionId="department-header-dialog-desc"
-        closeDisabled={busy}
+        closeDisabled={dialogLocked}
         dataTestId="department-header-dialog"
       >
         {dialog ? (
           <form className="space-y-4" onSubmit={handleSubmit}>
-            {dialog === "rename" ? (
+            {dialog.kind === "rename" ? (
               <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
                 Tên phòng ban mới (bắt buộc)
                 <input
@@ -585,6 +767,7 @@ function DepartmentGovernanceHeaderCard({
                   disabled={fieldsLocked}
                   maxLength={DEPARTMENT_NAME_MAX_LENGTH}
                   onChange={(event) => {
+                    if (fieldsLocked) return;
                     setPendingIntent(null);
                     setNameInput(event.target.value);
                   }}
@@ -592,8 +775,11 @@ function DepartmentGovernanceHeaderCard({
                 />
               </label>
             ) : (
-              <Alert tone={department.is_active ? "warning" : "info"} title={department.name}>
-                {department.is_active
+              <Alert
+                tone={dialog.baselineIsActive ? "warning" : "info"}
+                title={dialog.baselineName}
+              >
+                {dialog.baselineIsActive
                   ? "Ngừng hoạt động chỉ thành công khi phòng ban không còn thành viên hay Trưởng phòng đang hiệu lực."
                   : "Kích hoạt lại phòng ban tùy chỉnh để tiếp nhận thành viên."}
               </Alert>
@@ -609,6 +795,7 @@ function DepartmentGovernanceHeaderCard({
                 maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
                 placeholder="Nhập lý do cập nhật phòng ban…"
                 onChange={(event) => {
+                  if (fieldsLocked) return;
                   setPendingIntent(null);
                   setReasonInput(event.target.value);
                 }}
@@ -629,10 +816,7 @@ function DepartmentGovernanceHeaderCard({
                       variant="secondary"
                       size="sm"
                       disabled={busy}
-                      onClick={() => {
-                        resetDialog();
-                        onReloadDetail();
-                      }}
+                      onClick={() => void handleReconcile()}
                     >
                       Tải lại để đối chiếu
                     </Button>
@@ -642,15 +826,22 @@ function DepartmentGovernanceHeaderCard({
             ) : null}
 
             <div className="flex flex-wrap justify-end gap-2 pt-2">
-              <Button variant="secondary" size="md" disabled={busy} onClick={resetDialog}>
+              <Button
+                variant="secondary"
+                size="md"
+                disabled={dialogLocked}
+                onClick={() => {
+                  if (!dialogLocked) resetDialog();
+                }}
+              >
                 Hủy
               </Button>
               <Button
                 type="submit"
-                variant={dialog === "toggle" && department.is_active ? "danger" : "primary"}
+                variant={dialog.kind === "toggle" && dialog.baselineIsActive ? "danger" : "primary"}
                 size="md"
                 loading={busy}
-                disabled={busy}
+                disabled={busy || (dialog.conflictLocked && !pendingIntent?.uncertain)}
               >
                 {pendingIntent?.uncertain ? "Thử gửi lại cùng yêu cầu" : "Xác nhận"}
               </Button>
@@ -662,18 +853,47 @@ function DepartmentGovernanceHeaderCard({
   );
 }
 
+type HeadDialogState =
+  | {
+      kind: "designate";
+      baselineDepartmentId: string;
+      baselineDepartmentVersion: number;
+      baselineActiveHeadAssignmentId: string | null;
+      baselineActiveHeadPersonId: string | null;
+      baselineActiveHeadDisplay: string | null;
+      conflictLocked: boolean;
+    }
+  | {
+      kind: "end";
+      baselineDepartmentId: string;
+      baselineDepartmentVersion: number;
+      baselineActiveHeadAssignmentId: string;
+      baselineActiveHeadDisplay: string;
+      conflictLocked: boolean;
+    }
+  | null;
+
 function DepartmentHeadManagementSection({
   detail,
   parentReloadToken,
+  workspaceGuard,
+  onReconcileDetail,
   onMutated,
   onSessionLost,
 }: {
   detail: DepartmentDetailProjection;
   parentReloadToken: number;
+  workspaceGuard?: Wp4WorkspaceGuard;
+  onReconcileDetail?: () => Promise<boolean>;
   onMutated: () => void;
   onSessionLost: (message: string) => void;
 }) {
   const notify = useNotify();
+  const fallbackGuard = useWp4WorkspaceGuard();
+  const activeGuard = workspaceGuard ?? fallbackGuard;
+  const onSessionLostRef = useLatestSessionLostHandler(onSessionLost);
+  const headReqSeqRef = useRef(0);
+  const candReqSeqRef = useRef(0);
   const department = detail.department;
   const [page, setPage] = useState(1);
   const [reloadToken, setReloadToken] = useState(0);
@@ -681,7 +901,7 @@ function DepartmentHeadManagementSection({
     kind: "loading",
   });
 
-  const [dialog, setDialog] = useState<"designate" | "end" | null>(null);
+  const [dialog, setDialog] = useState<HeadDialogState>(null);
   const [candidatesState, setCandidatesState] = useState<
     | { kind: "idle" }
     | { kind: "loading" }
@@ -702,8 +922,14 @@ function DepartmentHeadManagementSection({
     });
     if (!query) return;
 
-    const controller = new AbortController();
+    const reqSeq = ++headReqSeqRef.current;
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
     void (async () => {
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== headReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       setState({ kind: "loading" });
       let response: Response;
       try {
@@ -717,7 +943,11 @@ function DepartmentHeadManagementSection({
           },
         );
       } catch (error) {
+        tracked.release();
         if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== headReqSeqRef.current) {
+          return;
+        }
         setState({
           kind: "error",
           message: "Không thể kết nối máy chủ để tải dữ liệu Trưởng phòng.",
@@ -726,14 +956,22 @@ function DepartmentHeadManagementSection({
         return;
       }
 
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== headReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
+
       const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted) return;
+      tracked.release();
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== headReqSeqRef.current) {
+        return;
+      }
 
       if (response.status !== 200) {
         const failure = classifyDepartmentReadError(response.status, payload);
         if (failure.kind === "unauthenticated" || failure.kind === "denied") {
           setState({ kind: "denied", message: failure.message });
-          onSessionLost(failure.message);
+          onSessionLostRef.current(failure.message);
           return;
         }
         setState({
@@ -756,13 +994,22 @@ function DepartmentHeadManagementSection({
       setState({ kind: "ready", data: projected });
     })();
 
-    return () => controller.abort();
-  }, [department.department_id, onSessionLost, page, parentReloadToken, reloadToken]);
+    return () => {
+      headReqSeqRef.current += 1;
+      controller.abort();
+      tracked.release();
+    };
+  }, [activeGuard, department.department_id, onSessionLostRef, page, parentReloadToken, reloadToken]);
+
+  const dialogKind = dialog?.kind ?? null;
+  const dialogBaselineDeptId = dialog?.baselineDepartmentId ?? department.department_id;
+  const dialogBaselineHeadPersonId =
+    dialog?.kind === "designate" ? dialog.baselineActiveHeadPersonId : null;
 
   useEffect(() => {
-    if (dialog !== "designate") return;
+    if (dialogKind !== "designate") return;
     const query = buildDepartmentPersonMembershipsQuery({
-      departmentId: department.department_id,
+      departmentId: dialogBaselineDeptId,
       status: "active",
       search: "",
       page: 1,
@@ -770,13 +1017,19 @@ function DepartmentHeadManagementSection({
     });
     if (!query) return;
 
-    const controller = new AbortController();
+    const reqSeq = ++candReqSeqRef.current;
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
     void (async () => {
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== candReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       setCandidatesState({ kind: "loading" });
       let response: Response;
       try {
         response = await fetch(
-          `/api/admin/departments/${encodeURIComponent(department.department_id)}/memberships?${query.toString()}`,
+          `/api/admin/departments/${encodeURIComponent(dialogBaselineDeptId)}/memberships?${query.toString()}`,
           {
             method: "GET",
             cache: "no-store",
@@ -785,18 +1038,29 @@ function DepartmentHeadManagementSection({
           },
         );
       } catch (error) {
+        tracked.release();
         if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== candReqSeqRef.current) {
+          return;
+        }
         setCandidatesState({
           kind: "error",
           message: "Không tải được danh sách thành viên phòng ban.",
         });
         return;
       }
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== candReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted) return;
+      tracked.release();
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== candReqSeqRef.current) {
+        return;
+      }
       if (response.status === 401 || response.status === 403) {
         setDialog(null);
-        onSessionLost("Phiên đăng nhập hoặc quyền quản trị không còn hiệu lực.");
+        onSessionLostRef.current("Phiên đăng nhập hoặc quyền quản trị không còn hiệu lực.");
         return;
       }
       if (response.status !== 200) {
@@ -808,7 +1072,7 @@ function DepartmentHeadManagementSection({
       }
       const projected = projectDepartmentPersonMembershipsListEnvelope(
         payload,
-        department.department_id,
+        dialogBaselineDeptId,
       );
       if (!projected) {
         setCandidatesState({
@@ -821,46 +1085,154 @@ function DepartmentHeadManagementSection({
         (member) =>
           member.person_status === "ACTIVE" &&
           member.ended_at === null &&
-          member.person_id !== department.active_head?.person_id,
+          member.person_id !== dialogBaselineHeadPersonId,
       );
       setCandidatesState({ kind: "ready", items: eligible });
     })();
 
-    return () => controller.abort();
-  }, [department.active_head?.person_id, department.department_id, dialog, onSessionLost]);
+    return () => {
+      candReqSeqRef.current += 1;
+      controller.abort();
+      tracked.release();
+    };
+  }, [activeGuard, dialogBaselineDeptId, dialogBaselineHeadPersonId, dialogKind, onSessionLostRef]);
 
-  const reloadHeads = () => setReloadToken((value) => value + 1);
+  const reloadHeads = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
+    setReloadToken((value) => value + 1);
+  };
 
-  const resetDialog = () => {
+  const resetDialog = useCallback(() => {
     setPendingIntent(null);
     setFeedback(null);
     setDialog(null);
-  };
+  }, []);
 
   const openDesignateDialog = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
+    const currentHead = state.kind === "ready" ? state.data.active_head : department.active_head;
     setSelectedPersonId("");
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog("designate");
+    setDialog({
+      kind: "designate",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentVersion: department.version,
+      baselineActiveHeadAssignmentId: currentHead?.head_assignment_id ?? null,
+      baselineActiveHeadPersonId: currentHead?.person_id ?? null,
+      baselineActiveHeadDisplay: currentHead
+        ? `${currentHead.full_name} (${currentHead.employee_code})`
+        : null,
+      conflictLocked: false,
+    });
   };
 
   const openEndDialog = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
+    const currentHead = state.kind === "ready" ? state.data.active_head : department.active_head;
+    if (!currentHead) return;
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog("end");
+    setDialog({
+      kind: "end",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentVersion: department.version,
+      baselineActiveHeadAssignmentId: currentHead.head_assignment_id,
+      baselineActiveHeadDisplay: `${currentHead.full_name} (${currentHead.employee_code})`,
+      conflictLocked: false,
+    });
+  };
+
+  const reconcileHeadSection = async () => {
+    if (busy) return;
+    const targetDeptId = dialog?.baselineDepartmentId ?? department.department_id;
+    const query = buildDepartmentHeadsQuery({
+      departmentId: targetDeptId,
+      includeHistory: true,
+      page,
+    });
+    if (!query) return;
+
+    setBusy(true);
+    const reqSeq = ++headReqSeqRef.current;
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
+    try {
+      const [detailOk, headsResponse] = await Promise.all([
+        onReconcileDetail ? onReconcileDetail() : Promise.resolve(true),
+        fetch(
+          `/api/admin/departments/${encodeURIComponent(targetDeptId)}/head?${query.toString()}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { Accept: "application/json" },
+          },
+        ),
+      ]);
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== headReqSeqRef.current) {
+        return;
+      }
+      const payload: unknown = await headsResponse.json().catch(() => null);
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== headReqSeqRef.current) {
+        return;
+      }
+      if (headsResponse.status !== 200) {
+        const failure = classifyDepartmentReadError(headsResponse.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          setState({ kind: "denied", message: failure.message });
+          onSessionLostRef.current(failure.message);
+          return;
+        }
+        setFeedback({
+          tone: "warning",
+          message: failure.message,
+          needsReload: true,
+        });
+        return;
+      }
+      const projected = projectDepartmentHeadsListEnvelope(payload, targetDeptId);
+      if (!projected || !detailOk) {
+        setFeedback({
+          tone: "warning",
+          message:
+            "Không thể đồng bộ dữ liệu Trưởng phòng mới nhất; yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+          needsReload: true,
+        });
+        return;
+      }
+      setState({ kind: "ready", data: projected });
+      resetDialog();
+    } catch {
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
+      setFeedback({
+        tone: "warning",
+        message:
+          "Không thể kết nối máy chủ để đối chiếu. Yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+        needsReload: true,
+      });
+    } finally {
+      tracked.release();
+      if (activeGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
+    }
   };
 
   const executeHeadIntent = async (intent: Wp3DialogPendingIntent<unknown>) => {
     setBusy(true);
     setFeedback(null);
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
     try {
       let response: Response;
       try {
         response = await fetch(intent.url, {
           method: intent.method,
           cache: "no-store",
+          signal: controller.signal,
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
@@ -869,6 +1241,7 @@ function DepartmentHeadManagementSection({
           body: JSON.stringify(intent.body),
         });
       } catch {
+        if (!activeGuard.isActive(tracked.epoch, controller)) return;
         setPendingIntent({ ...intent, uncertain: true });
         setFeedback({
           tone: "warning",
@@ -879,7 +1252,9 @@ function DepartmentHeadManagementSection({
         return;
       }
 
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
       const payload: unknown = await response.json().catch(() => null);
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
       const outcome = resolveWp3DepartmentMutationResult(
         response.status,
         payload,
@@ -889,14 +1264,14 @@ function DepartmentHeadManagementSection({
       if (outcome.ok) {
         notify.success({ title: intent.successMessage });
         resetDialog();
-        reloadHeads();
+        setReloadToken((value) => value + 1);
         onMutated();
         return;
       }
       const { failure } = outcome;
       if (failure.kind === "session-lost") {
         resetDialog();
-        onSessionLost(failure.message);
+        onSessionLostRef.current(failure.message);
         return;
       }
       if (failure.kind === "uncertain" && failure.preserveIdempotencyKey) {
@@ -909,13 +1284,19 @@ function DepartmentHeadManagementSection({
         return;
       }
       setPendingIntent(null);
+      if (failure.kind === "conflict") {
+        setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
+      }
       setFeedback({
         tone: failure.kind === "conflict" ? "warning" : "error",
         message: failure.message,
         needsReload: failure.needsReload,
       });
     } finally {
-      setBusy(false);
+      tracked.release();
+      if (activeGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -926,16 +1307,15 @@ function DepartmentHeadManagementSection({
       void executeHeadIntent(pendingIntent);
       return;
     }
+    if (dialog.conflictLocked) return;
 
     const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
-    const activeHead =
-      state.kind === "ready" ? state.data.active_head : department.active_head;
 
-    if (dialog === "designate") {
+    if (dialog.kind === "designate") {
       const built = buildDesignateDepartmentHeadRequest({
         personId: selectedPersonId,
-        expectedDepartmentVersion: department.version,
-        expectedCurrentHeadAssignmentId: activeHead?.head_assignment_id ?? null,
+        expectedDepartmentVersion: dialog.baselineDepartmentVersion,
+        expectedCurrentHeadAssignmentId: dialog.baselineActiveHeadAssignmentId,
         reason: reasonInput,
         idempotencyKey,
       });
@@ -950,7 +1330,7 @@ function DepartmentHeadManagementSection({
         body: built.body,
         expectCreated: false,
         projector: projectDesignateDepartmentHeadEnvelope,
-        successMessage: activeHead
+        successMessage: dialog.baselineActiveHeadAssignmentId
           ? "Đã thay đổi Trưởng phòng (hiệu lực ngay)."
           : "Đã bổ nhiệm Trưởng phòng (hiệu lực ngay).",
         uncertain: false,
@@ -960,17 +1340,9 @@ function DepartmentHeadManagementSection({
       return;
     }
 
-    if (!activeHead) {
-      setFeedback({
-        tone: "warning",
-        message: "Hiện không có Trưởng phòng đang hiệu lực để kết thúc. Vui lòng tải lại.",
-        needsReload: true,
-      });
-      return;
-    }
     const built = buildEndDepartmentHeadRequest({
-      expectedDepartmentVersion: department.version,
-      expectedCurrentHeadAssignmentId: activeHead.head_assignment_id,
+      expectedDepartmentVersion: dialog.baselineDepartmentVersion,
+      expectedCurrentHeadAssignmentId: dialog.baselineActiveHeadAssignmentId,
       reason: reasonInput,
       idempotencyKey,
     });
@@ -993,7 +1365,8 @@ function DepartmentHeadManagementSection({
   };
 
   const activeHead = state.kind === "ready" ? state.data.active_head : department.active_head;
-  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const dialogLocked = busy || pendingIntent?.uncertain === true;
+  const fieldsLocked = dialogLocked || Boolean(dialog?.conflictLocked);
   const historyPageCount =
     state.kind === "ready"
       ? Math.min(1000, Math.max(1, Math.ceil(state.data.total / Math.max(1, state.data.page_size))))
@@ -1009,12 +1382,12 @@ function DepartmentHeadManagementSection({
           />
           <div className="flex flex-wrap gap-2">
             {department.is_active ? (
-              <Button variant="primary" size="sm" onClick={openDesignateDialog}>
+              <Button variant="primary" size="sm" disabled={dialogLocked} onClick={openDesignateDialog}>
                 {activeHead ? "Thay Trưởng phòng" : "Bổ nhiệm Trưởng phòng"}
               </Button>
             ) : null}
             {activeHead ? (
-              <Button variant="secondary" size="sm" onClick={openEndDialog}>
+              <Button variant="secondary" size="sm" disabled={dialogLocked} onClick={openEndDialog}>
                 Kết thúc chức danh Trưởng phòng
               </Button>
             ) : null}
@@ -1128,30 +1501,28 @@ function DepartmentHeadManagementSection({
       <FormDialog
         open={dialog !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) resetDialog();
+          if (!open && !dialogLocked) resetDialog();
         }}
         title={
-          dialog === "designate"
-            ? activeHead
+          dialog?.kind === "designate"
+            ? dialog.baselineActiveHeadAssignmentId
               ? "Xác nhận thay Trưởng phòng"
               : "Bổ nhiệm Trưởng phòng"
             : "Xác nhận kết thúc chức danh Trưởng phòng"
         }
         description="Thao tác áp dụng ngay lập tức; không đặt lịch tương lai."
         descriptionId="department-head-dialog-desc"
-        closeDisabled={busy}
+        closeDisabled={dialogLocked}
         dataTestId="department-head-dialog"
       >
         {dialog ? (
           <form className="space-y-4" onSubmit={handleHeadSubmit}>
-            {dialog === "designate" ? (
+            {dialog.kind === "designate" ? (
               <>
-                {activeHead ? (
+                {dialog.baselineActiveHeadDisplay ? (
                   <Alert tone="warning" title="Thay thế Trưởng phòng hiện hành">
                     Trưởng phòng hiện tại{" "}
-                    <strong>
-                      {activeHead.full_name} ({activeHead.employee_code})
-                    </strong>{" "}
+                    <strong>{dialog.baselineActiveHeadDisplay}</strong>{" "}
                     sẽ được kết thúc chức danh ngay khi bổ nhiệm người mới.
                   </Alert>
                 ) : null}
@@ -1191,6 +1562,7 @@ function DepartmentHeadManagementSection({
                                 checked={selected}
                                 disabled={fieldsLocked}
                                 onChange={() => {
+                                  if (fieldsLocked) return;
                                   setPendingIntent(null);
                                   setSelectedPersonId(member.person_id);
                                 }}
@@ -1210,15 +1582,12 @@ function DepartmentHeadManagementSection({
                   ) : null}
                 </div>
               </>
-            ) : activeHead ? (
+            ) : (
               <Alert tone="warning" title="Kết thúc chức danh Trưởng phòng hiện tại">
                 Xác nhận kết thúc ngay chức danh Trưởng phòng của{" "}
-                <strong>
-                  {activeHead.full_name} ({activeHead.employee_code})
-                </strong>
-                . Nhân sự vẫn là thành viên phòng ban cho đến khi được chuyển hoặc kết thúc thành viên.
+                <strong>{dialog.baselineActiveHeadDisplay}</strong>. Nhân sự vẫn là thành viên phòng ban cho đến khi được chuyển hoặc kết thúc thành viên.
               </Alert>
-            ) : null}
+            )}
 
             <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
               Lý do thao tác (bắt buộc)
@@ -1230,6 +1599,7 @@ function DepartmentHeadManagementSection({
                 maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
                 placeholder="Nhập lý do bổ nhiệm, thay thế hoặc kết thúc Trưởng phòng…"
                 onChange={(event) => {
+                  if (fieldsLocked) return;
                   setPendingIntent(null);
                   setReasonInput(event.target.value);
                 }}
@@ -1250,11 +1620,7 @@ function DepartmentHeadManagementSection({
                       variant="secondary"
                       size="sm"
                       disabled={busy}
-                      onClick={() => {
-                        resetDialog();
-                        reloadHeads();
-                        onMutated();
-                      }}
+                      onClick={() => void reconcileHeadSection()}
                     >
                       Tải lại để đối chiếu
                     </Button>
@@ -1264,21 +1630,32 @@ function DepartmentHeadManagementSection({
             ) : null}
 
             <div className="flex flex-wrap justify-end gap-2 pt-2">
-              <Button variant="secondary" size="md" disabled={busy} onClick={resetDialog}>
+              <Button
+                variant="secondary"
+                size="md"
+                disabled={dialogLocked}
+                onClick={() => {
+                  if (!dialogLocked) resetDialog();
+                }}
+              >
                 Hủy
               </Button>
               <Button
                 type="submit"
-                variant={dialog === "end" ? "danger" : "primary"}
+                variant={dialog.kind === "end" ? "danger" : "primary"}
                 size="md"
                 loading={busy}
-                disabled={busy || (dialog === "designate" && !selectedPersonId && !pendingIntent?.uncertain)}
+                disabled={
+                  busy ||
+                  (dialog.conflictLocked && !pendingIntent?.uncertain) ||
+                  (dialog.kind === "designate" && !selectedPersonId && !pendingIntent?.uncertain)
+                }
               >
                 {pendingIntent?.uncertain
                   ? "Thử gửi lại cùng yêu cầu"
-                  : dialog === "end"
+                  : dialog.kind === "end"
                     ? "Xác nhận kết thúc chức danh"
-                    : activeHead
+                    : dialog.baselineActiveHeadAssignmentId
                       ? "Xác nhận thay Trưởng phòng"
                       : "Xác nhận bổ nhiệm"}
               </Button>
@@ -1290,18 +1667,49 @@ function DepartmentHeadManagementSection({
   );
 }
 
+type PersonMembershipDialogState =
+  | {
+      kind: "add";
+      baselineDepartmentId: string;
+      baselineDepartmentName: string;
+      conflictLocked: boolean;
+    }
+  | {
+      kind: "transfer";
+      baselineDepartmentId: string;
+      baselineDepartmentName: string;
+      membership: PersonDeptMembershipProjection;
+      conflictLocked: boolean;
+    }
+  | {
+      kind: "end";
+      baselineDepartmentId: string;
+      baselineDepartmentName: string;
+      membership: PersonDeptMembershipProjection;
+      conflictLocked: boolean;
+    }
+  | null;
+
 function DepartmentPersonMembershipsSection({
   detail,
   parentReloadToken,
+  workspaceGuard,
+  onReconcileDetail,
   onMutated,
   onSessionLost,
 }: {
   detail: DepartmentDetailProjection;
   parentReloadToken: number;
+  workspaceGuard?: Wp4WorkspaceGuard;
+  onReconcileDetail?: () => Promise<boolean>;
   onMutated: () => void;
   onSessionLost: (message: string) => void;
 }) {
   const notify = useNotify();
+  const fallbackGuard = useWp4WorkspaceGuard();
+  const activeGuard = workspaceGuard ?? fallbackGuard;
+  const onSessionLostRef = useLatestSessionLostHandler(onSessionLost);
+  const memberReqSeqRef = useRef(0);
   const department = detail.department;
 
   const [statusFilter, setStatusFilter] = useState<DepartmentPersonMembershipStatusFilter>("active");
@@ -1313,12 +1721,7 @@ function DepartmentPersonMembershipsSection({
     kind: "loading",
   });
 
-  const [dialog, setDialog] = useState<
-    | { kind: "add" }
-    | { kind: "transfer"; membership: PersonDeptMembershipProjection }
-    | { kind: "end"; membership: PersonDeptMembershipProjection }
-    | null
-  >(null);
+  const [dialog, setDialog] = useState<PersonMembershipDialogState>(null);
   const [selectedPerson, setSelectedPerson] = useState<PersonSummaryProjection | null>(null);
   const [selectedTargetDept, setSelectedTargetDept] = useState<SelectedDepartmentOption | null>(null);
   const [reasonInput, setReasonInput] = useState("");
@@ -1335,8 +1738,14 @@ function DepartmentPersonMembershipsSection({
     });
     if (!query) return;
 
-    const controller = new AbortController();
+    const reqSeq = ++memberReqSeqRef.current;
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
     void (async () => {
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== memberReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
       setState({ kind: "loading" });
       let response: Response;
       try {
@@ -1350,7 +1759,11 @@ function DepartmentPersonMembershipsSection({
           },
         );
       } catch (error) {
+        tracked.release();
         if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== memberReqSeqRef.current) {
+          return;
+        }
         setState({
           kind: "error",
           message: "Không thể kết nối máy chủ để tải danh sách thành viên phòng ban.",
@@ -1359,14 +1772,22 @@ function DepartmentPersonMembershipsSection({
         return;
       }
 
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== memberReqSeqRef.current) {
+        tracked.release();
+        return;
+      }
+
       const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted) return;
+      tracked.release();
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== memberReqSeqRef.current) {
+        return;
+      }
 
       if (response.status !== 200) {
         const failure = classifyDepartmentReadError(response.status, payload);
         if (failure.kind === "unauthenticated" || failure.kind === "denied") {
           setState({ kind: "denied", message: failure.message });
-          onSessionLost(failure.message);
+          onSessionLostRef.current(failure.message);
           return;
         }
         setState({
@@ -1392,38 +1813,160 @@ function DepartmentPersonMembershipsSection({
       setState({ kind: "ready", data: projected });
     })();
 
-    return () => controller.abort();
-  }, [department.department_id, onSessionLost, page, parentReloadToken, reloadToken, searchApplied, statusFilter]);
+    return () => {
+      memberReqSeqRef.current += 1;
+      controller.abort();
+      tracked.release();
+    };
+  }, [activeGuard, department.department_id, onSessionLostRef, page, parentReloadToken, reloadToken, searchApplied, statusFilter]);
 
-  const reloadMemberships = () => setReloadToken((value) => value + 1);
+  const reloadMemberships = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
+    setReloadToken((value) => value + 1);
+  };
 
-  const resetDialog = () => {
+  const resetDialog = useCallback(() => {
     setPendingIntent(null);
     setFeedback(null);
     setDialog(null);
-  };
+  }, []);
+
+  const handleSelectPersonToAdd = useCallback((person: PersonSummaryProjection | null) => {
+    setPendingIntent(null);
+    setSelectedPerson(person);
+  }, []);
+
+  const handleSelectTargetDept = useCallback((dept: SelectedDepartmentOption | null) => {
+    setPendingIntent(null);
+    setSelectedTargetDept(dept);
+  }, []);
+
+  const handlePickerSessionLost = useCallback(
+    (message: string) => {
+      resetDialog();
+      onSessionLostRef.current(message);
+    },
+    [onSessionLostRef, resetDialog],
+  );
 
   const openAddDialog = () => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setSelectedPerson(null);
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog({ kind: "add" });
+    setDialog({
+      kind: "add",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentName: department.name,
+      conflictLocked: false,
+    });
   };
 
   const openTransferDialog = (membership: PersonDeptMembershipProjection) => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setSelectedTargetDept(null);
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog({ kind: "transfer", membership });
+    setDialog({
+      kind: "transfer",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentName: department.name,
+      membership,
+      conflictLocked: false,
+    });
   };
 
   const openEndDialog = (membership: PersonDeptMembershipProjection) => {
+    if (busy || pendingIntent?.uncertain === true) return;
     setReasonInput("");
     setPendingIntent(null);
     setFeedback(null);
-    setDialog({ kind: "end", membership });
+    setDialog({
+      kind: "end",
+      baselineDepartmentId: department.department_id,
+      baselineDepartmentName: department.name,
+      membership,
+      conflictLocked: false,
+    });
+  };
+
+  const reconcileMembershipsSection = async () => {
+    if (busy) return;
+    const targetDeptId = dialog?.baselineDepartmentId ?? department.department_id;
+    const query = buildDepartmentPersonMembershipsQuery({
+      departmentId: targetDeptId,
+      status: statusFilter,
+      search: searchApplied,
+      page,
+    });
+    if (!query) return;
+
+    setBusy(true);
+    const reqSeq = ++memberReqSeqRef.current;
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
+    try {
+      const [detailOk, memResponse] = await Promise.all([
+        onReconcileDetail ? onReconcileDetail() : Promise.resolve(true),
+        fetch(
+          `/api/admin/departments/${encodeURIComponent(targetDeptId)}/memberships?${query.toString()}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { Accept: "application/json" },
+          },
+        ),
+      ]);
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== memberReqSeqRef.current) {
+        return;
+      }
+      const payload: unknown = await memResponse.json().catch(() => null);
+      if (!activeGuard.isActive(tracked.epoch, controller) || reqSeq !== memberReqSeqRef.current) {
+        return;
+      }
+      if (memResponse.status !== 200) {
+        const failure = classifyDepartmentReadError(memResponse.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          setState({ kind: "denied", message: failure.message });
+          onSessionLostRef.current(failure.message);
+          return;
+        }
+        setFeedback({
+          tone: "warning",
+          message: failure.message,
+          needsReload: true,
+        });
+        return;
+      }
+      const projected = projectDepartmentPersonMembershipsListEnvelope(payload, targetDeptId);
+      if (!projected || !detailOk) {
+        setFeedback({
+          tone: "warning",
+          message:
+            "Không thể đồng bộ danh sách thành viên mới nhất; yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+          needsReload: true,
+        });
+        return;
+      }
+      setState({ kind: "ready", data: projected });
+      resetDialog();
+    } catch {
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
+      setFeedback({
+        tone: "warning",
+        message:
+          "Không thể kết nối máy chủ để đối chiếu. Yêu cầu chờ xác nhận vẫn được giữ nguyên.",
+        needsReload: true,
+      });
+    } finally {
+      tracked.release();
+      if (activeGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
+    }
   };
 
   const executeIntent = async (
@@ -1432,12 +1975,15 @@ function DepartmentPersonMembershipsSection({
   ) => {
     setBusy(true);
     setFeedback(null);
+    const tracked = activeGuard.trackController();
+    const controller: AbortController = tracked.controller;
     try {
       let response: Response;
       try {
         response = await fetch(intent.url, {
           method: intent.method,
           cache: "no-store",
+          signal: controller.signal,
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
@@ -1446,6 +1992,7 @@ function DepartmentPersonMembershipsSection({
           body: JSON.stringify(intent.body),
         });
       } catch {
+        if (!activeGuard.isActive(tracked.epoch, controller)) return;
         setPendingIntent({ ...intent, uncertain: true });
         setFeedback({
           tone: "warning",
@@ -1456,7 +2003,10 @@ function DepartmentPersonMembershipsSection({
         return;
       }
 
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
       const payload: unknown = await response.json().catch(() => null);
+      if (!activeGuard.isActive(tracked.epoch, controller)) return;
+
       if (usePersonClassifier) {
         const outcome = classifyPersonOrgMutationResponse(
           response.status,
@@ -1466,13 +2016,13 @@ function DepartmentPersonMembershipsSection({
         if (outcome.kind === "applied") {
           notify.success({ title: intent.successMessage });
           resetDialog();
-          reloadMemberships();
+          setReloadToken((value) => value + 1);
           onMutated();
           return;
         }
         if (outcome.kind === "session-lost") {
           resetDialog();
-          onSessionLost(outcome.message);
+          onSessionLostRef.current(outcome.message);
           return;
         }
         if (outcome.kind === "uncertain" && outcome.preserveIdempotencyKey) {
@@ -1485,6 +2035,9 @@ function DepartmentPersonMembershipsSection({
           return;
         }
         setPendingIntent(null);
+        if (outcome.kind === "conflict") {
+          setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
+        }
         setFeedback({
           tone: outcome.kind === "conflict" || outcome.kind === "active-head-block" ? "warning" : "error",
           message: outcome.message,
@@ -1502,14 +2055,14 @@ function DepartmentPersonMembershipsSection({
       if (outcome.ok) {
         notify.success({ title: intent.successMessage });
         resetDialog();
-        reloadMemberships();
+        setReloadToken((value) => value + 1);
         onMutated();
         return;
       }
       const { failure } = outcome;
       if (failure.kind === "session-lost") {
         resetDialog();
-        onSessionLost(failure.message);
+        onSessionLostRef.current(failure.message);
         return;
       }
       if (failure.kind === "uncertain" && failure.preserveIdempotencyKey) {
@@ -1522,13 +2075,19 @@ function DepartmentPersonMembershipsSection({
         return;
       }
       setPendingIntent(null);
+      if (failure.kind === "conflict") {
+        setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
+      }
       setFeedback({
         tone: failure.kind === "conflict" || failure.kind === "active-head" ? "warning" : "error",
         message: failure.message,
         needsReload: failure.needsReload,
       });
     } finally {
-      setBusy(false);
+      tracked.release();
+      if (activeGuard.isActive(tracked.epoch)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -1537,14 +2096,12 @@ function DepartmentPersonMembershipsSection({
     if (!dialog || busy) return;
 
     if (pendingIntent?.uncertain) {
-      const usePerson =
-        dialog.kind === "transfer" ||
-        (dialog.kind === "add" &&
-          selectedPerson?.active_department !== null &&
-          selectedPerson?.active_department?.department_id !== department.department_id);
+      const usePerson = pendingIntent.url.endsWith("/transfer-department");
       void executeIntent(pendingIntent, usePerson);
       return;
     }
+
+    if (dialog.conflictLocked) return;
 
     const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
 
@@ -1553,7 +2110,7 @@ function DepartmentPersonMembershipsSection({
         setFeedback({ tone: "error", message: "Vui lòng chọn nhân sự nội bộ.", needsReload: false });
         return;
       }
-      if (selectedPerson.active_department?.department_id === department.department_id) {
+      if (selectedPerson.active_department?.department_id === dialog.baselineDepartmentId) {
         setFeedback({
           tone: "warning",
           message: "Nhân sự này hiện đã thuộc phòng ban này.",
@@ -1564,7 +2121,7 @@ function DepartmentPersonMembershipsSection({
 
       if (selectedPerson.active_department) {
         const built = buildTransferPersonDepartmentRequest({
-          targetDepartmentRef: department.department_id,
+          targetDepartmentRef: dialog.baselineDepartmentId,
           expectedPersonVersion: selectedPerson.version,
           expectedCurrentMembershipId: selectedPerson.active_department.membership_id,
           reason: reasonInput,
@@ -1581,7 +2138,7 @@ function DepartmentPersonMembershipsSection({
           body: built.body,
           expectCreated: false,
           projector: projectDepartmentPersonMemberMutationEnvelope,
-          successMessage: `Đã chuyển ${selectedPerson.full_name} sang phòng ban ${department.name}.`,
+          successMessage: `Đã chuyển ${selectedPerson.full_name} sang phòng ban ${dialog.baselineDepartmentName}.`,
           uncertain: false,
         };
         setPendingIntent(intent);
@@ -1606,7 +2163,7 @@ function DepartmentPersonMembershipsSection({
         body: built.body,
         expectCreated: true,
         projector: projectDepartmentPersonMemberMutationEnvelope,
-        successMessage: `Đã thêm ${selectedPerson.full_name} vào phòng ban ${department.name}.`,
+        successMessage: `Đã thêm ${selectedPerson.full_name} vào phòng ban ${dialog.baselineDepartmentName}.`,
         uncertain: false,
       };
       setPendingIntent(intent);
@@ -1668,7 +2225,8 @@ function DepartmentPersonMembershipsSection({
     void executeIntent(intent, false);
   };
 
-  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const dialogLocked = busy || pendingIntent?.uncertain === true;
+  const fieldsLocked = dialogLocked || Boolean(dialog?.conflictLocked);
   const pageCount =
     state.kind === "ready"
       ? Math.min(1000, Math.max(1, Math.ceil(state.data.total / Math.max(1, state.data.page_size))))
@@ -1683,7 +2241,7 @@ function DepartmentPersonMembershipsSection({
             description="Quản lý danh sách Nhân sự nội bộ trực thuộc phòng ban. Mỗi nhân sự ACTIVE chỉ thuộc tối đa một phòng ban tại một thời điểm."
           />
           {department.is_active ? (
-            <Button variant="primary" size="md" onClick={openAddDialog}>
+            <Button variant="primary" size="md" disabled={dialogLocked} onClick={openAddDialog}>
               Thêm hoặc chuyển thành viên
             </Button>
           ) : null}
@@ -1825,6 +2383,7 @@ function DepartmentPersonMembershipsSection({
                             <Button
                               variant="secondary"
                               size="sm"
+                              disabled={dialogLocked}
                               onClick={() => openTransferDialog(member)}
                             >
                               Chuyển phòng
@@ -1834,6 +2393,7 @@ function DepartmentPersonMembershipsSection({
                             <Button
                               variant="secondary"
                               size="sm"
+                              disabled={dialogLocked}
                               onClick={() => openEndDialog(member)}
                             >
                               Kết thúc thành viên
@@ -1853,11 +2413,11 @@ function DepartmentPersonMembershipsSection({
       <FormDialog
         open={dialog !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) resetDialog();
+          if (!open && !dialogLocked) resetDialog();
         }}
         title={
           dialog?.kind === "add"
-            ? `Thêm hoặc chuyển thành viên vào ${department.name}`
+            ? `Thêm hoặc chuyển thành viên vào ${dialog.baselineDepartmentName}`
             : dialog?.kind === "transfer"
               ? `Chuyển phòng ban cho ${dialog.membership.full_name}`
               : dialog?.kind === "end"
@@ -1866,7 +2426,7 @@ function DepartmentPersonMembershipsSection({
         }
         description="Thao tác áp dụng ngay lập tức; không có trường đặt lịch hiệu lực."
         descriptionId="department-person-member-dialog-desc"
-        closeDisabled={busy}
+        closeDisabled={dialogLocked}
         dataTestId="department-person-member-dialog"
       >
         {dialog ? (
@@ -1877,26 +2437,20 @@ function DepartmentPersonMembershipsSection({
                   id="dept-add-member-picker"
                   label="Tìm và chọn nhân sự nội bộ (ACTIVE)"
                   selectedPersonId={selectedPerson?.person_id ?? null}
-                  onSelect={(person) => {
-                    setPendingIntent(null);
-                    setSelectedPerson(person);
-                  }}
+                  onSelect={handleSelectPersonToAdd}
                   disabled={fieldsLocked}
-                  onSessionLost={(message) => {
-                    resetDialog();
-                    onSessionLost(message);
-                  }}
+                  onSessionLost={handlePickerSessionLost}
                 />
                 {selectedPerson?.active_department ? (
-                  selectedPerson.active_department.department_id === department.department_id ? (
+                  selectedPerson.active_department.department_id === dialog.baselineDepartmentId ? (
                     <Alert tone="warning" title="Đã thuộc phòng ban này">
-                      Nhân sự này hiện đã là thành viên đang hiệu lực của {department.name}.
+                      Nhân sự này hiện đã là thành viên đang hiệu lực của {dialog.baselineDepartmentName}.
                     </Alert>
                   ) : (
                     <Alert tone="info" title="Sẽ chuyển từ phòng ban hiện tại">
                       {selectedPerson.full_name} đang thuộc{" "}
                       <strong>{selectedPerson.active_department.name}</strong>. Xác nhận
-                      sẽ kết thúc phòng cũ và chuyển ngay sang {department.name}.
+                      sẽ kết thúc phòng cũ và chuyển ngay sang {dialog.baselineDepartmentName}.
                     </Alert>
                   )
                 ) : null}
@@ -1908,7 +2462,7 @@ function DepartmentPersonMembershipsSection({
                 {dialog.membership.is_department_head ? (
                   <Alert tone="warning" title="Nhân sự đang là Trưởng phòng">
                     {dialog.membership.full_name} đang giữ chức danh Trưởng phòng tại{" "}
-                    {department.name}. Theo quy tắc nghiệp vụ (PERSON_IS_ACTIVE_DEPARTMENT_HEAD),
+                    {dialog.baselineDepartmentName}. Theo quy tắc nghiệp vụ (PERSON_IS_ACTIVE_DEPARTMENT_HEAD),
                     phải kết thúc hoặc thay Trưởng phòng trước khi chuyển sang phòng ban khác.
                   </Alert>
                 ) : null}
@@ -1916,18 +2470,12 @@ function DepartmentPersonMembershipsSection({
                   id="dept-transfer-target-picker"
                   label="Chọn phòng ban đích đang hoạt động"
                   selectedId={selectedTargetDept?.department_id ?? null}
-                  excludeDepartmentId={department.department_id}
+                  excludeDepartmentId={dialog.baselineDepartmentId}
                   allowClear={false}
                   emptyLabel="Không có phòng ban đích phù hợp"
                   disabled={fieldsLocked}
-                  onSelect={(dept) => {
-                    setPendingIntent(null);
-                    setSelectedTargetDept(dept);
-                  }}
-                  onSessionLost={(message) => {
-                    resetDialog();
-                    onSessionLost(message);
-                  }}
+                  onSelect={handleSelectTargetDept}
+                  onSessionLost={handlePickerSessionLost}
                 />
               </div>
             ) : null}
@@ -1936,7 +2484,7 @@ function DepartmentPersonMembershipsSection({
               <Alert tone="warning" title={dialog.membership.full_name}>
                 {dialog.membership.is_department_head
                   ? "Lưu ý: Nhân sự này đang giữ chức danh Trưởng phòng. Cần kết thúc hoặc thay chức danh Trưởng phòng trước khi kết thúc thành viên khỏi phòng ban."
-                  : `Xác nhận kết thúc tư cách thành viên của ${dialog.membership.full_name} (${dialog.membership.employee_code}) tại ${department.name} ngay lập tức.`}
+                  : `Xác nhận kết thúc tư cách thành viên của ${dialog.membership.full_name} (${dialog.membership.employee_code}) tại ${dialog.baselineDepartmentName} ngay lập tức.`}
               </Alert>
             ) : null}
 
@@ -1950,6 +2498,7 @@ function DepartmentPersonMembershipsSection({
                 maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
                 placeholder="Nhập lý do điều chuyển hoặc cập nhật thành viên…"
                 onChange={(event) => {
+                  if (fieldsLocked) return;
                   setPendingIntent(null);
                   setReasonInput(event.target.value);
                 }}
@@ -1970,11 +2519,7 @@ function DepartmentPersonMembershipsSection({
                       variant="secondary"
                       size="sm"
                       disabled={busy}
-                      onClick={() => {
-                        resetDialog();
-                        reloadMemberships();
-                        onMutated();
-                      }}
+                      onClick={() => void reconcileMembershipsSection()}
                     >
                       Tải lại để đối chiếu
                     </Button>
@@ -1984,7 +2529,14 @@ function DepartmentPersonMembershipsSection({
             ) : null}
 
             <div className="flex flex-wrap justify-end gap-2 pt-2">
-              <Button variant="secondary" size="md" disabled={busy} onClick={resetDialog}>
+              <Button
+                variant="secondary"
+                size="md"
+                disabled={dialogLocked}
+                onClick={() => {
+                  if (!dialogLocked) resetDialog();
+                }}
+              >
                 Hủy
               </Button>
               <Button
@@ -1994,9 +2546,11 @@ function DepartmentPersonMembershipsSection({
                 loading={busy}
                 disabled={
                   busy ||
+                  (dialog.conflictLocked && !pendingIntent?.uncertain) ||
                   (dialog.kind === "add" &&
                     (!selectedPerson ||
-                      selectedPerson.active_department?.department_id === department.department_id) &&
+                      selectedPerson.active_department?.department_id ===
+                        dialog.baselineDepartmentId) &&
                     !pendingIntent?.uncertain) ||
                   (dialog.kind === "transfer" && !selectedTargetDept && !pendingIntent?.uncertain)
                 }

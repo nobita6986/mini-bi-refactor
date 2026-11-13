@@ -85,6 +85,10 @@ export function DepartmentSelectPicker({
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [filterText, setFilterText] = useState("");
   const seqRef = useRef(0);
+  const onSessionLostRef = useRef(onSessionLost);
+  useEffect(() => {
+    onSessionLostRef.current = onSessionLost;
+  }, [onSessionLost]);
 
   useEffect(() => {
     const reqSeq = ++seqRef.current;
@@ -107,7 +111,7 @@ export function DepartmentSelectPicker({
         if (response.status === 401 || response.status === 403) {
           setDepartments([]);
           setStatus("error");
-          onSessionLost?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
+          onSessionLostRef.current?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
           return;
         }
         if (response.status !== 200) {
@@ -124,12 +128,15 @@ export function DepartmentSelectPicker({
         setStatus("ready");
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (reqSeq !== seqRef.current) return;
+        if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         setStatus("error");
       }
     })();
-    return () => controller.abort();
-  }, [includeInactive, onSessionLost]);
+    return () => {
+      controller.abort();
+      seqRef.current += 1;
+    };
+  }, [includeInactive]);
 
   const filtered = useMemo(() => {
     const term = filterText.trim().toLowerCase();
@@ -286,6 +293,10 @@ export function PersonSearchPicker({
     | { kind: "error"; message: string }
   >({ kind: "loading" });
   const seqRef = useRef(0);
+  const onSessionLostRef = useRef(onSessionLost);
+  useEffect(() => {
+    onSessionLostRef.current = onSessionLost;
+  }, [onSessionLost]);
 
   useEffect(() => {
     const reqSeq = ++seqRef.current;
@@ -317,7 +328,7 @@ export function PersonSearchPicker({
         if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         if (response.status === 401 || response.status === 403) {
           setState({ kind: "error", message: "Phiên hoặc quyền quản trị đã hết hiệu lực." });
-          onSessionLost?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
+          onSessionLostRef.current?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
           return;
         }
         if (response.status !== 200) {
@@ -337,12 +348,15 @@ export function PersonSearchPicker({
         });
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (reqSeq !== seqRef.current) return;
+        if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         setState({ kind: "error", message: "Mất kết nối khi tìm Nhân sự nội bộ." });
       }
     })();
-    return () => controller.abort();
-  }, [appliedSearch, linkState, onSessionLost, page]);
+    return () => {
+      controller.abort();
+      seqRef.current += 1;
+    };
+  }, [appliedSearch, linkState, page]);
 
   const pageCount =
     state.kind === "ready"
@@ -473,6 +487,10 @@ export function AccountSearchPicker({
     | { kind: "error"; message: string }
   >({ kind: "loading" });
   const seqRef = useRef(0);
+  const onSessionLostRef = useRef(onSessionLost);
+  useEffect(() => {
+    onSessionLostRef.current = onSessionLost;
+  }, [onSessionLost]);
 
   useEffect(() => {
     const reqSeq = ++seqRef.current;
@@ -497,7 +515,7 @@ export function AccountSearchPicker({
         if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         if (response.status === 401 || response.status === 403) {
           setState({ kind: "error", message: "Phiên hoặc quyền quản trị đã hết hiệu lực." });
-          onSessionLost?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
+          onSessionLostRef.current?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
           return;
         }
         if (response.status !== 200) {
@@ -517,12 +535,15 @@ export function AccountSearchPicker({
         });
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (reqSeq !== seqRef.current) return;
+        if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         setState({ kind: "error", message: "Mất kết nối khi tải danh sách tài khoản." });
       }
     })();
-    return () => controller.abort();
-  }, [onSessionLost, page, searchInput]);
+    return () => {
+      controller.abort();
+      seqRef.current += 1;
+    };
+  }, [page, searchInput]);
 
   const pageCount =
     state.kind === "ready"
@@ -670,6 +691,10 @@ export function RecruiterConfirmPicker({
     | { kind: "error"; message: string }
   >({ kind: "loading" });
   const seqRef = useRef(0);
+  const onSessionLostRef = useRef(onSessionLost);
+  useEffect(() => {
+    onSessionLostRef.current = onSessionLost;
+  }, [onSessionLost]);
 
   useEffect(() => {
     const reqSeq = ++seqRef.current;
@@ -694,7 +719,7 @@ export function RecruiterConfirmPicker({
         if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         if (response.status === 401 || response.status === 403) {
           setState({ kind: "error", message: "Phiên hoặc quyền quản trị đã hết hiệu lực." });
-          onSessionLost?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
+          onSessionLostRef.current?.("Phiên đăng nhập hoặc quyền quản trị đã hết hiệu lực.");
           return;
         }
         if (response.status !== 200) {
@@ -714,12 +739,15 @@ export function RecruiterConfirmPicker({
         });
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (reqSeq !== seqRef.current) return;
+        if (controller.signal.aborted || reqSeq !== seqRef.current) return;
         setState({ kind: "error", message: "Mất kết nối khi tải hồ sơ tính công tuyển dụng." });
       }
     })();
-    return () => controller.abort();
-  }, [onSessionLost, page, searchInput]);
+    return () => {
+      controller.abort();
+      seqRef.current += 1;
+    };
+  }, [page, searchInput]);
 
   const pageCount =
     state.kind === "ready"

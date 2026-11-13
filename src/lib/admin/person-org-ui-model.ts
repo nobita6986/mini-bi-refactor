@@ -576,8 +576,14 @@ export function buildEndPersonDepartmentRequest(input: {
 
 function extractErrorCode(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
-  const code = (payload as Record<string, unknown>).code;
-  return typeof code === "string" && code.trim() !== "" ? code.trim() : null;
+  const rec = payload as Record<string, unknown>;
+  const direct = rec.code;
+  if (typeof direct === "string" && direct.trim() !== "") return direct.trim();
+  if (typeof rec.error === "object" && rec.error !== null && !Array.isArray(rec.error)) {
+    const nested = (rec.error as Record<string, unknown>).code;
+    if (typeof nested === "string" && nested.trim() !== "") return nested.trim();
+  }
+  return null;
 }
 
 export function messageForOrgErrorCode(code: string | null, status: number): string {
@@ -625,6 +631,8 @@ export function messageForOrgErrorCode(code: string | null, status: number): str
       return "Hồ sơ tính công tuyển dụng này đang được liên kết với một tài khoản truy cập khác.";
     case "CLIENT_SCHEDULE_FIELD_FORBIDDEN":
       return "Không hỗ trợ nhập ngày hiệu lực hoặc đặt lịch; các thay đổi tổ chức áp dụng ngay thời điểm xác nhận.";
+    case "IDEMPOTENCY_IN_PROGRESS":
+      return "Yêu cầu trước đó đang được xử lý trên máy chủ. Vui lòng giữ nguyên biểu mẫu để thử gửi lại cùng yêu cầu hoặc tải lại để đối chiếu.";
     case "IDEMPOTENCY_CONFLICT":
       return "Khóa thao tác bị trùng với một yêu cầu có nội dung khác. Hãy đóng và mở lại hộp thoại để tạo yêu cầu mới.";
     case "IDEMPOTENCY_KEY_INVALID":
@@ -822,6 +830,13 @@ export function classifyPersonOrgMutationResponse(
       kind: "invalid",
       message: messageForOrgErrorCode(code, status),
       preserveIdempotencyKey: false,
+    };
+  }
+  if (code === "IDEMPOTENCY_IN_PROGRESS") {
+    return {
+      kind: "uncertain",
+      message: messageForOrgErrorCode(code, status),
+      preserveIdempotencyKey: true,
     };
   }
   if (status === 409) {

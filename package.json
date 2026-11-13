@@ -176,7 +176,7 @@
     "test:wp1-s1-immediate-assignments": "node --conditions=react-server --test scripts/wp1-s1-immediate-assignments-db.test.mjs && node --test scripts/wp1-s1-immediate-assignments-concurrency.test.mjs",
     "test:wp2a-effective-access-shadow": "node --conditions=react-server --test scripts/wp2a-effective-access-shadow-db.test.mjs",
     "test:wp3-person-account-org": "node --conditions=react-server --test src/lib/organization/person-contract.test.mjs src/lib/organization/person-api.test.mjs scripts/wp3-person-account-org-db.test.mjs && node --test scripts/wp3-person-account-org-concurrency.test.mjs",
-    "test:wp4-org-person-admin-ui": "node --test src/lib/admin/person-org-ui-model.test.mjs src/components/admin/person-org-admin-ui.test.mjs"
+    "test:wp4-org-person-admin-ui": "node --test src/lib/admin/person-org-ui-model.test.mjs src/components/admin/person-org-admin-ui.test.mjs src/components/admin/wp4-org-admin-behavior.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1146.0",

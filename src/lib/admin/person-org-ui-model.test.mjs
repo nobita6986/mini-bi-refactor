@@ -426,6 +426,22 @@ test("classifyPersonOrgReadError & classifyPersonOrgMutationResponse xử lý đ
   assert.equal(err503.kind, "uncertain");
   assert.equal(err503.preserveIdempotencyKey, true);
 
+  const inProgressDirect = classifyPersonOrgMutationResponse(
+    409,
+    { code: "IDEMPOTENCY_IN_PROGRESS" },
+    "update",
+  );
+  assert.equal(inProgressDirect.kind, "uncertain");
+  assert.equal(inProgressDirect.preserveIdempotencyKey, true);
+
+  const inProgressNested = classifyPersonOrgMutationResponse(
+    409,
+    { ok: false, error: { code: "IDEMPOTENCY_IN_PROGRESS" } },
+    "update",
+  );
+  assert.equal(inProgressNested.kind, "uncertain");
+  assert.equal(inProgressNested.preserveIdempotencyKey, true);
+
   // 401/403 mất phiên/quyền
   const lost401 = classifyPersonOrgMutationResponse(401, { code: "UNAUTHENTICATED" }, "update");
   assert.equal(lost401.kind, "session-lost");
