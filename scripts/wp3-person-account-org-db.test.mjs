@@ -12,6 +12,7 @@ import {
   computeAssignAccountingMemberFingerprint,
   computeCreateDepartmentFingerprint,
   computeDesignateHeadFingerprint,
+  computeEndAccountingMemberFingerprint,
   computeEndHeadFingerprint,
   computeEndPersonMemberFingerprint,
   computeUpdateDepartmentFingerprint,
@@ -20,11 +21,15 @@ import { parsePatchAdminConfigBody } from "../src/lib/leave/leave-contract.ts";
 import {
   computeCreatePersonFingerprint,
   computeLinkAccountPersonFingerprint,
+  computeSetAccountTypeFingerprint,
   computeTransferPersonDepartmentFingerprint,
   computeUnlinkAccountPersonFingerprint,
   computeUpdatePersonFingerprint,
 } from "../src/lib/organization/person-contract.ts";
-import { WP3B_BACKFILL_SCHEMA_VERSION } from "./lib/wp3b-backfill-manifest.mjs";
+import {
+  WP3B_BACKFILL_SCHEMA_VERSION,
+  computeBackfillManifestFingerprint,
+} from "./lib/wp3b-backfill-manifest.mjs";
 import {
   assertSafeBackfillConnectionTarget,
   runQ1HrpRecruiterAudit,
@@ -1394,7 +1399,7 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
     )
   ).rows[0];
   assert.equal(lpRow.unit_kind, "MARKETING");
-  assert.equal(lpRow.ws, "2026-03-01");
+  assert.equal(lpRow.ws, "2025-05-01");
 
   // TM-05 Leave guard: leave_management_upsert_employee_profile_admin CANNOT change unit_kind or is_shared_non_employee,
   // while updating employment_status ('PROBATION' -> 'OFFICIAL') with matching unit_kind = 'MARKETING' SUCCEEDS!
@@ -1405,7 +1410,7 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
       is_shared_non_employee: false,
       employment_status: "OFFICIAL",
       unit_kind: "IT",
-      work_start_date: "2026-03-01",
+      work_start_date: "2025-05-01",
       official_effective_date: "2026-05-01",
       next_seniority_effective_date: null,
       next_seniority_units: 0,
@@ -1446,7 +1451,7 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
       is_shared_non_employee: false,
       employment_status: "OFFICIAL",
       unit_kind: "MARKETING",
-      work_start_date: "2026-03-01",
+      work_start_date: "2025-05-01",
       official_effective_date: "2026-05-01",
       next_seniority_effective_date: null,
       next_seniority_units: 0,
@@ -1908,6 +1913,748 @@ test("TM-01, TM-02, TM-03, TM-16 & TM-17: Q1 audit, BACKFILL_DATE_EVIDENCE times
   await assert.rejects(
     runWp3bBackfill(db, { manifest: mismatchedManifest, dryRun: true }),
     /BACKFILL_PERSON_MISMATCH/,
+  );
+
+  await db.close();
+});
+
+test("WP3B P1-1 Fix: INACTIVE Person drops legacy ACCOUNTING projection & VFIN authority, reactivation restores, Account.enabled=false preserves org state", async () => {
+  const db = await createMigratedWp3Database();
+  await seedWp3BaseData(db);
+
+  const deptRows = (await db.query("select department_id, system_key, version from public.organization_departments")).rows;
+  const acctDept = deptRows.find((d) => d.system_key === "ACCOUNTING");
+  const itDept = deptRows.find((d) => d.system_key === "IT");
+
+  // Person in ACCOUNTING linked to enabled NORMAL account USER_ACCT
+  const kCreate = nextKey();
+  const pAcct = (
+    await db.query(
+      "select public.org_department_create_person_admin($1::uuid, $2::uuid, 'KT-P1-01', 'Kế Toán Trạng Thái', '2026-01-15', $3::uuid, $4::uuid, 1, null, 'Tạo kế toán ACTIVE', $5::uuid, $6) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        acctDept.department_id,
+        USER_ACCT.app,
+        kCreate,
+        computeCreatePersonFingerprint(FULL_ADMIN.app, {
+          employee_code: "KT-P1-01",
+          full_name: "Kế Toán Trạng Thái",
+          joined_on: "2026-01-15",
+          initial_department_ref: acctDept.department_id,
+          account_ref: USER_ACCT.app,
+          expected_account_version: 1,
+          recruiter_id: null,
+          reason: "Tạo kế toán ACTIVE",
+          idempotency_key: kCreate,
+        }),
+      ],
+    )
+  ).rows[0].data.person;
+
+  // Verify initial active state in both legacy reader & VFIN resolver
+  const initialCheck = (
+    await db.query(
+      `select public.org_department__internal_has_active_membership($2::uuid, 'ACCOUNTING', public.direct_entry_authorization_date()) as has_acct,
+              public.org_department__internal_resolve_vfin_default_authority($1::uuid, $2::uuid, public.direct_entry_authorization_date()) as vfin_auth`,
+      [USER_ACCT.auth, USER_ACCT.app],
+    )
+  ).rows[0];
+  assert.equal(initialCheck.has_acct, true);
+  assert.equal(initialCheck.vfin_auth.allowed, true);
+  assert.equal(initialCheck.vfin_auth.authority_source, "accounting_department");
+
+  // 1) Update Person status -> INACTIVE (Account remains enabled = true)
+  const kDeact = nextKey();
+  await db.query(
+    "select public.org_department_update_person_admin($1::uuid, $2::uuid, $3::uuid, $4::int, 'KT-P1-01', 'Kế Toán Trạng Thái', '2026-01-15', 'INACTIVE', 'Ngừng hoạt động nhân sự', $5::uuid, $6)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      pAcct.person_id,
+      pAcct.version,
+      kDeact,
+      computeUpdatePersonFingerprint(FULL_ADMIN.app, pAcct.person_id, {
+        expected_person_version: pAcct.version,
+        employee_code: "KT-P1-01",
+        full_name: "Kế Toán Trạng Thái",
+        joined_on: "2026-01-15",
+        status: "INACTIVE",
+        reason: "Ngừng hoạt động nhân sự",
+        idempotency_key: kDeact,
+      }),
+    ],
+  );
+
+  const afterDeact = (
+    await db.query(
+      `select p.status,
+              u.enabled,
+              public.org_department__internal_has_active_membership(u.app_user_id, 'ACCOUNTING', public.direct_entry_authorization_date()) as legacy_acct,
+              public.org_department__internal_resolve_vfin_default_authority(u.auth_subject, u.app_user_id, public.direct_entry_authorization_date()) as vfin_auth,
+              (select count(*)::int from public.organization_department_memberships lm where lm.app_user_id = u.app_user_id and lm.valid_to is null) as open_legacy_rows,
+              (select count(*)::int from public.organization_person_department_memberships pm where pm.person_id = p.person_id and pm.ended_at is null) as open_wp3_memberships,
+              (select count(*)::int from public.organization_account_person_links l where l.person_id = p.person_id and l.ended_at is null) as open_wp3_links
+         from public.organization_persons p
+         join public.organization_account_person_links l0 on l0.person_id = p.person_id and l0.ended_at is null
+         join public.direct_entry_app_users u on u.app_user_id = l0.app_user_id
+        where p.person_id = $1::uuid`,
+      [pAcct.person_id],
+    )
+  ).rows[0];
+  assert.equal(afterDeact.status, "INACTIVE");
+  assert.equal(afterDeact.enabled, true);
+  assert.equal(afterDeact.legacy_acct, false);
+  assert.equal(afterDeact.vfin_auth.allowed, false);
+  assert.equal(afterDeact.vfin_auth.authority_source, "none");
+  assert.equal(afterDeact.open_legacy_rows, 0);
+  // Org relations & history preserved while Person is INACTIVE
+  assert.equal(afterDeact.open_wp3_memberships, 1);
+  assert.equal(afterDeact.open_wp3_links, 1);
+
+  // 2) Reactivate Person INACTIVE -> ACTIVE restores legacy ACCOUNTING projection & VFIN authority
+  const kReact = nextKey();
+  await db.query(
+    "select public.org_department_update_person_admin($1::uuid, $2::uuid, $3::uuid, $4::int, 'KT-P1-01', 'Kế Toán Trạng Thái', '2026-01-15', 'ACTIVE', 'Tái kích hoạt nhân sự', $5::uuid, $6)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      pAcct.person_id,
+      pAcct.version + 1,
+      kReact,
+      computeUpdatePersonFingerprint(FULL_ADMIN.app, pAcct.person_id, {
+        expected_person_version: pAcct.version + 1,
+        employee_code: "KT-P1-01",
+        full_name: "Kế Toán Trạng Thái",
+        joined_on: "2026-01-15",
+        status: "ACTIVE",
+        reason: "Tái kích hoạt nhân sự",
+        idempotency_key: kReact,
+      }),
+    ],
+  );
+  const afterReact = (
+    await db.query(
+      `select public.org_department__internal_has_active_membership($2::uuid, 'ACCOUNTING', public.direct_entry_authorization_date()) as legacy_acct,
+              public.org_department__internal_resolve_vfin_default_authority($1::uuid, $2::uuid, public.direct_entry_authorization_date()) as vfin_auth`,
+      [USER_ACCT.auth, USER_ACCT.app],
+    )
+  ).rows[0];
+  assert.equal(afterReact.legacy_acct, true);
+  assert.equal(afterReact.vfin_auth.allowed, true);
+
+  // Second deactivation on same calendar day succeeds cleanly (no legacy version collision)
+  const kDeact2 = nextKey();
+  await db.query(
+    "select public.org_department_update_person_admin($1::uuid, $2::uuid, $3::uuid, $4::int, 'KT-P1-01', 'Kế Toán Trạng Thái', '2026-01-15', 'INACTIVE', 'Ngừng lần 2', $5::uuid, $6)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      pAcct.person_id,
+      pAcct.version + 2,
+      kDeact2,
+      computeUpdatePersonFingerprint(FULL_ADMIN.app, pAcct.person_id, {
+        expected_person_version: pAcct.version + 2,
+        employee_code: "KT-P1-01",
+        full_name: "Kế Toán Trạng Thái",
+        joined_on: "2026-01-15",
+        status: "INACTIVE",
+        reason: "Ngừng lần 2",
+        idempotency_key: kDeact2,
+      }),
+    ],
+  );
+  assert.equal(
+    (
+      await db.query(
+        "select public.org_department__internal_has_active_membership($1::uuid, 'ACCOUNTING', public.direct_entry_authorization_date()) as legacy_acct",
+        [USER_ACCT.app],
+      )
+    ).rows[0].legacy_acct,
+    false,
+  );
+
+  // 3) Disabling an active NORMAL Account (Account.enabled = false) does NOT close org relations, HEAD, or Person.status
+  const kItPerson = nextKey();
+  const pHead = (
+    await db.query(
+      "select public.org_department_create_person_admin($1::uuid, $2::uuid, 'IT-P1-01', 'Trưởng Phòng IT', '2026-01-10', $3::uuid, $4::uuid, 1, $5::uuid, 'Tạo IT HEAD', $6::uuid, $7) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        itDept.department_id,
+        USER_A.app,
+        USER_A.recruiter,
+        kItPerson,
+        computeCreatePersonFingerprint(FULL_ADMIN.app, {
+          employee_code: "IT-P1-01",
+          full_name: "Trưởng Phòng IT",
+          joined_on: "2026-01-10",
+          initial_department_ref: itDept.department_id,
+          account_ref: USER_A.app,
+          expected_account_version: 1,
+          recruiter_id: USER_A.recruiter,
+          reason: "Tạo IT HEAD",
+          idempotency_key: kItPerson,
+        }),
+      ],
+    )
+  ).rows[0].data.person;
+  const kHead = nextKey();
+  await db.query(
+    "select public.org_department_designate_head_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, null, 'Bổ nhiệm HEAD IT', $6::uuid, $7)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      itDept.department_id,
+      pHead.person_id,
+      itDept.version,
+      kHead,
+      computeDesignateHeadFingerprint({
+        actor_app_user_id: FULL_ADMIN.app,
+        department_id: itDept.department_id,
+        person_id: pHead.person_id,
+        expected_department_version: itDept.version,
+        expected_current_head_assignment_id: null,
+        reason: "Bổ nhiệm HEAD IT",
+      }),
+    ],
+  );
+  const accVerA = (
+    await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [USER_A.app])
+  ).rows[0].version;
+  await db.query(
+    "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4::int, 'Khóa tài khoản đơn thuần', $5)",
+    [FULL_ADMIN.auth, FULL_ADMIN.app, USER_A.app, accVerA, nextKey()],
+  );
+  const afterAccDisable = (
+    await db.query(
+      `select p.status,
+              u.enabled,
+              (select count(*)::int from public.organization_account_person_links l where l.person_id = p.person_id and l.ended_at is null) as links,
+              (select count(*)::int from public.organization_person_department_memberships m where m.person_id = p.person_id and m.ended_at is null) as memberships,
+              (select count(*)::int from public.organization_department_heads h where h.person_id = p.person_id and h.ended_at is null) as heads
+         from public.organization_persons p
+         join public.organization_account_person_links l0 on l0.person_id = p.person_id and l0.ended_at is null
+         join public.direct_entry_app_users u on u.app_user_id = l0.app_user_id
+        where p.person_id = $1::uuid`,
+      [pHead.person_id],
+    )
+  ).rows[0];
+  assert.equal(afterAccDisable.enabled, false);
+  assert.equal(afterAccDisable.status, "ACTIVE");
+  assert.equal(afterAccDisable.links, 1);
+  assert.equal(afterAccDisable.memberships, 1);
+  assert.equal(afterAccDisable.heads, 1);
+
+  await db.close();
+});
+
+test("WP3B P1-2 Fix: Org sync never overwrites leave_employee_profiles.work_start_date or Leave policy fields across old and new writers", async () => {
+  const db = await createMigratedWp3Database();
+  await seedWp3BaseData(db);
+
+  const deptRows = (await db.query("select department_id, system_key from public.organization_departments")).rows;
+  const acctDept = deptRows.find((d) => d.system_key === "ACCOUNTING");
+  const mktDept = deptRows.find((d) => d.system_key === "MARKETING");
+  const itDept = deptRows.find((d) => d.system_key === "IT");
+
+  const kCreate = nextKey();
+  const p = (
+    await db.query(
+      "select public.org_department_create_person_admin($1::uuid, $2::uuid, 'LP-P1-02', 'Hồ Sơ Phép Gốc', '2026-01-15', $3::uuid, $4::uuid, 1, $5::uuid, 'Tạo nhân sự MARKETING', $6::uuid, $7) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        mktDept.department_id,
+        USER_A.app,
+        USER_A.recruiter,
+        kCreate,
+        computeCreatePersonFingerprint(FULL_ADMIN.app, {
+          employee_code: "LP-P1-02",
+          full_name: "Hồ Sơ Phép Gốc",
+          joined_on: "2026-01-15",
+          initial_department_ref: mktDept.department_id,
+          account_ref: USER_A.app,
+          expected_account_version: 1,
+          recruiter_id: USER_A.recruiter,
+          reason: "Tạo nhân sự MARKETING",
+          idempotency_key: kCreate,
+        }),
+      ],
+    )
+  ).rows[0].data.person;
+
+  // Seed Leave policy row owned by Leave Admin with distinct work_start_date = 2020-01-01
+  const upsertReq = parsePatchAdminConfigBody(
+    {
+      operation: "UPSERT_EMPLOYEE_PROFILE",
+      target_app_user_id: USER_A.app,
+      is_shared_non_employee: false,
+      employment_status: "OFFICIAL",
+      unit_kind: "MARKETING",
+      work_start_date: "2020-01-01",
+      official_effective_date: "2020-03-01",
+      next_seniority_effective_date: "2027-01-01",
+      next_seniority_units: 5,
+      expected_row_version: 0,
+      reason: "Leave Admin tạo hồ sơ phép gốc",
+      idempotency_key: nextKey(),
+    },
+    "2026-11-13",
+  );
+  assert.equal(upsertReq.ok, true);
+  await db.query(
+    "select public.leave_management_upsert_employee_profile_admin($1::uuid,$2::uuid,$3::uuid,$4::boolean,$5,$6,$7::date,$8::date,$9::date,$10::int,$11::int,$12,$13,$14)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      upsertReq.data.target_app_user_id,
+      upsertReq.data.is_shared_non_employee,
+      upsertReq.data.employment_status,
+      upsertReq.data.unit_kind,
+      upsertReq.data.work_start_date,
+      upsertReq.data.official_effective_date,
+      upsertReq.data.next_seniority_effective_date,
+      upsertReq.data.next_seniority_units,
+      upsertReq.data.expected_row_version,
+      upsertReq.data.reason,
+      upsertReq.data.idempotency_key,
+      upsertReq.data.request_fingerprint,
+    ],
+  );
+  await db.query("update public.leave_employee_profiles set notes = 'Policy note preserved' where app_user_id = $1::uuid", [
+    USER_A.app,
+  ]);
+
+  async function readLeaveSnapshot() {
+    return (
+      await db.query(
+        `select is_shared_non_employee,
+                employment_status,
+                unit_kind,
+                work_start_date::text as work_start_date,
+                official_effective_date::text as official_effective_date,
+                next_seniority_effective_date::text as next_seniority_effective_date,
+                next_seniority_units,
+                notes
+           from public.leave_employee_profiles
+          where app_user_id = $1::uuid`,
+        [USER_A.app],
+      )
+    ).rows[0];
+  }
+
+  function assertPolicyFieldsIntact(snap, expectedUnitKind) {
+    assert.equal(snap.is_shared_non_employee, false);
+    assert.equal(snap.employment_status, "OFFICIAL");
+    assert.equal(snap.unit_kind, expectedUnitKind);
+    assert.equal(snap.work_start_date, "2020-01-01");
+    assert.equal(snap.official_effective_date, "2020-03-01");
+    assert.equal(snap.next_seniority_effective_date, "2027-01-01");
+    assert.equal(snap.next_seniority_units, 5);
+    assert.equal(snap.notes, "Policy note preserved");
+  }
+
+  // 1) Update Person (joined_on & status)
+  let pCur = p;
+  const kUpd = nextKey();
+  pCur = (
+    await db.query(
+      "select public.org_department_update_person_admin($1::uuid, $2::uuid, $3::uuid, $4::int, 'LP-P1-02', 'Tên Đổi WP3', '2026-02-20', 'ACTIVE', 'Cập nhật HR joined_on', $5::uuid, $6) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        pCur.person_id,
+        pCur.version,
+        kUpd,
+        computeUpdatePersonFingerprint(FULL_ADMIN.app, pCur.person_id, {
+          expected_person_version: pCur.version,
+          employee_code: "LP-P1-02",
+          full_name: "Tên Đổi WP3",
+          joined_on: "2026-02-20",
+          status: "ACTIVE",
+          reason: "Cập nhật HR joined_on",
+          idempotency_key: kUpd,
+        }),
+      ],
+    )
+  ).rows[0].data.person;
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "MARKETING");
+
+  // 2) Legacy update display name
+  let accVer = (await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [USER_A.app])).rows[0].version;
+  await db.query(
+    "select public.direct_entry_account_operation_update_display_name($1::uuid, $2::uuid, $3::uuid, 'Tên Đổi Account Legacy', $4::int, 'Đổi tên cũ', $5)",
+    [FULL_ADMIN.auth, FULL_ADMIN.app, USER_A.app, accVer, nextKey()],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "MARKETING");
+
+  // 3) Legacy update personnel
+  const recVer = (await db.query("select version from public.recruiters where recruiter_id = $1::uuid", [USER_A.recruiter])).rows[0].version;
+  await db.query(
+    "select public.direct_entry_update_personnel($1::uuid, $2::uuid, $3::uuid, $4::int, 'Tên Đổi Recruiter Legacy', 'REC-A01', 'STAFF', 'Sửa nhân sự cũ', $5)",
+    [FULL_ADMIN.auth, FULL_ADMIN.app, USER_A.recruiter, recVer, nextKey()],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "MARKETING");
+
+  // 4) Transfer MARKETING -> IT -> ACCOUNTING
+  pCur = (
+    await db.query(
+      "select public.org_department_get_person_admin($1::uuid, $2::uuid, $3::uuid, null) as data",
+      [FULL_ADMIN.auth, FULL_ADMIN.app, pCur.person_id],
+    )
+  ).rows[0].data.person;
+  const kTr1 = nextKey();
+  const tr1 = (
+    await db.query(
+      "select public.org_department_transfer_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, 'Chuyển IT', $7::uuid, $8) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        pCur.person_id,
+        itDept.department_id,
+        pCur.version,
+        pCur.active_department.membership_id,
+        kTr1,
+        computeTransferPersonDepartmentFingerprint(FULL_ADMIN.app, pCur.person_id, {
+          target_department_ref: itDept.department_id,
+          expected_person_version: pCur.version,
+          expected_current_membership_id: pCur.active_department.membership_id,
+          reason: "Chuyển IT",
+          idempotency_key: kTr1,
+        }),
+      ],
+    )
+  ).rows[0].data;
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "IT");
+
+  const kTr2 = nextKey();
+  await db.query(
+    "select public.org_department_transfer_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, 'Chuyển Kế toán', $7::uuid, $8)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      pCur.person_id,
+      acctDept.department_id,
+      tr1.person_version,
+      tr1.active_membership.membership_id,
+      kTr2,
+      computeTransferPersonDepartmentFingerprint(FULL_ADMIN.app, pCur.person_id, {
+        target_department_ref: acctDept.department_id,
+        expected_person_version: tr1.person_version,
+        expected_current_membership_id: tr1.active_membership.membership_id,
+        reason: "Chuyển Kế toán",
+        idempotency_key: kTr2,
+      }),
+    ],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "ACCOUNTING");
+
+  // 5) Legacy end_accounting_member & assign_accounting_member
+  const legacyM = (
+    await db.query(
+      "select membership_id, version from public.organization_department_memberships where app_user_id = $1::uuid and valid_to is null",
+      [USER_A.app],
+    )
+  ).rows[0];
+  const kEndLeg = nextKey();
+  await db.query(
+    "select public.org_department_end_accounting_member($1::uuid, $2::uuid, $3::uuid, $4::int, null, 'Kết thúc kế toán cũ', $5::uuid, $6)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      legacyM.membership_id,
+      legacyM.version,
+      kEndLeg,
+      computeEndAccountingMemberFingerprint({
+        actor_app_user_id: FULL_ADMIN.app,
+        membership_id: legacyM.membership_id,
+        expected_pair_version: legacyM.version,
+        effective_to: null,
+        reason: "Kết thúc kế toán cũ",
+      }),
+    ],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "UNCLASSIFIED");
+
+  const kAssLeg = nextKey();
+  await db.query(
+    "select public.org_department_assign_accounting_member($1::uuid, $2::uuid, $3::uuid, $4::int, null, 'Gán lại kế toán cũ', $5::uuid, $6)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      USER_A.app,
+      legacyM.version + 1,
+      kAssLeg,
+      computeAssignAccountingMemberFingerprint({
+        actor_app_user_id: FULL_ADMIN.app,
+        account_ref: USER_A.app,
+        expected_pair_version: legacyM.version + 1,
+        effective_from: null,
+        reason: "Gán lại kế toán cũ",
+      }),
+    ],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "ACCOUNTING");
+
+  // 6) Unlink & re-link Account <-> Person
+  pCur = (
+    await db.query(
+      "select public.org_department_get_person_admin($1::uuid, $2::uuid, $3::uuid, null) as data",
+      [FULL_ADMIN.auth, FULL_ADMIN.app, pCur.person_id],
+    )
+  ).rows[0].data.person;
+  accVer = (await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [USER_A.app])).rows[0].version;
+  const kUnlink = nextKey();
+  await db.query(
+    "select public.org_department_unlink_account_person_admin($1::uuid, $2::uuid, $3::uuid, $4::int, $5::int, $6::uuid, 'Gỡ liên kết kiểm tra', $7::uuid, $8)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      USER_A.app,
+      accVer,
+      pCur.version,
+      pCur.active_account_link.link_id,
+      kUnlink,
+      computeUnlinkAccountPersonFingerprint(FULL_ADMIN.app, USER_A.app, {
+        expected_account_version: accVer,
+        expected_person_version: pCur.version,
+        expected_link_id: pCur.active_account_link.link_id,
+        reason: "Gỡ liên kết kiểm tra",
+        idempotency_key: kUnlink,
+      }),
+    ],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "UNCLASSIFIED");
+
+  const kRelink = nextKey();
+  await db.query(
+    "select public.org_department_link_account_person_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::int, $7::uuid, 'Nối lại kiểm tra', $8::uuid, $9)",
+    [
+      FULL_ADMIN.auth,
+      FULL_ADMIN.app,
+      USER_A.app,
+      pCur.person_id,
+      accVer + 1,
+      pCur.version + 1,
+      USER_A.recruiter,
+      kRelink,
+      computeLinkAccountPersonFingerprint(FULL_ADMIN.app, USER_A.app, {
+        person_id: pCur.person_id,
+        expected_account_version: accVer + 1,
+        expected_person_version: pCur.version + 1,
+        confirmed_recruiter_id: USER_A.recruiter,
+        reason: "Nối lại kiểm tra",
+        idempotency_key: kRelink,
+      }),
+    ],
+  );
+  assertPolicyFieldsIntact(await readLeaveSnapshot(), "ACCOUNTING");
+
+  await db.close();
+});
+
+test("WP3B P1-3 Fix: Open-ended work_report_delegations (effective_to IS NULL) block SHARED/SERVICE for both grantor & delegate and backfill, until revoked", async () => {
+  const db = await createMigratedWp3Database();
+  await seedWp3BaseData(db);
+
+  // Use USER_ACCT as delegate (no personal assignments initially) and USER_SHARED as grantor
+  await db.query(
+    `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+     values ($1::uuid, 'report_delegate', '2026-01-01', true),
+            ($1::uuid, 'report_review', '2026-01-01', true)`,
+    [USER_SHARED.app],
+  );
+  await db.query(
+    `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, is_current)
+     values ($1::uuid, 'all', '2026-01-01', true)`,
+    [USER_SHARED.app],
+  );
+  const template = (
+    await db.query(
+      `insert into public.work_report_templates (template_code, display_name, default_frequency, status, created_by_user_id)
+       values ('WP3B_OPEN_DELEG', 'WP3B Open Delegation', 'DAILY', 'ACTIVE', $1::uuid)
+       returning template_id`,
+      [FULL_ADMIN.app],
+    )
+  ).rows[0];
+  const tplVer = (
+    await db.query(
+      `insert into public.work_report_template_versions (template_id, version_no, status, schema_json, metric_contract_json, schema_checksum, published_by_user_id, published_at)
+       values ($1::uuid, 1, 'PUBLISHED', '{}'::jsonb, '{}'::jsonb, repeat('a', 64), $2::uuid, clock_timestamp())
+       returning version_id`,
+      [template.template_id, FULL_ADMIN.app],
+    )
+  ).rows[0];
+  await db.query("update public.work_report_templates set current_published_version_id = $2::uuid where template_id = $1::uuid", [
+    template.template_id,
+    tplVer.version_id,
+  ]);
+
+  // Seed historical revoked assignment + historical obligation for delegate to verify preservation after revocation + classification
+  const histAsgn = (
+    await db.query(
+      `insert into public.work_report_assignments (
+         template_id, template_version_id, target_kind, target_user_id, frequency, effective_from, assigned_by_user_id, state, is_current
+       )
+       values ($1::uuid, $2::uuid, 'USER', $3::uuid, 'DAILY', '2026-11-01', $4::uuid, 'REVOKED', false)
+       returning assignment_id`,
+      [template.template_id, tplVer.version_id, USER_ACCT.app, FULL_ADMIN.app],
+    )
+  ).rows[0];
+  await db.query(
+    `insert into public.work_report_obligations (
+       template_id, template_version_id, assignment_id, assignee_app_user_id,
+       snapshot_team_id, snapshot_team_code, snapshot_team_display_name,
+       period_type, period_key, period_start_date, period_end_date, due_at, is_mandatory, obligation_status
+     )
+     values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 'ALPHA', 'Nhóm Alpha', 'DAILY', '2026-11-01', '2026-11-01', '2026-11-01', '2026-11-02T00:00:00Z', true, 'ACTIVE')`,
+    [template.template_id, tplVer.version_id, histAsgn.assignment_id, USER_ACCT.app, TEAM_ALPHA],
+  );
+
+  // Create open-ended (effective_to = NULL) delegation
+  const delegation = (
+    await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'all', null, null, null, $5) as data",
+      [USER_SHARED.auth, USER_SHARED.app, USER_ACCT.app, template.template_id, nextKey()],
+    )
+  ).rows[0].data;
+  assert.equal(delegation.state, "ACTIVE");
+  assert.equal(delegation.effective_to, null);
+
+  // Both delegate and grantor MUST be blocked from both SHARED and SERVICE
+  for (const target of [USER_ACCT, USER_SHARED]) {
+    for (const targetType of ["SHARED", "SERVICE"]) {
+      const kCls = nextKey();
+      await assert.rejects(
+        db.query(
+          "select public.org_department_set_account_type_admin($1::uuid, $2::uuid, $3::uuid, $4, 1, 'Attempt classification with open delegation', $5::uuid, $6)",
+          [
+            FULL_ADMIN.auth,
+            FULL_ADMIN.app,
+            target.app,
+            targetType,
+            kCls,
+            computeSetAccountTypeFingerprint(FULL_ADMIN.app, target.app, {
+              account_type: targetType,
+              expected_account_version: 1,
+              reason: "Attempt classification with open delegation",
+              idempotency_key: kCls,
+            }),
+          ],
+        ),
+        /ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS/,
+      );
+    }
+  }
+
+  // Backfill manifest classifying delegate OR grantor as SHARED/SERVICE MUST also reject!
+  for (const blockedRef of [USER_ACCT.app, USER_SHARED.app]) {
+    for (const blockedType of ["SHARED", "SERVICE"]) {
+      const blockedManifest = {
+        schema_version: WP3B_BACKFILL_SCHEMA_VERSION,
+        approved_by: "Owner",
+        approved_at: "2026-11-13T03:00:00Z",
+        actor_app_user_id: FULL_ADMIN.app,
+        reason: "Backfill blocked by open-ended delegation",
+        account_classifications: [
+          {
+            account_ref: blockedRef,
+            account_type: blockedType,
+            evidence_note: "Test open-ended delegation block",
+          },
+        ],
+        persons: [],
+        department_heads: [],
+        quarantined_exceptions: [],
+      };
+      await assert.rejects(
+        runWp3bBackfill(db, {
+          manifest: blockedManifest,
+          dryRun: false,
+          expectedFingerprint: computeBackfillManifestFingerprint(blockedManifest),
+        }),
+        /BACKFILL_ACCOUNT_HAS_PERSONAL_ASSIGNMENTS/,
+      );
+    }
+  }
+
+  // Delegation remains effective & NOT auto-revoked
+  assert.equal(
+    (
+      await db.query(
+        "select public.work_report__internal_is_delegation_effective($1::uuid, clock_timestamp()) as eff",
+        [delegation.delegation_id],
+      )
+    ).rows[0].eff,
+    true,
+  );
+
+  // Explicitly revoke delegation -> classification to SHARED then SERVICE now succeeds, obligation preserved
+  await db.query(
+    "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, 1, $4)",
+    [USER_SHARED.auth, USER_SHARED.app, delegation.delegation_id, nextKey()],
+  );
+  assert.equal(
+    (
+      await db.query(
+        "select public.work_report__internal_is_delegation_effective($1::uuid, clock_timestamp()) as eff",
+        [delegation.delegation_id],
+      )
+    ).rows[0].eff,
+    false,
+  );
+
+  const kToShared = nextKey();
+  const sharedRes = (
+    await db.query(
+      "select public.org_department_set_account_type_admin($1::uuid, $2::uuid, $3::uuid, 'SHARED', 1, 'After revocation', $4::uuid, $5) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        USER_ACCT.app,
+        kToShared,
+        computeSetAccountTypeFingerprint(FULL_ADMIN.app, USER_ACCT.app, {
+          account_type: "SHARED",
+          expected_account_version: 1,
+          reason: "After revocation",
+          idempotency_key: kToShared,
+        }),
+      ],
+    )
+  ).rows[0].data;
+  assert.equal(sharedRes.account.account_type, "SHARED");
+
+  const kToSvc = nextKey();
+  const svcRes = (
+    await db.query(
+      "select public.org_department_set_account_type_admin($1::uuid, $2::uuid, $3::uuid, 'SERVICE', 2, 'Switch to SERVICE', $4::uuid, $5) as data",
+      [
+        FULL_ADMIN.auth,
+        FULL_ADMIN.app,
+        USER_ACCT.app,
+        kToSvc,
+        computeSetAccountTypeFingerprint(FULL_ADMIN.app, USER_ACCT.app, {
+          account_type: "SERVICE",
+          expected_account_version: 2,
+          reason: "Switch to SERVICE",
+          idempotency_key: kToSvc,
+        }),
+      ],
+    )
+  ).rows[0].data;
+  assert.equal(svcRes.account.account_type, "SERVICE");
+
+  // Historical obligation remains intact
+  assert.equal(
+    (
+      await db.query(
+        "select count(*)::int as cnt from public.work_report_obligations where assignee_app_user_id = $1::uuid",
+        [USER_ACCT.app],
+      )
+    ).rows[0].cnt,
+    1,
   );
 
   await db.close();

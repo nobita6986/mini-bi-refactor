@@ -30,6 +30,8 @@ import {
   computeAssignAccountingMemberFingerprint,
   computeAssignPersonMemberFingerprint,
   computeDesignateHeadFingerprint,
+  computeEndHeadFingerprint,
+  computeEndPersonMemberFingerprint,
 } from "../src/lib/departments/department-contract.ts";
 import {
   computeCreatePersonFingerprint,
@@ -195,6 +197,10 @@ const TRANSFER_SQL =
   "select public.org_department_transfer_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, $7, $8::uuid, $9) as data";
 const DESIGNATE_HEAD_SQL =
   "select public.org_department_designate_head_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, $7, $8::uuid, $9) as data";
+const END_HEAD_SQL =
+  "select public.org_department_end_head_admin($1::uuid, $2::uuid, $3::uuid, $4::int, $5::uuid, $6, $7::uuid, $8) as data";
+const END_PERSON_DEPT_SQL =
+  "select public.org_department_end_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6, $7::uuid, $8) as data";
 const LINK_SQL =
   "select public.org_department_link_account_person_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::int, $7::uuid, $8, $9::uuid, $10) as data";
 const ASSIGN_ACCT_SQL =
@@ -703,6 +709,528 @@ test("WP3B TM-12 real PostgreSQL concurrency: transfer, head, link, cross-writer
     assert.equal(syncState.user_name, syncState.full_name);
     assert.equal(syncState.rec_name, syncState.full_name);
     assert.ok(["Tên Từ Account Side", "Tên Từ Person Side"].includes(syncState.full_name));
+
+    // -------------------------------------------------------------------------
+    // Stage 6 (P1-4 Fix): Deterministic HEAD handover vs outgoing-HEAD races
+    //   - Replace HEAD (A -> B) vs transfer_person_member(A) in BOTH arrival orders & BOTH UUID orders
+    //   - Replace HEAD (A -> B) vs end_person_member(A)
+    //   - Replace HEAD (A -> B) vs update_person(A -> INACTIVE)
+    //   - End HEAD(A) vs transfer_person_member(A) in BOTH arrival orders
+    //   Asserts 0 `40P01` deadlocks, 0 timeouts, canonical PT409/commit outcomes, and all invariants hold.
+    // -------------------------------------------------------------------------
+    const blocker = await connect(port, databaseName, "wp3-head-blocker");
+    const actorA = await connect(port, databaseName, "wp3-head-actor-a");
+    const actorB = await connect(port, databaseName, "wp3-head-actor-b");
+
+    async function assertOrgInvariants(label) {
+      const badDepts = (
+        await observer.query(
+          `select count(*)::int as cnt from (
+             select department_id from public.organization_department_heads where ended_at is null group by department_id having count(*) > 1
+           ) x`,
+        )
+      ).rows[0].cnt;
+      assert.equal(badDepts, 0, `${label}: <= 1 active HEAD per department`);
+
+      const invalidHeads = (
+        await observer.query(
+          `select count(*)::int as cnt
+             from public.organization_department_heads h
+             join public.organization_persons p on p.person_id = h.person_id
+             left join public.organization_person_department_memberships m
+               on m.person_id = h.person_id and m.department_id = h.department_id and m.ended_at is null
+            where h.ended_at is null and (p.status <> 'ACTIVE' or m.membership_id is null)`,
+        )
+      ).rows[0].cnt;
+      assert.equal(invalidHeads, 0, `${label}: every active HEAD must be ACTIVE member of the department`);
+
+      const multiMembership = (
+        await observer.query(
+          `select count(*)::int as cnt from (
+             select person_id from public.organization_person_department_memberships where ended_at is null group by person_id having count(*) > 1
+           ) y`,
+        )
+      ).rows[0].cnt;
+      assert.equal(multiMembership, 0, `${label}: <= 1 active department per person`);
+    }
+
+    async function getDeptAndHead(deptId) {
+      const dept = (
+        await observer.query("select department_id, version from public.organization_departments where department_id = $1::uuid", [deptId])
+      ).rows[0];
+      const head = (
+        await observer.query(
+          "select head_assignment_id, person_id, version from public.organization_department_heads where department_id = $1::uuid and ended_at is null",
+          [deptId],
+        )
+      ).rows[0] ?? null;
+      return { dept, head };
+    }
+
+    async function getPersonState(personId) {
+      const res = await actorA.query(
+        "select public.org_department_get_person_admin($1::uuid, $2::uuid, $3::uuid, null) as data",
+        [ADMIN_1.auth, ADMIN_1.app, personId],
+      );
+      return res.rows[0].data.person;
+    }
+
+    async function runBarrierRace(label, barrierSql, barrierParams, firstFn, firstName, secondFn, secondName) {
+      await Promise.all([
+        actorA.query("set statement_timeout = '8s'"),
+        actorB.query("set statement_timeout = '8s'"),
+      ]);
+      await blocker.query("begin");
+      await blocker.query(barrierSql, barrierParams);
+
+      await actorA.query("begin; set local role service_role");
+      const firstPromise = firstFn(actorA)
+        .then(async (value) => {
+          await actorA.query("commit");
+          return { ok: true, value };
+        })
+        .catch(async (error) => {
+          await actorA.query("rollback");
+          return { ok: false, code: error.code, message: error.message };
+        });
+
+      await waitUntilBlocked(observer, firstName);
+
+      await actorB.query("begin; set local role service_role");
+      const secondPromise = secondFn(actorB)
+        .then(async (value) => {
+          await actorB.query("commit");
+          return { ok: true, value };
+        })
+        .catch(async (error) => {
+          await actorB.query("rollback");
+          return { ok: false, code: error.code, message: error.message };
+        });
+
+      await waitUntilBlocked(observer, secondName);
+      await blocker.query("commit");
+
+      const [firstRes, secondRes] = await Promise.all([firstPromise, secondPromise]);
+      for (const [tag, res] of [[firstName, firstRes], [secondName, secondRes]]) {
+        if (!res.ok) {
+          assert.notEqual(res.code, "40P01", `${label} (${tag}): PostgreSQL deadlock 40P01 must never occur (${res.message})`);
+          assert.equal(res.code, "PT409", `${label} (${tag}): unexpected error ${res.code} ${res.message}`);
+        }
+      }
+      assert.ok(firstRes.ok || secondRes.ok, `${label}: at least one transaction must commit`);
+      await assertOrgInvariants(label);
+      return { firstRes, secondRes };
+    }
+
+    try {
+      await actorA.query("set role service_role");
+      await actorB.query("set role service_role");
+
+      // Create two dedicated candidates and determine ascending/descending UUID order
+      const cand1 = await createPerson(actorA, { code: "S6-HD-01", fullName: "Stage 6 Head One", deptId: itDeptId, reason: "Stage 6 setup" });
+      const cand2 = await createPerson(actorA, { code: "S6-HD-02", fullName: "Stage 6 Head Two", deptId: itDeptId, reason: "Stage 6 setup" });
+      const [lowPerson, highPerson] =
+        cand1.person_id < cand2.person_id ? [cand1, cand2] : [cand2, cand1];
+
+      // Replace existing IT head with lowPerson so outgoing < candidate
+      let itState = await getDeptAndHead(itDeptId);
+      const kInit = nextKey();
+      await actorA.query(DESIGNATE_HEAD_SQL, [
+        ADMIN_1.auth,
+        ADMIN_1.app,
+        itDeptId,
+        lowPerson.person_id,
+        itState.dept.version,
+        itState.head.head_assignment_id,
+        "Set lowPerson HEAD",
+        kInit,
+        computeDesignateHeadFingerprint({
+          actor_app_user_id: ADMIN_1.app,
+          department_id: itDeptId,
+          person_id: lowPerson.person_id,
+          expected_department_version: itState.dept.version,
+          expected_current_head_assignment_id: itState.head.head_assignment_id,
+          reason: "Set lowPerson HEAD",
+        }),
+      ]);
+
+      // 6a: T0 reproduction direction: blocker locks IT dept -> transfer(lowPerson) arrives first -> replace(lowPerson -> highPerson) arrives second
+      itState = await getDeptAndHead(itDeptId);
+      let lowState = await getPersonState(lowPerson.person_id);
+      const k6aTr = nextKey();
+      const k6aRep = nextKey();
+      const res6a = await runBarrierRace(
+        "Stage 6a replace(low->high) vs transfer(low) [transfer first]",
+        "select department_id from public.organization_departments where department_id = $1::uuid for update",
+        [itDeptId],
+        (c) =>
+          c.query(TRANSFER_SQL, [
+            ADMIN_1.auth,
+            ADMIN_1.app,
+            lowPerson.person_id,
+            mktDeptId,
+            lowState.version,
+            lowState.active_department.membership_id,
+            "6a transfer lowPerson",
+            k6aTr,
+            computeTransferPersonDepartmentFingerprint(ADMIN_1.app, lowPerson.person_id, {
+              target_department_ref: mktDeptId,
+              expected_person_version: lowState.version,
+              expected_current_membership_id: lowState.active_department.membership_id,
+              reason: "6a transfer lowPerson",
+              idempotency_key: k6aTr,
+            }),
+          ]),
+        "wp3-head-actor-a",
+        (c) =>
+          c.query(DESIGNATE_HEAD_SQL, [
+            ADMIN_2.auth,
+            ADMIN_2.app,
+            itDeptId,
+            highPerson.person_id,
+            itState.dept.version,
+            itState.head.head_assignment_id,
+            "6a replace low->high",
+            k6aRep,
+            computeDesignateHeadFingerprint({
+              actor_app_user_id: ADMIN_2.app,
+              department_id: itDeptId,
+              person_id: highPerson.person_id,
+              expected_department_version: itState.dept.version,
+              expected_current_head_assignment_id: itState.head.head_assignment_id,
+              reason: "6a replace low->high",
+            }),
+          ]),
+        "wp3-head-actor-b",
+      );
+      assert.equal(res6a.secondRes.ok, true, "6a replacement must succeed");
+      assert.equal(res6a.firstRes.ok, false, "6a transfer while still HEAD must reject PT409");
+      assert.match(res6a.firstRes.message, /PERSON_IS_ACTIVE_DEPARTMENT_HEAD/);
+
+      // 6b: Reverse UUID order (outgoing highPerson > candidate lowPerson) AND replace arrives FIRST holding persons, transfer(highPerson) arrives second
+      itState = await getDeptAndHead(itDeptId);
+      let highState = await getPersonState(highPerson.person_id);
+      const k6bRep = nextKey();
+      const k6bTr = nextKey();
+      const res6b = await runBarrierRace(
+        "Stage 6b replace(high->low) vs transfer(high) [replace first]",
+        "select department_id from public.organization_departments where department_id = $1::uuid for update",
+        [itDeptId],
+        (c) =>
+          c.query(DESIGNATE_HEAD_SQL, [
+            ADMIN_2.auth,
+            ADMIN_2.app,
+            itDeptId,
+            lowPerson.person_id,
+            itState.dept.version,
+            itState.head.head_assignment_id,
+            "6b replace high->low",
+            k6bRep,
+            computeDesignateHeadFingerprint({
+              actor_app_user_id: ADMIN_2.app,
+              department_id: itDeptId,
+              person_id: lowPerson.person_id,
+              expected_department_version: itState.dept.version,
+              expected_current_head_assignment_id: itState.head.head_assignment_id,
+              reason: "6b replace high->low",
+            }),
+          ]),
+        "wp3-head-actor-a",
+        (c) =>
+          c.query(TRANSFER_SQL, [
+            ADMIN_1.auth,
+            ADMIN_1.app,
+            highPerson.person_id,
+            mktDeptId,
+            highState.version,
+            highState.active_department.membership_id,
+            "6b transfer highPerson",
+            k6bTr,
+            computeTransferPersonDepartmentFingerprint(ADMIN_1.app, highPerson.person_id, {
+              target_department_ref: mktDeptId,
+              expected_person_version: highState.version,
+              expected_current_membership_id: highState.active_department.membership_id,
+              reason: "6b transfer highPerson",
+              idempotency_key: k6bTr,
+            }),
+          ]),
+        "wp3-head-actor-b",
+      );
+      assert.equal(res6b.firstRes.ok, true, "6b replacement must succeed");
+      assert.equal(res6b.secondRes.ok, true, "6b transfer after replace committed must succeed serially");
+
+      // Move highPerson back to IT for 6c/6d/6e
+      highState = await getPersonState(highPerson.person_id);
+      const kBack = nextKey();
+      await actorA.query(TRANSFER_SQL, [
+        ADMIN_1.auth,
+        ADMIN_1.app,
+        highPerson.person_id,
+        itDeptId,
+        highState.version,
+        highState.active_department.membership_id,
+        "Move highPerson back to IT",
+        kBack,
+        computeTransferPersonDepartmentFingerprint(ADMIN_1.app, highPerson.person_id, {
+          target_department_ref: itDeptId,
+          expected_person_version: highState.version,
+          expected_current_membership_id: highState.active_department.membership_id,
+          reason: "Move highPerson back to IT",
+          idempotency_key: kBack,
+        }),
+      ]);
+
+      // 6c: Replace HEAD (low -> high) vs end_person_member(low)
+      itState = await getDeptAndHead(itDeptId);
+      lowState = await getPersonState(lowPerson.person_id);
+      const k6cEnd = nextKey();
+      const k6cRep = nextKey();
+      const res6c = await runBarrierRace(
+        "Stage 6c replace(low->high) vs end_person_member(low)",
+        "select department_id from public.organization_departments where department_id = $1::uuid for update",
+        [itDeptId],
+        (c) =>
+          c.query(END_PERSON_DEPT_SQL, [
+            ADMIN_1.auth,
+            ADMIN_1.app,
+            itDeptId,
+            lowState.active_department.membership_id,
+            lowState.version,
+            "6c end member low",
+            k6cEnd,
+            computeEndPersonMemberFingerprint({
+              actor_app_user_id: ADMIN_1.app,
+              department_id: itDeptId,
+              membership_id: lowState.active_department.membership_id,
+              expected_person_version: lowState.version,
+              reason: "6c end member low",
+            }),
+          ]),
+        "wp3-head-actor-a",
+        (c) =>
+          c.query(DESIGNATE_HEAD_SQL, [
+            ADMIN_2.auth,
+            ADMIN_2.app,
+            itDeptId,
+            highPerson.person_id,
+            itState.dept.version,
+            itState.head.head_assignment_id,
+            "6c replace low->high",
+            k6cRep,
+            computeDesignateHeadFingerprint({
+              actor_app_user_id: ADMIN_2.app,
+              department_id: itDeptId,
+              person_id: highPerson.person_id,
+              expected_department_version: itState.dept.version,
+              expected_current_head_assignment_id: itState.head.head_assignment_id,
+              reason: "6c replace low->high",
+            }),
+          ]),
+        "wp3-head-actor-b",
+      );
+      assert.equal(res6c.secondRes.ok, true);
+      assert.equal(res6c.firstRes.ok, false);
+      assert.match(res6c.firstRes.message, /PERSON_IS_ACTIVE_DEPARTMENT_HEAD/);
+
+      // 6d: Replace HEAD (high -> low) vs update_person(high -> INACTIVE) while blocker holds lowPerson lock
+      itState = await getDeptAndHead(itDeptId);
+      highState = await getPersonState(highPerson.person_id);
+      const k6dRep = nextKey();
+      const k6dDeact = nextKey();
+      const res6d = await runBarrierRace(
+        "Stage 6d replace(high->low) vs update_person(high -> INACTIVE)",
+        "select person_id from public.organization_persons where person_id = $1::uuid for update",
+        [lowPerson.person_id],
+        (c) =>
+          c.query(DESIGNATE_HEAD_SQL, [
+            ADMIN_2.auth,
+            ADMIN_2.app,
+            itDeptId,
+            lowPerson.person_id,
+            itState.dept.version,
+            itState.head.head_assignment_id,
+            "6d replace high->low",
+            k6dRep,
+            computeDesignateHeadFingerprint({
+              actor_app_user_id: ADMIN_2.app,
+              department_id: itDeptId,
+              person_id: lowPerson.person_id,
+              expected_department_version: itState.dept.version,
+              expected_current_head_assignment_id: itState.head.head_assignment_id,
+              reason: "6d replace high->low",
+            }),
+          ]),
+        "wp3-head-actor-a",
+        (c) =>
+          c.query(UPDATE_PERSON_SQL, [
+            ADMIN_1.auth,
+            ADMIN_1.app,
+            highPerson.person_id,
+            highState.version,
+            highState.employee_code,
+            highState.full_name,
+            null,
+            "INACTIVE",
+            "6d deactivate outgoing HEAD",
+            k6dDeact,
+            computeUpdatePersonFingerprint(ADMIN_1.app, highPerson.person_id, {
+              expected_person_version: highState.version,
+              employee_code: highState.employee_code,
+              full_name: highState.full_name,
+              joined_on: null,
+              status: "INACTIVE",
+              reason: "6d deactivate outgoing HEAD",
+              idempotency_key: k6dDeact,
+            }),
+          ]),
+        "wp3-head-actor-b",
+      );
+      assert.equal(res6d.firstRes.ok, true);
+      assert.equal(res6d.secondRes.ok, true, "6d deactivation after HEAD replacement must succeed cleanly");
+
+      // 6e: end_head_admin(low) vs transfer_person_member(low -> MARKETING) in BOTH arrival orders
+      itState = await getDeptAndHead(itDeptId);
+      lowState = await getPersonState(lowPerson.person_id);
+      const k6eEndHead = nextKey();
+      const k6eTr = nextKey();
+      const res6e = await runBarrierRace(
+        "Stage 6e end_head(low) vs transfer(low) [end_head first]",
+        "select department_id from public.organization_departments where department_id = $1::uuid for update",
+        [itDeptId],
+        (c) =>
+          c.query(END_HEAD_SQL, [
+            ADMIN_1.auth,
+            ADMIN_1.app,
+            itDeptId,
+            itState.dept.version,
+            itState.head.head_assignment_id,
+            "6e end head low",
+            k6eEndHead,
+            computeEndHeadFingerprint({
+              actor_app_user_id: ADMIN_1.app,
+              department_id: itDeptId,
+              expected_department_version: itState.dept.version,
+              expected_current_head_assignment_id: itState.head.head_assignment_id,
+              reason: "6e end head low",
+            }),
+          ]),
+        "wp3-head-actor-a",
+        (c) =>
+          c.query(TRANSFER_SQL, [
+            ADMIN_2.auth,
+            ADMIN_2.app,
+            lowPerson.person_id,
+            mktDeptId,
+            lowState.version,
+            lowState.active_department.membership_id,
+            "6e transfer low after end_head",
+            k6eTr,
+            computeTransferPersonDepartmentFingerprint(ADMIN_2.app, lowPerson.person_id, {
+              target_department_ref: mktDeptId,
+              expected_person_version: lowState.version,
+              expected_current_membership_id: lowState.active_department.membership_id,
+              reason: "6e transfer low after end_head",
+              idempotency_key: k6eTr,
+            }),
+          ]),
+        "wp3-head-actor-b",
+      );
+      assert.equal(res6e.firstRes.ok, true);
+      assert.equal(res6e.secondRes.ok, true);
+
+      // Re-transfer lowPerson back to IT, designate HEAD, then test transfer arriving BEFORE end_head
+      lowState = await getPersonState(lowPerson.person_id);
+      const kBackLow = nextKey();
+      await actorA.query(TRANSFER_SQL, [
+        ADMIN_1.auth,
+        ADMIN_1.app,
+        lowPerson.person_id,
+        itDeptId,
+        lowState.version,
+        lowState.active_department.membership_id,
+        "Back to IT for 6f",
+        kBackLow,
+        computeTransferPersonDepartmentFingerprint(ADMIN_1.app, lowPerson.person_id, {
+          target_department_ref: itDeptId,
+          expected_person_version: lowState.version,
+          expected_current_membership_id: lowState.active_department.membership_id,
+          reason: "Back to IT for 6f",
+          idempotency_key: kBackLow,
+        }),
+      ]);
+      itState = await getDeptAndHead(itDeptId);
+      const kDes6f = nextKey();
+      await actorA.query(DESIGNATE_HEAD_SQL, [
+        ADMIN_1.auth,
+        ADMIN_1.app,
+        itDeptId,
+        lowPerson.person_id,
+        itState.dept.version,
+        null,
+        "Designate IT head for 6f",
+        kDes6f,
+        computeDesignateHeadFingerprint({
+          actor_app_user_id: ADMIN_1.app,
+          department_id: itDeptId,
+          person_id: lowPerson.person_id,
+          expected_department_version: itState.dept.version,
+          expected_current_head_assignment_id: null,
+          reason: "Designate IT head for 6f",
+        }),
+      ]);
+
+      itState = await getDeptAndHead(itDeptId);
+      lowState = await getPersonState(lowPerson.person_id);
+      const k6fTr = nextKey();
+      const k6fEndHead = nextKey();
+      const res6f = await runBarrierRace(
+        "Stage 6f end_head(low) vs transfer(low) [transfer first]",
+        "select department_id from public.organization_departments where department_id = $1::uuid for update",
+        [itDeptId],
+        (c) =>
+          c.query(TRANSFER_SQL, [
+            ADMIN_2.auth,
+            ADMIN_2.app,
+            lowPerson.person_id,
+            mktDeptId,
+            lowState.version,
+            lowState.active_department.membership_id,
+            "6f transfer while HEAD",
+            k6fTr,
+            computeTransferPersonDepartmentFingerprint(ADMIN_2.app, lowPerson.person_id, {
+              target_department_ref: mktDeptId,
+              expected_person_version: lowState.version,
+              expected_current_membership_id: lowState.active_department.membership_id,
+              reason: "6f transfer while HEAD",
+              idempotency_key: k6fTr,
+            }),
+          ]),
+        "wp3-head-actor-a",
+        (c) =>
+          c.query(END_HEAD_SQL, [
+            ADMIN_1.auth,
+            ADMIN_1.app,
+            itDeptId,
+            itState.dept.version,
+            itState.head.head_assignment_id,
+            "6f end head",
+            k6fEndHead,
+            computeEndHeadFingerprint({
+              actor_app_user_id: ADMIN_1.app,
+              department_id: itDeptId,
+              expected_department_version: itState.dept.version,
+              expected_current_head_assignment_id: itState.head.head_assignment_id,
+              reason: "6f end head",
+            }),
+          ]),
+        "wp3-head-actor-b",
+      );
+      assert.equal(res6f.secondRes.ok, true);
+      assert.equal(res6f.firstRes.ok, false);
+      assert.match(res6f.firstRes.message, /PERSON_IS_ACTIVE_DEPARTMENT_HEAD/);
+    } finally {
+      await Promise.allSettled([blocker, actorA, actorB].map((client) => client.end()));
+    }
   } finally {
     await Promise.allSettled(
       [worker1, worker2, observer, setup, adminClient]

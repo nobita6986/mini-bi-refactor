@@ -97,15 +97,27 @@ function resolveIntervalStartSql(_client, _sourceKind, _evidenceDate, nowIso) {
 export async function runBackfillSelfChecks(client, quarantinedAccountIds = []) {
   const checks = {};
 
-  // Check 1: zero active links on SHARED/SERVICE accounts
-  const c1 = await client.query(`
+  // Check 1: zero active links or personal assignments on unquarantined SHARED/SERVICE accounts
+  const c1 = await client.query(
+    `
     select count(*)::integer as cnt
-      from public.organization_account_person_links l
-      join public.direct_entry_app_users u
-        on u.app_user_id = l.app_user_id
-     where l.ended_at is null
-       and u.account_type <> 'NORMAL'
-  `);
+      from public.direct_entry_app_users u
+     where u.account_type <> 'NORMAL'
+       and (
+         exists (
+           select 1
+             from public.organization_account_person_links l
+            where l.app_user_id = u.app_user_id
+              and l.ended_at is null
+         )
+         or (
+           not (u.app_user_id = any($1::uuid[]))
+           and public.org_department__internal_has_personal_assignments(u.app_user_id, pg_catalog.clock_timestamp())
+         )
+       )
+    `,
+    [quarantinedAccountIds],
+  );
   checks.check1_shared_service_links = c1.rows[0].cnt;
 
   // Check 2: zero multi-account / multi-person active links
@@ -183,12 +195,16 @@ export async function runBackfillSelfChecks(client, quarantinedAccountIds = []) 
     org_acct as (
       select l.app_user_id
         from public.organization_account_person_links l
+        join public.organization_persons p
+          on p.person_id = l.person_id
+         and p.status = 'ACTIVE'
         join public.organization_person_department_memberships m
-          on m.person_id = l.person_id
+          on m.person_id = p.person_id
          and m.ended_at is null
         join public.organization_departments d
           on d.department_id = m.department_id
          and d.system_key = 'ACCOUNTING'
+         and d.is_active = true
         join public.direct_entry_app_users u
           on u.app_user_id = l.app_user_id
        where l.ended_at is null
@@ -471,15 +487,11 @@ export async function runWp3bBackfill(client, options = {}) {
       const acc = accRes.rows[0];
       if (acc.account_type !== cls.account_type) {
         if (cls.account_type !== "NORMAL") {
-          const activeLinks = await client.query(
-            `
-            select
-              (select count(*)::integer from public.organization_account_person_links where app_user_id = $1 and ended_at is null) +
-              (select count(*)::integer from public.direct_entry_app_user_recruiter_links where app_user_id = $1 and is_current = true and verified = true) as cnt
-            `,
-            [cls.account_ref],
+          const hasPersonalRes = await client.query(
+            "select public.org_department__internal_has_personal_assignments($1::uuid, $2::timestamptz) as has_personal",
+            [cls.account_ref, vNow],
           );
-          if (activeLinks.rows[0].cnt > 0) {
+          if (hasPersonalRes.rows[0]?.has_personal) {
             throw new Error(
               `BACKFILL_ACCOUNT_HAS_PERSONAL_ASSIGNMENTS: cannot classify ${cls.account_ref} as ${cls.account_type}`,
             );

@@ -1549,6 +1549,111 @@ $function$;
 revoke all on function public.org_department__internal_lock_person(uuid)
   from public, anon, authenticated, service_role;
 
+create or replace function public.org_department__internal_lock_department(
+  p_department_id uuid
+)
+returns void
+language sql
+security definer
+set search_path = pg_catalog, public
+as $function$
+  select pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('org_department_dept_v1'),
+    pg_catalog.hashtext(p_department_id::text)
+  );
+$function$;
+
+revoke all on function public.org_department__internal_lock_department(uuid)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.org_department__internal_lock_app_user(
+  p_app_user_id uuid
+)
+returns void
+language sql
+security definer
+set search_path = pg_catalog, public
+as $function$
+  select pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('org_department_app_user_v1'),
+    pg_catalog.hashtext(p_app_user_id::text)
+  );
+$function$;
+
+revoke all on function public.org_department__internal_lock_app_user(uuid)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.org_department__internal_has_personal_assignments(
+  p_app_user_id uuid,
+  p_as_of timestamptz default null
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_eff_now timestamptz := coalesce(p_as_of, pg_catalog.clock_timestamp());
+  v_today date := (v_eff_now at time zone 'Asia/Ho_Chi_Minh')::date;
+begin
+  if p_app_user_id is null then
+    return false;
+  end if;
+
+  return exists (
+    select 1
+      from public.organization_account_person_links l
+     where l.app_user_id = p_app_user_id
+       and l.ended_at is null
+  ) or exists (
+    select 1
+      from public.organization_department_memberships lm
+     where lm.app_user_id = p_app_user_id
+       and (
+         lm.valid_to is null
+         or (lm.valid_from <= v_today and v_today < lm.valid_to and lm.valid_to > lm.valid_from)
+       )
+  ) or exists (
+    select 1
+      from public.direct_entry_app_user_recruiter_links rl
+     where rl.app_user_id = p_app_user_id
+       and rl.verified = true
+       and rl.is_current = true
+       and (rl.valid_to is null or v_today < rl.valid_to)
+  ) or exists (
+    select 1
+      from public.direct_entry_team_leader_assignments tla
+     where tla.leader_app_user_id = p_app_user_id
+       and tla.is_current = true
+       and (tla.valid_to is null or v_today < tla.valid_to)
+  ) or exists (
+    select 1
+      from public.leave_department_approvers lda
+     where lda.approver_app_user_id = p_app_user_id
+       and lda.is_current = true
+       and (lda.valid_to is null or v_today <= lda.valid_to)
+  ) or exists (
+    select 1
+      from public.work_report_delegations wrd
+     where (wrd.grantor_user_id = p_app_user_id or wrd.delegate_app_user_id = p_app_user_id)
+       and (
+         public.work_report__internal_is_delegation_effective(wrd.delegation_id, v_eff_now)
+         or (
+           wrd.is_current = true
+           and wrd.state = 'ACTIVE'
+           and wrd.revoked_at is null
+           and wrd.effective_from <= v_eff_now
+           and (wrd.effective_to is null or v_eff_now <= wrd.effective_to)
+         )
+       )
+  );
+end;
+$function$;
+
+revoke all on function public.org_department__internal_has_personal_assignments(uuid, timestamptz)
+  from public, anon, authenticated, service_role;
+
 drop function if exists public.org_department__internal_sync_leave_profile_from_org(uuid, uuid, timestamptz);
 
 create or replace function public.org_department__internal_sync_leave_profile_from_org(
@@ -1566,7 +1671,6 @@ declare
   v_user public.direct_entry_app_users%rowtype;
   v_is_shared boolean := false;
   v_unit_kind text := 'UNCLASSIFIED';
-  v_joined_on date := null;
   v_has_person_link boolean := false;
   v_has_legacy_acct boolean := false;
   v_prof public.leave_employee_profiles%rowtype;
@@ -1588,12 +1692,11 @@ begin
   else
     v_is_shared := false;
     select true,
-           p.joined_on,
            case
              when d.system_key in ('RECRUITMENT', 'MARKETING', 'IT', 'ACCOUNTING', 'MANAGEMENT_BOD') then d.system_key
              else 'UNCLASSIFIED'
            end
-      into v_has_person_link, v_joined_on, v_unit_kind
+      into v_has_person_link, v_unit_kind
       from public.organization_account_person_links l
       join public.organization_persons p
         on p.person_id = l.person_id
@@ -1668,15 +1771,10 @@ begin
     if found and (
       v_prof.is_shared_non_employee is distinct from false
       or v_prof.unit_kind is distinct from coalesce(v_unit_kind, 'UNCLASSIFIED')
-      or (v_has_person_link and v_joined_on is not null and v_prof.work_start_date is distinct from v_joined_on)
     ) then
       update public.leave_employee_profiles
          set is_shared_non_employee = false,
              unit_kind = coalesce(v_unit_kind, 'UNCLASSIFIED'),
-             work_start_date = case
-               when v_has_person_link then coalesce(v_joined_on, v_prof.work_start_date)
-               else v_prof.work_start_date
-             end,
              row_version = v_prof.row_version + 1,
              updated_at = v_eff_now,
              updated_by_app_user_id = v_actor
@@ -1728,6 +1826,7 @@ set search_path = pg_catalog, public
 as $function$
 declare
   v_acct_dept_id uuid;
+  v_acct_dept_active boolean := false;
   v_user public.direct_entry_app_users%rowtype;
   v_should_be_member boolean := false;
   v_open_legacy public.organization_department_memberships%rowtype;
@@ -1742,8 +1841,8 @@ begin
     return;
   end if;
 
-  select d.department_id
-    into v_acct_dept_id
+  select d.department_id, d.is_active
+    into v_acct_dept_id, v_acct_dept_active
     from public.organization_departments d
    where d.system_key = 'ACCOUNTING';
 
@@ -1760,12 +1859,15 @@ begin
     return;
   end if;
 
-  if v_user.account_type = 'NORMAL' then
+  if v_user.account_type = 'NORMAL' and coalesce(v_acct_dept_active, false) then
     select exists (
       select 1
         from public.organization_account_person_links l
+        join public.organization_persons p
+          on p.person_id = l.person_id
+         and p.status = 'ACTIVE'
         join public.organization_person_department_memberships m
-          on m.person_id = l.person_id
+          on m.person_id = p.person_id
          and m.department_id = v_acct_dept_id
          and m.ended_at is null
        where l.app_user_id = p_app_user_id
@@ -1818,9 +1920,15 @@ begin
       v_end_date := v_today;
     end if;
 
+    select coalesce(max(lm2.version), v_open_legacy.version) + 1
+      into v_next_ver
+      from public.organization_department_memberships lm2
+     where lm2.department_id = v_acct_dept_id
+       and lm2.app_user_id = p_app_user_id;
+
     update public.organization_department_memberships
        set valid_to = v_end_date,
-           version = v_open_legacy.version + 1,
+           version = v_next_ver,
            revoked_by_user_id = v_actor,
            revoke_reason = coalesce(nullif(pg_catalog.btrim(p_reason), ''), 'Synced end from organization person ACCOUNTING membership'),
            revoked_at = v_eff_now,
@@ -2225,6 +2333,8 @@ begin
     return v_replay;
   end if;
 
+  perform public.org_department__internal_lock_department(p_department_id);
+
   select d.* into v_dept
     from public.organization_departments d
    where d.department_id = p_department_id
@@ -2500,21 +2610,23 @@ begin
 
   perform public.org_department__internal_lock_person(p_person_id);
 
-  select d.* into v_dept
-    from public.organization_departments d
-   where d.department_id = p_department_id
-   for update;
-
-  if not found then
-    raise exception 'DEPARTMENT_NOT_FOUND' using errcode = 'P0002';
-  end if;
-
   select p.* into v_person
     from public.organization_persons p
    where p.person_id = p_person_id
    for update;
 
-  if not found then
+  perform public.org_department__internal_lock_department(p_department_id);
+
+  select d.* into v_dept
+    from public.organization_departments d
+   where d.department_id = p_department_id
+   for update;
+
+  if v_dept.department_id is null then
+    raise exception 'DEPARTMENT_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  if v_person.person_id is null then
     raise exception 'PERSON_NOT_FOUND' using errcode = 'P0002';
   end if;
 
@@ -2586,6 +2698,12 @@ begin
        and l.ended_at is null
      order by l.app_user_id
   loop
+    perform public.org_department__internal_lock_app_user(v_linked_app_user_id);
+    perform 1
+      from public.direct_entry_app_users u
+     where u.app_user_id = v_linked_app_user_id
+     for update;
+
     if v_dept.system_key = 'ACCOUNTING' then
       perform public.org_department__internal_sync_accounting_projection(
         v_linked_app_user_id,
@@ -2716,14 +2834,16 @@ begin
 
   perform public.org_department__internal_lock_person(v_m_person_id);
 
-  select d.* into v_dept
-    from public.organization_departments d
-   where d.department_id = p_department_id
-   for update;
-
   select p.* into v_person
     from public.organization_persons p
    where p.person_id = v_m_person_id
+   for update;
+
+  perform public.org_department__internal_lock_department(p_department_id);
+
+  select d.* into v_dept
+    from public.organization_departments d
+   where d.department_id = p_department_id
    for update;
 
   select m.* into v_m
@@ -2731,6 +2851,10 @@ begin
    where m.membership_id = p_membership_id
      and m.department_id = p_department_id
    for update;
+
+  if v_m.membership_id is null then
+    raise exception 'DEPARTMENT_MEMBERSHIP_NOT_FOUND' using errcode = 'P0002';
+  end if;
 
   if v_person.version <> p_expected_person_version then
     raise exception 'VERSION_CONFLICT' using errcode = 'PT409';
@@ -2774,6 +2898,12 @@ begin
        and l.ended_at is null
      order by l.app_user_id
   loop
+    perform public.org_department__internal_lock_app_user(v_linked_app_user_id);
+    perform 1
+      from public.direct_entry_app_users u
+     where u.app_user_id = v_linked_app_user_id
+     for update;
+
     if v_dept.system_key = 'ACCOUNTING' then
       perform public.org_department__internal_sync_accounting_projection(
         v_linked_app_user_id,
@@ -2963,6 +3093,9 @@ declare
   v_replay jsonb;
   v_dept public.organization_departments%rowtype;
   v_person public.organization_persons%rowtype;
+  v_pre_head_person_id uuid := null;
+  v_lock_person_id uuid;
+  v_lock_person public.organization_persons%rowtype;
   v_curr_head public.organization_department_heads%rowtype;
   v_replaced_head public.organization_department_heads%rowtype;
   v_new_head public.organization_department_heads%rowtype;
@@ -2990,23 +3123,48 @@ begin
     return v_replay;
   end if;
 
-  perform public.org_department__internal_lock_person(p_person_id);
+  -- Lock order (§4.2): all involved persons (current HEAD + candidate, ORDER BY person_id) -> department -> heads
+  select h.person_id
+    into v_pre_head_person_id
+    from public.organization_department_heads h
+   where h.department_id = p_department_id
+     and h.ended_at is null
+   limit 1;
+
+  for v_lock_person_id in
+    select distinct pid
+      from pg_catalog.unnest(array[p_person_id, v_pre_head_person_id]) as t(pid)
+     where pid is not null
+     order by pid
+  loop
+    perform public.org_department__internal_lock_person(v_lock_person_id);
+  end loop;
+
+  for v_lock_person in
+    select p.*
+      from public.organization_persons p
+     where p.person_id = p_person_id
+        or (v_pre_head_person_id is not null and p.person_id = v_pre_head_person_id)
+     order by p.person_id
+     for update
+  loop
+    if v_lock_person.person_id = p_person_id then
+      v_person := v_lock_person;
+    end if;
+  end loop;
+
+  perform public.org_department__internal_lock_department(p_department_id);
 
   select d.* into v_dept
     from public.organization_departments d
    where d.department_id = p_department_id
    for update;
 
-  if not found then
+  if v_dept.department_id is null then
     raise exception 'DEPARTMENT_NOT_FOUND' using errcode = 'P0002';
   end if;
 
-  select p.* into v_person
-    from public.organization_persons p
-   where p.person_id = p_person_id
-   for update;
-
-  if not found then
+  if v_person.person_id is null then
     raise exception 'PERSON_NOT_FOUND' using errcode = 'P0002';
   end if;
 
@@ -3039,7 +3197,8 @@ begin
   end if;
 
   if v_curr_head.head_assignment_id is not null then
-    if p_expected_current_head_assignment_id is distinct from v_curr_head.head_assignment_id then
+    if p_expected_current_head_assignment_id is distinct from v_curr_head.head_assignment_id
+       or v_curr_head.person_id is distinct from v_pre_head_person_id then
       raise exception 'VERSION_CONFLICT' using errcode = 'PT409';
     end if;
   elsif p_expected_current_head_assignment_id is not null then
@@ -3189,6 +3348,8 @@ declare
   v_action text := 'DEPT_HEAD_ENDED';
   v_reason text;
   v_replay jsonb;
+  v_pre_head_person_id uuid := null;
+  v_head_person public.organization_persons%rowtype;
   v_dept public.organization_departments%rowtype;
   v_curr_head public.organization_department_heads%rowtype;
   v_ended public.organization_department_heads%rowtype;
@@ -3217,6 +3378,25 @@ begin
     return v_replay;
   end if;
 
+  -- Lock order (§4.2): current HEAD person (if any) -> department -> heads
+  select h.person_id
+    into v_pre_head_person_id
+    from public.organization_department_heads h
+   where h.department_id = p_department_id
+     and h.ended_at is null
+   limit 1;
+
+  if v_pre_head_person_id is not null then
+    perform public.org_department__internal_lock_person(v_pre_head_person_id);
+    select p.*
+      into v_head_person
+      from public.organization_persons p
+     where p.person_id = v_pre_head_person_id
+     for update;
+  end if;
+
+  perform public.org_department__internal_lock_department(p_department_id);
+
   select d.* into v_dept
     from public.organization_departments d
    where d.department_id = p_department_id
@@ -3240,7 +3420,8 @@ begin
     raise exception 'HEAD_ALREADY_ENDED' using errcode = 'PT409';
   end if;
 
-  if p_expected_current_head_assignment_id is distinct from v_curr_head.head_assignment_id then
+  if p_expected_current_head_assignment_id is distinct from v_curr_head.head_assignment_id
+     or v_curr_head.person_id is distinct from v_pre_head_person_id then
     raise exception 'VERSION_CONFLICT' using errcode = 'PT409';
   end if;
 
@@ -3571,8 +3752,9 @@ begin
     return v_replay;
   end if;
 
-  -- Lock order (§4.2): departments -> persons -> direct_entry_app_users -> recruiters
+  -- Lock order (§4.2): persons (new person created below) -> departments -> direct_entry_app_users -> recruiters
   if p_initial_department_id is not null then
+    perform public.org_department__internal_lock_department(p_initial_department_id);
     select d.* into v_dept
       from public.organization_departments d
      where d.department_id = p_initial_department_id
@@ -3586,6 +3768,7 @@ begin
   end if;
 
   if p_account_ref is not null then
+    perform public.org_department__internal_lock_app_user(p_account_ref);
     select u.* into v_account
       from public.direct_entry_app_users u
      where u.app_user_id = p_account_ref
@@ -3900,6 +4083,7 @@ declare
   v_result jsonb;
   v_acc_row public.direct_entry_app_users%rowtype;
   v_rec_row public.recruiters%rowtype;
+  v_lock_app_user_id uuid;
   v_prev_name text;
 begin
   perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
@@ -3993,6 +4177,16 @@ begin
    returning * into v_updated;
 
   -- Lock order (§4.2): persons -> direct_entry_app_users -> recruiters
+  for v_lock_app_user_id in
+    select l.app_user_id
+      from public.organization_account_person_links l
+     where l.person_id = p_person_id
+       and l.ended_at is null
+     order by l.app_user_id
+  loop
+    perform public.org_department__internal_lock_app_user(v_lock_app_user_id);
+  end loop;
+
   for v_acc_row in
     select u.*
       from public.direct_entry_app_users u
@@ -4029,6 +4223,13 @@ begin
         v_reason_id
       );
     end if;
+
+    perform public.org_department__internal_sync_accounting_projection(
+      v_acc_row.app_user_id,
+      p_app_user_id,
+      v_reason,
+      v_now
+    );
 
     perform public.org_department__internal_sync_leave_profile_from_org(
       v_acc_row.app_user_id,
@@ -4159,6 +4360,8 @@ declare
   v_reason text;
   v_replay jsonb;
   v_curr_dept_id uuid;
+  v_lock_dept_id uuid;
+  v_lock_app_user_id uuid;
   v_lock_dept public.organization_departments%rowtype;
   v_person public.organization_persons%rowtype;
   v_to_dept public.organization_departments%rowtype;
@@ -4194,8 +4397,13 @@ begin
     return v_replay;
   end if;
 
-  -- Lock order (§4.2): advisory person lock -> departments (ORDER BY department_id) -> person -> membership -> accounts
+  -- Lock order (§4.2): person -> departments (ORDER BY department_id) -> membership -> accounts
   perform public.org_department__internal_lock_person(p_person_id);
+
+  select p.* into v_person
+    from public.organization_persons p
+   where p.person_id = p_person_id
+   for update;
 
   select m.department_id
     into v_curr_dept_id
@@ -4203,6 +4411,15 @@ begin
    where m.person_id = p_person_id
      and m.ended_at is null
    limit 1;
+
+  for v_lock_dept_id in
+    select distinct did
+      from pg_catalog.unnest(array[p_target_department_id, v_curr_dept_id]) as t(did)
+     where did is not null
+     order by did
+  loop
+    perform public.org_department__internal_lock_department(v_lock_dept_id);
+  end loop;
 
   for v_lock_dept in
     select d.*
@@ -4224,12 +4441,7 @@ begin
     raise exception 'DEPARTMENT_NOT_FOUND' using errcode = 'P0002';
   end if;
 
-  select p.* into v_person
-    from public.organization_persons p
-   where p.person_id = p_person_id
-   for update;
-
-  if not found then
+  if v_person.person_id is null then
     raise exception 'PERSON_NOT_FOUND' using errcode = 'P0002';
   end if;
 
@@ -4316,6 +4528,16 @@ begin
          updated_at = v_now,
          updated_by_app_user_id = p_app_user_id
    where person_id = p_person_id;
+
+  for v_lock_app_user_id in
+    select l.app_user_id
+      from public.organization_account_person_links l
+     where l.person_id = p_person_id
+       and l.ended_at is null
+     order by l.app_user_id
+  loop
+    perform public.org_department__internal_lock_app_user(v_lock_app_user_id);
+  end loop;
 
   for v_acc_row in
     select u.*
@@ -4472,6 +4694,8 @@ begin
     return v_replay;
   end if;
 
+  perform public.org_department__internal_lock_app_user(p_target_app_user_id);
+
   select u.* into v_account
     from public.direct_entry_app_users u
    where u.app_user_id = p_target_app_user_id
@@ -4488,34 +4712,7 @@ begin
   v_now := pg_catalog.clock_timestamp();
 
   if p_account_type in ('SHARED', 'SERVICE') then
-    if exists (
-      select 1 from public.organization_account_person_links l
-       where l.app_user_id = p_target_app_user_id
-         and l.ended_at is null
-    ) or exists (
-      select 1 from public.organization_department_memberships lm
-       where lm.app_user_id = p_target_app_user_id
-         and lm.valid_to is null
-    ) or exists (
-      select 1 from public.direct_entry_app_user_recruiter_links rl
-       where rl.app_user_id = p_target_app_user_id
-         and rl.verified = true
-         and rl.is_current = true
-    ) or exists (
-      select 1 from public.direct_entry_team_leader_assignments tla
-       where tla.leader_app_user_id = p_target_app_user_id
-         and tla.is_current = true
-    ) or exists (
-      select 1 from public.leave_department_approvers lda
-       where lda.approver_app_user_id = p_target_app_user_id
-         and lda.is_current = true
-    ) or exists (
-      select 1 from public.work_report_delegations wrd
-       where (wrd.grantor_user_id = p_target_app_user_id or wrd.delegate_app_user_id = p_target_app_user_id)
-         and wrd.is_current = true
-         and wrd.state = 'ACTIVE'
-         and wrd.effective_to > v_now
-    ) then
+    if public.org_department__internal_has_personal_assignments(p_target_app_user_id, v_now) then
       raise exception 'ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS' using errcode = 'PT409';
     end if;
   end if;
@@ -4665,6 +4862,8 @@ begin
   if not found then
     raise exception 'PERSON_NOT_FOUND' using errcode = 'P0002';
   end if;
+
+  perform public.org_department__internal_lock_app_user(p_target_app_user_id);
 
   select u.* into v_account
     from public.direct_entry_app_users u
@@ -5007,6 +5206,8 @@ begin
      for update;
   end if;
 
+  perform public.org_department__internal_lock_app_user(p_target_app_user_id);
+
   select u.* into v_account
     from public.direct_entry_app_users u
    where u.app_user_id = p_target_app_user_id
@@ -5027,11 +5228,7 @@ begin
   end if;
 
   if v_person.person_id is null or v_person.person_id <> v_link.person_id then
-    perform public.org_department__internal_lock_person(v_link.person_id);
-    select p.* into v_person
-      from public.organization_persons p
-     where p.person_id = v_link.person_id
-     for update;
+    raise exception 'VERSION_CONFLICT' using errcode = 'PT409';
   end if;
 
   if v_account.version <> p_expected_account_version
@@ -5359,7 +5556,7 @@ begin
       using errcode = '22023';
   end if;
 
-  -- Lock order (§4.2): advisory person lock -> departments -> person -> membership key -> account -> legacy memberships
+  -- Lock order (§4.2): person -> departments -> membership key -> account -> legacy memberships
   select l.person_id
     into v_linked_person_id
     from public.organization_account_person_links l
@@ -5369,6 +5566,12 @@ begin
 
   if v_linked_person_id is not null then
     perform public.org_department__internal_lock_person(v_linked_person_id);
+    select p.*
+      into v_person
+      from public.organization_persons p
+     where p.person_id = v_linked_person_id
+     for update;
+
     select m.department_id
       into v_curr_pm.department_id
       from public.organization_person_department_memberships m
@@ -5376,6 +5579,16 @@ begin
        and m.ended_at is null
      limit 1;
   end if;
+
+  for v_lock_dept in
+    select d.*
+      from public.organization_departments d
+     where d.system_key = 'ACCOUNTING'
+        or (v_curr_pm.department_id is not null and d.department_id = v_curr_pm.department_id)
+     order by d.department_id
+  loop
+    perform public.org_department__internal_lock_department(v_lock_dept.department_id);
+  end loop;
 
   for v_lock_dept in
     select d.*
@@ -5400,13 +5613,7 @@ begin
       using errcode = '22023';
   end if;
 
-  if v_linked_person_id is not null then
-    select p.*
-      into v_person
-      from public.organization_persons p
-     where p.person_id = v_linked_person_id
-     for update;
-  end if;
+  perform public.org_department__internal_lock_app_user(p_target_app_user_id);
 
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtext('org_department_membership_v1'),
@@ -5418,6 +5625,17 @@ begin
     from public.direct_entry_app_users u
    where u.app_user_id = p_target_app_user_id
    for update;
+
+  if exists (
+    select 1
+      from public.organization_account_person_links l
+     where l.app_user_id = p_target_app_user_id
+       and l.ended_at is null
+       and l.person_id is distinct from v_linked_person_id
+  ) then
+    raise exception 'DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
 
   if not found then
     raise exception 'TARGET_ACCOUNT_NOT_FOUND'
@@ -5742,7 +5960,14 @@ begin
 
   if v_linked_person_id is not null then
     perform public.org_department__internal_lock_person(v_linked_person_id);
+    select p.*
+      into v_person
+      from public.organization_persons p
+     where p.person_id = v_linked_person_id
+     for update;
   end if;
+
+  perform public.org_department__internal_lock_department(v_dept.department_id);
 
   select d.*
     into v_dept
@@ -5750,13 +5975,7 @@ begin
    where d.department_id = v_dept.department_id
    for update;
 
-  if v_linked_person_id is not null then
-    select p.*
-      into v_person
-      from public.organization_persons p
-     where p.person_id = v_linked_person_id
-     for update;
-  end if;
+  perform public.org_department__internal_lock_app_user(v_target_user_id);
 
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtext('org_department_membership_v1'),
@@ -5768,6 +5987,17 @@ begin
     from public.direct_entry_app_users u
    where u.app_user_id = v_target_user_id
    for update;
+
+  if exists (
+    select 1
+      from public.organization_account_person_links l
+     where l.app_user_id = v_target_user_id
+       and l.ended_at is null
+       and l.person_id is distinct from v_linked_person_id
+  ) then
+    raise exception 'DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
 
   if not found then
     raise exception 'TARGET_ACCOUNT_NOT_FOUND'
