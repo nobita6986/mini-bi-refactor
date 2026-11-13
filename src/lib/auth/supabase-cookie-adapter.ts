@@ -22,18 +22,23 @@ export type CookieHeaderMetricsSummary = {
   staleSupabaseCookieCount: number;
   staleSupabaseBytes: number;
   staleSupabaseCookieNames: string[];
+  otherSupabaseCookieCount: number;
+  otherSupabaseBytes: number;
+  otherSupabaseCookieNames: string[];
   duplicateCookieNames: string[];
   otherCookieCount: number;
   otherCookieBytes: number;
   entries: Array<{
     name: string;
     byteLength: number;
-    category: "active_supabase" | "stale_supabase" | "other";
+    category: "active_supabase" | "stale_supabase" | "other_supabase" | "other";
   }>;
 };
 
 const SUPABASE_MANAGED_COOKIE_PATTERN =
-  /^sb-[a-z0-9_-]+-auth-token(?:\.\d+|-code-verifier(?:\.\d+|\/[^\s;,]*)?)?$/i;
+  /^sb-[a-z0-9_-]+-auth-token(?:\.(?:0|[1-9]\d*)|(?:-flow-[a-z0-9_-]{8,64}|-flows)?-code-verifier(?:\.(?:0|[1-9]\d*)|\/[^\s;,]*)?)?$/i;
+const CHUNK_INDEX_PATTERN = /^(?:0|[1-9]\d*)$/;
+const FLOW_SLOT_BASE_SUFFIX_PATTERN = /^-flow-[a-z0-9_-]{8,64}-code-verifier$/i;
 
 const EXPIRE_STALE_COOKIE_OPTIONS: CookieOptions = {
   path: "/",
@@ -61,56 +66,97 @@ export function isSupabaseManagedCookieName(name: string): boolean {
   return SUPABASE_MANAGED_COOKIE_PATTERN.test(name);
 }
 
+function isChunkForBaseKey(name: string, baseKey: string): boolean {
+  const prefix = `${baseKey}.`;
+  return (
+    name.startsWith(prefix) && CHUNK_INDEX_PATTERN.test(name.slice(prefix.length))
+  );
+}
+
 export function isActiveSupabaseCookieName(
   name: string,
   storageKey: string,
 ): boolean {
   const verifierBase = `${storageKey}-code-verifier`;
-  return (
+  const flowsVerifierBase = `${storageKey}-flows-code-verifier`;
+  if (
     name === storageKey ||
-    name.startsWith(`${storageKey}.`) ||
+    isChunkForBaseKey(name, storageKey) ||
     name === verifierBase ||
-    name.startsWith(`${verifierBase}.`) ||
-    name.startsWith(`${verifierBase}/`)
+    isChunkForBaseKey(name, verifierBase) ||
+    name.startsWith(`${verifierBase}/`) ||
+    name === flowsVerifierBase ||
+    isChunkForBaseKey(name, flowsVerifierBase)
+  ) {
+    return true;
+  }
+
+  if (!name.startsWith(`${storageKey}-flow-`)) {
+    return false;
+  }
+  const rest = name.slice(storageKey.length);
+  const dotIndex = rest.indexOf(".");
+  if (dotIndex < 0) {
+    return FLOW_SLOT_BASE_SUFFIX_PATTERN.test(rest);
+  }
+  const baseSuffix = rest.slice(0, dotIndex);
+  const chunkSuffix = rest.slice(dotIndex + 1);
+  return (
+    FLOW_SLOT_BASE_SUFFIX_PATTERN.test(baseSuffix) &&
+    CHUNK_INDEX_PATTERN.test(chunkSuffix)
   );
 }
 
+function resolveEffectiveCookieValues(
+  cookies: ReadonlyArray<{ name: string; value: string }>,
+): Map<string, string> {
+  const effectiveValues = new Map<string, string>();
+  for (const cookie of cookies) {
+    const existing = effectiveValues.get(cookie.name);
+    if (existing === undefined || (existing === "" && cookie.value.length > 0)) {
+      effectiveValues.set(cookie.name, cookie.value);
+    }
+  }
+  return effectiveValues;
+}
+
 function collectOrphanedChunkNamesForBaseKey(
-  cookieNames: ReadonlySet<string>,
+  effectiveValues: ReadonlyMap<string, string>,
   baseKey: string,
 ): Set<string> {
   const orphaned = new Set<string>();
   const prefix = `${baseKey}.`;
-  const chunkEntries: Array<{ name: string; index: number }> = [];
+  const nonEmptyChunks: Array<{ name: string; index: number }> = [];
 
-  for (const name of cookieNames) {
-    if (!name.startsWith(prefix)) continue;
+  for (const [name, value] of effectiveValues) {
+    if (value.length === 0 || !name.startsWith(prefix)) continue;
     const suffix = name.slice(prefix.length);
-    if (!/^\d+$/.test(suffix)) continue;
+    if (!CHUNK_INDEX_PATTERN.test(suffix)) continue;
     const index = Number(suffix);
     if (Number.isSafeInteger(index) && index >= 0) {
-      chunkEntries.push({ name, index });
+      nonEmptyChunks.push({ name, index });
     }
   }
 
-  if (chunkEntries.length === 0) {
+  if (nonEmptyChunks.length === 0) {
     return orphaned;
   }
 
-  if (cookieNames.has(baseKey)) {
-    for (const entry of chunkEntries) {
+  const baseValue = effectiveValues.get(baseKey) ?? "";
+  if (baseValue.length > 0) {
+    for (const entry of nonEmptyChunks) {
       orphaned.add(entry.name);
     }
     return orphaned;
   }
 
-  const indexSet = new Set(chunkEntries.map((entry) => entry.index));
+  const indexSet = new Set(nonEmptyChunks.map((entry) => entry.index));
   let contiguousLimit = 0;
   while (indexSet.has(contiguousLimit)) {
     contiguousLimit += 1;
   }
 
-  for (const entry of chunkEntries) {
+  for (const entry of nonEmptyChunks) {
     if (entry.index >= contiguousLimit) {
       orphaned.add(entry.name);
     }
@@ -119,30 +165,54 @@ function collectOrphanedChunkNamesForBaseKey(
   return orphaned;
 }
 
+function collectActiveVerifierBaseKeys(
+  effectiveValues: ReadonlyMap<string, string>,
+  storageKey: string,
+): string[] {
+  const baseKeys = new Set<string>([
+    storageKey,
+    `${storageKey}-code-verifier`,
+    `${storageKey}-flows-code-verifier`,
+  ]);
+  const flowPrefix = `${storageKey}-flow-`;
+  for (const name of effectiveValues.keys()) {
+    if (!name.startsWith(flowPrefix)) continue;
+    const rest = name.slice(storageKey.length);
+    const dotIndex = rest.indexOf(".");
+    const baseSuffix = dotIndex >= 0 ? rest.slice(0, dotIndex) : rest;
+    if (FLOW_SLOT_BASE_SUFFIX_PATTERN.test(baseSuffix)) {
+      baseKeys.add(`${storageKey}${baseSuffix}`);
+    }
+  }
+  return [...baseKeys];
+}
+
 export function findStaleSupabaseCookieNames(
   cookies: ReadonlyArray<{ name: string; value: string }>,
   storageKey?: string | null,
 ): string[] {
   if (!storageKey) return [];
 
-  const cookieNames = new Set(cookies.map((cookie) => cookie.name));
-  const orphanedChunks = new Set<string>([
-    ...collectOrphanedChunkNamesForBaseKey(cookieNames, storageKey),
-    ...collectOrphanedChunkNamesForBaseKey(
-      cookieNames,
-      `${storageKey}-code-verifier`,
-    ),
-  ]);
+  const effectiveValues = resolveEffectiveCookieValues(cookies);
+  const orphanedChunks = new Set<string>();
+  for (const baseKey of collectActiveVerifierBaseKeys(effectiveValues, storageKey)) {
+    for (const orphanName of collectOrphanedChunkNamesForBaseKey(
+      effectiveValues,
+      baseKey,
+    )) {
+      orphanedChunks.add(orphanName);
+    }
+  }
 
   const staleNames: string[] = [];
   const seen = new Set<string>();
 
+  // Only prune orphaned chunks that deterministically belong to this deployment's
+  // own storageKey; never expire cookies belonging to other Supabase projects /
+  // parent-domain cookies that may be shared with Production.
   for (const { name } of cookies) {
     if (seen.has(name)) continue;
-    const isForeignSupabase =
-      isSupabaseManagedCookieName(name) &&
-      !isActiveSupabaseCookieName(name, storageKey);
-    if (isForeignSupabase || orphanedChunks.has(name)) {
+    if (orphanedChunks.has(name)) {
       seen.add(name);
       staleNames.push(name);
     }
@@ -156,6 +226,7 @@ export function filterAndDedupeAuthCookies(
   storageKey?: string | null,
 ): { name: string; value: string }[] {
   const staleSet = new Set(findStaleSupabaseCookieNames(cookies, storageKey));
+  const effectiveValues = resolveEffectiveCookieValues(cookies);
   const seenNames = new Set<string>();
   const filtered: { name: string; value: string }[] = [];
 
@@ -164,7 +235,10 @@ export function filterAndDedupeAuthCookies(
       continue;
     }
     seenNames.add(cookie.name);
-    filtered.push({ name: cookie.name, value: cookie.value });
+    filtered.push({
+      name: cookie.name,
+      value: effectiveValues.get(cookie.name) ?? cookie.value,
+    });
   }
 
   return filtered;
@@ -197,12 +271,15 @@ export function summarizeCookieHeaderMetrics(
   const staleSet = new Set(findStaleSupabaseCookieNames(cookies, storageKey));
   const seenNames = new Set<string>();
   const duplicateSet = new Set<string>();
+  const otherSupabaseNameSet = new Set<string>();
 
   let totalPairBytes = 0;
   let activeSupabaseCookieCount = 0;
   let activeSupabaseBytes = 0;
   let staleSupabaseCookieCount = 0;
   let staleSupabaseBytes = 0;
+  let otherSupabaseCookieCount = 0;
+  let otherSupabaseBytes = 0;
   let otherCookieCount = 0;
   let otherCookieBytes = 0;
   const entries: CookieHeaderMetricsSummary["entries"] = [];
@@ -220,11 +297,12 @@ export function summarizeCookieHeaderMetrics(
       Buffer.byteLength(cookie.value, "utf8");
     totalPairBytes += pairBytes;
 
-    const isStaleSupabase =
-      staleSet.has(cookie.name) ||
-      (Boolean(storageKey) &&
-        isSupabaseManagedCookieName(cookie.name) &&
-        !isActiveSupabaseCookieName(cookie.name, storageKey!));
+    const isStaleSupabase = staleSet.has(cookie.name);
+    const isOtherSupabase =
+      Boolean(storageKey) &&
+      !isStaleSupabase &&
+      isSupabaseManagedCookieName(cookie.name) &&
+      !isActiveSupabaseCookieName(cookie.name, storageKey!);
     const isActiveSupabase = storageKey
       ? !isStaleSupabase && isActiveSupabaseCookieName(cookie.name, storageKey)
       : isSupabaseManagedCookieName(cookie.name);
@@ -244,6 +322,15 @@ export function summarizeCookieHeaderMetrics(
         name: cookie.name,
         byteLength: pairBytes,
         category: "active_supabase",
+      });
+    } else if (isOtherSupabase) {
+      otherSupabaseCookieCount += 1;
+      otherSupabaseBytes += pairBytes;
+      otherSupabaseNameSet.add(cookie.name);
+      entries.push({
+        name: cookie.name,
+        byteLength: pairBytes,
+        category: "other_supabase",
       });
     } else {
       otherCookieCount += 1;
@@ -267,6 +354,9 @@ export function summarizeCookieHeaderMetrics(
     staleSupabaseCookieCount,
     staleSupabaseBytes,
     staleSupabaseCookieNames: [...staleSet],
+    otherSupabaseCookieCount,
+    otherSupabaseBytes,
+    otherSupabaseCookieNames: [...otherSupabaseNameSet],
     duplicateCookieNames: [...duplicateSet],
     otherCookieCount,
     otherCookieBytes,

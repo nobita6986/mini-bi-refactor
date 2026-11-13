@@ -1858,6 +1858,12 @@ export function resolveDepartmentApproverMutationPayload(input: {
   };
 }
 
+export type DepartmentApproverPendingState = {
+  phase: "ambiguous_retry" | "reload_required";
+  payload: DepartmentApproverMutationPayload;
+  message: string;
+};
+
 export function isAmbiguousLeaveMutationFailure(
   outcome:
     | "network_error"
@@ -1881,6 +1887,131 @@ export function isAmbiguousLeaveMutationFailure(
     outcome.errorCode === "LEAVE_UNAVAILABLE" ||
     outcome.errorCode === "LEAVE_INTERNAL_ERROR"
   );
+}
+
+export function transitionDepartmentApproverAfterMutation(input: {
+  payload: DepartmentApproverMutationPayload;
+  mutationResult:
+    | "network_error"
+    | { ok: true }
+    | { ok: false; status: number; errorCode?: string | null };
+  postMutationReloadSucceeded?: boolean;
+}): {
+  nextPendingState: DepartmentApproverPendingState | null;
+  unlocked: boolean;
+  shouldClearReason: boolean;
+} {
+  if (
+    input.mutationResult === "network_error" ||
+    (!input.mutationResult.ok && isAmbiguousLeaveMutationFailure(input.mutationResult))
+  ) {
+    return {
+      nextPendingState: {
+        phase: "ambiguous_retry",
+        payload: input.payload,
+        message:
+          "Chưa xác định được kết quả lưu trên máy chủ. Các trường đang được khóa để giữ nguyên dữ liệu và khóa chống ghi trùng (Idempotency-Key); vui lòng thử lại lưu người duyệt hoặc tải lại cấu hình để đối chiếu.",
+      },
+      unlocked: false,
+      shouldClearReason: false,
+    };
+  }
+
+  if (input.mutationResult.ok) {
+    if (input.postMutationReloadSucceeded === true) {
+      return {
+        nextPendingState: null,
+        unlocked: true,
+        shouldClearReason: true,
+      };
+    }
+    return {
+      nextPendingState: {
+        phase: "reload_required",
+        payload: input.payload,
+        message:
+          "Đã lưu người duyệt trên máy chủ nhưng chưa tải lại được cấu hình mới nhất. Vui lòng tải lại cấu hình để đối chiếu trước khi chỉnh sửa tiếp.",
+      },
+      unlocked: false,
+      shouldClearReason: true,
+    };
+  }
+
+  if (input.mutationResult.errorCode === "LEAVE_ROW_VERSION_CONFLICT") {
+    if (input.postMutationReloadSucceeded === true) {
+      return {
+        nextPendingState: null,
+        unlocked: true,
+        shouldClearReason: false,
+      };
+    }
+    return {
+      nextPendingState: {
+        phase: "reload_required",
+        payload: input.payload,
+        message:
+          "Phiên bản cấu hình trên máy chủ đã thay đổi nhưng chưa tải lại được dữ liệu mới nhất. Vui lòng tải lại cấu hình để đối chiếu trước khi thao tác tiếp.",
+      },
+      unlocked: false,
+      shouldClearReason: false,
+    };
+  }
+
+  return {
+    nextPendingState: null,
+    unlocked: true,
+    shouldClearReason: false,
+  };
+}
+
+export function transitionDepartmentApproverAfterReload(input: {
+  pendingState: DepartmentApproverPendingState;
+  reloadResult:
+    | { ok: false }
+    | {
+        ok: true;
+        departmentApprovers: ReadonlyArray<{
+          unit_kind: string;
+          approver_app_user_id: string | null;
+          is_current: boolean;
+          row_version: number;
+        }>;
+      };
+}): {
+  nextPendingState: DepartmentApproverPendingState | null;
+  unlocked: boolean;
+  appliedOnServer: boolean;
+  shouldClearReason: boolean;
+} {
+  if (!input.reloadResult.ok) {
+    return {
+      nextPendingState: input.pendingState,
+      unlocked: false,
+      appliedOnServer: false,
+      shouldClearReason: false,
+    };
+  }
+
+  const currentRow = input.reloadResult.departmentApprovers.find(
+    (row) => row.unit_kind === input.pendingState.payload.unit_kind && row.is_current,
+  );
+  const appliedOnServer =
+    input.pendingState.payload.approver_app_user_id === null
+      ? !currentRow
+      : Boolean(
+          currentRow &&
+            currentRow.approver_app_user_id ===
+              input.pendingState.payload.approver_app_user_id &&
+            currentRow.row_version >
+              input.pendingState.payload.expected_row_version,
+        );
+
+  return {
+    nextPendingState: null,
+    unlocked: true,
+    appliedOnServer,
+    shouldClearReason: appliedOnServer,
+  };
 }
 
 export function formatSignedHalfDayUnits(unitsDelta: number): string {

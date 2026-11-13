@@ -66,7 +66,6 @@ import {
   leaveUnitKindLabel,
   mergeLeaveAdminKnownAccounts,
   newClientIdempotencyKey,
-  isAmbiguousLeaveMutationFailure,
   parseDaysInputToHalfDayUnits,
   parseOpeningBalanceBulkText,
   resolveAdminSelectorEmployeeOptions,
@@ -78,8 +77,10 @@ import {
   resolveRequestTypeBreakdown,
   resolveVisibleLeaveTabs,
   todayVietnamIsoDate,
+  transitionDepartmentApproverAfterMutation,
+  transitionDepartmentApproverAfterReload,
   validateApproverDecisionInput,
-  type DepartmentApproverMutationPayload,
+  type DepartmentApproverPendingState,
   type LeaveAccountProjection,
   type LeaveAdminEmployeeItemProjection,
   type LeaveAdminOverviewProjection,
@@ -296,8 +297,10 @@ export function LeaveManagementWorkspace({
   const [deptApproverUserId, setDeptApproverUserId] = useState<string>("");
   const [deptReason, setDeptReason] = useState<string>("");
   const [savingDeptApprover, setSavingDeptApprover] = useState<boolean>(false);
-  const [pendingDeptApproverPayload, setPendingDeptApproverPayload] =
-    useState<DepartmentApproverMutationPayload | null>(null);
+  const [reloadingDeptApprover, setReloadingDeptApprover] = useState<boolean>(false);
+  const [deptApproverPendingState, setDeptApproverPendingState] =
+    useState<DepartmentApproverPendingState | null>(null);
+  const deptApproverLocked = deptApproverPendingState !== null;
 
   // Admin Module Grant Form State
   const [grantUserId, setGrantUserId] = useState<string>("");
@@ -407,10 +410,13 @@ export function LeaveManagementWorkspace({
     search: string,
     page: number,
     accountStatus: LeaveAdminAccountStatusFilter,
-  ) => {
+    options?: { silentErrorState?: boolean },
+  ): Promise<LeaveAdminOverviewProjection | null> => {
     await Promise.resolve();
     setAdminLoading(true);
-    setAdminErrorCode(null);
+    if (!options?.silentErrorState) {
+      setAdminErrorCode(null);
+    }
     const offset = Math.max(0, (page - 1) * ADMIN_PAGE_SIZE);
     const qs = new URLSearchParams({
       limit: String(ADMIN_PAGE_SIZE),
@@ -428,27 +434,33 @@ export function LeaveManagementWorkspace({
       });
       const parsed = await parseJsonResponse<LeaveAdminOverviewProjection>(response);
       if (!parsed.ok || !parsed.data) {
-        setAdminErrorCode(parsed.errorCode ?? "LEAVE_INTERNAL_ERROR");
-      } else {
-        const overviewData = parsed.data;
-        setAdminData(overviewData);
-        setKnownAccountsById((prev) =>
-          mergeLeaveAdminKnownAccounts(
-            prev,
-            overviewData.employees.map((emp) => emp.account),
-            overviewData.department_approvers.map((da) => da.approver),
-            overviewData.module_grants.map((gr) => gr.account),
-          ),
-        );
-        if (overviewData.policy.carry_over_expiry_month !== null) {
-          setPolicyExpiryMonth(String(overviewData.policy.carry_over_expiry_month));
+        if (!options?.silentErrorState) {
+          setAdminErrorCode(parsed.errorCode ?? "LEAVE_INTERNAL_ERROR");
         }
-        if (overviewData.policy.carry_over_expiry_day !== null) {
-          setPolicyExpiryDay(String(overviewData.policy.carry_over_expiry_day));
-        }
+        return null;
       }
+      const overviewData = parsed.data;
+      setAdminData(overviewData);
+      setKnownAccountsById((prev) =>
+        mergeLeaveAdminKnownAccounts(
+          prev,
+          overviewData.employees.map((emp) => emp.account),
+          overviewData.department_approvers.map((da) => da.approver),
+          overviewData.module_grants.map((gr) => gr.account),
+        ),
+      );
+      if (overviewData.policy.carry_over_expiry_month !== null) {
+        setPolicyExpiryMonth(String(overviewData.policy.carry_over_expiry_month));
+      }
+      if (overviewData.policy.carry_over_expiry_day !== null) {
+        setPolicyExpiryDay(String(overviewData.policy.carry_over_expiry_day));
+      }
+      return overviewData;
     } catch {
-      setAdminErrorCode("LEAVE_INTERNAL_ERROR");
+      if (!options?.silentErrorState) {
+        setAdminErrorCode("LEAVE_INTERNAL_ERROR");
+      }
+      return null;
     } finally {
       setAdminLoading(false);
     }
@@ -934,8 +946,15 @@ export function LeaveManagementWorkspace({
 
   const handleSaveDepartmentApprover = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!adminData || savingDeptApprover) return;
-    if (!deptApproverUserId.trim()) {
+    if (!adminData || savingDeptApprover || reloadingDeptApprover) return;
+    if (deptApproverPendingState?.phase === "reload_required") return;
+
+    const retryPendingPayload =
+      deptApproverPendingState?.phase === "ambiguous_retry"
+        ? deptApproverPendingState.payload
+        : null;
+
+    if (!retryPendingPayload && !deptApproverUserId.trim()) {
       notify.warning({
         title: "Thiếu thông tin người duyệt",
         description: "Vui lòng chọn người duyệt bộ phận.",
@@ -946,19 +965,21 @@ export function LeaveManagementWorkspace({
     const existingCurrent = adminData.department_approvers.find(
       (item) => item.unit_kind === deptUnitKind && item.is_current,
     );
-    const payload = resolveDepartmentApproverMutationPayload({
-      unitKind: deptUnitKind,
-      approverAppUserId: deptApproverUserId,
-      expectedRowVersion:
-        pendingDeptApproverPayload &&
-        pendingDeptApproverPayload.unit_kind === deptUnitKind &&
-        pendingDeptApproverPayload.approver_app_user_id === deptApproverUserId.trim() &&
-        pendingDeptApproverPayload.reason === (deptReason.trim() || null)
-          ? pendingDeptApproverPayload.expected_row_version
-          : (existingCurrent?.row_version ?? 0),
-      reason: deptReason,
-      pendingPayload: pendingDeptApproverPayload,
-    });
+    const payload = retryPendingPayload
+      ? resolveDepartmentApproverMutationPayload({
+          unitKind: retryPendingPayload.unit_kind,
+          approverAppUserId: retryPendingPayload.approver_app_user_id,
+          expectedRowVersion: retryPendingPayload.expected_row_version,
+          reason: retryPendingPayload.reason,
+          pendingPayload: retryPendingPayload,
+        })
+      : resolveDepartmentApproverMutationPayload({
+          unitKind: deptUnitKind,
+          approverAppUserId: deptApproverUserId,
+          expectedRowVersion: existingCurrent?.row_version ?? 0,
+          reason: deptReason,
+          pendingPayload: null,
+        });
 
     setSavingDeptApprover(true);
     try {
@@ -976,38 +997,134 @@ export function LeaveManagementWorkspace({
       });
       const parsed = await parseJsonResponse(response);
       if (!parsed.ok) {
-        if (
-          isAmbiguousLeaveMutationFailure({
+        if (parsed.errorCode === "LEAVE_ROW_VERSION_CONFLICT") {
+          const reloaded = await loadAdminConfig(
+            adminAppliedSearch,
+            adminPage,
+            adminAccountStatus,
+            { silentErrorState: true },
+          );
+          const transition = transitionDepartmentApproverAfterMutation({
+            payload,
+            mutationResult: {
+              ok: false,
+              status: parsed.status,
+              errorCode: parsed.errorCode,
+            },
+            postMutationReloadSucceeded: reloaded !== null,
+          });
+          setDeptApproverPendingState(transition.nextPendingState);
+          if (transition.unlocked) {
+            notify.warning({
+              title: "Dữ liệu người duyệt đã thay đổi",
+              description: `${leaveErrorMessage(parsed.errorCode)} Đã tải lại cấu hình mới nhất từ máy chủ.`,
+            });
+          } else {
+            notify.warning({
+              title: "Xung đột phiên bản cấu hình",
+              description: "Cấu hình trên máy chủ đã thay đổi nhưng chưa tải lại được dữ liệu mới nhất. Vui lòng bấm Tải lại cấu hình để đối chiếu.",
+            });
+          }
+          return;
+        }
+
+        const transition = transitionDepartmentApproverAfterMutation({
+          payload,
+          mutationResult: {
             ok: false,
             status: parsed.status,
             errorCode: parsed.errorCode ?? null,
-          })
-        ) {
-          setPendingDeptApproverPayload(payload);
-        } else {
-          setPendingDeptApproverPayload(null);
-        }
+          },
+        });
+        setDeptApproverPendingState(transition.nextPendingState);
         notify.error({
           title: "Không thể cập nhật người duyệt bộ phận",
           description: leaveErrorMessage(parsed.errorCode),
         });
         return;
       }
-      setPendingDeptApproverPayload(null);
-      notify.success({
-        title: "Đã lưu người duyệt bộ phận",
-        description: `Đã cập nhật người duyệt cho bộ phận ${leaveUnitKindLabel(deptUnitKind)}.`,
+
+      const reloaded = await loadAdminConfig(
+        adminAppliedSearch,
+        adminPage,
+        adminAccountStatus,
+        { silentErrorState: true },
+      );
+      const transition = transitionDepartmentApproverAfterMutation({
+        payload,
+        mutationResult: { ok: true },
+        postMutationReloadSucceeded: reloaded !== null,
       });
-      setDeptReason("");
-      await loadAdminConfig(adminAppliedSearch, adminPage, adminAccountStatus);
+      setDeptApproverPendingState(transition.nextPendingState);
+      if (transition.shouldClearReason) {
+        setDeptReason("");
+      }
+      if (reloaded !== null) {
+        notify.success({
+          title: "Đã lưu người duyệt bộ phận",
+          description: `Đã cập nhật người duyệt cho bộ phận ${leaveUnitKindLabel(payload.unit_kind)}.`,
+        });
+      } else {
+        notify.warning({
+          title: "Đã lưu người duyệt nhưng cần tải lại cấu hình",
+          description: "Thay đổi đã được máy chủ ghi nhận nhưng chưa tải lại được dữ liệu mới nhất. Vui lòng bấm Tải lại cấu hình để đối chiếu.",
+        });
+      }
     } catch {
-      setPendingDeptApproverPayload(payload);
+      const transition = transitionDepartmentApproverAfterMutation({
+        payload,
+        mutationResult: "network_error",
+      });
+      setDeptApproverPendingState(transition.nextPendingState);
       notify.error({
         title: "Lỗi kết nối",
-        description: "Không thể cập nhật người duyệt lúc này.",
+        description: "Chưa xác định được kết quả cập nhật người duyệt. Vui lòng thử lại lưu người duyệt hoặc tải lại cấu hình để đối chiếu.",
       });
     } finally {
       setSavingDeptApprover(false);
+    }
+  };
+
+  const handleReloadDepartmentApproverConfig = async () => {
+    if (!deptApproverPendingState || savingDeptApprover || reloadingDeptApprover) return;
+    setReloadingDeptApprover(true);
+    try {
+      const freshOverview = await loadAdminConfig(
+        adminAppliedSearch,
+        adminPage,
+        adminAccountStatus,
+        { silentErrorState: true },
+      );
+      const transition = transitionDepartmentApproverAfterReload({
+        pendingState: deptApproverPendingState,
+        reloadResult: freshOverview
+          ? { ok: true, departmentApprovers: freshOverview.department_approvers }
+          : { ok: false },
+      });
+      setDeptApproverPendingState(transition.nextPendingState);
+      if (!transition.unlocked) {
+        notify.error({
+          title: "Không thể tải lại cấu hình",
+          description: "Chưa tải được dữ liệu đối chiếu từ máy chủ. Biểu mẫu vẫn giữ khóa và bảo toàn thao tác đang chờ.",
+        });
+        return;
+      }
+      if (transition.shouldClearReason) {
+        setDeptReason("");
+      }
+      if (transition.appliedOnServer) {
+        notify.success({
+          title: "Đã đối chiếu cấu hình mới nhất",
+          description: "Thay đổi người duyệt bộ phận đã có hiệu lực trên máy chủ. Biểu mẫu đã được mở khóa.",
+        });
+      } else {
+        notify.info({
+          title: "Đã tải lại cấu hình để đối chiếu",
+          description: "Dữ liệu mới nhất từ máy chủ đã được cập nhật. Biểu mẫu đã được mở khóa.",
+        });
+      }
+    } finally {
+      setReloadingDeptApprover(false);
     }
   };
 
@@ -2788,6 +2905,33 @@ export function LeaveManagementWorkspace({
                       )}
                     </div>
 
+                    {deptApproverPendingState ? (
+                      <StatusBanner
+                        tone="warning"
+                        title={
+                          deptApproverPendingState.phase === "ambiguous_retry"
+                            ? "Thao tác lưu người duyệt chưa có kết quả xác nhận"
+                            : "Cần tải lại cấu hình để đối chiếu trước khi chỉnh sửa tiếp"
+                        }
+                        dataTestId="leave-dept-approver-pending-banner"
+                      >
+                        <p>{deptApproverPendingState.message}</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            loading={reloadingDeptApprover}
+                            disabled={savingDeptApprover || reloadingDeptApprover}
+                            onClick={() => void handleReloadDepartmentApproverConfig()}
+                            data-testid="leave-reload-dept-approver-btn"
+                          >
+                            Tải lại cấu hình để đối chiếu
+                          </Button>
+                        </div>
+                      </StatusBanner>
+                    ) : null}
+
                     <form
                       onSubmit={handleSaveDepartmentApprover}
                       className="space-y-3 border-t border-border pt-3"
@@ -2801,11 +2945,12 @@ export function LeaveManagementWorkspace({
                             value={deptUnitKind}
                             disabled={
                               savingDeptApprover ||
-                              pendingDeptApproverPayload !== null ||
+                              reloadingDeptApprover ||
+                              deptApproverLocked ||
                               (!authority.is_full_admin && !authority.is_bod)
                             }
                             onChange={(e) => {
-                              setPendingDeptApproverPayload(null);
+                              if (deptApproverLocked) return;
                               setDeptUnitKind(
                                 e.target.value as LeaveDepartmentApproverUnitKind,
                               );
@@ -2828,11 +2973,12 @@ export function LeaveManagementWorkspace({
                             value={deptApproverUserId}
                             disabled={
                               savingDeptApprover ||
-                              pendingDeptApproverPayload !== null ||
+                              reloadingDeptApprover ||
+                              deptApproverLocked ||
                               (!authority.is_full_admin && !authority.is_bod)
                             }
                             onChange={(e) => {
-                              setPendingDeptApproverPayload(null);
+                              if (deptApproverLocked) return;
                               setDeptApproverUserId(e.target.value);
                             }}
                             data-testid="leave-dept-approver-select"
@@ -2867,12 +3013,13 @@ export function LeaveManagementWorkspace({
                             type="text"
                             disabled={
                               savingDeptApprover ||
-                              pendingDeptApproverPayload !== null ||
+                              reloadingDeptApprover ||
+                              deptApproverLocked ||
                               (!authority.is_full_admin && !authority.is_bod)
                             }
                             value={deptReason}
                             onChange={(e) => {
-                              setPendingDeptApproverPayload(null);
+                              if (deptApproverLocked) return;
                               setDeptReason(e.target.value);
                             }}
                             placeholder="Nhập lý do cấu hình người duyệt bộ phận..."
@@ -2885,11 +3032,16 @@ export function LeaveManagementWorkspace({
                           variant="primary"
                           loading={savingDeptApprover}
                           disabled={
-                            savingDeptApprover || (!authority.is_full_admin && !authority.is_bod)
+                            savingDeptApprover ||
+                            reloadingDeptApprover ||
+                            deptApproverPendingState?.phase === "reload_required" ||
+                            (!authority.is_full_admin && !authority.is_bod)
                           }
                           data-testid="leave-save-dept-approver-btn"
                         >
-                          {pendingDeptApproverPayload ? "Thử lại lưu người duyệt" : "Lưu người duyệt"}
+                          {deptApproverPendingState?.phase === "ambiguous_retry"
+                            ? "Thử lại lưu người duyệt"
+                            : "Lưu người duyệt"}
                         </Button>
                       </div>
                     </form>
