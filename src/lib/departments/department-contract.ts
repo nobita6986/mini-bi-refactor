@@ -10,10 +10,12 @@ export const DEPARTMENT_MAX_REASON_LENGTH = 4000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
-const ISO_UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ISO_UTC_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/i;
 const DEPARTMENT_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,63}$/;
 const SEARCH_CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 const REASON_CONTROL_CHAR_PATTERN = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+const WP3_MAX_REASON_LENGTH = 500;
 
 export const DEPARTMENT_SYSTEM_KEYS = [
   "RECRUITMENT",
@@ -333,7 +335,11 @@ function isValidIsoCalendarDate(value: unknown): value is string {
 }
 
 function isIsoUtcTimestamp(value: unknown): value is string {
-  return typeof value === "string" && ISO_UTC_TIMESTAMP_PATTERN.test(value);
+  return (
+    typeof value === "string" &&
+    ISO_UTC_TIMESTAMP_PATTERN.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
 }
 
 function isSafeNonNegativeInt(value: unknown): value is number {
@@ -612,6 +618,19 @@ function parseReasonField(raw: unknown): string | null {
   return trimmed;
 }
 
+function parseWp3ReasonField(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (
+    trimmed.length < 1 ||
+    trimmed.length > WP3_MAX_REASON_LENGTH ||
+    REASON_CONTROL_CHAR_PATTERN.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
 function parseMatchedIdempotencyKey(
   headerValue: string | null,
   bodyValue: unknown,
@@ -623,6 +642,26 @@ function parseMatchedIdempotencyKey(
     return null;
   }
   return bodyUuid;
+}
+
+function parseWp3MatchedIdempotencyKey(
+  headerValue: string | null,
+  bodyValue: unknown,
+):
+  | { ok: true; value: string }
+  | { ok: false; code: "IDEMPOTENCY_KEY_INVALID" | "IDEMPOTENCY_KEY_MISMATCH" } {
+  if (typeof headerValue !== "string") {
+    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  }
+  const headerUuid = normalizeUuid(headerValue.trim());
+  const bodyUuid = normalizeUuid(bodyValue);
+  if (!headerUuid || !bodyUuid) {
+    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  }
+  if (headerUuid !== bodyUuid) {
+    return { ok: false, code: "IDEMPOTENCY_KEY_MISMATCH" };
+  }
+  return { ok: true, value: bodyUuid };
 }
 
 function resolveDepartmentBusinessTodayVn(todayVn?: string | null): string {
@@ -1563,9 +1602,9 @@ export function parseCreateDepartmentBody(
   if (!hasExactKeys(body, ["code", "name", "reason", "idempotency_key"])) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem) {
-    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
   }
   if (typeof body.code !== "string") {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
@@ -1577,7 +1616,7 @@ export function parseCreateDepartmentBody(
   if (!isNonEmptyDisplayString(body.name, 256)) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const reason = parseReasonField(body.reason);
+  const reason = parseWp3ReasonField(body.reason);
   if (!reason) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
@@ -1587,7 +1626,7 @@ export function parseCreateDepartmentBody(
       code: trimmedCode,
       name: body.name.trim(),
       reason,
-      idempotency_key: idem,
+      idempotency_key: idem.value,
     },
   };
 }
@@ -1612,9 +1651,9 @@ export function parseUpdateDepartmentBody(
   ) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem) {
-    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
   }
   if (
     !isSafePositiveInt(body.expected_department_version) ||
@@ -1623,7 +1662,7 @@ export function parseUpdateDepartmentBody(
   ) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const reason = parseReasonField(body.reason);
+  const reason = parseWp3ReasonField(body.reason);
   if (!reason) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
@@ -1634,7 +1673,7 @@ export function parseUpdateDepartmentBody(
       name: body.name.trim(),
       is_active: body.is_active,
       reason,
-      idempotency_key: idem,
+      idempotency_key: idem.value,
     },
   };
 }
@@ -1695,15 +1734,15 @@ export function parseAssignPersonMemberBody(
   if (!hasExactKeys(body, ["person_id", "expected_person_version", "reason", "idempotency_key"])) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem) {
-    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
   }
   const personId = normalizeUuid(body.person_id);
   if (!personId || !isSafePositiveInt(body.expected_person_version)) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const reason = parseReasonField(body.reason);
+  const reason = parseWp3ReasonField(body.reason);
   if (!reason) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
@@ -1713,7 +1752,7 @@ export function parseAssignPersonMemberBody(
       person_id: personId,
       expected_person_version: body.expected_person_version,
       reason,
-      idempotency_key: idem,
+      idempotency_key: idem.value,
     },
   };
 }
@@ -1730,14 +1769,14 @@ export function parseEndPersonMemberBody(
   if (!hasExactKeys(body, ["expected_person_version", "reason", "idempotency_key"])) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem) {
-    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
   }
   if (!isSafePositiveInt(body.expected_person_version)) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const reason = parseReasonField(body.reason);
+  const reason = parseWp3ReasonField(body.reason);
   if (!reason) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
@@ -1746,7 +1785,7 @@ export function parseEndPersonMemberBody(
     value: {
       expected_person_version: body.expected_person_version,
       reason,
-      idempotency_key: idem,
+      idempotency_key: idem.value,
     },
   };
 }
@@ -1819,9 +1858,9 @@ export function parseDesignateHeadBody(
   ) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem) {
-    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
   }
   const personId = normalizeUuid(body.person_id);
   if (!personId || !isSafePositiveInt(body.expected_department_version)) {
@@ -1835,7 +1874,7 @@ export function parseDesignateHeadBody(
     }
     expectedHeadId = normalized;
   }
-  const reason = parseReasonField(body.reason);
+  const reason = parseWp3ReasonField(body.reason);
   if (!reason) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
@@ -1846,7 +1885,7 @@ export function parseDesignateHeadBody(
       expected_department_version: body.expected_department_version,
       expected_current_head_assignment_id: expectedHeadId,
       reason,
-      idempotency_key: idem,
+      idempotency_key: idem.value,
     },
   };
 }
@@ -1870,15 +1909,15 @@ export function parseEndHeadBody(
   ) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem) {
-    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
   }
   const expectedHeadId = normalizeUuid(body.expected_current_head_assignment_id);
   if (!isSafePositiveInt(body.expected_department_version) || !expectedHeadId) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
-  const reason = parseReasonField(body.reason);
+  const reason = parseWp3ReasonField(body.reason);
   if (!reason) {
     return { ok: false, code: "ORG_VALIDATION_ERROR" };
   }
@@ -1888,7 +1927,7 @@ export function parseEndHeadBody(
       expected_department_version: body.expected_department_version,
       expected_current_head_assignment_id: expectedHeadId,
       reason,
-      idempotency_key: idem,
+      idempotency_key: idem.value,
     },
   };
 }
@@ -1901,7 +1940,7 @@ export function computeCreateDepartmentFingerprint(input: {
 }): string {
   const canonical = JSON.stringify({
     v: 1,
-    op: "DEPARTMENT_CREATED",
+    op: "DEPT_CREATED",
     actor_app_user_id: input.actor_app_user_id.toLowerCase(),
     code: input.code,
     name: input.name,
@@ -1920,7 +1959,7 @@ export function computeUpdateDepartmentFingerprint(input: {
 }): string {
   const canonical = JSON.stringify({
     v: 1,
-    op: "DEPARTMENT_UPDATED",
+    op: "DEPT_UPDATED",
     actor_app_user_id: input.actor_app_user_id.toLowerCase(),
     department_id: input.department_id.toLowerCase(),
     expected_department_version: input.expected_department_version,
@@ -2009,4 +2048,423 @@ export function computeEndHeadFingerprint(input: {
     reason: input.reason,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function parseDepartmentPersonMembershipParams(
+  rawDepartmentId: unknown,
+  rawMembershipId: unknown,
+  url: URL,
+): ParseResult<{ department_id: string; membership_id: string }> {
+  if (url.search.length > 0) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const departmentId = normalizeUuid(rawDepartmentId);
+  const membershipId = normalizeUuid(rawMembershipId);
+  if (!departmentId || !membershipId) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  return {
+    ok: true,
+    value: {
+      department_id: departmentId,
+      membership_id: membershipId,
+    },
+  };
+}
+
+export type DepartmentMutationProjection = {
+  replayed: boolean;
+  department: DepartmentProjection;
+};
+
+export type DepartmentPersonMemberMutationProjection = {
+  replayed: boolean;
+  person_version: number;
+  membership: PersonDeptMembershipProjection;
+};
+
+export type DesignateDepartmentHeadProjection = {
+  replayed: boolean;
+  department_version: number;
+  replaced_head: {
+    head_assignment_id: string;
+    person_id: string;
+    ended_at: string;
+    version: number;
+  } | null;
+  active_head: DepartmentHeadProjection;
+};
+
+export type EndDepartmentHeadProjection = {
+  replayed: boolean;
+  department_version: number;
+  ended_head: DepartmentHeadProjection;
+};
+
+const PERSON_SOURCE_KINDS_SET = new Set([
+  "ADMIN_MUTATION",
+  "BACKFILL_DATE_EVIDENCE",
+  "BACKFILL_CURRENT_STATE_ONLY",
+]);
+
+function isValidPersonSourceKind(
+  value: unknown,
+): value is PersonDeptMembershipProjection["source_kind"] {
+  return typeof value === "string" && PERSON_SOURCE_KINDS_SET.has(value);
+}
+
+export function projectDepartmentMutationResponse(
+  value: unknown,
+): DepartmentMutationProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["replayed", "department"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean") {
+    return null;
+  }
+  const department = projectDepartmentItem(value.department);
+  if (!department) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    department,
+  };
+}
+
+export function projectPersonDeptMembershipItem(
+  value: unknown,
+): PersonDeptMembershipProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "membership_id",
+      "department_id",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "person_status",
+      "person_version",
+      "active_account_ref",
+      "is_department_head",
+      "started_at",
+      "ended_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  const membershipId = normalizeUuid(value.membership_id);
+  const departmentId = normalizeUuid(value.department_id);
+  const personId = normalizeUuid(value.person_id);
+  const activeAccountRef =
+    value.active_account_ref === null ? null : normalizeUuid(value.active_account_ref);
+
+  if (
+    !membershipId ||
+    !departmentId ||
+    !personId ||
+    !isNonEmptyDisplayString(value.employee_code, 64) ||
+    !isNonEmptyDisplayString(value.full_name, 160) ||
+    (value.person_status !== "ACTIVE" && value.person_status !== "INACTIVE") ||
+    !isSafePositiveInt(value.person_version) ||
+    (value.active_account_ref !== null && !activeAccountRef) ||
+    typeof value.is_department_head !== "boolean" ||
+    !isIsoUtcTimestamp(value.started_at) ||
+    (value.ended_at !== null && !isIsoUtcTimestamp(value.ended_at)) ||
+    !isValidPersonSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoCalendarDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+
+  return {
+    membership_id: membershipId,
+    department_id: departmentId,
+    person_id: personId,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    person_status: value.person_status,
+    person_version: value.person_version,
+    active_account_ref: activeAccountRef,
+    is_department_head: value.is_department_head,
+    started_at: value.started_at,
+    ended_at: value.ended_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+export function projectDepartmentPersonMembershipsListResponse(
+  value: unknown,
+): DepartmentPersonMembershipsListProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "authorization_date",
+      "as_of",
+      "department_id",
+      "status",
+      "search",
+      "page",
+      "page_size",
+      "total",
+      "has_more",
+      "memberships",
+    ])
+  ) {
+    return null;
+  }
+  const departmentId = normalizeUuid(value.department_id);
+  if (
+    !isValidIsoCalendarDate(value.authorization_date) ||
+    !isIsoUtcTimestamp(value.as_of) ||
+    !departmentId ||
+    typeof value.status !== "string" ||
+    !(DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS as readonly string[]).includes(value.status) ||
+    (value.search !== null &&
+      !isNonEmptyDisplayString(value.search, DEPARTMENT_MAX_SEARCH_LENGTH)) ||
+    !isSafePositiveInt(value.page) ||
+    value.page > DEPARTMENT_MAX_PAGE ||
+    !isSafePositiveInt(value.page_size) ||
+    value.page_size > DEPARTMENT_MAX_PAGE_SIZE ||
+    !isSafeNonNegativeInt(value.total) ||
+    typeof value.has_more !== "boolean" ||
+    !Array.isArray(value.memberships) ||
+    value.memberships.length > value.page_size
+  ) {
+    return null;
+  }
+
+  const memberships: PersonDeptMembershipProjection[] = [];
+  for (const raw of value.memberships) {
+    const item = projectPersonDeptMembershipItem(raw);
+    if (!item || item.department_id !== departmentId) return null;
+    memberships.push(item);
+  }
+
+  return {
+    authorization_date: value.authorization_date,
+    as_of: value.as_of,
+    department_id: departmentId,
+    status: value.status as DepartmentPersonMembershipStatusFilter,
+    search: value.search,
+    page: value.page,
+    page_size: value.page_size,
+    total: value.total,
+    has_more: value.has_more,
+    memberships,
+  };
+}
+
+export function projectDepartmentPersonMemberMutationResponse(
+  value: unknown,
+): DepartmentPersonMemberMutationProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["replayed", "person_version", "membership"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.person_version)) {
+    return null;
+  }
+  const membership = projectPersonDeptMembershipItem(value.membership);
+  if (!membership) return null;
+  return {
+    replayed: value.replayed,
+    person_version: value.person_version,
+    membership,
+  };
+}
+
+export function projectDepartmentHeadItem(value: unknown): DepartmentHeadProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "head_assignment_id",
+      "department_id",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "started_at",
+      "ended_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  const headAssignmentId = normalizeUuid(value.head_assignment_id);
+  const departmentId = normalizeUuid(value.department_id);
+  const personId = normalizeUuid(value.person_id);
+  if (
+    !headAssignmentId ||
+    !departmentId ||
+    !personId ||
+    !isNonEmptyDisplayString(value.employee_code, 64) ||
+    !isNonEmptyDisplayString(value.full_name, 160) ||
+    !isIsoUtcTimestamp(value.started_at) ||
+    (value.ended_at !== null && !isIsoUtcTimestamp(value.ended_at)) ||
+    !isValidPersonSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoCalendarDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+
+  return {
+    head_assignment_id: headAssignmentId,
+    department_id: departmentId,
+    person_id: personId,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    started_at: value.started_at,
+    ended_at: value.ended_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+export function projectDepartmentHeadsListResponse(
+  value: unknown,
+): DepartmentHeadsListProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "authorization_date",
+      "as_of",
+      "department_id",
+      "include_history",
+      "active_head",
+      "page",
+      "page_size",
+      "total",
+      "has_more",
+      "history",
+    ])
+  ) {
+    return null;
+  }
+  const departmentId = normalizeUuid(value.department_id);
+  if (
+    !isValidIsoCalendarDate(value.authorization_date) ||
+    !isIsoUtcTimestamp(value.as_of) ||
+    !departmentId ||
+    typeof value.include_history !== "boolean" ||
+    !isSafePositiveInt(value.page) ||
+    value.page > DEPARTMENT_MAX_PAGE ||
+    !isSafePositiveInt(value.page_size) ||
+    value.page_size > DEPARTMENT_MAX_PAGE_SIZE ||
+    !isSafeNonNegativeInt(value.total) ||
+    typeof value.has_more !== "boolean" ||
+    !Array.isArray(value.history) ||
+    value.history.length > value.page_size
+  ) {
+    return null;
+  }
+
+  let activeHead: DepartmentActiveHeadProjection | null = null;
+  if (value.active_head !== null) {
+    activeHead = projectDepartmentActiveHead(value.active_head);
+    if (!activeHead) return null;
+  }
+
+  const history: DepartmentHeadProjection[] = [];
+  for (const raw of value.history) {
+    const item = projectDepartmentHeadItem(raw);
+    if (!item || item.department_id !== departmentId) return null;
+    history.push(item);
+  }
+
+  return {
+    authorization_date: value.authorization_date,
+    as_of: value.as_of,
+    department_id: departmentId,
+    include_history: value.include_history,
+    active_head: activeHead,
+    page: value.page,
+    page_size: value.page_size,
+    total: value.total,
+    has_more: value.has_more,
+    history,
+  };
+}
+
+export function projectDesignateDepartmentHeadResponse(
+  value: unknown,
+): DesignateDepartmentHeadProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["replayed", "department_version", "replaced_head", "active_head"])
+  ) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.department_version)) {
+    return null;
+  }
+
+  let replacedHead: DesignateDepartmentHeadProjection["replaced_head"] = null;
+  if (value.replaced_head !== null) {
+    if (
+      !isRecord(value.replaced_head) ||
+      !hasExactKeys(value.replaced_head, [
+        "head_assignment_id",
+        "person_id",
+        "ended_at",
+        "version",
+      ])
+    ) {
+      return null;
+    }
+    const headAssignmentId = normalizeUuid(value.replaced_head.head_assignment_id);
+    const personId = normalizeUuid(value.replaced_head.person_id);
+    if (
+      !headAssignmentId ||
+      !personId ||
+      !isIsoUtcTimestamp(value.replaced_head.ended_at) ||
+      !isSafePositiveInt(value.replaced_head.version)
+    ) {
+      return null;
+    }
+    replacedHead = {
+      head_assignment_id: headAssignmentId,
+      person_id: personId,
+      ended_at: value.replaced_head.ended_at,
+      version: value.replaced_head.version,
+    };
+  }
+
+  const activeHead = projectDepartmentHeadItem(value.active_head);
+  if (!activeHead) return null;
+
+  return {
+    replayed: value.replayed,
+    department_version: value.department_version,
+    replaced_head: replacedHead,
+    active_head: activeHead,
+  };
+}
+
+export function projectEndDepartmentHeadResponse(
+  value: unknown,
+): EndDepartmentHeadProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["replayed", "department_version", "ended_head"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.department_version)) {
+    return null;
+  }
+  const endedHead = projectDepartmentHeadItem(value.ended_head);
+  if (!endedHead || endedHead.ended_at === null) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    department_version: value.department_version,
+    ended_head: endedHead,
+  };
 }

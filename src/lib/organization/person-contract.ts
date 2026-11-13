@@ -1198,3 +1198,608 @@ export function computeUnlinkAccountPersonFingerprint(
     reason: body.reason,
   });
 }
+
+export type ListPersonsRpcProjection = Omit<ListPersonsResponse, "ok">;
+export type GetPersonRpcProjection = Omit<GetPersonResponse, "ok">;
+export type MutatePersonRpcProjection = Omit<MutatePersonResponse, "ok">;
+export type TransferPersonDepartmentRpcProjection = Omit<TransferPersonDepartmentResponse, "ok">;
+export type SetAccountTypeRpcProjection = Omit<SetAccountTypeResponse, "ok">;
+export type LinkAccountPersonRpcProjection = Omit<LinkAccountPersonResponse, "ok">;
+export type UnlinkAccountPersonRpcProjection = Omit<UnlinkAccountPersonResponse, "ok">;
+
+function hasExactKeys(obj: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actualKeys = Object.keys(obj);
+  if (actualKeys.length !== keys.length) return false;
+  for (const k of keys) {
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) return false;
+  }
+  return true;
+}
+
+function isSafePositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function isSafeNonNegativeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNonEmptySafeText(value: unknown, maxLen: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length >= 1 &&
+    value.length <= maxLen &&
+    !CONTROL_CHAR_PATTERN.test(value)
+  );
+}
+
+function isValidSourceKind(value: unknown): value is PersonSourceKind {
+  return typeof value === "string" && (PERSON_SOURCE_KINDS as readonly string[]).includes(value);
+}
+
+function projectPersonActiveAccountLink(
+  value: unknown,
+): PersonActiveAccountLinkProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "link_id",
+      "account_ref",
+      "login_id",
+      "display_name",
+      "enabled",
+      "account_version",
+      "started_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    !isValidUuid(value.link_id) ||
+    !isValidUuid(value.account_ref) ||
+    (value.login_id !== null &&
+      (!isNonEmptySafeText(value.login_id, 128) || value.login_id.includes("@"))) ||
+    (value.display_name !== null && !isNonEmptySafeText(value.display_name, 256)) ||
+    typeof value.enabled !== "boolean" ||
+    !isSafePositiveInt(value.account_version) ||
+    !isValidIsoTimestamp(value.started_at) ||
+    !isValidSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+  return {
+    link_id: value.link_id.toLowerCase(),
+    account_ref: value.account_ref.toLowerCase(),
+    login_id: value.login_id,
+    display_name: value.display_name,
+    enabled: value.enabled,
+    account_version: value.account_version,
+    started_at: value.started_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+function projectPersonActiveDepartment(
+  value: unknown,
+): PersonActiveDepartmentProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "membership_id",
+      "department_id",
+      "system_key",
+      "code",
+      "name",
+      "started_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    !isValidUuid(value.membership_id) ||
+    !isValidUuid(value.department_id) ||
+    (value.system_key !== null && !isNonEmptySafeText(value.system_key, 64)) ||
+    !isNonEmptySafeText(value.code, 64) ||
+    !isNonEmptySafeText(value.name, 256) ||
+    !isValidIsoTimestamp(value.started_at) ||
+    !isValidSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+  return {
+    membership_id: value.membership_id.toLowerCase(),
+    department_id: value.department_id.toLowerCase(),
+    system_key: value.system_key,
+    code: value.code,
+    name: value.name,
+    started_at: value.started_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+function projectPersonDepartmentHistoryItem(
+  value: unknown,
+): PersonDepartmentHistoryProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "membership_id",
+      "department_id",
+      "system_key",
+      "code",
+      "name",
+      "started_at",
+      "ended_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    !isValidUuid(value.membership_id) ||
+    !isValidUuid(value.department_id) ||
+    (value.system_key !== null && !isNonEmptySafeText(value.system_key, 64)) ||
+    !isNonEmptySafeText(value.code, 64) ||
+    !isNonEmptySafeText(value.name, 256) ||
+    !isValidIsoTimestamp(value.started_at) ||
+    (value.ended_at !== null && !isValidIsoTimestamp(value.ended_at)) ||
+    !isValidSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+  return {
+    membership_id: value.membership_id.toLowerCase(),
+    department_id: value.department_id.toLowerCase(),
+    system_key: value.system_key,
+    code: value.code,
+    name: value.name,
+    started_at: value.started_at,
+    ended_at: value.ended_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+function projectPersonHeadHistoryItem(
+  value: unknown,
+): PersonHeadHistoryProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "head_assignment_id",
+      "department_id",
+      "system_key",
+      "code",
+      "name",
+      "started_at",
+      "ended_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    !isValidUuid(value.head_assignment_id) ||
+    !isValidUuid(value.department_id) ||
+    (value.system_key !== null && !isNonEmptySafeText(value.system_key, 64)) ||
+    !isNonEmptySafeText(value.code, 64) ||
+    !isNonEmptySafeText(value.name, 256) ||
+    !isValidIsoTimestamp(value.started_at) ||
+    (value.ended_at !== null && !isValidIsoTimestamp(value.ended_at)) ||
+    !isValidSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+  return {
+    head_assignment_id: value.head_assignment_id.toLowerCase(),
+    department_id: value.department_id.toLowerCase(),
+    system_key: value.system_key,
+    code: value.code,
+    name: value.name,
+    started_at: value.started_at,
+    ended_at: value.ended_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+export function projectPersonSummary(value: unknown): PersonSummaryProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "person_id",
+      "employee_code",
+      "full_name",
+      "status",
+      "joined_on",
+      "recruiter_id",
+      "version",
+      "active_account_link",
+      "active_department",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    !isValidUuid(value.person_id) ||
+    !isNonEmptySafeText(value.employee_code, EMPLOYEE_CODE_MAX_LENGTH) ||
+    !isNonEmptySafeText(value.full_name, FULL_NAME_MAX_LENGTH) ||
+    (value.status !== "ACTIVE" && value.status !== "INACTIVE") ||
+    (value.joined_on !== null && !isValidIsoDate(value.joined_on)) ||
+    (value.recruiter_id !== null && !isValidUuid(value.recruiter_id)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+  const activeAccountLink =
+    value.active_account_link === null
+      ? null
+      : projectPersonActiveAccountLink(value.active_account_link);
+  if (value.active_account_link !== null && !activeAccountLink) {
+    return null;
+  }
+  const activeDepartment =
+    value.active_department === null
+      ? null
+      : projectPersonActiveDepartment(value.active_department);
+  if (value.active_department !== null && !activeDepartment) {
+    return null;
+  }
+  return {
+    person_id: value.person_id.toLowerCase(),
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    status: value.status,
+    joined_on: value.joined_on,
+    recruiter_id: value.recruiter_id ? value.recruiter_id.toLowerCase() : null,
+    version: value.version,
+    active_account_link: activeAccountLink,
+    active_department: activeDepartment,
+  };
+}
+
+export function projectPersonDetail(value: unknown): PersonDetailProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "person_id",
+      "employee_code",
+      "full_name",
+      "status",
+      "joined_on",
+      "recruiter_id",
+      "version",
+      "active_account_link",
+      "active_department",
+      "department_history",
+      "head_assignments",
+    ])
+  ) {
+    return null;
+  }
+  if (!Array.isArray(value.department_history) || !Array.isArray(value.head_assignments)) {
+    return null;
+  }
+  const summary = projectPersonSummary({
+    person_id: value.person_id,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    status: value.status,
+    joined_on: value.joined_on,
+    recruiter_id: value.recruiter_id,
+    version: value.version,
+    active_account_link: value.active_account_link,
+    active_department: value.active_department,
+  });
+  if (!summary) return null;
+
+  const deptHistory: PersonDepartmentHistoryProjection[] = [];
+  for (const raw of value.department_history) {
+    const item = projectPersonDepartmentHistoryItem(raw);
+    if (!item) return null;
+    deptHistory.push(item);
+  }
+  const headAssignments: PersonHeadHistoryProjection[] = [];
+  for (const raw of value.head_assignments) {
+    const item = projectPersonHeadHistoryItem(raw);
+    if (!item) return null;
+    headAssignments.push(item);
+  }
+  return {
+    ...summary,
+    department_history: deptHistory,
+    head_assignments: headAssignments,
+  };
+}
+
+export function projectListPersonsResponse(value: unknown): ListPersonsRpcProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "authorization_date",
+      "as_of",
+      "search",
+      "status",
+      "department_id",
+      "link_state",
+      "page",
+      "page_size",
+      "total",
+      "has_more",
+      "persons",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    !isValidIsoDate(value.authorization_date) ||
+    !isValidIsoTimestamp(value.as_of) ||
+    (value.search !== null && !isNonEmptySafeText(value.search, SEARCH_MAX_LENGTH)) ||
+    typeof value.status !== "string" ||
+    !(PERSON_FILTER_STATUSES as readonly string[]).includes(value.status) ||
+    (value.department_id !== null && !isValidUuid(value.department_id)) ||
+    typeof value.link_state !== "string" ||
+    !(PERSON_LINK_STATES as readonly string[]).includes(value.link_state) ||
+    !isSafePositiveInt(value.page) ||
+    value.page > MAX_ORG_PAGE ||
+    !isSafePositiveInt(value.page_size) ||
+    value.page_size > MAX_ORG_PAGE_SIZE ||
+    !isSafeNonNegativeInt(value.total) ||
+    typeof value.has_more !== "boolean" ||
+    !Array.isArray(value.persons) ||
+    value.persons.length > value.page_size
+  ) {
+    return null;
+  }
+
+  const persons: PersonSummaryProjection[] = [];
+  for (const raw of value.persons) {
+    const item = projectPersonSummary(raw);
+    if (!item) return null;
+    persons.push(item);
+  }
+
+  return {
+    authorization_date: value.authorization_date,
+    as_of: value.as_of,
+    search: value.search,
+    status: value.status as PersonFilterStatus,
+    department_id: value.department_id ? value.department_id.toLowerCase() : null,
+    link_state: value.link_state as PersonLinkState,
+    page: value.page,
+    page_size: value.page_size,
+    total: value.total,
+    has_more: value.has_more,
+    persons,
+  };
+}
+
+export function projectGetPersonResponse(value: unknown): GetPersonRpcProjection | null {
+  if (!isPlainObject(value) || !hasExactKeys(value, ["authorization_date", "as_of", "person"])) {
+    return null;
+  }
+  if (!isValidIsoDate(value.authorization_date) || !isValidIsoTimestamp(value.as_of)) {
+    return null;
+  }
+  const person = projectPersonDetail(value.person);
+  if (!person) return null;
+  return {
+    authorization_date: value.authorization_date,
+    as_of: value.as_of,
+    person,
+  };
+}
+
+export function projectMutatePersonResponse(value: unknown): MutatePersonRpcProjection | null {
+  if (!isPlainObject(value) || !hasExactKeys(value, ["replayed", "person"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean") {
+    return null;
+  }
+  const person = projectPersonDetail(value.person);
+  if (!person) return null;
+  return {
+    replayed: value.replayed,
+    person,
+  };
+}
+
+export function projectTransferPersonDepartmentResponse(
+  value: unknown,
+): TransferPersonDepartmentRpcProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, ["replayed", "person_version", "closed_membership", "active_membership"])
+  ) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.person_version)) {
+    return null;
+  }
+  if (
+    !isPlainObject(value.closed_membership) ||
+    !hasExactKeys(value.closed_membership, [
+      "membership_id",
+      "department_id",
+      "started_at",
+      "ended_at",
+      "version",
+    ]) ||
+    !isValidUuid(value.closed_membership.membership_id) ||
+    !isValidUuid(value.closed_membership.department_id) ||
+    !isValidIsoTimestamp(value.closed_membership.started_at) ||
+    !isValidIsoTimestamp(value.closed_membership.ended_at) ||
+    !isSafePositiveInt(value.closed_membership.version)
+  ) {
+    return null;
+  }
+  const activeMembership = projectPersonDepartmentHistoryItem(value.active_membership);
+  if (!activeMembership || activeMembership.ended_at !== null) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    person_version: value.person_version,
+    closed_membership: {
+      membership_id: value.closed_membership.membership_id.toLowerCase(),
+      department_id: value.closed_membership.department_id.toLowerCase(),
+      started_at: value.closed_membership.started_at,
+      ended_at: value.closed_membership.ended_at,
+      version: value.closed_membership.version,
+    },
+    active_membership: activeMembership,
+  };
+}
+
+export function projectSetAccountTypeResponse(
+  value: unknown,
+): SetAccountTypeRpcProjection | null {
+  if (!isPlainObject(value) || !hasExactKeys(value, ["replayed", "account"])) {
+    return null;
+  }
+  if (
+    typeof value.replayed !== "boolean" ||
+    !isPlainObject(value.account) ||
+    !hasExactKeys(value.account, ["account_ref", "account_type", "version"]) ||
+    !isValidUuid(value.account.account_ref) ||
+    typeof value.account.account_type !== "string" ||
+    !(ACCOUNT_TYPES as readonly string[]).includes(value.account.account_type) ||
+    !isSafePositiveInt(value.account.version)
+  ) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    account: {
+      account_ref: value.account.account_ref.toLowerCase(),
+      account_type: value.account.account_type as AccountType,
+      version: value.account.version,
+    },
+  };
+}
+
+export function projectLinkAccountPersonResponse(
+  value: unknown,
+): LinkAccountPersonRpcProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, ["replayed", "account_version", "person_version", "link"])
+  ) {
+    return null;
+  }
+  if (
+    typeof value.replayed !== "boolean" ||
+    !isSafePositiveInt(value.account_version) ||
+    !isSafePositiveInt(value.person_version) ||
+    !isPlainObject(value.link) ||
+    !hasExactKeys(value.link, [
+      "link_id",
+      "account_ref",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "started_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ]) ||
+    !isValidUuid(value.link.link_id) ||
+    !isValidUuid(value.link.account_ref) ||
+    !isValidUuid(value.link.person_id) ||
+    !isNonEmptySafeText(value.link.employee_code, EMPLOYEE_CODE_MAX_LENGTH) ||
+    !isNonEmptySafeText(value.link.full_name, FULL_NAME_MAX_LENGTH) ||
+    !isValidIsoTimestamp(value.link.started_at) ||
+    !isValidSourceKind(value.link.source_kind) ||
+    (value.link.evidence_date !== null && !isValidIsoDate(value.link.evidence_date)) ||
+    !isSafePositiveInt(value.link.version)
+  ) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    account_version: value.account_version,
+    person_version: value.person_version,
+    link: {
+      link_id: value.link.link_id.toLowerCase(),
+      account_ref: value.link.account_ref.toLowerCase(),
+      person_id: value.link.person_id.toLowerCase(),
+      employee_code: value.link.employee_code,
+      full_name: value.link.full_name,
+      started_at: value.link.started_at,
+      source_kind: value.link.source_kind,
+      evidence_date: value.link.evidence_date,
+      version: value.link.version,
+    },
+  };
+}
+
+export function projectUnlinkAccountPersonResponse(
+  value: unknown,
+): UnlinkAccountPersonRpcProjection | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, ["replayed", "account_version", "person_version", "ended_link"])
+  ) {
+    return null;
+  }
+  if (
+    typeof value.replayed !== "boolean" ||
+    !isSafePositiveInt(value.account_version) ||
+    !isSafePositiveInt(value.person_version) ||
+    !isPlainObject(value.ended_link) ||
+    !hasExactKeys(value.ended_link, [
+      "link_id",
+      "account_ref",
+      "person_id",
+      "started_at",
+      "ended_at",
+      "version",
+    ]) ||
+    !isValidUuid(value.ended_link.link_id) ||
+    !isValidUuid(value.ended_link.account_ref) ||
+    !isValidUuid(value.ended_link.person_id) ||
+    !isValidIsoTimestamp(value.ended_link.started_at) ||
+    !isValidIsoTimestamp(value.ended_link.ended_at) ||
+    !isSafePositiveInt(value.ended_link.version)
+  ) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    account_version: value.account_version,
+    person_version: value.person_version,
+    ended_link: {
+      link_id: value.ended_link.link_id.toLowerCase(),
+      account_ref: value.ended_link.account_ref.toLowerCase(),
+      person_id: value.ended_link.person_id.toLowerCase(),
+      started_at: value.ended_link.started_at,
+      ended_at: value.ended_link.ended_at,
+      version: value.ended_link.version,
+    },
+  };
+}

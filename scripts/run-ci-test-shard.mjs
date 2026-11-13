@@ -26,6 +26,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/recruitment-location-catalog-concurrency.test.mjs",
   "scripts/recruitment-posts-concurrency.test.mjs",
   "scripts/wp1-s1-immediate-assignments-concurrency.test.mjs",
+  "scripts/wp3-person-account-org-concurrency.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -105,6 +106,7 @@ const TEST_WEIGHTS = {
   "test:recruitment-posts": 14.0,
   "test:wp1-s1-immediate-assignments": 10.0,
   "test:wp2a-effective-access-shadow": 8.0,
+  "test:wp3-person-account-org": 12.0,
 };
 
 const target = process.argv[2];

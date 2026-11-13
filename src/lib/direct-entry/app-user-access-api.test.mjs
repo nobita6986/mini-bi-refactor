@@ -29,6 +29,8 @@ const ACCOUNT = {
   login_id: "target.td",
   enabled: true,
   version: 1,
+  account_type: "NORMAL",
+  active_person_link: null,
 };
 const LIST = { search: null, enabled: "all", page: 1, page_size: 25, total: 1, accounts: [ACCOUNT] };
 function deps(overrides = {}) {
@@ -51,8 +53,30 @@ function json(body, headers = {}) {
 }
 
 test("strict projection rejects raw identity and extra fields", () => {
-  assert.deepEqual(Object.keys(projectExistingAccount(ACCOUNT)).sort(), ["account_ref", "display_name", "enabled", "login_id", "version"]);
+  assert.deepEqual(Object.keys(projectExistingAccount(ACCOUNT)).sort(), [
+    "account_ref",
+    "account_type",
+    "active_person_link",
+    "display_name",
+    "enabled",
+    "login_id",
+    "version",
+  ]);
   assert.deepEqual(Object.keys(projectExistingAccountList(LIST)).sort(), ["accounts", "enabled", "page", "page_size", "search", "total"]);
+  assert.ok(
+    projectExistingAccount({
+      ...ACCOUNT,
+      active_person_link: {
+        link_id: "50000000-0000-4000-8000-000000000104",
+        person_id: "60000000-0000-4000-8000-000000000105",
+        employee_code: "TD-003",
+        full_name: "Target",
+        started_at: "2026-10-24T00:00:00.000Z",
+        person_version: 1,
+      },
+    }),
+  );
+  assert.equal(projectExistingAccount({ ...ACCOUNT, account_type: "BOT" }), null);
   assert.equal(projectExistingAccount({ ...ACCOUNT, email: "x@example.test" }), null);
   assert.equal(projectExistingAccount({ ...ACCOUNT, account_label: "TK-abcdef12" }), null);
   assert.equal(projectExistingAccount({ ...ACCOUNT, auth_subject: ACTOR.auth_subject }), null);

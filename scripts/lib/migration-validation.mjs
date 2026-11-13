@@ -415,6 +415,32 @@ export const WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_authz_resolve_current_snapshot(timestamp with time zone, uuid)",
   "public.direct_entry_authz_compare_shadow_access(timestamp with time zone, uuid)",
 ]);
+export const WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME =
+  "20261114090000_wp3b_person_account_org_foundation.sql";
+export const WP3B_SUPERSEDED_ORG_RPC_SIGNATURES = Object.freeze([
+  "public.org_department_list_departments_admin(uuid, uuid)",
+  "public.org_department_get_department_admin(uuid, uuid, uuid)",
+]);
+export const WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES = Object.freeze([
+  "public.org_department_list_departments_admin(uuid, uuid, boolean, timestamp with time zone)",
+  "public.org_department_create_department_admin(uuid, uuid, text, text, text, uuid, text)",
+  "public.org_department_get_department_admin(uuid, uuid, uuid, timestamp with time zone)",
+  "public.org_department_update_department_admin(uuid, uuid, uuid, integer, text, boolean, text, uuid, text)",
+  "public.org_department_list_person_memberships_admin(uuid, uuid, uuid, text, text, timestamp with time zone, integer, integer)",
+  "public.org_department_assign_person_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
+  "public.org_department_end_person_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
+  "public.org_department_list_department_heads_admin(uuid, uuid, uuid, boolean, timestamp with time zone, integer, integer)",
+  "public.org_department_designate_head_admin(uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text)",
+  "public.org_department_end_head_admin(uuid, uuid, uuid, integer, uuid, text, uuid, text)",
+  "public.org_department_list_persons_admin(uuid, uuid, text, text, uuid, text, timestamp with time zone, integer, integer)",
+  "public.org_department_get_person_admin(uuid, uuid, uuid, timestamp with time zone)",
+  "public.org_department_create_person_admin(uuid, uuid, text, text, date, uuid, uuid, integer, uuid, text, uuid, text)",
+  "public.org_department_update_person_admin(uuid, uuid, uuid, integer, text, text, date, text, text, uuid, text)",
+  "public.org_department_transfer_person_member_admin(uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text)",
+  "public.org_department_set_account_type_admin(uuid, uuid, uuid, text, integer, text, uuid, text)",
+  "public.org_department_link_account_person_admin(uuid, uuid, uuid, uuid, integer, integer, uuid, text, uuid, text)",
+  "public.org_department_unlink_account_person_admin(uuid, uuid, uuid, integer, integer, uuid, text, uuid, text)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -671,7 +697,8 @@ export async function verifyS0T1CHistoricalCompatibility(
     recruitmentPostListMineApplied = false,
     recruitmentPostPublicFeedV1Applied = false,
     recruitmentPostListWithFacetsApplied = false,
-    wp2aEffectiveAccessShadowApplied = false } = {},
+    wp2aEffectiveAccessShadowApplied = false,
+    wp3bPersonAccountOrgApplied = false } = {},
 ) {
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
   if (baseAllowlist.length === 0) {
@@ -702,7 +729,13 @@ export async function verifyS0T1CHistoricalCompatibility(
       ? HF_OFFBOARDING_SUPPRESSION_AND_ATTENDANCE_FILTER_RPC_SIGNATURES
       : []),
     ...(attendanceSelfHistoryApplied ? ATTENDANCE_SELF_HISTORY_RPC_SIGNATURES : []),
-    ...(orgShell01DepartmentsApplied ? ORG_SHELL_01_DEPARTMENTS_RPC_SIGNATURES : []),
+    ...(orgShell01DepartmentsApplied
+      ? (wp3bPersonAccountOrgApplied
+          ? ORG_SHELL_01_DEPARTMENTS_RPC_SIGNATURES.filter(
+              (sig) => !WP3B_SUPERSEDED_ORG_RPC_SIGNATURES.includes(sig),
+            )
+          : ORG_SHELL_01_DEPARTMENTS_RPC_SIGNATURES)
+      : []),
     ...(vfin05CombinedPaymentOffsetApplied
       ? VFIN_05_COMBINED_PAYMENT_OFFSET_RPC_SIGNATURES
       : vfin04SharedVendorAdvanceApplied
@@ -797,6 +830,9 @@ export async function verifyS0T1CHistoricalCompatibility(
       : []),
     ...(wp2aEffectiveAccessShadowApplied
       ? WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES
+      : []),
+    ...(wp3bPersonAccountOrgApplied
+      ? WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES
       : []),
   ];
 
@@ -1082,6 +1118,8 @@ export async function verifyAppliedMigrationChecksum(
           appliedMap.has(RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
         wp2aEffectiveAccessShadowApplied:
           appliedMap.has(WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME),
+        wp3bPersonAccountOrgApplied:
+          appliedMap.has(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME),
       },
     );
     if (postconditions.ok) {

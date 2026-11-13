@@ -200,7 +200,7 @@ export function DepartmentListManager() {
                   return (
                     <tr
                       key={department.department_id}
-                      data-testid={`department-row-${department.system_key.toLowerCase()}`}
+                      data-testid={`department-row-${(department.system_key ?? department.code).toLowerCase()}`}
                       className={DATA_TABLE_ROW_CLASS}
                     >
                       <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
@@ -242,7 +242,11 @@ export function DepartmentListManager() {
                               size: "sm",
                             })}
                           >
-                            {isAccounting ? "Quản lý thành viên" : "Xem danh sách Nhóm"}
+                            {isAccounting
+                              ? "Quản lý thành viên"
+                              : department.system_key === "RECRUITMENT"
+                                ? "Xem danh sách Nhóm"
+                                : "Xem thông tin"}
                           </Link>
                         </RowActionCluster>
                       </td>

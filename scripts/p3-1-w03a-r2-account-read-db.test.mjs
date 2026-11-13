@@ -62,7 +62,17 @@ test("R2 migration #83 is append-only and read RPC ACL/projection is exact", asy
   await seed(database);
   const result = await rpc(database, "direct_entry_list_app_users_admin", [ADMIN_AUTH, ADMIN_APP, null, "all", 1, 25]);
   assert.deepEqual(Object.keys(result).sort(), ["accounts", "enabled", "page", "page_size", "search", "total"]);
-  assert.deepEqual(Object.keys(result.accounts[0]).sort(), ["account_ref", "display_name", "enabled", "login_id", "version"]);
+  assert.deepEqual(Object.keys(result.accounts[0]).sort(), [
+    "account_ref",
+    "account_type",
+    "active_person_link",
+    "display_name",
+    "enabled",
+    "login_id",
+    "version",
+  ]);
+  assert.equal(result.accounts[0].account_type, "NORMAL");
+  assert.equal(result.accounts[0].active_person_link, null);
   assert.equal(result.accounts[0].display_name, "Accounting");
   assert.equal(result.accounts[0].login_id, "accounting");
   assert.equal(result.accounts[0].account_ref, ACCOUNTING_APP);
@@ -95,7 +105,17 @@ test("R2 list filters, bounds, stable order and detail are Full-Admin-only", asy
   const disabled = await rpc(database, "direct_entry_list_app_users_admin", [ADMIN_AUTH, ADMIN_APP, null, "false", 1, 25]);
   assert.equal(disabled.total, 1);
   const detail = (await rows(database, "select public.direct_entry_get_app_user_admin($1::uuid,$2::uuid,$3::uuid) as result", [ADMIN_AUTH, ADMIN_APP, TARGET_APP]))[0].result;
-  assert.deepEqual(Object.keys(detail).sort(), ["account_ref", "display_name", "enabled", "login_id", "version"]);
+  assert.deepEqual(Object.keys(detail).sort(), [
+    "account_ref",
+    "account_type",
+    "active_person_link",
+    "display_name",
+    "enabled",
+    "login_id",
+    "version",
+  ]);
+  assert.equal(detail.account_type, "NORMAL");
+  assert.equal(detail.active_person_link, null);
   await denied(rpc(database, "direct_entry_list_app_users_admin", [ACCOUNTING_AUTH, ACCOUNTING_APP, null, "all", 1, 25]));
   await denied(rpc(database, "direct_entry_list_app_users_admin", [DISABLED_ADMIN_AUTH, DISABLED_ADMIN_APP, null, "all", 1, 25]));
   await denied(rpc(database, "direct_entry_list_app_users_admin", ["10000000-0000-4000-8000-000000000199", ADMIN_APP, null, "all", 1, 25]));

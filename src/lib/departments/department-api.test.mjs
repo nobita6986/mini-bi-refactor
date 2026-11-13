@@ -5,12 +5,20 @@ import test from "node:test";
 
 import {
   assignAccountingMemberAdmin,
+  assignDepartmentPersonMemberAdmin,
+  createDepartmentAdmin,
+  designateDepartmentHeadAdmin,
   endAccountingMemberAdmin,
+  endDepartmentHeadAdmin,
+  endDepartmentPersonMemberAdmin,
   getDepartmentAdmin,
   listAccountingCandidatesAdmin,
   listAccountingMembershipsAdmin,
+  listDepartmentHeadsAdmin,
+  listDepartmentPersonMembershipsAdmin,
   listDepartmentsAdmin,
   listRecruitmentTeamsAdmin,
+  updateDepartmentAdmin,
 } from "./department-api.ts";
 import { createServiceDepartmentRepository } from "./department-repository.ts";
 
@@ -54,9 +62,26 @@ const HTTP_VERBS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 const DEPARTMENT_ROUTE_REGISTRY = Object.freeze({
   "src/app/api/admin/departments/route.ts": Object.freeze({
     GET: "listDepartmentsAdmin",
+    POST: "createDepartmentAdmin",
   }),
   "src/app/api/admin/departments/[departmentId]/route.ts": Object.freeze({
     GET: "getDepartmentAdmin",
+    PATCH: "updateDepartmentAdmin",
+  }),
+  "src/app/api/admin/departments/[departmentId]/memberships/route.ts": Object.freeze({
+    GET: "listDepartmentPersonMembershipsAdmin",
+    POST: "assignDepartmentPersonMemberAdmin",
+  }),
+  "src/app/api/admin/departments/[departmentId]/memberships/[membershipId]/end/route.ts":
+    Object.freeze({
+      POST: "endDepartmentPersonMemberAdmin",
+    }),
+  "src/app/api/admin/departments/[departmentId]/head/route.ts": Object.freeze({
+    GET: "listDepartmentHeadsAdmin",
+    POST: "designateDepartmentHeadAdmin",
+  }),
+  "src/app/api/admin/departments/[departmentId]/head/end/route.ts": Object.freeze({
+    POST: "endDepartmentHeadAdmin",
   }),
   "src/app/api/admin/departments/recruitment/teams/route.ts": Object.freeze({
     GET: "listRecruitmentTeamsAdmin",
@@ -121,6 +146,14 @@ function failIfCalledRepository(counter) {
     assignAccountingMember: boom,
     endAccountingMember: boom,
     listRecruitmentTeams: boom,
+    createDepartment: boom,
+    updateDepartment: boom,
+    listPersonMemberships: boom,
+    assignPersonMember: boom,
+    endPersonMember: boom,
+    listDepartmentHeads: boom,
+    designateHead: boom,
+    endHead: boom,
   };
 }
 
@@ -298,11 +331,13 @@ test("when DIRECT_ENTRY_API_ENABLED is 'true', all 5 GET department endpoints re
     code: "RECRUITMENT",
     name: "Phòng Tuyển dụng",
     is_active: true,
-    membership_mode: "READ_ONLY_TEAMS_PROJECTION",
+    version: 1,
+    membership_mode: "MANAGED_MEMBERSHIP_AND_TEAMS",
     default_policy_code: "EXISTING_TEAM_AUTHORITY_READ_ONLY",
-    active_member_count: null,
+    active_member_count: 0,
     team_count: 3,
     active_team_count: 2,
+    active_head: null,
     created_at: "2026-10-24T00:00:00.000Z",
     updated_at: "2026-10-24T00:00:00.000Z",
   };
@@ -312,11 +347,13 @@ test("when DIRECT_ENTRY_API_ENABLED is 'true', all 5 GET department endpoints re
     code: "ACCOUNTING",
     name: "Phòng Kế toán",
     is_active: true,
+    version: 1,
     membership_mode: "MANAGED_MEMBERSHIP",
     default_policy_code: "VENDOR_FINANCE_VIEW_AND_RECORD",
     active_member_count: 1,
     team_count: null,
     active_team_count: null,
+    active_head: null,
     created_at: "2026-10-24T00:00:00.000Z",
     updated_at: "2026-10-24T00:00:00.000Z",
   };
@@ -326,6 +363,7 @@ test("when DIRECT_ENTRY_API_ENABLED is 'true', all 5 GET department endpoints re
       return {
         data: {
           authorization_date: "2026-10-24",
+          as_of: "2026-10-24T00:00:00.000Z",
           departments: [sampleDepartmentRecruitment, sampleDepartmentAccounting],
         },
         error: null,
@@ -335,6 +373,7 @@ test("when DIRECT_ENTRY_API_ENABLED is 'true', all 5 GET department endpoints re
       return {
         data: {
           authorization_date: "2026-10-24",
+          as_of: "2026-10-24T00:00:00.000Z",
           department: sampleDepartmentAccounting,
         },
         error: null,
@@ -901,7 +940,33 @@ test("department route registry discovers every route file under src/app/api/adm
     }
   }
 
-  assert.equal(gatedEndpointCount, 7, "All 7 department endpoints must be gated");
+  assert.equal(gatedEndpointCount, 15, "All 15 department endpoints must be gated");
+});
+
+test("WP3 department create/update, person-membership, and HEAD handlers enforce feature gate and Full Admin", async () => {
+  const calls = { session: 0, repository: 0 };
+  const depsDisabled = {
+    resolveSession: async () => {
+      calls.session += 1;
+      throw new Error("should not resolve session when gated off");
+    },
+    repository: failIfCalledRepository(calls),
+  };
+  const offResponses = await Promise.all([
+    createDepartmentAdmin(new Request(`${ORIGIN}/api/admin/departments`, { method: "POST" }), "false", depsDisabled),
+    updateDepartmentAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}`, { method: "PATCH" }), DEPT_ACCOUNTING, "false", depsDisabled),
+    listDepartmentPersonMembershipsAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}/memberships`), DEPT_ACCOUNTING, "false", depsDisabled),
+    assignDepartmentPersonMemberAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}/memberships`, { method: "POST" }), DEPT_ACCOUNTING, "false", depsDisabled),
+    endDepartmentPersonMemberAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}/memberships/${MEMBERSHIP_ID}/end`, { method: "POST" }), DEPT_ACCOUNTING, MEMBERSHIP_ID, "false", depsDisabled),
+    listDepartmentHeadsAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}/head`), DEPT_ACCOUNTING, "false", depsDisabled),
+    designateDepartmentHeadAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}/head`, { method: "POST" }), DEPT_ACCOUNTING, "false", depsDisabled),
+    endDepartmentHeadAdmin(new Request(`${ORIGIN}/api/admin/departments/${DEPT_ACCOUNTING}/head/end`, { method: "POST" }), DEPT_ACCOUNTING, "false", depsDisabled),
+  ]);
+  for (const res of offResponses) {
+    assert.equal(res.status, 404);
+  }
+  assert.equal(calls.session, 0);
+  assert.equal(calls.repository, 0);
 });
 
 test("Recruitment teams route exports GET only and exposes zero write methods", async () => {
