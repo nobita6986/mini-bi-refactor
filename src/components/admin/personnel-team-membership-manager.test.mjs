@@ -102,6 +102,9 @@ test("membership form captures DOM values before the queued React state updater 
 test("inactive personnel can still close membership, while assign and move require active personnel and scheduled rows are read-only with conflict alert", () => {
   assert.match(component, /onMove=\{personnel\.active && state === "CURRENT" && !hasScheduledConflict/);
   assert.match(component, /onClose=\{state === "CURRENT"/);
+  assert.match(component, /const showScheduledSection = hasScheduledConflict/);
+  assert.match(component, /const visibleStates = STATES\.filter\(\(state\) => state !== "SCHEDULED" \|\| showScheduledSection\)/);
+  assert.match(component, /visibleStates\.map\(\(state\) =>/);
   assert.doesNotMatch(component, /onCancelScheduled/);
   assert.doesNotMatch(component, />Hủy lịch</);
   assert.match(component, /startClose\(membership\)/);

@@ -26,10 +26,14 @@ export async function getDirectEntryActor(
     resolveActor,
     supabaseUrl: env.supabaseUrl,
     publishableKey: env.supabasePublishableKey,
-    cookieStore: scopeAuthCookieStore({
-      getAll: () => cookieStore.getAll(),
-      set: (name, value, options) => cookieStore.set(name, value, options),
-    }, options.cookieWriteMode),
+    cookieStore: scopeAuthCookieStore(
+      {
+        getAll: () => cookieStore.getAll(),
+        set: (name, value, options) => cookieStore.set(name, value, options),
+      },
+      options.cookieWriteMode,
+      { supabaseUrl: env.supabaseUrl },
+    ),
     repository,
     at: new Date().toISOString(),
   });

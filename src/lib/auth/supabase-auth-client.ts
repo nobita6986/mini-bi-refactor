@@ -10,9 +10,12 @@ export async function createSupabaseAuthClient() {
   const env = getServerEnv();
   const cookieStore = await cookies();
   return createServerClient(env.supabaseUrl, env.supabasePublishableKey, {
-    cookies: createSupabaseCookieAdapter({
-      getAll: () => cookieStore.getAll(),
-      set: (name, value, options) => cookieStore.set(name, value, options),
-    }),
+    cookies: createSupabaseCookieAdapter(
+      {
+        getAll: () => cookieStore.getAll(),
+        set: (name, value, options) => cookieStore.set(name, value, options),
+      },
+      { supabaseUrl: env.supabaseUrl },
+    ),
   });
 }

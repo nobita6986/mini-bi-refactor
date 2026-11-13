@@ -126,7 +126,7 @@ export function TeamLeaderManager({
   const [pages, setPages] = useState<Record<TeamLeaderState, number>>({
     CURRENT: 1, SCHEDULED: 1, HISTORY: 1,
   });
-  const [activeState, setActiveState] = useState<TeamLeaderState>("CURRENT");
+  const [selectedState, setActiveState] = useState<TeamLeaderState>("CURRENT");
   const [candidateSnapshot, setCandidateSnapshot] = useState<{
     key: string;
     state: CandidateState;
@@ -158,6 +158,13 @@ export function TeamLeaderManager({
   const currentLeaders = currentList?.leaders ?? [];
   const scheduledList = visibleLists.SCHEDULED.kind === "loaded" ? visibleLists.SCHEDULED.value : null;
   const hasScheduledLeaders = (scheduledList?.leaders.length ?? 0) > 0;
+  const showScheduledState = hasScheduledLeaders
+    || (scheduledList?.total ?? 0) > 0
+    || (visibleLists.SCHEDULED.kind !== "loading" && visibleLists.SCHEDULED.kind !== "loaded");
+  const visibleStates = STATES.filter((state) => state !== "SCHEDULED" || showScheduledState);
+  const activeState: TeamLeaderState = selectedState === "SCHEDULED" && !showScheduledState
+    ? "CURRENT"
+    : selectedState;
   const activeReadError = visibleLists[activeState].kind;
   const activeList = visibleLists[activeState].kind === "loaded"
     ? visibleLists[activeState].value : null;
@@ -476,7 +483,7 @@ export function TeamLeaderManager({
               ) : null}
 
               <div role="tablist" aria-label="Lịch sử trưởng nhóm" className="flex flex-wrap gap-2 overflow-x-auto whitespace-nowrap border-b border-border">
-                {STATES.map((state) => (
+                {visibleStates.map((state) => (
                   <button key={state} type="button" role="tab" aria-selected={activeState === state}
                     onClick={() => setActiveState(state)}
                     className={`min-h-11 sm:min-h-10 whitespace-nowrap shrink-0 border-b-2 px-3 text-sm ${activeState === state

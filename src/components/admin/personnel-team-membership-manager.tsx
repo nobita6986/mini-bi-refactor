@@ -491,6 +491,10 @@ export function PersonnelTeamMembershipManager({
   const canAssign = canAssignMembership(visibleLists.CURRENT, visibleLists.SCHEDULED);
   const hasScheduledConflict = visibleLists.SCHEDULED.kind === "loaded"
     && visibleLists.SCHEDULED.list.memberships.length > 0;
+  const showScheduledSection = hasScheduledConflict
+    || (visibleLists.SCHEDULED.kind === "loaded" && visibleLists.SCHEDULED.list.total > 0)
+    || (visibleLists.SCHEDULED.kind !== "loading" && visibleLists.SCHEDULED.kind !== "loaded");
+  const visibleStates = STATES.filter((state) => state !== "SCHEDULED" || showScheduledSection);
   const activeListLock = locked;
   const closeDialog = () => {
     if (busy) return;
@@ -604,7 +608,7 @@ export function PersonnelTeamMembershipManager({
               ) : null}
 
               <div className="mt-5 grid gap-4">
-                {STATES.map((state) => (
+                {visibleStates.map((state) => (
                   <MembershipSection
                     key={state}
                     state={state}

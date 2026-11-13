@@ -39,11 +39,15 @@ import {
   parseOpeningBalanceBulkText,
   resolveAdminSelectorEmployeeOptions,
   resolveAppliedOpeningRowCount,
+  resolveDepartmentApproverMutationPayload,
   resolveKnownLeaveAccountLabel,
   resolveLeaveAdminDropdownEmployees,
   resolveLeaveOpeningBalanceEmployees,
   resolveOpeningRowSelectOptions,
   resolveVisibleLeaveTabs,
+  isAmbiguousLeaveMutationFailure,
+  transitionDepartmentApproverAfterMutation,
+  transitionDepartmentApproverAfterReload,
   validateApproverDecisionInput,
 } from "./leave-ui-model.ts";
 
@@ -1085,3 +1089,178 @@ test("Opening balance reconciliation helpers: resolveAppliedOpeningRowCount neve
     leaveErrorMessage("LEAVE_OPENING_PREVIEW_STALE").includes("Xem trước"),
   );
 });
+
+test("resolveDepartmentApproverMutationPayload sends valid_from: null, normalizes optional reason, and preserves idempotency_key on ambiguous retry", () => {
+  let seq = 0;
+  const nextKey = () => `leave-dept-approver-test-${++seq}`;
+
+  const firstAttempt = resolveDepartmentApproverMutationPayload({
+    unitKind: "MARKETING",
+    approverAppUserId: "  11111111-1111-4111-8111-111111111101  ",
+    expectedRowVersion: 2,
+    reason: "   ",
+    pendingPayload: null,
+    createIdempotencyKey: nextKey,
+  });
+
+  assert.deepEqual(firstAttempt, {
+    operation: "SET_DEPARTMENT_APPROVER",
+    unit_kind: "MARKETING",
+    approver_app_user_id: "11111111-1111-4111-8111-111111111101",
+    valid_from: null,
+    expected_row_version: 2,
+    reason: null,
+    idempotency_key: "leave-dept-approver-test-1",
+  });
+
+  assert.equal(isAmbiguousLeaveMutationFailure("network_error"), true);
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 431, errorCode: "LEAVE_INTERNAL_ERROR" }),
+    true,
+  );
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 503, errorCode: "LEAVE_UNAVAILABLE" }),
+    true,
+  );
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 422, errorCode: "LEAVE_REASON_INVALID" }),
+    false,
+  );
+  assert.equal(
+    isAmbiguousLeaveMutationFailure({ ok: false, status: 409, errorCode: "LEAVE_ROW_VERSION_CONFLICT" }),
+    false,
+  );
+
+  // Retrying after an ambiguous outcome (even if the form stayed open across midnight)
+  // reuses the exact same payload and idempotency_key
+  const retryAttempt = resolveDepartmentApproverMutationPayload({
+    unitKind: "MARKETING",
+    approverAppUserId: "11111111-1111-4111-8111-111111111101",
+    expectedRowVersion: 2,
+    reason: "",
+    pendingPayload: firstAttempt,
+    createIdempotencyKey: nextKey,
+  });
+  assert.equal(retryAttempt, firstAttempt);
+  assert.equal(retryAttempt.idempotency_key, "leave-dept-approver-test-1");
+  assert.equal(seq, 1);
+
+  // Changing inputs after clearing/unlocking generates a fresh idempotency_key
+  const changedAttempt = resolveDepartmentApproverMutationPayload({
+    unitKind: "IT",
+    approverAppUserId: "11111111-1111-4111-8111-111111111101",
+    expectedRowVersion: 0,
+    reason: "Bổ nhiệm người duyệt IT",
+    pendingPayload: firstAttempt,
+    createIdempotencyKey: nextKey,
+  });
+  assert.equal(changedAttempt.idempotency_key, "leave-dept-approver-test-2");
+  assert.equal(changedAttempt.valid_from, null);
+  assert.equal(changedAttempt.reason, "Bổ nhiệm người duyệt IT");
+});
+
+test("Department approver form keeps pending payload and Idempotency-Key locked until authoritative reload succeeds", () => {
+  const payload = resolveDepartmentApproverMutationPayload({
+    unitKind: "MARKETING",
+    approverAppUserId: "11111111-1111-4111-8111-111111111101",
+    expectedRowVersion: 2,
+    reason: null,
+    pendingPayload: null,
+    createIdempotencyKey: () => "leave-dept-approver-lock-1",
+  });
+
+  // 1. Ambiguous failures lock form in ambiguous_retry and preserve exact payload + key
+  for (const outcome of [
+    "network_error",
+    { ok: false, status: 431, errorCode: "LEAVE_INTERNAL_ERROR" },
+    { ok: false, status: 503, errorCode: "LEAVE_UNAVAILABLE" },
+    { ok: false, status: 500, errorCode: "LEAVE_INTERNAL_ERROR" },
+  ]) {
+    const t = transitionDepartmentApproverAfterMutation({
+      payload,
+      mutationResult: outcome,
+    });
+    assert.equal(t.unlocked, false);
+    assert.equal(t.shouldClearReason, false);
+    assert.equal(t.nextPendingState?.phase, "ambiguous_retry");
+    assert.equal(t.nextPendingState?.payload, payload);
+    assert.equal(t.nextPendingState?.payload.idempotency_key, "leave-dept-approver-lock-1");
+  }
+
+  const ambiguousPending = transitionDepartmentApproverAfterMutation({
+    payload,
+    mutationResult: "network_error",
+  }).nextPendingState;
+  assert.ok(ambiguousPending);
+
+  // 2. Failed reload keeps form locked AND preserves original payload + Idempotency-Key
+  const failedReload = transitionDepartmentApproverAfterReload({
+    pendingState: ambiguousPending,
+    reloadResult: { ok: false },
+  });
+  assert.equal(failedReload.unlocked, false);
+  assert.equal(failedReload.appliedOnServer, false);
+  assert.equal(failedReload.nextPendingState, ambiguousPending);
+  assert.equal(
+    failedReload.nextPendingState?.payload.idempotency_key,
+    "leave-dept-approver-lock-1",
+  );
+
+  // 3. Successful reload showing change did NOT apply unlocks with appliedOnServer=false
+  const reloadNotApplied = transitionDepartmentApproverAfterReload({
+    pendingState: ambiguousPending,
+    reloadResult: {
+      ok: true,
+      departmentApprovers: [
+        {
+          unit_kind: "MARKETING",
+          approver_app_user_id: "22222222-2222-4222-8222-222222222202",
+          is_current: true,
+          row_version: 2,
+        },
+      ],
+    },
+  });
+  assert.equal(reloadNotApplied.unlocked, true);
+  assert.equal(reloadNotApplied.nextPendingState, null);
+  assert.equal(reloadNotApplied.appliedOnServer, false);
+  assert.equal(reloadNotApplied.shouldClearReason, false);
+
+  // 4. Successful reload showing server already applied change unlocks with appliedOnServer=true
+  const reloadApplied = transitionDepartmentApproverAfterReload({
+    pendingState: ambiguousPending,
+    reloadResult: {
+      ok: true,
+      departmentApprovers: [
+        {
+          unit_kind: "MARKETING",
+          approver_app_user_id: "11111111-1111-4111-8111-111111111101",
+          is_current: true,
+          row_version: 3,
+        },
+      ],
+    },
+  });
+  assert.equal(reloadApplied.unlocked, true);
+  assert.equal(reloadApplied.nextPendingState, null);
+  assert.equal(reloadApplied.appliedOnServer, true);
+  assert.equal(reloadApplied.shouldClearReason, true);
+
+  // 5. 200 OK or 409 conflict whose post-mutation reload failed locks in reload_required until reload succeeds
+  const okReloadFailed = transitionDepartmentApproverAfterMutation({
+    payload,
+    mutationResult: { ok: true },
+    postMutationReloadSucceeded: false,
+  });
+  assert.equal(okReloadFailed.unlocked, false);
+  assert.equal(okReloadFailed.nextPendingState?.phase, "reload_required");
+
+  const conflictReloadFailed = transitionDepartmentApproverAfterMutation({
+    payload,
+    mutationResult: { ok: false, status: 409, errorCode: "LEAVE_ROW_VERSION_CONFLICT" },
+    postMutationReloadSucceeded: false,
+  });
+  assert.equal(conflictReloadFailed.unlocked, false);
+  assert.equal(conflictReloadFailed.nextPendingState?.phase, "reload_required");
+});
+
