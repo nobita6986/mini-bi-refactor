@@ -1,8 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
+import {
+  DepartmentSelectPicker,
+  PersonSearchPicker,
+  type SelectedDepartmentOption,
+} from "@/components/admin/org-entity-picker";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { Alert } from "@/components/ui/alert";
@@ -25,15 +30,25 @@ import { OffsetPager } from "@/components/ui/offset-pager";
 import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import {
   ACCOUNTING_DEFAULT_POLICY_DESCRIPTION,
+  DEPARTMENT_NAME_MAX_LENGTH,
   DEPARTMENT_UI_MAX_REASON_LENGTH,
   DEPARTMENT_UI_MAX_SEARCH_LENGTH,
+  DEPARTMENT_WP3_MAX_REASON_LENGTH,
   RECRUITMENT_DEFAULT_POLICY_DESCRIPTION,
   buildAccountingCandidatesQuery,
   buildAccountingMembershipsQuery,
   buildAssignAccountingMemberRequest,
+  buildAssignDepartmentPersonMemberRequest,
+  buildDepartmentHeadsQuery,
+  buildDepartmentPersonMembershipsQuery,
+  buildDesignateDepartmentHeadRequest,
   buildEndAccountingMemberRequest,
+  buildEndDepartmentHeadRequest,
+  buildEndDepartmentPersonMemberRequest,
   buildRecruitmentTeamsQuery,
+  buildUpdateDepartmentRequest,
   canManageDepartmentMemberships,
+  canToggleDepartmentActive,
   candidateAvailabilityBadge,
   classifyDepartmentMutationResponse,
   classifyDepartmentReadError,
@@ -47,16 +62,33 @@ import {
   projectAccountingCandidatesEnvelope,
   projectAccountingMembershipsEnvelope,
   projectDepartmentDetailEnvelope,
+  projectDepartmentHeadsListEnvelope,
+  projectDepartmentMutationEnvelope,
+  projectDepartmentPersonMemberMutationEnvelope,
+  projectDepartmentPersonMembershipsListEnvelope,
+  projectDesignateDepartmentHeadEnvelope,
+  projectEndDepartmentHeadEnvelope,
   projectRecruitmentTeamsEnvelope,
+  resolveWp3DepartmentMutationResult,
   sanitizeDepartmentSearchInput,
   visibleRecruitmentTeams,
+  type DepartmentWp3MutationResult,
 } from "@/lib/admin/department-ui-model";
+import {
+  buildTransferPersonDepartmentRequest,
+  classifyPersonOrgMutationResponse,
+  type PersonSummaryProjection,
+} from "@/lib/admin/person-org-ui-model";
 import type {
   AccountingCandidateListProjection,
   AccountingCandidateProjection,
   AccountingMembershipListProjection,
   AccountingMembershipProjection,
   DepartmentDetailProjection,
+  DepartmentHeadsListProjection,
+  DepartmentPersonMembershipStatusFilter,
+  DepartmentPersonMembershipsListProjection,
+  PersonDeptMembershipProjection,
   RecruitmentTeamListProjection,
 } from "@/lib/departments/department-contract";
 
@@ -175,6 +207,14 @@ export function DepartmentDetailManager({
     setDetailReloadToken((value) => value + 1);
   };
 
+  const handleSessionLost = useCallback((message: string) => {
+    setDetailState({ kind: "denied", message });
+  }, []);
+
+  const handleChildMutated = useCallback(() => {
+    setDetailReloadToken((value) => value + 1);
+  }, []);
+
   const effectiveState: DepartmentDetailLoadState = normalizedDepartmentId
     ? detailState
     : {
@@ -248,75 +288,1733 @@ export function DepartmentDetailManager({
       ) : null}
 
       {effectiveState.kind === "ready" ? (
-        effectiveState.detail.department.system_key === "RECRUITMENT" ? (
-          <RecruitmentDepartmentReadOnlySection
+        <div className="space-y-6">
+          <DepartmentGovernanceHeaderCard
+            detail={effectiveState.detail}
+            onReloadDetail={reloadDetail}
+            onSessionLost={handleSessionLost}
+          />
+
+          <DepartmentHeadManagementSection
             detail={effectiveState.detail}
             parentReloadToken={detailReloadToken}
-            onReloadDetail={reloadDetail}
+            onMutated={handleChildMutated}
+            onSessionLost={handleSessionLost}
           />
-        ) : effectiveState.detail.department.system_key === "ACCOUNTING" ? (
-          <AccountingDepartmentMembershipsSection
+
+          <DepartmentPersonMembershipsSection
             detail={effectiveState.detail}
             parentReloadToken={detailReloadToken}
-            onReloadDetail={reloadDetail}
-            onMembershipMutated={() => setDetailReloadToken((value) => value + 1)}
+            onMutated={handleChildMutated}
+            onSessionLost={handleSessionLost}
           />
-        ) : (
-          <StandardDepartmentOverviewSection
-            detail={effectiveState.detail}
-            onReloadDetail={reloadDetail}
-          />
-        )
+
+          {effectiveState.detail.department.system_key === "RECRUITMENT" ? (
+            <RecruitmentDepartmentReadOnlySection
+              detail={effectiveState.detail}
+              parentReloadToken={detailReloadToken}
+              onReloadDetail={reloadDetail}
+            />
+          ) : effectiveState.detail.department.system_key === "ACCOUNTING" ? (
+            <AccountingDepartmentMembershipsSection
+              detail={effectiveState.detail}
+              parentReloadToken={detailReloadToken}
+              onReloadDetail={reloadDetail}
+              onMembershipMutated={() => setDetailReloadToken((value) => value + 1)}
+            />
+          ) : null}
+        </div>
       ) : null}
     </PageShell>
   );
 }
 
-function StandardDepartmentOverviewSection({
+type Wp3DialogPendingIntent<T> = {
+  url: string;
+  method: "POST" | "PATCH";
+  idempotencyKey: string;
+  body: Record<string, unknown>;
+  expectCreated: boolean;
+  projector: (payload: unknown) => T | null;
+  successMessage: string;
+  uncertain: boolean;
+};
+
+function DepartmentGovernanceHeaderCard({
   detail,
   onReloadDetail,
+  onSessionLost,
 }: {
   detail: DepartmentDetailProjection;
   onReloadDetail: () => void;
+  onSessionLost: (message: string) => void;
 }) {
+  const notify = useNotify();
   const department = detail.department;
+  const isCustom = canToggleDepartmentActive(department);
+
+  const [dialog, setDialog] = useState<"rename" | "toggle" | null>(null);
+  const [nameInput, setNameInput] = useState(department.name);
+  const [reasonInput, setReasonInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pendingIntent, setPendingIntent] = useState<Wp3DialogPendingIntent<unknown> | null>(null);
+  const [feedback, setFeedback] = useState<DialogFeedback>(null);
+
+  const resetDialog = () => {
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog(null);
+  };
+
+  const openRename = () => {
+    setNameInput(department.name);
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog("rename");
+  };
+
+  const openToggle = () => {
+    if (!isCustom) return;
+    setNameInput(department.name);
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog("toggle");
+  };
+
+  const executeIntent = async (intent: Wp3DialogPendingIntent<unknown>) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      let response: Response;
+      try {
+        response = await fetch(intent.url, {
+          method: intent.method,
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "Idempotency-Key": intent.idempotencyKey,
+          },
+          body: JSON.stringify(intent.body),
+        });
+      } catch {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message:
+            "Mất kết nối hoặc hết thời gian chờ phản hồi. Nội dung và khóa gửi trùng được giữ nguyên để thử gửi lại hoặc tải lại đối chiếu.",
+          needsReload: true,
+        });
+        return;
+      }
+
+      const payload: unknown = await response.json().catch(() => null);
+      const outcome: DepartmentWp3MutationResult<unknown> = resolveWp3DepartmentMutationResult(
+        response.status,
+        payload,
+        intent.projector,
+        intent.expectCreated,
+      );
+      if (outcome.ok) {
+        notify.success({ title: intent.successMessage });
+        resetDialog();
+        onReloadDetail();
+        return;
+      }
+      const { failure } = outcome;
+      if (failure.kind === "session-lost") {
+        resetDialog();
+        onSessionLost(failure.message);
+        return;
+      }
+      if (failure.kind === "uncertain" && failure.preserveIdempotencyKey) {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message: failure.message,
+          needsReload: true,
+        });
+        return;
+      }
+      setPendingIntent(null);
+      setFeedback({
+        tone: failure.kind === "conflict" ? "warning" : "error",
+        message: failure.message,
+        needsReload: failure.needsReload,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!dialog || busy) return;
+    if (pendingIntent?.uncertain) {
+      void executeIntent(pendingIntent);
+      return;
+    }
+
+    const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
+    const nextActive = dialog === "toggle" ? !department.is_active : department.is_active;
+    const built = buildUpdateDepartmentRequest({
+      expectedDepartmentVersion: department.version,
+      name: dialog === "rename" ? nameInput : department.name,
+      isActive: nextActive,
+      reason: reasonInput,
+      idempotencyKey,
+    });
+    if (!built.ok) {
+      setFeedback({ tone: "error", message: built.message, needsReload: false });
+      return;
+    }
+    const intent: Wp3DialogPendingIntent<unknown> = {
+      url: `/api/admin/departments/${encodeURIComponent(department.department_id)}`,
+      method: "PATCH",
+      idempotencyKey: built.idempotencyKey,
+      body: built.body,
+      expectCreated: false,
+      projector: projectDepartmentMutationEnvelope,
+      successMessage:
+        dialog === "rename"
+          ? `Đã đổi tên phòng ban thành “${built.body.name}”.`
+          : nextActive
+            ? `Đã kích hoạt lại phòng ban “${department.name}”.`
+            : `Đã ngừng hoạt động phòng ban “${department.name}”.`,
+      uncertain: false,
+    };
+    setPendingIntent(intent);
+    void executeIntent(intent);
+  };
+
+  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+
   return (
-    <Card>
+    <Card data-testid="department-governance-header">
       <div className="space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <CardHeader
-            title={department.name}
-            description={`Mã: ${department.code} · Ngày phân quyền: ${detail.authorization_date}`}
-          />
-          <StatusBadge tone={department.is_active ? "success" : "neutral"} dot>
-            {department.is_active ? "Đang hoạt động" : "Ngừng hoạt động"}
-          </StatusBadge>
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-bold text-foreground">{department.name}</h1>
+              <StatusBadge tone={isCustom ? "info" : "neutral"}>
+                {isCustom ? "Phòng tùy chỉnh" : "Phòng mặc định hệ thống"}
+              </StatusBadge>
+              <StatusBadge tone={department.is_active ? "success" : "neutral"} dot>
+                {department.is_active ? "Đang hoạt động" : "Ngừng hoạt động"}
+              </StatusBadge>
+            </div>
+            <p className="font-mono text-xs text-muted">
+              Mã: {department.code} · Ngày hiệu lực hệ thống: {detail.authorization_date}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={onReloadDetail}>
+              Tải lại
+            </Button>
+            <Button variant="secondary" size="sm" onClick={openRename}>
+              Đổi tên
+            </Button>
+            {isCustom ? (
+              <Button
+                variant={department.is_active ? "secondary" : "primary"}
+                size="sm"
+                onClick={openToggle}
+              >
+                {department.is_active ? "Ngừng hoạt động" : "Kích hoạt lại"}
+              </Button>
+            ) : null}
+          </div>
         </div>
+
         <div className="grid gap-3 text-sm sm:grid-cols-2">
           <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
             <div className="text-xs text-muted">Quy mô hiện tại</div>
-            <div className="mt-1 font-medium text-foreground">
+            <div className="mt-1 font-medium text-foreground tabular-nums">
               {departmentScaleSummary(department)}
             </div>
           </div>
           <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
             <div className="text-xs text-muted">Trưởng phòng (HEAD) hiện tại</div>
             <div className="mt-1 font-medium text-foreground">
-              {department.active_head
-                ? `${department.active_head.full_name} (${department.active_head.employee_code})`
-                : "Chưa bổ nhiệm"}
+              {department.active_head ? (
+                <Link
+                  href={`/admin/organization/persons/${encodeURIComponent(department.active_head.person_id)}`}
+                  className="text-primary hover:underline"
+                >
+                  {department.active_head.full_name} ({department.active_head.employee_code})
+                </Link>
+              ) : (
+                "Chưa bổ nhiệm"
+              )}
             </div>
           </div>
         </div>
-        <Alert tone="info" title="Chính sách phân quyền phòng ban">
+
+        <Alert tone="info" title="Chính sách phân quyền mặc định (chỉ đọc)">
           {departmentDefaultPolicyDescription(department)}
         </Alert>
-        <div>
-          <Button variant="secondary" onClick={onReloadDetail}>
-            Tải lại
-          </Button>
-        </div>
       </div>
+
+      <FormDialog
+        open={dialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) resetDialog();
+        }}
+        title={
+          dialog === "rename"
+            ? "Đổi tên phòng ban"
+            : department.is_active
+              ? "Ngừng hoạt động phòng ban tùy chỉnh"
+              : "Kích hoạt lại phòng ban tùy chỉnh"
+        }
+        description="Thay đổi có hiệu lực ngay sau khi xác nhận."
+        descriptionId="department-header-dialog-desc"
+        closeDisabled={busy}
+        dataTestId="department-header-dialog"
+      >
+        {dialog ? (
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            {dialog === "rename" ? (
+              <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
+                Tên phòng ban mới (bắt buộc)
+                <input
+                  required
+                  value={nameInput}
+                  disabled={fieldsLocked}
+                  maxLength={DEPARTMENT_NAME_MAX_LENGTH}
+                  onChange={(event) => {
+                    setPendingIntent(null);
+                    setNameInput(event.target.value);
+                  }}
+                  className={INPUT_CLASS}
+                />
+              </label>
+            ) : (
+              <Alert tone={department.is_active ? "warning" : "info"} title={department.name}>
+                {department.is_active
+                  ? "Ngừng hoạt động chỉ thành công khi phòng ban không còn thành viên hay Trưởng phòng đang hiệu lực."
+                  : "Kích hoạt lại phòng ban tùy chỉnh để tiếp nhận thành viên."}
+              </Alert>
+            )}
+
+            <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
+              Lý do thao tác (bắt buộc)
+              <textarea
+                required
+                rows={3}
+                value={reasonInput}
+                disabled={fieldsLocked}
+                maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
+                placeholder="Nhập lý do cập nhật phòng ban…"
+                onChange={(event) => {
+                  setPendingIntent(null);
+                  setReasonInput(event.target.value);
+                }}
+                className={TEXTAREA_CLASS}
+              />
+            </label>
+
+            {feedback ? (
+              <Alert
+                tone={feedback.tone}
+                role="alert"
+                title={feedback.tone === "warning" ? "Cần xác nhận hoặc tải lại" : "Không thể lưu thay đổi"}
+              >
+                <p>{feedback.message}</p>
+                {feedback.needsReload ? (
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => {
+                        resetDialog();
+                        onReloadDetail();
+                      }}
+                    >
+                      Tải lại để đối chiếu
+                    </Button>
+                  </div>
+                ) : null}
+              </Alert>
+            ) : null}
+
+            <div className="flex flex-wrap justify-end gap-2 pt-2">
+              <Button variant="secondary" size="md" disabled={busy} onClick={resetDialog}>
+                Hủy
+              </Button>
+              <Button
+                type="submit"
+                variant={dialog === "toggle" && department.is_active ? "danger" : "primary"}
+                size="md"
+                loading={busy}
+                disabled={busy}
+              >
+                {pendingIntent?.uncertain ? "Thử gửi lại cùng yêu cầu" : "Xác nhận"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </FormDialog>
+    </Card>
+  );
+}
+
+function DepartmentHeadManagementSection({
+  detail,
+  parentReloadToken,
+  onMutated,
+  onSessionLost,
+}: {
+  detail: DepartmentDetailProjection;
+  parentReloadToken: number;
+  onMutated: () => void;
+  onSessionLost: (message: string) => void;
+}) {
+  const notify = useNotify();
+  const department = detail.department;
+  const [page, setPage] = useState(1);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [state, setState] = useState<SubListLoadState<DepartmentHeadsListProjection>>({
+    kind: "loading",
+  });
+
+  const [dialog, setDialog] = useState<"designate" | "end" | null>(null);
+  const [candidatesState, setCandidatesState] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "ready"; items: readonly PersonDeptMembershipProjection[] }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+  const [selectedPersonId, setSelectedPersonId] = useState<string>("");
+  const [reasonInput, setReasonInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pendingIntent, setPendingIntent] = useState<Wp3DialogPendingIntent<unknown> | null>(null);
+  const [feedback, setFeedback] = useState<DialogFeedback>(null);
+
+  useEffect(() => {
+    const query = buildDepartmentHeadsQuery({
+      departmentId: department.department_id,
+      includeHistory: true,
+      page,
+    });
+    if (!query) return;
+
+    const controller = new AbortController();
+    void (async () => {
+      setState({ kind: "loading" });
+      let response: Response;
+      try {
+        response = await fetch(
+          `/api/admin/departments/${encodeURIComponent(department.department_id)}/head?${query.toString()}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { Accept: "application/json" },
+          },
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setState({
+          kind: "error",
+          message: "Không thể kết nối máy chủ để tải dữ liệu Trưởng phòng.",
+          retryable: true,
+        });
+        return;
+      }
+
+      const payload: unknown = await response.json().catch(() => null);
+      if (controller.signal.aborted) return;
+
+      if (response.status !== 200) {
+        const failure = classifyDepartmentReadError(response.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          setState({ kind: "denied", message: failure.message });
+          onSessionLost(failure.message);
+          return;
+        }
+        setState({
+          kind: "error",
+          message: failure.message,
+          retryable: failure.retryable,
+        });
+        return;
+      }
+
+      const projected = projectDepartmentHeadsListEnvelope(payload, department.department_id);
+      if (!projected) {
+        setState({
+          kind: "error",
+          message: "Phản hồi danh sách Trưởng phòng không đúng định dạng chuẩn.",
+          retryable: true,
+        });
+        return;
+      }
+      setState({ kind: "ready", data: projected });
+    })();
+
+    return () => controller.abort();
+  }, [department.department_id, onSessionLost, page, parentReloadToken, reloadToken]);
+
+  useEffect(() => {
+    if (dialog !== "designate") return;
+    const query = buildDepartmentPersonMembershipsQuery({
+      departmentId: department.department_id,
+      status: "active",
+      search: "",
+      page: 1,
+      pageSize: 100,
+    });
+    if (!query) return;
+
+    const controller = new AbortController();
+    void (async () => {
+      setCandidatesState({ kind: "loading" });
+      let response: Response;
+      try {
+        response = await fetch(
+          `/api/admin/departments/${encodeURIComponent(department.department_id)}/memberships?${query.toString()}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { Accept: "application/json" },
+          },
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setCandidatesState({
+          kind: "error",
+          message: "Không tải được danh sách thành viên phòng ban.",
+        });
+        return;
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      if (controller.signal.aborted) return;
+      if (response.status === 401 || response.status === 403) {
+        setDialog(null);
+        onSessionLost("Phiên đăng nhập hoặc quyền quản trị không còn hiệu lực.");
+        return;
+      }
+      if (response.status !== 200) {
+        setCandidatesState({
+          kind: "error",
+          message: "Không tải được danh sách thành viên hợp lệ của phòng ban.",
+        });
+        return;
+      }
+      const projected = projectDepartmentPersonMembershipsListEnvelope(
+        payload,
+        department.department_id,
+      );
+      if (!projected) {
+        setCandidatesState({
+          kind: "error",
+          message: "Phản hồi danh sách thành viên không đúng định dạng.",
+        });
+        return;
+      }
+      const eligible = projected.memberships.filter(
+        (member) =>
+          member.person_status === "ACTIVE" &&
+          member.ended_at === null &&
+          member.person_id !== department.active_head?.person_id,
+      );
+      setCandidatesState({ kind: "ready", items: eligible });
+    })();
+
+    return () => controller.abort();
+  }, [department.active_head?.person_id, department.department_id, dialog, onSessionLost]);
+
+  const reloadHeads = () => setReloadToken((value) => value + 1);
+
+  const resetDialog = () => {
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog(null);
+  };
+
+  const openDesignateDialog = () => {
+    setSelectedPersonId("");
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog("designate");
+  };
+
+  const openEndDialog = () => {
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog("end");
+  };
+
+  const executeHeadIntent = async (intent: Wp3DialogPendingIntent<unknown>) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      let response: Response;
+      try {
+        response = await fetch(intent.url, {
+          method: intent.method,
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "Idempotency-Key": intent.idempotencyKey,
+          },
+          body: JSON.stringify(intent.body),
+        });
+      } catch {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message:
+            "Mất kết nối hoặc hết thời gian chờ phản hồi. Nội dung và khóa gửi trùng được giữ nguyên để thử lại hoặc tải lại đối chiếu.",
+          needsReload: true,
+        });
+        return;
+      }
+
+      const payload: unknown = await response.json().catch(() => null);
+      const outcome = resolveWp3DepartmentMutationResult(
+        response.status,
+        payload,
+        intent.projector,
+        false,
+      );
+      if (outcome.ok) {
+        notify.success({ title: intent.successMessage });
+        resetDialog();
+        reloadHeads();
+        onMutated();
+        return;
+      }
+      const { failure } = outcome;
+      if (failure.kind === "session-lost") {
+        resetDialog();
+        onSessionLost(failure.message);
+        return;
+      }
+      if (failure.kind === "uncertain" && failure.preserveIdempotencyKey) {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message: failure.message,
+          needsReload: true,
+        });
+        return;
+      }
+      setPendingIntent(null);
+      setFeedback({
+        tone: failure.kind === "conflict" ? "warning" : "error",
+        message: failure.message,
+        needsReload: failure.needsReload,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleHeadSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!dialog || busy) return;
+    if (pendingIntent?.uncertain) {
+      void executeHeadIntent(pendingIntent);
+      return;
+    }
+
+    const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
+    const activeHead =
+      state.kind === "ready" ? state.data.active_head : department.active_head;
+
+    if (dialog === "designate") {
+      const built = buildDesignateDepartmentHeadRequest({
+        personId: selectedPersonId,
+        expectedDepartmentVersion: department.version,
+        expectedCurrentHeadAssignmentId: activeHead?.head_assignment_id ?? null,
+        reason: reasonInput,
+        idempotencyKey,
+      });
+      if (!built.ok) {
+        setFeedback({ tone: "error", message: built.message, needsReload: false });
+        return;
+      }
+      const intent: Wp3DialogPendingIntent<unknown> = {
+        url: `/api/admin/departments/${encodeURIComponent(department.department_id)}/head`,
+        method: "POST",
+        idempotencyKey: built.idempotencyKey,
+        body: built.body,
+        expectCreated: false,
+        projector: projectDesignateDepartmentHeadEnvelope,
+        successMessage: activeHead
+          ? "Đã thay đổi Trưởng phòng (hiệu lực ngay)."
+          : "Đã bổ nhiệm Trưởng phòng (hiệu lực ngay).",
+        uncertain: false,
+      };
+      setPendingIntent(intent);
+      void executeHeadIntent(intent);
+      return;
+    }
+
+    if (!activeHead) {
+      setFeedback({
+        tone: "warning",
+        message: "Hiện không có Trưởng phòng đang hiệu lực để kết thúc. Vui lòng tải lại.",
+        needsReload: true,
+      });
+      return;
+    }
+    const built = buildEndDepartmentHeadRequest({
+      expectedDepartmentVersion: department.version,
+      expectedCurrentHeadAssignmentId: activeHead.head_assignment_id,
+      reason: reasonInput,
+      idempotencyKey,
+    });
+    if (!built.ok) {
+      setFeedback({ tone: "error", message: built.message, needsReload: false });
+      return;
+    }
+    const intent: Wp3DialogPendingIntent<unknown> = {
+      url: `/api/admin/departments/${encodeURIComponent(department.department_id)}/head/end`,
+      method: "POST",
+      idempotencyKey: built.idempotencyKey,
+      body: built.body,
+      expectCreated: false,
+      projector: projectEndDepartmentHeadEnvelope,
+      successMessage: "Đã kết thúc chức danh Trưởng phòng hiện tại.",
+      uncertain: false,
+    };
+    setPendingIntent(intent);
+    void executeHeadIntent(intent);
+  };
+
+  const activeHead = state.kind === "ready" ? state.data.active_head : department.active_head;
+  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const historyPageCount =
+    state.kind === "ready"
+      ? Math.min(1000, Math.max(1, Math.ceil(state.data.total / Math.max(1, state.data.page_size))))
+      : 1;
+
+  return (
+    <Card data-testid="department-head-section">
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <CardHeader
+            title="Trưởng phòng (HEAD) & Lịch sử chức danh"
+            description="Trưởng phòng phải là nhân sự đang hoạt động (ACTIVE) thuộc chính phòng ban này. Mọi bổ nhiệm, thay thế hoặc kết thúc có hiệu lực ngay."
+          />
+          <div className="flex flex-wrap gap-2">
+            {department.is_active ? (
+              <Button variant="primary" size="sm" onClick={openDesignateDialog}>
+                {activeHead ? "Thay Trưởng phòng" : "Bổ nhiệm Trưởng phòng"}
+              </Button>
+            ) : null}
+            {activeHead ? (
+              <Button variant="secondary" size="sm" onClick={openEndDialog}>
+                Kết thúc chức danh Trưởng phòng
+              </Button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-surface-muted/40 p-4 text-sm">
+          <div className="text-xs font-medium uppercase tracking-wide text-muted">
+            Trưởng phòng hiện hành
+          </div>
+          {activeHead ? (
+            <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <Link
+                  href={`/admin/organization/persons/${encodeURIComponent(activeHead.person_id)}`}
+                  className="font-semibold text-primary hover:underline"
+                >
+                  {activeHead.full_name}
+                </Link>{" "}
+                <span className="font-mono text-xs text-muted">({activeHead.employee_code})</span>
+              </div>
+              <div className="font-mono text-xs text-muted">
+                Bắt đầu: {activeHead.started_at.slice(0, 10)}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-muted">
+              Phòng ban hiện chưa có Trưởng phòng hiệu lực.
+            </p>
+          )}
+        </div>
+
+        {state.kind === "loading" ? (
+          <p role="status" className="py-4 text-center text-sm text-muted">
+            Đang tải lịch sử Trưởng phòng…
+          </p>
+        ) : state.kind === "error" ? (
+          <div className="space-y-2">
+            <ErrorState title="Không tải được lịch sử Trưởng phòng" detail={state.message} />
+            {state.retryable ? (
+              <Button variant="secondary" size="sm" onClick={reloadHeads}>
+                Thử tải lại
+              </Button>
+            ) : null}
+          </div>
+        ) : state.kind === "ready" && state.data.history.length > 0 ? (
+          <DataTableContainer
+            dataTestId="department-heads-history-table"
+            footer={
+              <OffsetPager
+                page={state.data.page}
+                pageCount={historyPageCount}
+                total={state.data.total}
+                previousDisabled={state.data.page <= 1}
+                nextDisabled={!state.data.has_more && state.data.page >= historyPageCount}
+                onPageChange={(nextPage) => setPage(nextPage)}
+                className="mt-0 border-t-0 pt-0"
+              />
+            }
+          >
+            <table className={DATA_TABLE_CLASS}>
+              <thead className={DATA_TABLE_HEAD_CLASS}>
+                <tr>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Nhân sự
+                  </th>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Trạng thái
+                  </th>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Bắt đầu
+                  </th>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Kết thúc
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {state.data.history.map((item) => (
+                  <tr key={item.head_assignment_id} className={DATA_TABLE_ROW_CLASS}>
+                    <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
+                      <Link
+                        href={`/admin/organization/persons/${encodeURIComponent(item.person_id)}`}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        {item.full_name}
+                      </Link>
+                      <div className="font-mono text-xs text-muted">{item.employee_code}</div>
+                    </td>
+                    <td data-label="Trạng thái" className={DATA_TABLE_TD_CLASS}>
+                      <StatusBadge tone={item.ended_at === null ? "success" : "neutral"} dot>
+                        {item.ended_at === null ? "Đương nhiệm" : "Đã kết thúc"}
+                      </StatusBadge>
+                    </td>
+                    <td data-label="Bắt đầu" className={`${DATA_TABLE_TD_CLASS} font-mono text-xs`}>
+                      {item.started_at.slice(0, 10)}
+                    </td>
+                    <td data-label="Kết thúc" className={`${DATA_TABLE_TD_CLASS} font-mono text-xs`}>
+                      {item.ended_at ? item.ended_at.slice(0, 10) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </DataTableContainer>
+        ) : state.kind === "ready" ? (
+          <p className="text-xs text-muted">Chưa có lịch sử bổ nhiệm Trưởng phòng.</p>
+        ) : null}
+      </div>
+
+      <FormDialog
+        open={dialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) resetDialog();
+        }}
+        title={
+          dialog === "designate"
+            ? activeHead
+              ? "Xác nhận thay Trưởng phòng"
+              : "Bổ nhiệm Trưởng phòng"
+            : "Xác nhận kết thúc chức danh Trưởng phòng"
+        }
+        description="Thao tác áp dụng ngay lập tức; không đặt lịch tương lai."
+        descriptionId="department-head-dialog-desc"
+        closeDisabled={busy}
+        dataTestId="department-head-dialog"
+      >
+        {dialog ? (
+          <form className="space-y-4" onSubmit={handleHeadSubmit}>
+            {dialog === "designate" ? (
+              <>
+                {activeHead ? (
+                  <Alert tone="warning" title="Thay thế Trưởng phòng hiện hành">
+                    Trưởng phòng hiện tại{" "}
+                    <strong>
+                      {activeHead.full_name} ({activeHead.employee_code})
+                    </strong>{" "}
+                    sẽ được kết thúc chức danh ngay khi bổ nhiệm người mới.
+                  </Alert>
+                ) : null}
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-foreground">
+                    Chọn thành viên ACTIVE thuộc phòng ban {department.name}
+                  </div>
+                  {candidatesState.kind === "loading" ? (
+                    <p role="status" className="text-xs text-muted">
+                      Đang tải thành viên hợp lệ…
+                    </p>
+                  ) : candidatesState.kind === "error" ? (
+                    <Alert tone="error" role="alert" title="Lỗi tải danh sách">
+                      {candidatesState.message}
+                    </Alert>
+                  ) : candidatesState.kind === "ready" && candidatesState.items.length === 0 ? (
+                    <Alert tone="info" title="Chưa có thành viên đủ điều kiện">
+                      Trưởng phòng phải là nhân sự đang hoạt động (ACTIVE) thuộc chính phòng ban này. Hãy thêm nhân sự vào phòng trước khi bổ nhiệm.
+                    </Alert>
+                  ) : candidatesState.kind === "ready" ? (
+                    <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-border p-2">
+                      {candidatesState.items.map((member) => {
+                        const selected = selectedPersonId === member.person_id;
+                        return (
+                          <label
+                            key={member.membership_id}
+                            className={`flex cursor-pointer items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm ${
+                              selected
+                                ? "border-primary bg-primary/10"
+                                : "border-border/70 bg-surface hover:border-primary/40"
+                            }`}
+                          >
+                            <span className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="department-head-candidate"
+                                checked={selected}
+                                disabled={fieldsLocked}
+                                onChange={() => {
+                                  setPendingIntent(null);
+                                  setSelectedPersonId(member.person_id);
+                                }}
+                              />
+                              <span>
+                                <span className="font-medium text-foreground">{member.full_name}</span>{" "}
+                                <span className="font-mono text-xs text-muted">
+                                  ({member.employee_code})
+                                </span>
+                              </span>
+                            </span>
+                            <StatusBadge tone="success">ACTIVE</StatusBadge>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            ) : activeHead ? (
+              <Alert tone="warning" title="Kết thúc chức danh Trưởng phòng hiện tại">
+                Xác nhận kết thúc ngay chức danh Trưởng phòng của{" "}
+                <strong>
+                  {activeHead.full_name} ({activeHead.employee_code})
+                </strong>
+                . Nhân sự vẫn là thành viên phòng ban cho đến khi được chuyển hoặc kết thúc thành viên.
+              </Alert>
+            ) : null}
+
+            <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
+              Lý do thao tác (bắt buộc)
+              <textarea
+                required
+                rows={3}
+                value={reasonInput}
+                disabled={fieldsLocked}
+                maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
+                placeholder="Nhập lý do bổ nhiệm, thay thế hoặc kết thúc Trưởng phòng…"
+                onChange={(event) => {
+                  setPendingIntent(null);
+                  setReasonInput(event.target.value);
+                }}
+                className={TEXTAREA_CLASS}
+              />
+            </label>
+
+            {feedback ? (
+              <Alert
+                tone={feedback.tone}
+                role="alert"
+                title={feedback.tone === "warning" ? "Cần xác nhận hoặc tải lại" : "Không thể thực hiện"}
+              >
+                <p>{feedback.message}</p>
+                {feedback.needsReload ? (
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => {
+                        resetDialog();
+                        reloadHeads();
+                        onMutated();
+                      }}
+                    >
+                      Tải lại để đối chiếu
+                    </Button>
+                  </div>
+                ) : null}
+              </Alert>
+            ) : null}
+
+            <div className="flex flex-wrap justify-end gap-2 pt-2">
+              <Button variant="secondary" size="md" disabled={busy} onClick={resetDialog}>
+                Hủy
+              </Button>
+              <Button
+                type="submit"
+                variant={dialog === "end" ? "danger" : "primary"}
+                size="md"
+                loading={busy}
+                disabled={busy || (dialog === "designate" && !selectedPersonId && !pendingIntent?.uncertain)}
+              >
+                {pendingIntent?.uncertain
+                  ? "Thử gửi lại cùng yêu cầu"
+                  : dialog === "end"
+                    ? "Xác nhận kết thúc chức danh"
+                    : activeHead
+                      ? "Xác nhận thay Trưởng phòng"
+                      : "Xác nhận bổ nhiệm"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </FormDialog>
+    </Card>
+  );
+}
+
+function DepartmentPersonMembershipsSection({
+  detail,
+  parentReloadToken,
+  onMutated,
+  onSessionLost,
+}: {
+  detail: DepartmentDetailProjection;
+  parentReloadToken: number;
+  onMutated: () => void;
+  onSessionLost: (message: string) => void;
+}) {
+  const notify = useNotify();
+  const department = detail.department;
+
+  const [statusFilter, setStatusFilter] = useState<DepartmentPersonMembershipStatusFilter>("active");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchApplied, setSearchApplied] = useState("");
+  const [page, setPage] = useState(1);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [state, setState] = useState<SubListLoadState<DepartmentPersonMembershipsListProjection>>({
+    kind: "loading",
+  });
+
+  const [dialog, setDialog] = useState<
+    | { kind: "add" }
+    | { kind: "transfer"; membership: PersonDeptMembershipProjection }
+    | { kind: "end"; membership: PersonDeptMembershipProjection }
+    | null
+  >(null);
+  const [selectedPerson, setSelectedPerson] = useState<PersonSummaryProjection | null>(null);
+  const [selectedTargetDept, setSelectedTargetDept] = useState<SelectedDepartmentOption | null>(null);
+  const [reasonInput, setReasonInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pendingIntent, setPendingIntent] = useState<Wp3DialogPendingIntent<unknown> | null>(null);
+  const [feedback, setFeedback] = useState<DialogFeedback>(null);
+
+  useEffect(() => {
+    const query = buildDepartmentPersonMembershipsQuery({
+      departmentId: department.department_id,
+      status: statusFilter,
+      search: searchApplied,
+      page,
+    });
+    if (!query) return;
+
+    const controller = new AbortController();
+    void (async () => {
+      setState({ kind: "loading" });
+      let response: Response;
+      try {
+        response = await fetch(
+          `/api/admin/departments/${encodeURIComponent(department.department_id)}/memberships?${query.toString()}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { Accept: "application/json" },
+          },
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setState({
+          kind: "error",
+          message: "Không thể kết nối máy chủ để tải danh sách thành viên phòng ban.",
+          retryable: true,
+        });
+        return;
+      }
+
+      const payload: unknown = await response.json().catch(() => null);
+      if (controller.signal.aborted) return;
+
+      if (response.status !== 200) {
+        const failure = classifyDepartmentReadError(response.status, payload);
+        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
+          setState({ kind: "denied", message: failure.message });
+          onSessionLost(failure.message);
+          return;
+        }
+        setState({
+          kind: "error",
+          message: failure.message,
+          retryable: failure.retryable,
+        });
+        return;
+      }
+
+      const projected = projectDepartmentPersonMembershipsListEnvelope(
+        payload,
+        department.department_id,
+      );
+      if (!projected) {
+        setState({
+          kind: "error",
+          message: "Phản hồi danh sách thành viên phòng ban không đúng định dạng chuẩn.",
+          retryable: true,
+        });
+        return;
+      }
+      setState({ kind: "ready", data: projected });
+    })();
+
+    return () => controller.abort();
+  }, [department.department_id, onSessionLost, page, parentReloadToken, reloadToken, searchApplied, statusFilter]);
+
+  const reloadMemberships = () => setReloadToken((value) => value + 1);
+
+  const resetDialog = () => {
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog(null);
+  };
+
+  const openAddDialog = () => {
+    setSelectedPerson(null);
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog({ kind: "add" });
+  };
+
+  const openTransferDialog = (membership: PersonDeptMembershipProjection) => {
+    setSelectedTargetDept(null);
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog({ kind: "transfer", membership });
+  };
+
+  const openEndDialog = (membership: PersonDeptMembershipProjection) => {
+    setReasonInput("");
+    setPendingIntent(null);
+    setFeedback(null);
+    setDialog({ kind: "end", membership });
+  };
+
+  const executeIntent = async (
+    intent: Wp3DialogPendingIntent<unknown>,
+    usePersonClassifier = false,
+  ) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      let response: Response;
+      try {
+        response = await fetch(intent.url, {
+          method: intent.method,
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "Idempotency-Key": intent.idempotencyKey,
+          },
+          body: JSON.stringify(intent.body),
+        });
+      } catch {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message:
+            "Mất kết nối hoặc hết thời gian chờ phản hồi. Dữ liệu và khóa gửi trùng được giữ nguyên để thử lại hoặc tải lại đối chiếu.",
+          needsReload: true,
+        });
+        return;
+      }
+
+      const payload: unknown = await response.json().catch(() => null);
+      if (usePersonClassifier) {
+        const outcome = classifyPersonOrgMutationResponse(
+          response.status,
+          payload,
+          "transfer-department",
+        );
+        if (outcome.kind === "applied") {
+          notify.success({ title: intent.successMessage });
+          resetDialog();
+          reloadMemberships();
+          onMutated();
+          return;
+        }
+        if (outcome.kind === "session-lost") {
+          resetDialog();
+          onSessionLost(outcome.message);
+          return;
+        }
+        if (outcome.kind === "uncertain" && outcome.preserveIdempotencyKey) {
+          setPendingIntent({ ...intent, uncertain: true });
+          setFeedback({
+            tone: "warning",
+            message: outcome.message,
+            needsReload: true,
+          });
+          return;
+        }
+        setPendingIntent(null);
+        setFeedback({
+          tone: outcome.kind === "conflict" || outcome.kind === "active-head-block" ? "warning" : "error",
+          message: outcome.message,
+          needsReload: outcome.kind === "conflict" || outcome.kind === "not-found",
+        });
+        return;
+      }
+
+      const outcome = resolveWp3DepartmentMutationResult(
+        response.status,
+        payload,
+        intent.projector,
+        intent.expectCreated,
+      );
+      if (outcome.ok) {
+        notify.success({ title: intent.successMessage });
+        resetDialog();
+        reloadMemberships();
+        onMutated();
+        return;
+      }
+      const { failure } = outcome;
+      if (failure.kind === "session-lost") {
+        resetDialog();
+        onSessionLost(failure.message);
+        return;
+      }
+      if (failure.kind === "uncertain" && failure.preserveIdempotencyKey) {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message: failure.message,
+          needsReload: true,
+        });
+        return;
+      }
+      setPendingIntent(null);
+      setFeedback({
+        tone: failure.kind === "conflict" || failure.kind === "active-head" ? "warning" : "error",
+        message: failure.message,
+        needsReload: failure.needsReload,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!dialog || busy) return;
+
+    if (pendingIntent?.uncertain) {
+      const usePerson =
+        dialog.kind === "transfer" ||
+        (dialog.kind === "add" &&
+          selectedPerson?.active_department !== null &&
+          selectedPerson?.active_department?.department_id !== department.department_id);
+      void executeIntent(pendingIntent, usePerson);
+      return;
+    }
+
+    const idempotencyKey = pendingIntent?.idempotencyKey ?? newDepartmentIdempotencyKey();
+
+    if (dialog.kind === "add") {
+      if (!selectedPerson) {
+        setFeedback({ tone: "error", message: "Vui lòng chọn nhân sự nội bộ.", needsReload: false });
+        return;
+      }
+      if (selectedPerson.active_department?.department_id === department.department_id) {
+        setFeedback({
+          tone: "warning",
+          message: "Nhân sự này hiện đã thuộc phòng ban này.",
+          needsReload: false,
+        });
+        return;
+      }
+
+      if (selectedPerson.active_department) {
+        const built = buildTransferPersonDepartmentRequest({
+          targetDepartmentRef: department.department_id,
+          expectedPersonVersion: selectedPerson.version,
+          expectedCurrentMembershipId: selectedPerson.active_department.membership_id,
+          reason: reasonInput,
+          idempotencyKey,
+        });
+        if (!built.ok) {
+          setFeedback({ tone: "error", message: built.message, needsReload: false });
+          return;
+        }
+        const intent: Wp3DialogPendingIntent<unknown> = {
+          url: `/api/admin/organization/persons/${encodeURIComponent(selectedPerson.person_id)}/transfer-department`,
+          method: "POST",
+          idempotencyKey: built.idempotencyKey,
+          body: built.body,
+          expectCreated: false,
+          projector: projectDepartmentPersonMemberMutationEnvelope,
+          successMessage: `Đã chuyển ${selectedPerson.full_name} sang phòng ban ${department.name}.`,
+          uncertain: false,
+        };
+        setPendingIntent(intent);
+        void executeIntent(intent, true);
+        return;
+      }
+
+      const built = buildAssignDepartmentPersonMemberRequest({
+        personId: selectedPerson.person_id,
+        expectedPersonVersion: selectedPerson.version,
+        reason: reasonInput,
+        idempotencyKey,
+      });
+      if (!built.ok) {
+        setFeedback({ tone: "error", message: built.message, needsReload: false });
+        return;
+      }
+      const intent: Wp3DialogPendingIntent<unknown> = {
+        url: `/api/admin/departments/${encodeURIComponent(department.department_id)}/memberships`,
+        method: "POST",
+        idempotencyKey: built.idempotencyKey,
+        body: built.body,
+        expectCreated: true,
+        projector: projectDepartmentPersonMemberMutationEnvelope,
+        successMessage: `Đã thêm ${selectedPerson.full_name} vào phòng ban ${department.name}.`,
+        uncertain: false,
+      };
+      setPendingIntent(intent);
+      void executeIntent(intent, false);
+      return;
+    }
+
+    if (dialog.kind === "transfer") {
+      if (!selectedTargetDept) {
+        setFeedback({ tone: "error", message: "Vui lòng chọn phòng ban đích.", needsReload: false });
+        return;
+      }
+      const built = buildTransferPersonDepartmentRequest({
+        targetDepartmentRef: selectedTargetDept.department_id,
+        expectedPersonVersion: dialog.membership.person_version,
+        expectedCurrentMembershipId: dialog.membership.membership_id,
+        reason: reasonInput,
+        idempotencyKey,
+      });
+      if (!built.ok) {
+        setFeedback({ tone: "error", message: built.message, needsReload: false });
+        return;
+      }
+      const intent: Wp3DialogPendingIntent<unknown> = {
+        url: `/api/admin/organization/persons/${encodeURIComponent(dialog.membership.person_id)}/transfer-department`,
+        method: "POST",
+        idempotencyKey: built.idempotencyKey,
+        body: built.body,
+        expectCreated: false,
+        projector: projectDepartmentPersonMemberMutationEnvelope,
+        successMessage: `Đã chuyển ${dialog.membership.full_name} sang phòng ban ${selectedTargetDept.name}.`,
+        uncertain: false,
+      };
+      setPendingIntent(intent);
+      void executeIntent(intent, true);
+      return;
+    }
+
+    const built = buildEndDepartmentPersonMemberRequest({
+      expectedPersonVersion: dialog.membership.person_version,
+      reason: reasonInput,
+      idempotencyKey,
+    });
+    if (!built.ok) {
+      setFeedback({ tone: "error", message: built.message, needsReload: false });
+      return;
+    }
+    const intent: Wp3DialogPendingIntent<unknown> = {
+      url: `/api/admin/departments/${encodeURIComponent(department.department_id)}/memberships/${encodeURIComponent(dialog.membership.membership_id)}/end`,
+      method: "POST",
+      idempotencyKey: built.idempotencyKey,
+      body: built.body,
+      expectCreated: false,
+      projector: projectDepartmentPersonMemberMutationEnvelope,
+      successMessage: `Đã kết thúc thành viên ${dialog.membership.full_name} khỏi phòng ban.`,
+      uncertain: false,
+    };
+    setPendingIntent(intent);
+    void executeIntent(intent, false);
+  };
+
+  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const pageCount =
+    state.kind === "ready"
+      ? Math.min(1000, Math.max(1, Math.ceil(state.data.total / Math.max(1, state.data.page_size))))
+      : 1;
+
+  return (
+    <Card data-testid="department-person-memberships-section">
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <CardHeader
+            title="Thành viên Nhân sự nội bộ"
+            description="Quản lý danh sách Nhân sự nội bộ trực thuộc phòng ban. Mỗi nhân sự ACTIVE chỉ thuộc tối đa một phòng ban tại một thời điểm."
+          />
+          {department.is_active ? (
+            <Button variant="primary" size="md" onClick={openAddDialog}>
+              Thêm hoặc chuyển thành viên
+            </Button>
+          ) : null}
+        </div>
+
+        <FilterToolbar>
+          <form
+            className="flex flex-1 flex-wrap items-end gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSearchApplied(sanitizeDepartmentSearchInput(searchInput));
+              setPage(1);
+            }}
+          >
+            <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-xs font-medium text-muted">
+              Tìm theo họ tên hoặc mã nhân sự
+              <input
+                value={searchInput}
+                maxLength={DEPARTMENT_UI_MAX_SEARCH_LENGTH}
+                placeholder="Nhập họ tên hoặc mã nhân sự…"
+                onChange={(event) => setSearchInput(event.target.value)}
+                className={INPUT_CLASS}
+              />
+            </label>
+            <label className="flex w-44 flex-col gap-1 text-xs font-medium text-muted">
+              Trạng thái thành viên
+              <select
+                value={statusFilter}
+                onChange={(event) => {
+                  setStatusFilter(event.target.value as DepartmentPersonMembershipStatusFilter);
+                  setPage(1);
+                }}
+                className={INPUT_CLASS}
+              >
+                <option value="active">Đang hiệu lực</option>
+                <option value="ended">Đã kết thúc</option>
+                <option value="all">Tất cả</option>
+              </select>
+            </label>
+            <Button type="submit" variant="secondary" size="md">
+              Tìm kiếm
+            </Button>
+          </form>
+        </FilterToolbar>
+
+        {state.kind === "loading" ? (
+          <p role="status" className="py-8 text-center text-sm text-muted">
+            Đang tải thành viên phòng ban…
+          </p>
+        ) : state.kind === "error" ? (
+          <div className="space-y-2">
+            <ErrorState title="Không tải được thành viên phòng ban" detail={state.message} />
+            {state.retryable ? (
+              <Button variant="secondary" size="sm" onClick={reloadMemberships}>
+                Thử tải lại
+              </Button>
+            ) : null}
+          </div>
+        ) : state.kind === "ready" && state.data.memberships.length === 0 ? (
+          <EmptyState
+            title="Chưa có thành viên phù hợp"
+            description="Thử đổi bộ lọc trạng thái hoặc thêm nhân sự nội bộ vào phòng ban."
+          />
+        ) : state.kind === "ready" ? (
+          <DataTableContainer
+            dataTestId="department-person-memberships-table"
+            footer={
+              <OffsetPager
+                page={state.data.page}
+                pageCount={pageCount}
+                total={state.data.total}
+                previousDisabled={state.data.page <= 1}
+                nextDisabled={!state.data.has_more && state.data.page >= pageCount}
+                onPageChange={(nextPage) => setPage(nextPage)}
+                className="mt-0 border-t-0 pt-0"
+              />
+            }
+          >
+            <table className={DATA_TABLE_CLASS}>
+              <thead className={DATA_TABLE_HEAD_CLASS}>
+                <tr>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Nhân sự nội bộ
+                  </th>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Vai trò &amp; trạng thái
+                  </th>
+                  <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                    Hiệu lực phòng ban
+                  </th>
+                  <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
+                    Thao tác
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {state.data.memberships.map((member) => {
+                  const isActiveRow = member.ended_at === null;
+                  return (
+                    <tr key={member.membership_id} className={DATA_TABLE_ROW_CLASS}>
+                      <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
+                        <Link
+                          href={`/admin/organization/persons/${encodeURIComponent(member.person_id)}`}
+                          className="font-semibold text-primary hover:underline"
+                        >
+                          {member.full_name}
+                        </Link>
+                        <div className="font-mono text-xs text-muted">{member.employee_code}</div>
+                      </td>
+                      <td data-label="Vai trò & trạng thái" className={DATA_TABLE_TD_CLASS}>
+                        <div className="flex flex-wrap gap-1.5">
+                          <StatusBadge
+                            tone={member.person_status === "ACTIVE" ? "success" : "neutral"}
+                            dot
+                          >
+                            {member.person_status}
+                          </StatusBadge>
+                          {member.is_department_head ? (
+                            <StatusBadge tone="primary">Trưởng phòng</StatusBadge>
+                          ) : null}
+                          <StatusBadge tone={isActiveRow ? "info" : "neutral"}>
+                            {isActiveRow ? "Đang thuộc phòng" : "Đã kết thúc"}
+                          </StatusBadge>
+                        </div>
+                      </td>
+                      <td data-label="Hiệu lực phòng ban" className={`${DATA_TABLE_TD_CLASS} font-mono text-xs`}>
+                        <div>Bắt đầu: {member.started_at.slice(0, 10)}</div>
+                        <div>Kết thúc: {member.ended_at ? member.ended_at.slice(0, 10) : "—"}</div>
+                      </td>
+                      <td data-card-actions="true" className={`${DATA_TABLE_TD_CLASS} text-right`}>
+                        <RowActionCluster>
+                          <Link
+                            href={`/admin/organization/persons/${encodeURIComponent(member.person_id)}`}
+                            className={buttonClasses({ variant: "secondary", size: "sm" })}
+                          >
+                            Hồ sơ
+                          </Link>
+                          {isActiveRow && member.person_status === "ACTIVE" ? (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => openTransferDialog(member)}
+                            >
+                              Chuyển phòng
+                            </Button>
+                          ) : null}
+                          {isActiveRow ? (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => openEndDialog(member)}
+                            >
+                              Kết thúc thành viên
+                            </Button>
+                          ) : null}
+                        </RowActionCluster>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </DataTableContainer>
+        ) : null}
+      </div>
+
+      <FormDialog
+        open={dialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) resetDialog();
+        }}
+        title={
+          dialog?.kind === "add"
+            ? `Thêm hoặc chuyển thành viên vào ${department.name}`
+            : dialog?.kind === "transfer"
+              ? `Chuyển phòng ban cho ${dialog.membership.full_name}`
+              : dialog?.kind === "end"
+                ? `Kết thúc thành viên ${dialog.membership.full_name}`
+                : "Thành viên phòng ban"
+        }
+        description="Thao tác áp dụng ngay lập tức; không có trường đặt lịch hiệu lực."
+        descriptionId="department-person-member-dialog-desc"
+        closeDisabled={busy}
+        dataTestId="department-person-member-dialog"
+      >
+        {dialog ? (
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            {dialog.kind === "add" ? (
+              <div className="space-y-3">
+                <PersonSearchPicker
+                  id="dept-add-member-picker"
+                  label="Tìm và chọn nhân sự nội bộ (ACTIVE)"
+                  selectedPersonId={selectedPerson?.person_id ?? null}
+                  onSelect={(person) => {
+                    setPendingIntent(null);
+                    setSelectedPerson(person);
+                  }}
+                  disabled={fieldsLocked}
+                  onSessionLost={(message) => {
+                    resetDialog();
+                    onSessionLost(message);
+                  }}
+                />
+                {selectedPerson?.active_department ? (
+                  selectedPerson.active_department.department_id === department.department_id ? (
+                    <Alert tone="warning" title="Đã thuộc phòng ban này">
+                      Nhân sự này hiện đã là thành viên đang hiệu lực của {department.name}.
+                    </Alert>
+                  ) : (
+                    <Alert tone="info" title="Sẽ chuyển từ phòng ban hiện tại">
+                      {selectedPerson.full_name} đang thuộc{" "}
+                      <strong>{selectedPerson.active_department.name}</strong>. Xác nhận
+                      sẽ kết thúc phòng cũ và chuyển ngay sang {department.name}.
+                    </Alert>
+                  )
+                ) : null}
+              </div>
+            ) : null}
+
+            {dialog.kind === "transfer" ? (
+              <div className="space-y-3">
+                {dialog.membership.is_department_head ? (
+                  <Alert tone="warning" title="Nhân sự đang là Trưởng phòng">
+                    {dialog.membership.full_name} đang giữ chức danh Trưởng phòng tại{" "}
+                    {department.name}. Theo quy tắc nghiệp vụ (PERSON_IS_ACTIVE_DEPARTMENT_HEAD),
+                    phải kết thúc hoặc thay Trưởng phòng trước khi chuyển sang phòng ban khác.
+                  </Alert>
+                ) : null}
+                <DepartmentSelectPicker
+                  id="dept-transfer-target-picker"
+                  label="Chọn phòng ban đích đang hoạt động"
+                  selectedId={selectedTargetDept?.department_id ?? null}
+                  excludeDepartmentId={department.department_id}
+                  allowClear={false}
+                  emptyLabel="Không có phòng ban đích phù hợp"
+                  disabled={fieldsLocked}
+                  onSelect={(dept) => {
+                    setPendingIntent(null);
+                    setSelectedTargetDept(dept);
+                  }}
+                  onSessionLost={(message) => {
+                    resetDialog();
+                    onSessionLost(message);
+                  }}
+                />
+              </div>
+            ) : null}
+
+            {dialog.kind === "end" ? (
+              <Alert tone="warning" title={dialog.membership.full_name}>
+                {dialog.membership.is_department_head
+                  ? "Lưu ý: Nhân sự này đang giữ chức danh Trưởng phòng. Cần kết thúc hoặc thay chức danh Trưởng phòng trước khi kết thúc thành viên khỏi phòng ban."
+                  : `Xác nhận kết thúc tư cách thành viên của ${dialog.membership.full_name} (${dialog.membership.employee_code}) tại ${department.name} ngay lập tức.`}
+              </Alert>
+            ) : null}
+
+            <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
+              Lý do thao tác (bắt buộc)
+              <textarea
+                required
+                rows={3}
+                value={reasonInput}
+                disabled={fieldsLocked}
+                maxLength={DEPARTMENT_WP3_MAX_REASON_LENGTH}
+                placeholder="Nhập lý do điều chuyển hoặc cập nhật thành viên…"
+                onChange={(event) => {
+                  setPendingIntent(null);
+                  setReasonInput(event.target.value);
+                }}
+                className={TEXTAREA_CLASS}
+              />
+            </label>
+
+            {feedback ? (
+              <Alert
+                tone={feedback.tone}
+                role="alert"
+                title={feedback.tone === "warning" ? "Cần lưu ý hoặc tải lại" : "Không thể lưu thay đổi"}
+              >
+                <p>{feedback.message}</p>
+                {feedback.needsReload ? (
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => {
+                        resetDialog();
+                        reloadMemberships();
+                        onMutated();
+                      }}
+                    >
+                      Tải lại để đối chiếu
+                    </Button>
+                  </div>
+                ) : null}
+              </Alert>
+            ) : null}
+
+            <div className="flex flex-wrap justify-end gap-2 pt-2">
+              <Button variant="secondary" size="md" disabled={busy} onClick={resetDialog}>
+                Hủy
+              </Button>
+              <Button
+                type="submit"
+                variant={dialog.kind === "end" ? "danger" : "primary"}
+                size="md"
+                loading={busy}
+                disabled={
+                  busy ||
+                  (dialog.kind === "add" &&
+                    (!selectedPerson ||
+                      selectedPerson.active_department?.department_id === department.department_id) &&
+                    !pendingIntent?.uncertain) ||
+                  (dialog.kind === "transfer" && !selectedTargetDept && !pendingIntent?.uncertain)
+                }
+              >
+                {pendingIntent?.uncertain
+                  ? "Thử gửi lại cùng yêu cầu"
+                  : dialog.kind === "add"
+                    ? selectedPerson?.active_department
+                      ? "Xác nhận chuyển vào phòng"
+                      : "Xác nhận thêm thành viên"
+                    : dialog.kind === "transfer"
+                      ? "Xác nhận chuyển phòng"
+                      : "Xác nhận kết thúc thành viên"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </FormDialog>
     </Card>
   );
 }

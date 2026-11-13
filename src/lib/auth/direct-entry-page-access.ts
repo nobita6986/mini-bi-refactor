@@ -144,6 +144,17 @@ export function decideAccountAccessPageAccess(input: {
   });
 }
 
+/**
+ * Separate direct-URL gate for `/admin/organization/persons` and
+ * `/admin/organization/persons/[personId]`. Mirrors Account/Department admin authority
+ * (canonical Full Admin triple at effective `all` scope); never widens to BoD or catalog operators.
+ */
+export function decideOrganizationPersonsPageAccess(input: {
+  actor: ActorResolution | null;
+}): DirectEntryPageDecision {
+  return decideAccountAccessPageAccess(input);
+}
+
 const ENTRY_CAPABILITIES = ["entry_own", "entry_team", "entry_admin"] as const;
 
 function decideUiCapabilityPageAccess(input: {

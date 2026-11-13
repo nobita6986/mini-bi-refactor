@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import * as Dialog from "radix-ui/dialog";
 
+import {
+  PersonSearchPicker,
+  RecruiterConfirmPicker,
+} from "@/components/admin/org-entity-picker";
 import { Alert } from "@/components/ui/alert";
 import { Card, CardHeader } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
@@ -13,14 +20,24 @@ import type {
   ExistingAccount,
   ExistingAccountList,
 } from "@/lib/direct-entry/app-user-access-contract";
+import type { AdminPersonnel } from "@/lib/direct-entry/personnel-catalog-contract";
 import {
+  ACCOUNT_ORG_MAX_REASON_LENGTH,
+  ACCOUNT_TYPES,
+  accountTypeBadgeMeta,
   buildAccountListQuery,
   buildAccountStateRequest,
+  buildLinkAccountPersonRequest,
+  buildSetAccountClassificationRequest,
+  buildUnlinkAccountPersonRequest,
+  canLinkPersonToAccount,
   classifyAccountMutation,
+  classifyAccountOrgMutation,
   newAccountIntentKey,
   projectAccountItem,
   projectAccountListForQuery,
   type AccountEnabledFilter,
+  type AccountType,
 } from "@/lib/admin/account-access-model";
 import {
   buildCreateAccountRequest,
@@ -30,6 +47,7 @@ import {
   classifyAccountOperationResponse,
   newAccountOperationKey,
 } from "@/lib/admin/account-operation-ui-model";
+import type { PersonSummaryProjection } from "@/lib/admin/person-org-ui-model";
 
 type ListState =
   | { kind: "loading" }
@@ -84,6 +102,12 @@ export function AccountManager() {
     | "create"
     | { kind: "edit"; account: ExistingAccount }
     | { kind: "reset"; account: ExistingAccount }
+    | null
+  >(null);
+  const [orgOperation, setOrgOperation] = useState<
+    | { kind: "classification"; account: ExistingAccount }
+    | { kind: "link"; account: ExistingAccount }
+    | { kind: "unlink"; account: ExistingAccount }
     | null
   >(null);
   const [reconcileIntent, setReconcileIntent] = useState<{ intentId: string; state: string } | null>(null);
@@ -146,6 +170,7 @@ export function AccountManager() {
         const list = projectAccountListForQuery(await response.json(), {
           search, enabled: enabledFilter, page,
         });
+        if (controller.signal.aborted) return;
         if (!list) {
           setListState({ kind: "error" });
           return;
@@ -158,6 +183,7 @@ export function AccountManager() {
         }
         setListState({ kind: "loaded", list });
       } catch {
+        if (controller.signal.aborted) return;
         setListState({ kind: "error" });
       }
     })();
@@ -168,6 +194,15 @@ export function AccountManager() {
     setListState({ kind: "loading" });
     setReloadToken((value) => value + 1);
   };
+
+  const handleOrgSessionLost = useCallback(() => {
+    setOrgOperation(null);
+    setOperation(null);
+    setDialog(null);
+    setPendingIntent(null);
+    setConflictIntent(null);
+    setListState({ kind: "denied" });
+  }, []);
 
   const startStateChange = (account: ExistingAccount, nextEnabled: boolean) => {
     setReason("");
@@ -447,41 +482,94 @@ export function AccountManager() {
         ) : (
           <>
             <div className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs">
-              <table className="r22-card-table w-full min-w-[520px] border-collapse text-left text-sm">
+              <table className="r22-card-table w-full min-w-[780px] border-collapse text-left text-sm">
                 <caption className="sr-only">Danh sách tài khoản và trạng thái hoạt động</caption>
                 <thead className="border-b border-border bg-surface-muted text-xs uppercase text-muted">
                   <tr>
                     <th scope="col" className="px-3 py-3">Tên hiển thị</th>
+                    <th scope="col" className="px-3 py-3">Phân loại</th>
+                    <th scope="col" className="px-3 py-3">Hồ sơ người liên kết</th>
                     <th scope="col" className="px-3 py-3">Trạng thái</th>
                     <th scope="col" className="px-3 py-3 text-right">Thao tác</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {list.accounts.map((account) => (
-                    <tr key={account.account_ref} className="border-b border-border/70 last:border-0 hover:bg-surface-hover">
-                      <td data-card-header="true" className="px-3 py-3">
-                        <span className="block font-medium">{account.display_name ?? "Chưa cập nhật tên thật"}</span>
-                        {account.login_id ? <span className="block text-xs text-muted">{account.login_id}</span> : null}
-                      </td>
-                      <td data-label="Trạng thái" className="px-3 py-3"><EnabledBadge enabled={account.enabled} /></td>
-                      <td data-card-actions="true" className="px-3 py-3">
-                        <div className="flex flex-wrap justify-end gap-2 whitespace-nowrap">
-                          <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
-                            onClick={() => { setOperation({ kind: "edit", account }); }}>
-                            Sửa tên
-                          </button>
-                          <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
-                            onClick={() => { setOperation({ kind: "reset", account }); }}>
-                            Đặt lại mật khẩu
-                          </button>
-                          <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
-                            onClick={() => startStateChange(account, !account.enabled)}>
-                            {account.enabled ? "Ngừng hoạt động" : "Kích hoạt"}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {list.accounts.map((account) => {
+                    const typeMeta = accountTypeBadgeMeta(account.account_type);
+                    const canLink = canLinkPersonToAccount(account);
+                    return (
+                      <tr key={account.account_ref} className="border-b border-border/70 last:border-0 hover:bg-surface-hover">
+                        <td data-card-header="true" className="px-3 py-3">
+                          <span className="block font-medium">{account.display_name ?? "Chưa cập nhật tên thật"}</span>
+                          {account.login_id ? <span className="block text-xs text-muted">{account.login_id}</span> : null}
+                        </td>
+                        <td data-label="Phân loại" className="px-3 py-3">
+                          <StatusBadge tone={typeMeta.tone}>{typeMeta.label}</StatusBadge>
+                        </td>
+                        <td data-label="Hồ sơ người liên kết" className="px-3 py-3">
+                          {account.active_person_link ? (
+                            <div>
+                              <Link
+                                href={`/admin/organization/persons/${encodeURIComponent(account.active_person_link.person_id)}`}
+                                className="font-medium text-primary hover:underline"
+                              >
+                                {account.active_person_link.full_name}
+                              </Link>
+                              <div className="font-mono text-xs text-muted">
+                                {account.active_person_link.employee_code}
+                              </div>
+                            </div>
+                          ) : account.account_type !== "NORMAL" ? (
+                            <span className="text-xs text-muted">Không áp dụng ({account.account_type})</span>
+                          ) : (
+                            <span className="text-xs text-muted">Chưa liên kết</span>
+                          )}
+                        </td>
+                        <td data-label="Trạng thái" className="px-3 py-3">
+                          <EnabledBadge enabled={account.enabled} />
+                          <span className="mt-1 block text-[11px] text-muted">
+                            Khóa tài khoản không làm ngừng hồ sơ nhân sự
+                          </span>
+                        </td>
+                        <td data-card-actions="true" className="px-3 py-3">
+                          <div className="flex flex-wrap justify-end gap-2 whitespace-nowrap">
+                            <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
+                              onClick={() => { setOrgOperation({ kind: "classification", account }); }}>
+                              Phân loại
+                            </button>
+                            {account.active_person_link ? (
+                              <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
+                                onClick={() => { setOrgOperation({ kind: "unlink", account }); }}>
+                                Ngắt liên kết
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
+                                disabled={locked || !canLink}
+                                title={!canLink ? "Tài khoản SHARED/SERVICE không nối hồ sơ người" : undefined}
+                                onClick={() => { if (canLink) setOrgOperation({ kind: "link", account }); }}
+                              >
+                                Liên kết người
+                              </button>
+                            )}
+                            <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
+                              onClick={() => { setOperation({ kind: "edit", account }); }}>
+                              Sửa tên
+                            </button>
+                            <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
+                              onClick={() => { setOperation({ kind: "reset", account }); }}>
+                              Đặt lại mật khẩu
+                            </button>
+                            <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
+                              onClick={() => startStateChange(account, !account.enabled)}>
+                              {account.enabled ? "Ngừng hoạt động" : "Kích hoạt"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -514,6 +602,14 @@ export function AccountManager() {
           setReconcileIntent({ intentId, state });
           reloadList();
         }}
+      />
+      <AccountOrgDialogs
+        key={orgOperation === null ? "org-none" : `${orgOperation.kind}:${orgOperation.account.account_ref}:${orgOperation.account.version}`}
+        operation={orgOperation}
+        onClose={() => { setOrgOperation(null); }}
+        onApplied={() => { setOrgOperation(null); reloadList(); }}
+        onReloadRequested={() => { setOrgOperation(null); reloadList(); }}
+        onSessionLost={handleOrgSessionLost}
       />
       <AccountReconcileSurface
         intent={reconcileIntent}
@@ -775,5 +871,448 @@ function AccountReconcileSurface({
         <button type="button" disabled={busy} onClick={onClose} className={opButton}>Đóng</button>
       </div>
     </Alert>
+  );
+}
+
+type OrgDialogPendingIntent = {
+  url: string;
+  idempotencyKey: string;
+  body: Record<string, unknown>;
+  op: "classification" | "link" | "unlink";
+  successMessage: string;
+  uncertain: boolean;
+};
+
+type OrgDialogFeedback = {
+  tone: "error" | "warning";
+  message: string;
+  needsReload: boolean;
+} | null;
+
+function AccountOrgDialogs({
+  operation,
+  onClose,
+  onApplied,
+  onReloadRequested,
+  onSessionLost,
+}: {
+  operation:
+    | { kind: "classification"; account: ExistingAccount }
+    | { kind: "link"; account: ExistingAccount }
+    | { kind: "unlink"; account: ExistingAccount }
+    | null;
+  onClose: () => void;
+  onApplied: () => void;
+  onReloadRequested: () => void;
+  onSessionLost: () => void;
+}) {
+  const notify = useNotify();
+  const targetAccount = operation?.account ?? null;
+
+  const [selectedType, setSelectedType] = useState<AccountType>(
+    targetAccount?.account_type ?? "NORMAL",
+  );
+  const [selectedPerson, setSelectedPerson] = useState<PersonSummaryProjection | null>(null);
+  const [mismatchConfirmRequired, setMismatchConfirmRequired] = useState(false);
+  const [confirmedRecruiter, setConfirmedRecruiter] = useState<AdminPersonnel | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pendingIntent, setPendingIntent] = useState<OrgDialogPendingIntent | null>(null);
+  const [feedback, setFeedback] = useState<OrgDialogFeedback>(null);
+
+  const resetAndClose = () => {
+    setPendingIntent(null);
+    setFeedback(null);
+    setMismatchConfirmRequired(false);
+    setConfirmedRecruiter(null);
+    onClose();
+  };
+
+  const executeIntent = async (intent: OrgDialogPendingIntent) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      let response: Response;
+      try {
+        response = await fetch(intent.url, {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "Idempotency-Key": intent.idempotencyKey,
+          },
+          body: JSON.stringify(intent.body),
+        });
+      } catch {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message:
+            "Mất kết nối hoặc hết thời gian chờ phản hồi. Nội dung và khóa gửi trùng được giữ nguyên để thử gửi lại đúng yêu cầu hoặc tải lại đối chiếu.",
+          needsReload: true,
+        });
+        return;
+      }
+
+      const rawPayload: unknown = await response.json().catch(() => null);
+      const outcome =
+        intent.op === "classification"
+          ? classifyAccountOrgMutation(response.status, rawPayload, "classification")
+          : intent.op === "link"
+            ? classifyAccountOrgMutation(response.status, rawPayload, "link")
+            : classifyAccountOrgMutation(response.status, rawPayload, "unlink");
+
+      if (outcome.kind === "applied") {
+        notify.success({ title: intent.successMessage });
+        resetAndClose();
+        onApplied();
+        return;
+      }
+
+      if (outcome.kind === "session-lost") {
+        resetAndClose();
+        onSessionLost();
+        return;
+      }
+
+      if (outcome.kind === "uncertain" && outcome.preserveIdempotencyKey) {
+        setPendingIntent({ ...intent, uncertain: true });
+        setFeedback({
+          tone: "warning",
+          message: outcome.message,
+          needsReload: true,
+        });
+        return;
+      }
+
+      setPendingIntent(null);
+
+      if (outcome.kind === "recruiter-mismatch") {
+        setMismatchConfirmRequired(true);
+        setConfirmedRecruiter(null);
+        setFeedback({
+          tone: "warning",
+          message: outcome.message,
+          needsReload: false,
+        });
+        return;
+      }
+
+      setFeedback({
+        tone: outcome.kind === "conflict" ? "warning" : "error",
+        message: outcome.message,
+        needsReload: outcome.kind === "conflict",
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!operation || !targetAccount || busy) return;
+
+    if (pendingIntent?.uncertain) {
+      void executeIntent(pendingIntent);
+      return;
+    }
+
+    const idempotencyKey = newAccountIntentKey();
+
+    if (operation.kind === "classification") {
+      const built = buildSetAccountClassificationRequest({
+        expectedAccountVersion: targetAccount.version,
+        accountType: selectedType,
+        reason,
+        idempotencyKey,
+      });
+      if (!built.ok) {
+        setFeedback({ tone: "error", message: built.message, needsReload: false });
+        return;
+      }
+      const intent: OrgDialogPendingIntent = {
+        url: `/api/admin/access/accounts/${encodeURIComponent(targetAccount.account_ref)}/classification`,
+        idempotencyKey: built.idempotencyKey,
+        body: built.body,
+        op: "classification",
+        successMessage: `Đã cập nhật phân loại tài khoản sang ${selectedType}.`,
+        uncertain: false,
+      };
+      setPendingIntent(intent);
+      void executeIntent(intent);
+      return;
+    }
+
+    if (operation.kind === "link") {
+      if (!selectedPerson) {
+        setFeedback({
+          tone: "error",
+          message: "Vui lòng tìm và chọn hồ sơ nhân sự nội bộ chưa liên kết.",
+          needsReload: false,
+        });
+        return;
+      }
+      if (mismatchConfirmRequired && !confirmedRecruiter) {
+        setFeedback({
+          tone: "warning",
+          message:
+            "Vui lòng tìm và chọn đúng hồ sơ tính công tuyển dụng để xác nhận rõ ràng trước khi gửi lại.",
+          needsReload: false,
+        });
+        return;
+      }
+      const built = buildLinkAccountPersonRequest({
+        personId: selectedPerson.person_id,
+        expectedAccountVersion: targetAccount.version,
+        expectedPersonVersion: selectedPerson.version,
+        confirmedRecruiterId: mismatchConfirmRequired ? confirmedRecruiter?.recruiter_id ?? null : null,
+        reason,
+        idempotencyKey,
+      });
+      if (!built.ok) {
+        setFeedback({ tone: "error", message: built.message, needsReload: false });
+        return;
+      }
+      const intent: OrgDialogPendingIntent = {
+        url: `/api/admin/access/accounts/${encodeURIComponent(targetAccount.account_ref)}/person-link`,
+        idempotencyKey: built.idempotencyKey,
+        body: built.body,
+        op: "link",
+        successMessage: `Đã liên kết tài khoản với hồ sơ ${selectedPerson.full_name} (${selectedPerson.employee_code}).`,
+        uncertain: false,
+      };
+      setPendingIntent(intent);
+      void executeIntent(intent);
+      return;
+    }
+
+    const activeLink = targetAccount.active_person_link;
+    if (!activeLink) {
+      setFeedback({
+        tone: "warning",
+        message: "Tài khoản hiện không còn liên kết hồ sơ người đang hiệu lực. Hãy tải lại danh sách.",
+        needsReload: true,
+      });
+      return;
+    }
+    const built = buildUnlinkAccountPersonRequest({
+      expectedAccountVersion: targetAccount.version,
+      expectedPersonVersion: activeLink.person_version,
+      expectedLinkId: activeLink.link_id,
+      reason,
+      idempotencyKey,
+    });
+    if (!built.ok) {
+      setFeedback({ tone: "error", message: built.message, needsReload: false });
+      return;
+    }
+    const intent: OrgDialogPendingIntent = {
+      url: `/api/admin/access/accounts/${encodeURIComponent(targetAccount.account_ref)}/person-link/end`,
+      idempotencyKey: built.idempotencyKey,
+      body: built.body,
+      op: "unlink",
+      successMessage: `Đã ngắt liên kết giữa tài khoản và hồ sơ ${activeLink.full_name}.`,
+      uncertain: false,
+    };
+    setPendingIntent(intent);
+    void executeIntent(intent);
+  };
+
+  const fieldsLocked = busy || pendingIntent?.uncertain === true;
+  const isUnlinkingFromClassification =
+    operation?.kind === "classification" &&
+    targetAccount?.active_person_link !== null &&
+    selectedType !== "NORMAL";
+
+  return (
+    <FormDialog
+      open={operation !== null}
+      onOpenChange={(open) => {
+        if (!open && !busy) resetAndClose();
+      }}
+      title={
+        operation?.kind === "classification"
+          ? "Đổi phân loại tài khoản"
+          : operation?.kind === "link"
+            ? "Liên kết tài khoản với Nhân sự nội bộ"
+            : operation?.kind === "unlink"
+              ? "Ngắt liên kết hồ sơ Nhân sự nội bộ"
+              : "Quản trị tài khoản"
+      }
+      description={
+        targetAccount
+          ? `Tài khoản: ${targetAccount.display_name ?? "Chưa cập nhật tên thật"}${targetAccount.login_id ? ` (${targetAccount.login_id})` : ""}`
+          : undefined
+      }
+      descriptionId="account-org-dialog-desc"
+      closeDisabled={busy}
+      dataTestId="account-org-dialog"
+    >
+      {operation && targetAccount ? (
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          {operation.kind === "classification" ? (
+            <div className="space-y-3">
+              <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
+                Phân loại tài khoản
+                <select
+                  value={selectedType}
+                  disabled={fieldsLocked}
+                  onChange={(event) => {
+                    setPendingIntent(null);
+                    setSelectedType(event.target.value as AccountType);
+                  }}
+                  className={opInput}
+                >
+                  {ACCOUNT_TYPES.map((typeOption) => (
+                    <option key={typeOption} value={typeOption}>
+                      {accountTypeBadgeMeta(typeOption).label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedType !== "NORMAL" ? (
+                <Alert
+                  tone={isUnlinkingFromClassification ? "warning" : "info"}
+                  title="Lưu ý phân loại SHARED / SERVICE"
+                >
+                  Tài khoản SHARED hoặc SERVICE không được nối hồ sơ Nhân sự nội bộ. Nếu tài khoản vẫn còn liên kết người hoặc phân công cá nhân đang hiệu lực, hệ thống sẽ từ chối đổi loại và không tự thu hồi phân công.
+                </Alert>
+              ) : null}
+            </div>
+          ) : null}
+
+          {operation.kind === "link" ? (
+            <div className="space-y-3">
+              {targetAccount.account_type !== "NORMAL" ? (
+                <Alert tone="error" title="Không thể liên kết">
+                  Chỉ tài khoản phân loại Cá nhân (NORMAL) mới được liên kết hồ sơ nhân sự nội bộ.
+                </Alert>
+              ) : (
+                <>
+                  <PersonSearchPicker
+                    id="account-link-person-picker"
+                    label="Tìm và chọn hồ sơ nhân sự nội bộ (chưa liên kết tài khoản)"
+                    selectedPersonId={selectedPerson?.person_id ?? null}
+                    linkState="unlinked"
+                    disabled={fieldsLocked || mismatchConfirmRequired}
+                    onSelect={(person) => {
+                      setPendingIntent(null);
+                      setMismatchConfirmRequired(false);
+                      setConfirmedRecruiter(null);
+                      setSelectedPerson(person);
+                    }}
+                    onSessionLost={onSessionLost}
+                  />
+                  {mismatchConfirmRequired ? (
+                    <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50/60 p-3 dark:border-amber-700/60 dark:bg-amber-950/30">
+                      <Alert tone="warning" title="Xác nhận thủ công hồ sơ tính công tuyển dụng">
+                        Phát hiện sai khác với liên kết tính công tuyển dụng hiện có. Vui lòng tự tìm và chọn đúng hồ sơ tính công tuyển dụng để gửi xác nhận (`confirmed_recruiter_id`), hệ thống không tự ghi đè.
+                      </Alert>
+                      <RecruiterConfirmPicker
+                        id="account-link-recruiter-confirm-picker"
+                        label="Chọn hồ sơ tính công tuyển dụng cần xác nhận"
+                        selectedRecruiterId={confirmedRecruiter?.recruiter_id ?? null}
+                        initialSearch={selectedPerson?.full_name ?? ""}
+                        disabled={fieldsLocked}
+                        onSelect={(recruiter) => {
+                          setPendingIntent(null);
+                          setConfirmedRecruiter(recruiter);
+                        }}
+                        onSessionLost={onSessionLost}
+                      />
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
+
+          {operation.kind === "unlink" && targetAccount.active_person_link ? (
+            <Alert tone="warning" title="Xác nhận ngắt liên kết hồ sơ nhân sự">
+              Ngắt liên kết giữa tài khoản này và{" "}
+              <strong>
+                {targetAccount.active_person_link.full_name} (
+                {targetAccount.active_person_link.employee_code})
+              </strong>
+              . Thao tác này không làm ngừng hoạt động hồ sơ nhân sự hoặc khóa tài khoản.
+            </Alert>
+          ) : null}
+
+          <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
+            Lý do thao tác (bắt buộc)
+            <textarea
+              required
+              rows={3}
+              value={reason}
+              disabled={fieldsLocked}
+              maxLength={ACCOUNT_ORG_MAX_REASON_LENGTH}
+              placeholder="Nhập lý do phân loại hoặc liên kết tài khoản…"
+              onChange={(event) => {
+                setPendingIntent(null);
+                setReason(event.target.value);
+              }}
+              className="rounded-md border border-border bg-surface px-3 py-2 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50"
+            />
+          </label>
+
+          {feedback ? (
+            <Alert
+              tone={feedback.tone}
+              role="alert"
+              title={feedback.tone === "warning" ? "Cần xác nhận hoặc tải lại" : "Không thể thực hiện"}
+            >
+              <p>{feedback.message}</p>
+              {feedback.needsReload ? (
+                <div className="mt-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      resetAndClose();
+                      onReloadRequested();
+                    }}
+                  >
+                    Tải lại dữ liệu mới nhất
+                  </Button>
+                </div>
+              ) : null}
+            </Alert>
+          ) : null}
+
+          <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <Button variant="secondary" size="md" disabled={busy} onClick={resetAndClose}>
+              Hủy
+            </Button>
+            <Button
+              type="submit"
+              variant={operation.kind === "unlink" ? "danger" : "primary"}
+              size="md"
+              loading={busy}
+              disabled={
+                busy ||
+                (operation.kind === "link" &&
+                  targetAccount.account_type !== "NORMAL") ||
+                (operation.kind === "link" &&
+                  (!selectedPerson ||
+                    (mismatchConfirmRequired && !confirmedRecruiter)) &&
+                  !pendingIntent?.uncertain)
+              }
+            >
+              {pendingIntent?.uncertain
+                ? "Thử gửi lại cùng yêu cầu"
+                : operation.kind === "link" && mismatchConfirmRequired
+                  ? "Xác nhận liên kết kèm hồ sơ đã chọn"
+                  : operation.kind === "classification"
+                    ? "Lưu phân loại"
+                    : operation.kind === "link"
+                      ? "Xác nhận liên kết"
+                      : "Xác nhận ngắt liên kết"}
+            </Button>
+          </div>
+        </form>
+      ) : null}
+    </FormDialog>
   );
 }

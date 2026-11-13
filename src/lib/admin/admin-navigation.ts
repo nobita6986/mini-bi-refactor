@@ -28,13 +28,14 @@ type AdminSectionConfig = AdminSection & {
 };
 
 export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
-  { id: "personnel", label: "Nhân sự", href: "/admin/catalog/personnel", visible: adminAreaNavPredicate },
+  { id: "personnel", label: "Hồ sơ tính công tuyển dụng", href: "/admin/catalog/personnel", visible: adminAreaNavPredicate },
   { id: "teams", label: "Nhóm", href: "/admin/catalog/teams", visible: adminAreaNavPredicate },
   { id: "labor-types", label: "Loại hình lao động", href: "/admin/catalog/labor-types", visible: adminAreaNavPredicate },
   { id: "provinces", label: "Tỉnh/Thành", href: "/admin/catalog/provinces", visible: recruitmentLocationCatalogNavPredicate },
   { id: "industrial-parks", label: "Khu công nghiệp", href: "/admin/catalog/industrial-parks", visible: recruitmentLocationCatalogNavPredicate },
   { id: "project-team-scopes", label: "Mapping Dự án ↔ Nhóm", href: "/admin/catalog/project-team-scopes", visible: adminSecurityNavPredicate },
   { id: "vendors", label: "Vendor (NCC)", href: "/admin/catalog/vendors", visible: adminAreaNavPredicate },
+  { id: "organization-persons", label: "Nhân sự nội bộ", href: "/admin/organization/persons", visible: adminSecurityNavPredicate },
   { id: "departments", label: "Phòng ban", href: "/admin/departments", visible: adminSecurityNavPredicate },
   { id: "accounts", label: "Tài khoản truy cập", href: "/admin/access/accounts", visible: adminSecurityNavPredicate },
   { id: "attendance", label: "Báo cáo chấm công", href: "/admin/attendance", visible: attendanceReportNavPredicate },
