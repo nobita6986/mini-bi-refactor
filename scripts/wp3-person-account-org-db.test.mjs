@@ -32,6 +32,7 @@ import {
 } from "./lib/wp3b-backfill-manifest.mjs";
 import {
   assertSafeBackfillConnectionTarget,
+  normalizeIsoDateString,
   runQ1HrpRecruiterAudit,
   runWp3bBackfill,
 } from "./wp3b-backfill-person-account-org.mjs";
@@ -1585,6 +1586,44 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
   await checkSync("Tên Từ Personnel RPC");
 
   await db.close();
+});
+
+test("PostgreSQL DATE replay preserves its calendar day across client timezones", () => {
+  const previous = process.env.TZ;
+  try {
+    for (const timezone of ["Asia/Ho_Chi_Minh", "Pacific/Kiritimati", "America/Los_Angeles", "UTC"]) {
+      process.env.TZ = timezone;
+      assert.equal(normalizeIsoDateString(new Date(2026, 9, 6)), "2026-10-06");
+      assert.equal(normalizeIsoDateString("2026-10-06"), "2026-10-06");
+    }
+    assert.equal(normalizeIsoDateString(null), null);
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
+test("Legacy organization helper ACL drift is repaired before WP3B migration", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(AUTH_PROLOGUE);
+    const repair = "20261114083000_hf_org_internal_helper_acl.sql";
+    const files = (await readdir(MIGRATION_DIR)).filter(name => name.endsWith(".sql")).sort();
+    for (const name of files.filter(name => name < repair)) {
+      await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+    }
+    await db.exec("grant execute on function public.org_department__internal_account_summary(uuid) to anon, authenticated, service_role");
+    await db.exec("grant execute on function public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer) to anon, authenticated");
+    const sql = await readFile(path.join(MIGRATION_DIR, repair), "utf8");
+    await db.exec(sql);
+    await db.exec(sql);
+    const result = await db.query("select has_function_privilege('anon', 'public.org_department__internal_account_summary(uuid)', 'EXECUTE') as anon, has_function_privilege('authenticated', 'public.org_department__internal_account_summary(uuid)', 'EXECUTE') as authenticated, has_function_privilege('service_role', 'public.org_department__internal_account_summary(uuid)', 'EXECUTE') as service_role, has_function_privilege('service_role', 'public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer)', 'EXECUTE') as public_rpc");
+    assert.deepEqual(result.rows[0], { anon: false, authenticated: false, service_role: false, public_rpc: true });
+    const rpc = await db.query("select has_function_privilege('anon', 'public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer)', 'EXECUTE') as anon, has_function_privilege('authenticated', 'public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer)', 'EXECUTE') as authenticated");
+    assert.deepEqual(rpc.rows[0], { anon: false, authenticated: false });
+    await db.exec(await readFile(path.join(MIGRATION_DIR, WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME), "utf8"));
+    assert.equal((await db.query("select to_regclass('public.organization_persons') is not null as ready")).rows[0].ready, true);
+  } finally { await db.close(); }
 });
 
 test("NWC backfill requires explicit staging mode and refuses other remote targets", () => {
