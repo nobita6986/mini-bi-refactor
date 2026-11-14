@@ -5038,15 +5038,14 @@ begin
   );
 
   v_result := jsonb_build_object(
-    'recruiter_id', v_recruiter.recruiter_id,
-    'display_name', v_recruiter.display_name,
-    'personnel_code', v_recruiter.personnel_code,
-    'personnel_position', v_recruiter.personnel_position,
-    'app_user_id', p_account_ref,
     'link_id', v_link_id,
+    'app_user_id', p_account_ref,
     'app_user_version', v_account.version,
+    'app_user_revision_id', v_app_user_revision_id,
+    'recruiter_id', v_recruiter.recruiter_id,
     'recruiter_version', v_recruiter.version,
-    'app_user_revision_id', v_app_user_revision_id
+    'personnel_code', v_recruiter.personnel_code,
+    'valid_from', v_today
   );
   perform public.direct_entry_idempotency_finish(
     p_actor_app_user_id, v_action, p_idempotency_key, v_result

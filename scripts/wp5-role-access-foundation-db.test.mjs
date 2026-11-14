@@ -10,6 +10,7 @@ import test from "node:test";
 
 import { PGlite } from "@electric-sql/pglite";
 import { WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME } from "./lib/migration-validation.mjs";
+import { projectLinkRecruiterEnvelope } from "../src/lib/admin/account-operation-contract.ts";
 import { computeRoleMutationRequestHash } from "../src/lib/direct-entry/role-access-api.ts";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
@@ -803,10 +804,15 @@ test("5. Contextual roles (DEPARTMENT_HEAD, PROJECT_ACCOUNTANT), work_reports de
     { role_code: "RECRUITER", source_kind: "PERSONNEL_LINK_AUTO" },
   ]);
 
-  // link_recruiter auto-seeds EMPLOYEE_BASE + RECRUITER
-  await db.query(
-    "select public.direct_entry_account_operation_link_recruiter($1::uuid, $2::uuid, $3::uuid, 1, $4::uuid, 1, 'Auto-seed link recruiter', $5)",
+  // link_recruiter auto-seeds EMPLOYEE_BASE + RECRUITER and preserves exact D3-C link envelope
+  const { rows: [{ payload: linkPayload }] } = await db.query(
+    "select public.direct_entry_account_operation_link_recruiter($1::uuid, $2::uuid, $3::uuid, 1, $4::uuid, 1, 'Auto-seed link recruiter', $5) as payload",
     [OWNER.auth, OWNER.app, LINK_TARGET.recruiter, LINK_TARGET.app, `link-rec-${seq++}`],
+  );
+  assert.notEqual(
+    projectLinkRecruiterEnvelope(linkPayload),
+    null,
+    "link_recruiter RPC payload must match LinkRecruiterEnvelope contract (including valid_from)",
   );
   const { rows: linkRoles } = await db.query(
     "select role_code, source_kind from public.authz_account_role_assignments where app_user_id = $1::uuid and ended_at is null order by role_code",
