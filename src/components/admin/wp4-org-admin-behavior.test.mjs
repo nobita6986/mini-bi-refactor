@@ -99,7 +99,7 @@ const reactShim = {
     const index = instance.cursor++;
     const prev = instance.slots[index];
     if (!prev || deps === undefined || !equalDeps(prev.deps, deps)) {
-      const slot = { deps, cleanup: prev?.cleanup ?? null };
+      const slot = { deps, cleanup: prev?.cleanup ?? null, setupFn: effect, cleanupRegistered: false };
       instance.slots[index] = slot;
       instance.pendingEffects.push(() => {
         if (typeof slot.cleanup === "function") {
@@ -108,16 +108,21 @@ const reactShim = {
           runCleanup();
         }
         if (instance.unmounted) return;
-        const cleanup = effect();
+        const cleanup = slot.setupFn();
         slot.cleanup = typeof cleanup === "function" ? cleanup : null;
-        instance.cleanups.add(() => {
-          if (typeof slot.cleanup === "function") {
-            const fn = slot.cleanup;
-            slot.cleanup = null;
-            fn();
-          }
-        });
+        if (!slot.cleanupRegistered) {
+          slot.cleanupRegistered = true;
+          instance.cleanups.add(() => {
+            if (typeof slot.cleanup === "function") {
+              const fn = slot.cleanup;
+              slot.cleanup = null;
+              fn();
+            }
+          });
+        }
       });
+    } else {
+      prev.setupFn = effect;
     }
   },
   useId() {
@@ -244,6 +249,23 @@ function mount(Component, props = {}) {
     async rerender(nextProps) {
       handle.props = nextProps;
       handle.dirty = true;
+      await handle.flush();
+    },
+    async replayStrictEffects() {
+      if (handle.unmounted) return;
+      for (const slot of handle.slots) {
+        if (slot && typeof slot.setupFn === "function" && typeof slot.cleanup === "function") {
+          const runCleanup = slot.cleanup;
+          slot.cleanup = null;
+          runCleanup();
+        }
+      }
+      for (const slot of handle.slots) {
+        if (slot && typeof slot.setupFn === "function") {
+          const cleanup = slot.setupFn();
+          slot.cleanup = typeof cleanup === "function" ? cleanup : null;
+        }
+      }
       await handle.flush();
     },
     unmount() {
@@ -1716,4 +1738,198 @@ test("Finding 4 [Pickers across Person, Department Memberships, Account]: editin
       r.url.startsWith("/api/admin/catalog/personnel?"),
   ).length;
   assert.equal(accPickerAfter - accPickerBefore, 0);
+});
+
+// ===========================================================================
+// Strict Mode P2 — AccountOrgDialogs setup -> cleanup -> setup retains active
+// mountedRef=true while still suppressing post-unmount state updates
+// ===========================================================================
+
+test("Strict Mode [AccountOrgDialogs]: setup -> cleanup -> setup lowers busy on 409 business error, allows 503 retry, unblocks failed reconcile while keeping uncertain lock, and guards unmount", async () => {
+  const am = mount(AccountManager);
+  await am.flush();
+  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, { ok: true, reclassified: {} });
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?")),
+    200,
+    makeAccountListEnvelope([makeAccount({ version: 2 })]),
+  );
+  await am.flush();
+
+  // 1) Business 409 ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS after Strict Mode replay
+  findButton(am, "Phân loại").props.onClick();
+  await am.flush();
+  let orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
+  await orgDialog.replayStrictEffects();
+
+  findNode(orgDialog, (n) => n.type === "select").props.onChange({ target: { value: "SHARED" } });
+  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
+    target: { value: "Đổi phân loại dùng chung" },
+  });
+  await orgDialog.flush();
+  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await orgDialog.flush();
+
+  assert.equal(findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog").props.closeDisabled, true);
+  assert.equal(findNode(orgDialog, (n) => n.type === "textarea").props.disabled, true);
+
+  respond(findLastRequest((r) => r.url.endsWith("/classification")), 409, {
+    ok: false,
+    code: "ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS",
+  });
+  await orgDialog.flush();
+  await am.flush();
+
+  const bizDlg = findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog");
+  assert.equal(bizDlg.props.closeDisabled, false);
+  assert.equal(Boolean(findNode(orgDialog, (n) => n.type === "select").props.disabled), false);
+  assert.equal(Boolean(findNode(orgDialog, (n) => n.type === "textarea").props.disabled), false);
+  assert.equal(Boolean(findButton(orgDialog, "Hủy").props.disabled), false);
+  const bizSubmitBtn = findNode(
+    orgDialog,
+    (n) => n.type?.name === "Button" && textOf(n).trim() === "Lưu phân loại",
+  );
+  assert.equal(Boolean(bizSubmitBtn.props.loading), false);
+  assert.equal(Boolean(bizSubmitBtn.props.disabled), false);
+
+  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
+    target: { value: "Sửa lại lý do sau 409 nghiệp vụ" },
+  });
+  await orgDialog.flush();
+  assert.equal(
+    findNode(orgDialog, (n) => n.type === "textarea").props.value,
+    "Sửa lại lý do sau 409 nghiệp vụ",
+  );
+
+  findButton(orgDialog, "Hủy").props.onClick();
+  await orgDialog.flush();
+  await am.flush();
+  assert.equal(componentNode(am, "AccountOrgDialogs").props.operation, null);
+
+  // 2) 503 uncertain write -> failed reconcile unblocks reconciling while keeping uncertain lock -> retry succeeds
+  findButton(am, "Phân loại").props.onClick();
+  await am.flush();
+  orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
+  await orgDialog.replayStrictEffects();
+
+  findNode(orgDialog, (n) => n.type === "select").props.onChange({ target: { value: "SERVICE" } });
+  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
+    target: { value: "Đổi sang dịch vụ" },
+  });
+  await orgDialog.flush();
+  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await orgDialog.flush();
+
+  const post1 = findLastRequest((r) => r.url.endsWith("/classification"));
+  const key1 = post1.options.headers["Idempotency-Key"];
+  const body1 = post1.options.body;
+  respond(post1, 503, { ok: false, code: "TEMP_UNAVAILABLE" });
+  await orgDialog.flush();
+
+  const dlg503 = () => findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog");
+  assert.equal(dlg503().props.closeDisabled, true);
+  assert.equal(findButton(orgDialog, "Hủy").props.disabled, true);
+  dlg503().props.onOpenChange(false);
+  await orgDialog.flush();
+  assert.equal(dlg503().props.open, true);
+
+  const retryBtn503 = findNode(
+    orgDialog,
+    (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
+  );
+  assert.equal(Boolean(retryBtn503.props.loading), false);
+  assert.equal(Boolean(retryBtn503.props.disabled), false);
+  assert.equal(Boolean(findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.disabled), false);
+
+  // Failed reconcile GET must release reconciling without losing uncertain payload/key
+  findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.onClick();
+  await orgDialog.flush();
+  assert.equal(Boolean(findButton(orgDialog, "Đang tải đối chiếu…").props.disabled), true);
+  assert.equal(
+    Boolean(
+      findNode(
+        orgDialog,
+        (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
+      ).props.disabled,
+    ),
+    true,
+  );
+
+  respond(findLastRequest((r) => r.method === "GET"), 503, { ok: false });
+  await orgDialog.flush();
+
+  assert.equal(Boolean(findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.disabled), false);
+  assert.equal(
+    textOf(orgDialog.tree).includes("Yêu cầu và khóa gửi trùng vẫn được giữ nguyên."),
+    true,
+  );
+  assert.equal(dlg503().props.closeDisabled, true);
+  assert.equal(findButton(orgDialog, "Hủy").props.disabled, true);
+  const retryBtnAfterReconcileFail = findNode(
+    orgDialog,
+    (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
+  );
+  assert.equal(Boolean(retryBtnAfterReconcileFail.props.disabled), false);
+
+  // Retry sends exact same payload and Idempotency-Key
+  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await orgDialog.flush();
+  const post2 = findLastRequest((r) => r.url.endsWith("/classification"));
+  assert.notEqual(post2, post1);
+  assert.equal(post2.options.headers["Idempotency-Key"], key1);
+  assert.equal(post2.options.body, body1);
+
+  respond(post2, 200, {
+    ok: true,
+    replayed: true,
+    account: { account_ref: ACCOUNT_A_REF, account_type: "SERVICE", version: 3 },
+  });
+  await orgDialog.flush();
+  await am.flush();
+  respond(
+    findLastRequest((r) => r.method === "GET"),
+    200,
+    makeAccountListEnvelope([makeAccount({ account_type: "SERVICE", version: 3 })]),
+  );
+  await am.flush();
+  assert.equal(componentNode(am, "AccountOrgDialogs").props.operation, null);
+  assert.equal(notifications.success.length, 1);
+
+  // 3) Real unmount still guards async reconcile against post-unmount state updates
+  findButton(am, "Phân loại").props.onClick();
+  await am.flush();
+  const vnode = componentNode(am, "AccountOrgDialogs");
+  let resolveDeferredReload;
+  const deferredReload = new Promise((resolve) => {
+    resolveDeferredReload = resolve;
+  });
+  const unmountDlg = mount(vnode.type, {
+    ...vnode.props,
+    onReloadRequested: () => deferredReload,
+  });
+  await unmountDlg.flush();
+  await unmountDlg.replayStrictEffects();
+
+  findNode(unmountDlg, (n) => n.type === "select").props.onChange({ target: { value: "SHARED" } });
+  findNode(unmountDlg, (n) => n.type === "textarea").props.onChange({
+    target: { value: "Kiểm tra cleanup khi unmount thật" },
+  });
+  await unmountDlg.flush();
+  findNode(unmountDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await unmountDlg.flush();
+
+  respond(findLastRequest((r) => r.url.endsWith("/classification")), 409, {
+    ok: false,
+    code: "VERSION_CONFLICT",
+  });
+  await unmountDlg.flush();
+
+  findButton(unmountDlg, "Tải lại dữ liệu mới nhất").props.onClick();
+  await unmountDlg.flush();
+  assert.equal(unmountDlg.dirty, false);
+
+  unmountDlg.unmount();
+  resolveDeferredReload(false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(unmountDlg.dirty, false);
 });

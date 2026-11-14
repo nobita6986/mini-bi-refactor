@@ -1201,12 +1201,12 @@ function AccountOrgDialogs({
   const notify = useNotify();
   const [targetAccount] = useState<ExistingAccount | null>(() => operation?.account ?? null);
   const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const [selectedType, setSelectedType] = useState<AccountType>(
     targetAccount?.account_type ?? "NORMAL",
