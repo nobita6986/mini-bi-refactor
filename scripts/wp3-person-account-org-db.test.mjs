@@ -1587,6 +1587,22 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
   await db.close();
 });
 
+test("NWC backfill requires explicit staging mode and refuses other remote targets", () => {
+  const direct = "postgresql://postgres:x@db.nwcvmigrhzdywaumkrjp.supabase.co:5432/postgres";
+  const pooler = "postgresql://postgres.nwcvmigrhzdywaumkrjp:x@aws-0-region.pooler.supabase.com:5432/postgres";
+  for (const uri of [direct, pooler]) {
+    assert.throws(() => assertSafeBackfillConnectionTarget(uri, { allowRemoteTarget: true }), /BACKFILL_FORBIDDEN_NWC_TARGET/);
+    assert.equal(assertSafeBackfillConnectionTarget(uri, { nwcStaging: true }), uri);
+  }
+  for (const uri of [
+    "postgresql://postgres:x@db.otherproject.supabase.co:5432/postgres",
+    "postgresql://postgres.otherproject:x@aws-0-region.pooler.supabase.com:5432/postgres",
+    "postgresql://postgres.nwcvmigrhzdywaumkrjp:x@untrusted.example:5432/postgres",
+  ]) {
+    assert.throws(() => assertSafeBackfillConnectionTarget(uri, { nwcStaging: true, allowRemoteTarget: true }), /BACKFILL_NWC_TARGET_MISMATCH/);
+  }
+});
+
 test("TM-01, TM-02, TM-03, TM-16 & TM-17: Q1 audit, BACKFILL_DATE_EVIDENCE timestamp invariant, SHARED/SERVICE, disabled account, OD-WP3-05 leave approver separation & self_check 1..7", async () => {
   const db = await createMigratedWp3Database();
   await seedWp3BaseData(db);

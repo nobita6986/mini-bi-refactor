@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseExternalNwcConfig } from "./run-wp2a-effective-access-shadow.mjs";
 
 import {
   Q1_HRP_RECRUITER_LINK_AUDIT_SQL,
@@ -50,6 +51,17 @@ export function assertSafeBackfillConnectionTarget(connectionString, options = {
     throw new Error("BACKFILL_DB_URL_REQUIRED");
   }
   const lower = connectionString.toLowerCase();
+  if (options.nwcStaging) {
+    const target = new URL(connectionString);
+    const user = decodeURIComponent(target.username);
+    const isDirectNwc = target.hostname === `db.${FORBIDDEN_NWC_PROJECT_REF}.supabase.co`;
+    const isPoolerNwc = target.hostname.endsWith(".pooler.supabase.com") &&
+      user === `postgres.${FORBIDDEN_NWC_PROJECT_REF}`;
+    if (!isDirectNwc && !isPoolerNwc) {
+      throw new Error("BACKFILL_NWC_TARGET_MISMATCH");
+    }
+    return connectionString;
+  }
   if (lower.includes(FORBIDDEN_NWC_PROJECT_REF) || lower.includes("db-test-nwc")) {
     throw new Error("BACKFILL_FORBIDDEN_NWC_TARGET: WP3B must never write to NWC");
   }
@@ -1013,6 +1025,8 @@ function parseCliArgs(argv) {
     confirmApply: false,
     expectedFingerprint: null,
     allowRemoteTarget: false,
+    nwcStaging: false,
+    configPath: null,
     connectionString: process.env.WP3B_BACKFILL_DB_URL ?? process.env.DATABASE_URL ?? null,
   };
 
@@ -1034,6 +1048,10 @@ function parseCliArgs(argv) {
       args.expectedFingerprint = argv[++i] ?? null;
     } else if (token === "--allow-remote-target") {
       args.allowRemoteTarget = true;
+    } else if (token === "--nwc-staging") {
+      args.nwcStaging = true;
+    } else if (token === "--config") {
+      args.configPath = argv[++i] ?? null;
     } else if (token === "--db-url") {
       args.connectionString = argv[++i] ?? null;
     } else {
@@ -1086,12 +1104,17 @@ async function main() {
     throw new Error("--apply requires --confirm-apply and --expected-fingerprint <sha256>");
   }
 
-  const dbUrl = assertSafeBackfillConnectionTarget(args.connectionString, {
+  if (args.nwcStaging && !args.configPath) {
+    throw new Error("BACKFILL_NWC_CONFIG_REQUIRED: --nwc-staging requires --config <path>");
+  }
+  const nwcConfig = args.nwcStaging ? parseExternalNwcConfig(args.configPath) : null;
+  const dbUrl = assertSafeBackfillConnectionTarget(nwcConfig?.connectionString ?? args.connectionString, {
     allowRemoteTarget: args.allowRemoteTarget,
+    nwcStaging: args.nwcStaging,
   });
 
   const { Client } = await import("pg");
-  const client = new Client({ connectionString: dbUrl });
+  const client = new Client({ connectionString: dbUrl, ...(nwcConfig ? { ssl: nwcConfig.ssl } : {}) });
   await client.connect();
 
   try {
