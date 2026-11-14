@@ -185,6 +185,8 @@ test("assertions 6-7: assignment and revision tables carry the exact shape", asy
     ["valid_to", "date", "YES"],
     ["created_at", "timestamp with time zone", "NO"],
     ["is_current", "boolean", "NO"],
+    // WP5B-1 adds D10 temporary suspension marker without altering historical revision columns.
+    ["suspended_by_account_disable", "boolean", "NO"],
   ]);
 
   const assignmentFks = (await db.query(

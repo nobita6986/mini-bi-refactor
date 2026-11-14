@@ -1,0 +1,655 @@
+{
+  "schema_version": "wp5b1-role-access-fixtures-v1",
+  "generated_for": "WP5B-1 PR1 (WP6 T1B contract & UI integration bundle)",
+  "as_of": "2026-11-14T08:00:00+07:00",
+  "requests": {
+    "list_accounts_summary": {
+      "default": {
+        "search": null,
+        "enabled": "all",
+        "role_code": null,
+        "page": 1,
+        "page_size": 20
+      },
+      "filtered_admin": {
+        "search": "Minh",
+        "enabled": "true",
+        "role_code": "ADMIN",
+        "page": 1,
+        "page_size": 10
+      }
+    },
+    "assign_global_role": {
+      "role_code": "ADMIN",
+      "expected_version": 3,
+      "reason": "Grant BoD/Admin workspace governance role",
+      "idempotency_key": "11111111-1111-4111-8111-111111111111"
+    },
+    "revoke_global_role": {
+      "expected_version": 4,
+      "reason": "Remove temporary global role assignment",
+      "idempotency_key": "22222222-2222-4222-8222-222222222222"
+    },
+    "forbidden_authority_payloads": {
+      "assign_with_is_protected": {
+        "role_code": "ADMIN",
+        "expected_version": 3,
+        "reason": "Attempt client spoof of protected flag",
+        "idempotency_key": "33333333-3333-4333-8333-333333333333",
+        "is_protected": true
+      },
+      "revoke_with_protected_reason": {
+        "expected_version": 4,
+        "reason": "Attempt client spoof of protected reason",
+        "idempotency_key": "44444444-4444-4444-8444-444444444444",
+        "nested": {
+          "protected_reason": "PROTECTED_OWNER_ADMIN"
+        }
+      }
+    }
+  },
+  "responses": {
+    "roles_catalog": {
+      "as_of": "2026-11-14T08:00:00+07:00",
+      "roles": [
+        {
+          "role_code": "EMPLOYEE_BASE",
+          "display_name": "Nhân viên cơ sở",
+          "description": "Vai trò nền toàn cục cho tài khoản nhân sự/kế toán, không tự cấp quyền Direct Entry.",
+          "assignment_mode": "GLOBAL",
+          "fixed_scope_kind": "none",
+          "requires_active_person": false,
+          "is_assignable_global": true,
+          "sort_order": 1,
+          "capabilities": []
+        },
+        {
+          "role_code": "RECRUITER",
+          "display_name": "Tuyển dụng (Recruiter)",
+          "description": "Quyền nhập liệu, nộp hồ sơ và tải/xem tài liệu trong phạm vi dữ liệu tự tạo (OWN).",
+          "assignment_mode": "GLOBAL",
+          "fixed_scope_kind": "own",
+          "requires_active_person": false,
+          "is_assignable_global": true,
+          "sort_order": 2,
+          "capabilities": [
+            { "capability": "entry_create", "scope_template": "OWN", "retired_compat": false },
+            { "capability": "entry_own", "scope_template": "OWN", "retired_compat": false },
+            { "capability": "submission_create", "scope_template": "OWN", "retired_compat": false },
+            { "capability": "document_upload", "scope_template": "OWN", "retired_compat": false },
+            { "capability": "document_view", "scope_template": "OWN", "retired_compat": false },
+            { "capability": "change_request_create", "scope_template": "OWN", "retired_compat": true },
+            { "capability": "employment_status.request", "scope_template": "OWN", "retired_compat": true }
+          ]
+        },
+        {
+          "role_code": "HR_OPERATOR",
+          "display_name": "Vận hành nhân sự (HR Operator)",
+          "description": "Quản trị danh mục tuyển dụng, đội ngũ, nhân sự tuyển dụng, nhật ký kiểm toán và xem tài liệu.",
+          "assignment_mode": "GLOBAL",
+          "fixed_scope_kind": "all",
+          "requires_active_person": false,
+          "is_assignable_global": true,
+          "sort_order": 3,
+          "capabilities": [
+            { "capability": "recruiter_master_manage", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "team_master_manage", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "catalog_master_manage", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "audit_view", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "document_view", "scope_template": "ALL", "retired_compat": false }
+          ]
+        },
+        {
+          "role_code": "ADMIN",
+          "display_name": "BoD/Admin",
+          "description": "Vai trò điều hành/quản trị hợp nhất với bộ 21 quyền chuẩn (tách riêng 8 quyền chuyên trách ngoài gói tự cấp).",
+          "assignment_mode": "GLOBAL",
+          "fixed_scope_kind": "all",
+          "requires_active_person": false,
+          "is_assignable_global": true,
+          "sort_order": 4,
+          "capabilities": [
+            { "capability": "entry_own", "scope_template": "OWN", "retired_compat": false },
+            { "capability": "entry_admin", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "entry_team", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "entry_create", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "submission_create", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "entry_privileged_edit", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "entry_restore", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "recruiter_master_manage", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "team_master_manage", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "audit_view", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "worker_edit_history_view", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "document_upload", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "document_view", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "employment_status.review", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "employment_status.apply", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "change_request_create", "scope_template": "ALL", "retired_compat": true },
+            { "capability": "change_review", "scope_template": "ALL", "retired_compat": true },
+            { "capability": "employment_status.request", "scope_template": "ALL", "retired_compat": true },
+            { "capability": "duplicate_cccd_withdraw", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "report_view", "scope_template": "ALL", "retired_compat": false },
+            { "capability": "report_analytics_view", "scope_template": "ALL", "retired_compat": false }
+          ]
+        },
+        {
+          "role_code": "TEAM_LEADER",
+          "display_name": "Trưởng nhóm (Team Leader)",
+          "description": "Vai trò ngữ cảnh gắn với phân công Trưởng nhóm của đội đang hoạt động.",
+          "assignment_mode": "CONTEXTUAL",
+          "fixed_scope_kind": "team",
+          "requires_active_person": false,
+          "is_assignable_global": false,
+          "sort_order": 5,
+          "capabilities": [
+            { "capability": "entry_team", "scope_template": "CONTEXT_TEAM", "retired_compat": false },
+            { "capability": "team_manager_assign", "scope_template": "CONTEXT_TEAM", "retired_compat": false },
+            { "capability": "report_view", "scope_template": "CONTEXT_TEAM", "retired_compat": false },
+            { "capability": "report_analytics_view", "scope_template": "CONTEXT_TEAM", "retired_compat": false },
+            { "capability": "report_assign", "scope_template": "CONTEXT_TEAM", "retired_compat": false }
+          ]
+        },
+        {
+          "role_code": "DEPARTMENT_HEAD",
+          "display_name": "Trưởng phòng ban",
+          "description": "Vai trò ngữ cảnh chỉ đọc từ bổ nhiệm Trưởng phòng ban (yêu cầu nhân sự ACTIVE).",
+          "assignment_mode": "CONTEXTUAL",
+          "fixed_scope_kind": "department",
+          "requires_active_person": true,
+          "is_assignable_global": false,
+          "sort_order": 6,
+          "capabilities": []
+        },
+        {
+          "role_code": "PROJECT_MANAGER",
+          "display_name": "Quản lý dự án (PM)",
+          "description": "Vai trò ngữ cảnh quản lý dự án đang mở (quyết định quyền tạo tin tuyển dụng theo dự án).",
+          "assignment_mode": "CONTEXTUAL",
+          "fixed_scope_kind": "project",
+          "requires_active_person": false,
+          "is_assignable_global": false,
+          "sort_order": 7,
+          "capabilities": []
+        },
+        {
+          "role_code": "PROJECT_ACCOUNTANT",
+          "display_name": "Kế toán dự án",
+          "description": "Vai trò ngữ cảnh kế toán theo từng dự án được phân công.",
+          "assignment_mode": "CONTEXTUAL",
+          "fixed_scope_kind": "project",
+          "requires_active_person": false,
+          "is_assignable_global": false,
+          "sort_order": 8,
+          "capabilities": [
+            { "capability": "vendor_finance_view", "scope_template": "CONTEXT_PROJECT", "retired_compat": false }
+          ]
+        }
+      ]
+    },
+    "accounts_summary": {
+      "as_of": "2026-11-14T08:00:00+07:00",
+      "search": null,
+      "enabled": "all",
+      "role_code": null,
+      "page": 1,
+      "page_size": 20,
+      "total": 3,
+      "accounts": [
+        {
+          "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "login_id": "owner_canonical",
+          "display_name": "Canonical Owner",
+          "enabled": true,
+          "account_type": "NORMAL",
+          "authz_managed": true,
+          "version": 4,
+          "person": {
+            "person_id": "10000000-0000-4000-8000-000000000001",
+            "employee_code": "BOD-001",
+            "full_name": "Canonical Owner",
+            "status": "ACTIVE",
+            "department_id": "20000000-0000-4000-8000-000000000001",
+            "department_name": "Ban Điều Hành"
+          },
+          "global_roles": [
+            {
+              "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+              "role_code": "ADMIN",
+              "display_name": "BoD/Admin",
+              "is_effective": true,
+              "is_protected": true,
+              "can_revoke": false,
+              "cannot_revoke_reason": "PROTECTED_OWNER_ADMIN"
+            }
+          ],
+          "contextual_roles": [],
+          "direct_exception_count": 0,
+          "effective_grant_count": 21,
+          "blocking_reasons": []
+        },
+        {
+          "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
+          "login_id": "minh_admin",
+          "display_name": "Nguyen Minh",
+          "enabled": true,
+          "account_type": "NORMAL",
+          "authz_managed": true,
+          "version": 3,
+          "person": {
+            "person_id": "10000000-0000-4000-8000-000000000002",
+            "employee_code": "NV-002",
+            "full_name": "Nguyen Minh",
+            "status": "ACTIVE",
+            "department_id": "20000000-0000-4000-8000-000000000002",
+            "department_name": "Phòng Tuyển Dụng"
+          },
+          "global_roles": [
+            {
+              "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+              "role_code": "ADMIN",
+              "display_name": "BoD/Admin",
+              "is_effective": true,
+              "is_protected": false,
+              "can_revoke": true,
+              "cannot_revoke_reason": null
+            }
+          ],
+          "contextual_roles": [
+            {
+              "role_code": "TEAM_LEADER",
+              "display_name": "Trưởng nhóm (Team Leader)",
+              "target_kind": "TEAM",
+              "target_ref": "team_south_01",
+              "target_label": "South Recruiting Team",
+              "is_effective": true
+            }
+          ],
+          "direct_exception_count": 1,
+          "effective_grant_count": 26,
+          "blocking_reasons": []
+        },
+        {
+          "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000003",
+          "login_id": "suspended_staff",
+          "display_name": "Tran Van Tam",
+          "enabled": false,
+          "account_type": "NORMAL",
+          "authz_managed": true,
+          "version": 6,
+          "person": null,
+          "global_roles": [
+            {
+              "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000003",
+              "role_code": "RECRUITER",
+              "display_name": "Tuyển dụng (Recruiter)",
+              "is_effective": false,
+              "is_protected": false,
+              "can_revoke": true,
+              "cannot_revoke_reason": null
+            }
+          ],
+          "contextual_roles": [],
+          "direct_exception_count": 0,
+          "effective_grant_count": 0,
+          "blocking_reasons": ["ACCOUNT_DISABLED"]
+        }
+      ]
+    },
+    "account_access_detail": {
+      "canonical_owner_protected": {
+        "as_of": "2026-11-14T08:00:00+07:00",
+        "account": {
+          "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "login_id": "owner_canonical",
+          "display_name": "Canonical Owner",
+          "enabled": true,
+          "account_type": "NORMAL",
+          "authz_managed": true,
+          "version": 4,
+          "person": {
+            "person_id": "10000000-0000-4000-8000-000000000001",
+            "employee_code": "BOD-001",
+            "full_name": "Canonical Owner",
+            "status": "ACTIVE",
+            "department_id": "20000000-0000-4000-8000-000000000001",
+            "department_name": "Ban Điều Hành"
+          }
+        },
+        "blocking_reasons": [],
+        "assigned_global_roles": [
+          {
+            "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+            "role_code": "ADMIN",
+            "display_name": "BoD/Admin",
+            "source_kind": "BACKFILL_SNAPSHOT",
+            "reason": "Canonical Owner protected BoD/Admin assignment",
+            "started_at": "2026-11-14T00:00:00+07:00",
+            "ended_at": null,
+            "ended_reason": null,
+            "assigned_by_display": "System Cutover",
+            "is_effective": true,
+            "inactive_reason": null,
+            "is_protected": true,
+            "can_revoke": false,
+            "cannot_revoke_reason": "PROTECTED_OWNER_ADMIN"
+          }
+        ],
+        "direct_exceptions": [],
+        "contextual_assignments": [
+          {
+            "role_code": "DEPARTMENT_HEAD",
+            "display_name": "Trưởng phòng ban",
+            "target_kind": "DEPARTMENT",
+            "target_ref": "20000000-0000-4000-8000-000000000001",
+            "target_label": "Ban Điều Hành",
+            "scope_kind": "CONTEXT_DEPARTMENT",
+            "scope_id": "20000000-0000-4000-8000-000000000001",
+            "assignment_id": "cccccccc-cccc-4ccc-8ccc-000000000001",
+            "started_at": "2026-11-14T00:00:00+07:00",
+            "is_effective": true,
+            "inactive_reason": null,
+            "derived_capabilities": [],
+            "can_revoke": false,
+            "cannot_revoke_reason": "MANAGED_IN_SOURCE_MODULE"
+          }
+        ],
+        "module_authorities": [],
+        "effective_grants": [
+          {
+            "capability": "entry_own",
+            "scope_kind": "OWN",
+            "scope_id": null,
+            "source_type": "ROLE_BUNDLE",
+            "source_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+            "scope_label": "OWN"
+          },
+          {
+            "capability": "entry_admin",
+            "scope_kind": "ALL",
+            "scope_id": null,
+            "source_type": "ROLE_BUNDLE",
+            "source_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+            "scope_label": "ALL"
+          }
+        ]
+      },
+      "member_admin_revocable_with_contextual_and_exception": {
+        "as_of": "2026-11-14T08:00:00+07:00",
+        "account": {
+          "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
+          "login_id": "minh_admin",
+          "display_name": "Nguyen Minh",
+          "enabled": true,
+          "account_type": "NORMAL",
+          "authz_managed": true,
+          "version": 3,
+          "person": {
+            "person_id": "10000000-0000-4000-8000-000000000002",
+            "employee_code": "NV-002",
+            "full_name": "Nguyen Minh",
+            "status": "ACTIVE",
+            "department_id": "20000000-0000-4000-8000-000000000002",
+            "department_name": "Phòng Tuyển Dụng"
+          }
+        },
+        "blocking_reasons": [],
+        "assigned_global_roles": [
+          {
+            "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+            "role_code": "ADMIN",
+            "display_name": "BoD/Admin",
+            "source_kind": "ADMIN_ASSIGNMENT",
+            "reason": "Peer BoD/Admin delegation",
+            "started_at": "2026-11-14T01:00:00+07:00",
+            "ended_at": null,
+            "ended_reason": null,
+            "assigned_by_display": "Canonical Owner",
+            "is_effective": true,
+            "inactive_reason": null,
+            "is_protected": false,
+            "can_revoke": true,
+            "cannot_revoke_reason": null
+          }
+        ],
+        "direct_exceptions": [
+          {
+            "direct_grant_id": "dddddddd-dddd-4ddd-8ddd-000000000001",
+            "capability": "catalog_master_manage",
+            "scope_kind": "ALL",
+            "scope_id": null,
+            "scope_label": "ALL",
+            "source_kind": "EXCEPTION_GRANT",
+            "reason": "Catalog maintenance outside default ADMIN bundle",
+            "started_at": "2026-11-14T01:00:00+07:00",
+            "ended_at": null,
+            "ended_reason": null,
+            "granted_by_display": "Canonical Owner",
+            "is_effective": true,
+            "inactive_reason": null
+          }
+        ],
+        "contextual_assignments": [
+          {
+            "role_code": "TEAM_LEADER",
+            "display_name": "Trưởng nhóm (Team Leader)",
+            "target_kind": "TEAM",
+            "target_ref": "team_south_01",
+            "target_label": "South Recruiting Team",
+            "scope_kind": "CONTEXT_TEAM",
+            "scope_id": "team_south_01",
+            "assignment_id": "cccccccc-cccc-4ccc-8ccc-000000000002",
+            "started_at": "2026-11-14T01:00:00+07:00",
+            "is_effective": true,
+            "inactive_reason": null,
+            "derived_capabilities": [
+              "entry_team",
+              "team_manager_assign",
+              "report_view",
+              "report_analytics_view",
+              "report_assign"
+            ],
+            "can_revoke": false,
+            "cannot_revoke_reason": "MANAGED_IN_SOURCE_MODULE"
+          },
+          {
+            "role_code": "PROJECT_MANAGER",
+            "display_name": "Quản lý dự án (PM)",
+            "target_kind": "PROJECT",
+            "target_ref": "prj_hcm_2026",
+            "target_label": "Du An HCM 2026",
+            "scope_kind": "CONTEXT_PROJECT",
+            "scope_id": "prj_hcm_2026",
+            "assignment_id": "cccccccc-cccc-4ccc-8ccc-000000000003",
+            "started_at": "2026-11-14T01:00:00+07:00",
+            "is_effective": true,
+            "inactive_reason": null,
+            "derived_capabilities": [],
+            "can_revoke": false,
+            "cannot_revoke_reason": "MANAGED_IN_SOURCE_MODULE"
+          }
+        ],
+        "module_authorities": [
+          {
+            "module": "work_reports",
+            "authority_code": "REPORT_REVIEWER",
+            "display_name": "Work Report Reviewer",
+            "scope_kind": "CONTEXT_TEAM",
+            "scope_ref": "team_south_01",
+            "scope_label": "South Recruiting Team",
+            "is_effective": true,
+            "inactive_reason": null
+          }
+        ],
+        "effective_grants": [
+          {
+            "capability": "catalog_master_manage",
+            "scope_kind": "ALL",
+            "scope_id": null,
+            "source_type": "DIRECT_GRANT",
+            "source_id": "dddddddd-dddd-4ddd-8ddd-000000000001",
+            "scope_label": "ALL"
+          },
+          {
+            "capability": "team_manager_assign",
+            "scope_kind": "CONTEXT_TEAM",
+            "scope_id": "team_south_01",
+            "source_type": "CONTEXTUAL_ASSIGNMENT",
+            "source_id": "cccccccc-cccc-4ccc-8ccc-000000000002",
+            "scope_label": "South Recruiting Team"
+          }
+        ]
+      },
+      "disabled_account_d10_zero_effective_grants": {
+        "as_of": "2026-11-14T08:00:00+07:00",
+        "account": {
+          "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000003",
+          "login_id": "suspended_staff",
+          "display_name": "Tran Van Tam",
+          "enabled": false,
+          "account_type": "NORMAL",
+          "authz_managed": true,
+          "version": 6,
+          "person": null
+        },
+        "blocking_reasons": ["ACCOUNT_DISABLED"],
+        "assigned_global_roles": [
+          {
+            "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000003",
+            "role_code": "RECRUITER",
+            "display_name": "Tuyển dụng (Recruiter)",
+            "source_kind": "PERSONNEL_LINK_AUTO",
+            "reason": "Auto-granted upon personnel creation",
+            "started_at": "2026-11-14T01:00:00+07:00",
+            "ended_at": null,
+            "ended_reason": null,
+            "assigned_by_display": "Canonical Owner",
+            "is_effective": false,
+            "inactive_reason": "ACCOUNT_DISABLED",
+            "is_protected": false,
+            "can_revoke": true,
+            "cannot_revoke_reason": null
+          }
+        ],
+        "direct_exceptions": [],
+        "contextual_assignments": [],
+        "module_authorities": [],
+        "effective_grants": []
+      }
+    },
+    "mutations": {
+      "assign_global_role_created": {
+        "replayed": false,
+        "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
+        "account_version": 4,
+        "assignment": {
+          "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+          "role_code": "ADMIN",
+          "display_name": "BoD/Admin",
+          "source_kind": "ADMIN_ASSIGNMENT",
+          "reason": "Grant BoD/Admin workspace governance role",
+          "started_at": "2026-11-14T08:00:00+07:00",
+          "ended_at": null,
+          "ended_reason": null,
+          "assigned_by_display": "Canonical Owner",
+          "is_effective": true,
+          "inactive_reason": null,
+          "is_protected": false,
+          "can_revoke": true,
+          "cannot_revoke_reason": null
+        }
+      },
+      "assign_global_role_replayed": {
+        "replayed": true,
+        "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
+        "account_version": 4,
+        "assignment": {
+          "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+          "role_code": "ADMIN",
+          "display_name": "BoD/Admin",
+          "source_kind": "ADMIN_ASSIGNMENT",
+          "reason": "Grant BoD/Admin workspace governance role",
+          "started_at": "2026-11-14T08:00:00+07:00",
+          "ended_at": null,
+          "ended_reason": null,
+          "assigned_by_display": "Canonical Owner",
+          "is_effective": true,
+          "inactive_reason": null,
+          "is_protected": false,
+          "can_revoke": true,
+          "cannot_revoke_reason": null
+        }
+      },
+      "revoke_global_role_ok": {
+        "replayed": false,
+        "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
+        "account_version": 5,
+        "assignment": {
+          "assignment_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+          "role_code": "ADMIN",
+          "display_name": "BoD/Admin",
+          "source_kind": "ADMIN_ASSIGNMENT",
+          "reason": "Grant BoD/Admin workspace governance role",
+          "started_at": "2026-11-14T08:00:00+07:00",
+          "ended_at": "2026-11-14T09:00:00+07:00",
+          "ended_reason": "Remove temporary global role assignment",
+          "assigned_by_display": "Canonical Owner",
+          "is_effective": false,
+          "inactive_reason": "REVOKED",
+          "is_protected": false,
+          "can_revoke": false,
+          "cannot_revoke_reason": null
+        }
+      }
+    }
+  },
+  "api_envelopes": {
+    "get_roles": {
+      "ok": true,
+      "as_of": "2026-11-14T08:00:00+07:00",
+      "roles_count": 8
+    },
+    "get_accounts_summary": {
+      "ok": true,
+      "page": 1,
+      "page_size": 20,
+      "total": 3
+    },
+    "post_assign_global_role_201": {
+      "ok": true,
+      "replayed": false,
+      "account_ref": "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
+      "account_version": 4
+    }
+  },
+  "errors": {
+    "AUTHORITY_FIELD_FORBIDDEN": {
+      "ok": false,
+      "error": {
+        "code": "AUTHORITY_FIELD_FORBIDDEN",
+        "message": "Authority-bearing field is forbidden"
+      }
+    },
+    "AUTHZ_CUTOVER_NOT_READY": {
+      "ok": false,
+      "error": {
+        "code": "AUTHZ_CUTOVER_NOT_READY",
+        "message": "Authz cutover is not active yet"
+      }
+    },
+    "VERSION_CONFLICT": {
+      "ok": false,
+      "error": {
+        "code": "VERSION_CONFLICT",
+        "message": "Account version conflict; reload and retry",
+        "current_version": 5
+      }
+    },
+    "AUTHZ_PROTECTED_ASSIGNMENT": {
+      "ok": false,
+      "error": {
+        "code": "AUTHZ_PROTECTED_ASSIGNMENT",
+        "message": "Protected owner ADMIN assignment cannot be revoked"
+      }
+    }
+  }
+}
