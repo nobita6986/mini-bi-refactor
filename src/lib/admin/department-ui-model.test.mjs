@@ -876,3 +876,149 @@ test("department policy and membership capability helpers lock Recruitment read-
     null,
   );
 });
+
+test("WP4 department CRUD, HEAD, and Person membership builders enforce OCC, Idempotency-Key, and zero scheduling fields", async () => {
+  const model = await import("./department-ui-model.ts");
+  const KEY = "60000000-0000-4000-8000-000000000099";
+  const DEPT_ID = "40000000-0000-4000-8000-000000000003";
+  const PERSON_ID = "70000000-0000-4000-8000-000000000001";
+  const HEAD_ID = "80000000-0000-4000-8000-000000000002";
+
+  // Custom vs seeded department active toggle policy
+  assert.equal(model.canToggleDepartmentActive({ system_key: null }), true);
+  assert.equal(model.canToggleDepartmentActive({ system_key: "RECRUITMENT" }), false);
+  assert.equal(model.canToggleDepartmentActive({ system_key: "ACCOUNTING" }), false);
+  assert.equal(model.canToggleDepartmentActive({ system_key: "MANAGEMENT_BOD" }), false);
+
+  // Create custom department validates uppercase code and excludes scheduling keys
+  assert.equal(
+    model.buildCreateDepartmentRequest({
+      code: "bad code!",
+      name: "Phòng Mới",
+      reason: "Tạo mới",
+      idempotencyKey: KEY,
+    }).ok,
+    false,
+  );
+  const createdReq = model.buildCreateDepartmentRequest({
+    code: "OPS_CENTRAL",
+    name: "Phòng Vận hành Miền Trung",
+    reason: "Mở rộng chi nhánh",
+    idempotencyKey: KEY,
+  });
+  assert.equal(createdReq.ok, true);
+  if (createdReq.ok) {
+    assert.deepEqual(createdReq.body, {
+      code: "OPS_CENTRAL",
+      name: "Phòng Vận hành Miền Trung",
+      reason: "Mở rộng chi nhánh",
+      idempotency_key: KEY,
+    });
+  }
+
+  // Update department validates expected_department_version and no scheduling keys
+  const updateReq = model.buildUpdateDepartmentRequest({
+    expectedDepartmentVersion: 4,
+    name: "Phòng Vận hành 2",
+    isActive: false,
+    reason: "Tạm ngừng",
+    idempotencyKey: KEY,
+  });
+  assert.equal(updateReq.ok, true);
+  if (updateReq.ok) {
+    assert.equal(updateReq.body.expected_department_version, 4);
+    assert.equal("started_at" in updateReq.body, false);
+    assert.equal("ended_at" in updateReq.body, false);
+  }
+
+  // Assign & End Person membership
+  const assignPerson = model.buildAssignDepartmentPersonMemberRequest({
+    personId: PERSON_ID,
+    expectedPersonVersion: 2,
+    reason: "Bổ sung thành viên",
+    idempotencyKey: KEY,
+  });
+  assert.equal(assignPerson.ok, true);
+  if (assignPerson.ok) {
+    assert.deepEqual(Object.keys(assignPerson.body).sort(), [
+      "expected_person_version",
+      "idempotency_key",
+      "person_id",
+      "reason",
+    ]);
+  }
+  const endPerson = model.buildEndDepartmentPersonMemberRequest({
+    expectedPersonVersion: 3,
+    reason: "Kết thúc phân công",
+    idempotencyKey: KEY,
+  });
+  assert.equal(endPerson.ok, true);
+
+  // Designate & End HEAD
+  const designateHead = model.buildDesignateDepartmentHeadRequest({
+    personId: PERSON_ID,
+    expectedDepartmentVersion: 5,
+    expectedCurrentHeadAssignmentId: HEAD_ID,
+    reason: "Thay trưởng phòng",
+    idempotencyKey: KEY,
+  });
+  assert.equal(designateHead.ok, true);
+  if (designateHead.ok) {
+    assert.equal(designateHead.body.expected_department_version, 5);
+    assert.equal(designateHead.body.expected_current_head_assignment_id, HEAD_ID);
+  }
+  const endHead = model.buildEndDepartmentHeadRequest({
+    expectedDepartmentVersion: 6,
+    expectedCurrentHeadAssignmentId: HEAD_ID,
+    reason: "Miễn nhiệm trưởng phòng",
+    idempotencyKey: KEY,
+  });
+  assert.equal(endHead.ok, true);
+
+  // WP3 error classification: PERSON_IS_ACTIVE_DEPARTMENT_HEAD, VERSION_CONFLICT, uncertain retry, session loss
+  const activeHeadErr = model.classifyWp3DepartmentMutationFailure(409, {
+    ok: false,
+    code: "PERSON_IS_ACTIVE_DEPARTMENT_HEAD",
+  });
+  assert.equal(activeHeadErr.kind, "active-head");
+  assert.match(activeHeadErr.message, /Trưởng phòng/);
+  assert.equal(activeHeadErr.preserveIdempotencyKey, false);
+
+  const conflictErr = model.classifyWp3DepartmentMutationFailure(409, {
+    ok: false,
+    code: "VERSION_CONFLICT",
+  });
+  assert.equal(conflictErr.kind, "conflict");
+  assert.equal(conflictErr.needsReload, true);
+  assert.equal(conflictErr.preserveIdempotencyKey, false);
+
+  const uncertainErr = model.classifyWp3DepartmentMutationFailure(503, null);
+  assert.equal(uncertainErr.kind, "uncertain");
+  assert.equal(uncertainErr.preserveIdempotencyKey, true);
+  assert.equal(uncertainErr.needsReload, true);
+
+  const sessionErr = model.classifyWp3DepartmentMutationFailure(401, {
+    ok: false,
+    code: "UNAUTHENTICATED",
+  });
+  assert.equal(sessionErr.kind, "session-lost");
+
+  // Queries
+  assert.equal(
+    model.buildDepartmentHeadsQuery({
+      departmentId: DEPT_ID,
+      includeHistory: true,
+      page: 1,
+    })?.toString(),
+    "include_history=true&page=1&page_size=25",
+  );
+  assert.equal(
+    model.buildDepartmentPersonMembershipsQuery({
+      departmentId: DEPT_ID,
+      status: "active",
+      search: "An",
+      page: 2,
+    })?.toString(),
+    "status=active&page=2&page_size=25&search=An",
+  );
+});

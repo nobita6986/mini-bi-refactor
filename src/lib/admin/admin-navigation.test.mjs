@@ -56,7 +56,7 @@ test("one top-level /admin entry is independently authorized and is not a Direct
   }), false);
 });
 
-test("Admin internal navigation exposes mapping, departments, and worker edit history only to authorized Admin actors", () => {
+test("Admin internal navigation exposes mapping, departments, organization persons, and worker edit history only to authorized Admin actors", () => {
   assert.deepEqual(ADMIN_SECTIONS.map(({ id, href }) => ({ id, href })), [
     { id: "personnel", href: "/admin/catalog/personnel" },
     { id: "teams", href: "/admin/catalog/teams" },
@@ -65,26 +65,28 @@ test("Admin internal navigation exposes mapping, departments, and worker edit hi
     { id: "industrial-parks", href: "/admin/catalog/industrial-parks" },
     { id: "project-team-scopes", href: "/admin/catalog/project-team-scopes" },
     { id: "vendors", href: "/admin/catalog/vendors" },
+    { id: "organization-persons", href: "/admin/organization/persons" },
     { id: "departments", href: "/admin/departments" },
     { id: "accounts", href: "/admin/access/accounts" },
     { id: "attendance", href: "/admin/attendance" },
     { id: "worker-edit-history", href: "/admin/worker-edit-history" },
   ]);
   assert.deepEqual(ADMIN_SECTIONS.map(({ id, label }) => ({ id, label })), [
-    { id: "personnel", label: "Nhân sự" },
+    { id: "personnel", label: "Hồ sơ tính công tuyển dụng" },
     { id: "teams", label: "Nhóm" },
     { id: "labor-types", label: "Loại hình lao động" },
     { id: "provinces", label: "Tỉnh/Thành" },
     { id: "industrial-parks", label: "Khu công nghiệp" },
     { id: "project-team-scopes", label: "Mapping Dự án ↔ Nhóm" },
     { id: "vendors", label: "Vendor (NCC)" },
+    { id: "organization-persons", label: "Nhân sự nội bộ" },
     { id: "departments", label: "Phòng ban" },
     { id: "accounts", label: "Tài khoản truy cập" },
     { id: "attendance", label: "Báo cáo chấm công" },
     { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ" },
   ]);
   const serializableSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
-  const catalogOnly = serializableSections.filter(({ id }) => !["provinces", "industrial-parks", "departments", "accounts", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
+  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "accounts", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
   const fullAdminWithoutHistory = serializableSections.filter(({ id }) => id !== "worker-edit-history");
   const allowlistedAdmin = {
@@ -149,6 +151,8 @@ test("catalog and access paths highlight exactly one internal tab", () => {
   for (const [pathname, activeId] of [
     ["/admin/catalog/personnel", "personnel"],
     ["/admin/catalog/personnel/record", "personnel"],
+    ["/admin/organization/persons", "organization-persons"],
+    ["/admin/organization/persons/40000000-0000-4000-8000-000000000009", "organization-persons"],
     ["/admin/catalog/teams", "teams"],
     ["/admin/catalog/teams/record", "teams"],
     ["/admin/catalog/vendors", "vendors"],
@@ -173,6 +177,8 @@ test("catalog and access paths highlight exactly one internal tab", () => {
 
 test("top-level Admin remains the active registry entry across catalog and access routes", () => {
   assert.equal(findEntryByPath("/admin/catalog/personnel")?.id, "admin");
+  assert.equal(findEntryByPath("/admin/organization/persons")?.id, "admin");
+  assert.equal(findEntryByPath("/admin/organization/persons/40000000-0000-4000-8000-000000000009")?.id, "admin");
   assert.equal(findEntryByPath("/admin/catalog/teams")?.id, "admin");
   assert.equal(findEntryByPath("/admin/catalog/teams/nested")?.id, "admin");
   assert.equal(findEntryByPath("/admin/catalog/vendors")?.id, "admin");

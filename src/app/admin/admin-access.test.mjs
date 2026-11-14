@@ -94,6 +94,19 @@ test("/admin/departments and /admin/departments/[departmentId] require Full Admi
   assert.match(departmentDetailPage, /decideAccountAccessPageAccess\(\{ actor \}\)/);
 });
 
+test("/admin/organization/persons and [personId] enforce Full Admin gate via decideOrganizationPersonsPageAccess", () => {
+  const personsPage = readFileSync(new URL("./organization/persons/page.tsx", import.meta.url), "utf8");
+  const personDetailPage = readFileSync(
+    new URL("./organization/persons/[personId]/page.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(personsPage, /resolveActorForRequest\(\)/);
+  assert.match(personsPage, /decideOrganizationPersonsPageAccess\(\{ actor \}\)/);
+  assert.match(personDetailPage, /resolveActorForRequest\(\)/);
+  assert.match(personDetailPage, /decideOrganizationPersonsPageAccess\(\{ actor \}\)/);
+  assert.doesNotMatch(personsPage + personDetailPage, /decideAdminAreaAccess|decideRecruitmentLocationCatalogPageAccess/);
+});
+
 test("/admin/catalog/provinces and /admin/catalog/industrial-parks allow Full Admin and BoD only", () => {
   const full = actor(["entry_admin", "recruiter_master_manage", "team_master_manage"]);
   const bodPrivileged = actor(["entry_privileged_edit"]);

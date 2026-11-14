@@ -204,6 +204,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
   const catalogSections = allSectionsWithoutWorkerHistory.filter(
     ({ id }) =>
       ![
+        "organization-persons",
         "departments",
         "accounts",
         "project-team-scopes",
