@@ -1597,11 +1597,14 @@ test("Legacy organization helper ACL drift is repaired before WP3B migration", a
       await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
     }
     await db.exec("grant execute on function public.org_department__internal_account_summary(uuid) to anon, authenticated, service_role");
+    await db.exec("grant execute on function public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer) to anon, authenticated");
     const sql = await readFile(path.join(MIGRATION_DIR, repair), "utf8");
     await db.exec(sql);
     await db.exec(sql);
     const result = await db.query("select has_function_privilege('anon', 'public.org_department__internal_account_summary(uuid)', 'EXECUTE') as anon, has_function_privilege('authenticated', 'public.org_department__internal_account_summary(uuid)', 'EXECUTE') as authenticated, has_function_privilege('service_role', 'public.org_department__internal_account_summary(uuid)', 'EXECUTE') as service_role, has_function_privilege('service_role', 'public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer)', 'EXECUTE') as public_rpc");
     assert.deepEqual(result.rows[0], { anon: false, authenticated: false, service_role: false, public_rpc: true });
+    const rpc = await db.query("select has_function_privilege('anon', 'public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer)', 'EXECUTE') as anon, has_function_privilege('authenticated', 'public.org_department_list_accounting_memberships_admin(uuid, uuid, text, boolean, integer, integer)', 'EXECUTE') as authenticated");
+    assert.deepEqual(rpc.rows[0], { anon: false, authenticated: false });
     await db.exec(await readFile(path.join(MIGRATION_DIR, WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME), "utf8"));
     assert.equal((await db.query("select to_regclass('public.organization_persons') is not null as ready")).rows[0].ready, true);
   } finally { await db.close(); }
