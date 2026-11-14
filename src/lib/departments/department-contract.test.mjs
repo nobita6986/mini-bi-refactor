@@ -3,15 +3,29 @@ import test from "node:test";
 
 import {
   computeAssignAccountingMemberFingerprint,
+  computeAssignPersonMemberFingerprint,
+  computeCreateDepartmentFingerprint,
+  computeDesignateHeadFingerprint,
   computeEndAccountingMemberFingerprint,
+  computeEndHeadFingerprint,
+  computeEndPersonMemberFingerprint,
+  computeUpdateDepartmentFingerprint,
   departmentHttpStatusForError,
   parseAssignAccountingMemberBody,
+  parseAssignPersonMemberBody,
+  parseCreateDepartmentBody,
   parseDepartmentIdParam,
+  parseDesignateHeadBody,
   parseEndAccountingMemberBody,
+  parseEndHeadBody,
+  parseEndPersonMemberBody,
   parseListAccountingCandidatesQuery,
   parseListAccountingMembershipsQuery,
+  parseListDepartmentHeadsQuery,
+  parseListDepartmentPersonMembershipsQuery,
   parseListDepartmentsQuery,
   parseListRecruitmentTeamsQuery,
+  parseUpdateDepartmentBody,
   projectAccountingCandidateListResponse,
   projectAccountingMembershipListResponse,
   projectAccountingMembershipMutationResponse,
@@ -279,6 +293,7 @@ test("request fingerprints are deterministic and separate assign from end", () =
 test("response projectors accept canonical shapes and fail closed on PII or schema drift", () => {
   const listPayload = {
     authorization_date: "2026-10-24",
+    as_of: "2026-10-24T00:00:00.000Z",
     departments: [
       {
         department_id: DEPT_RECRUITMENT,
@@ -286,11 +301,13 @@ test("response projectors accept canonical shapes and fail closed on PII or sche
         code: "RECRUITMENT",
         name: "Phòng Tuyển dụng",
         is_active: true,
-        membership_mode: "READ_ONLY_TEAMS_PROJECTION",
+        version: 1,
+        membership_mode: "MANAGED_MEMBERSHIP_AND_TEAMS",
         default_policy_code: "EXISTING_TEAM_AUTHORITY_READ_ONLY",
-        active_member_count: null,
+        active_member_count: 0,
         team_count: 3,
         active_team_count: 2,
+        active_head: null,
         created_at: "2026-10-24T00:00:00.000Z",
         updated_at: "2026-10-24T00:00:00.000Z",
       },
@@ -300,11 +317,29 @@ test("response projectors accept canonical shapes and fail closed on PII or sche
         code: "ACCOUNTING",
         name: "Phòng Kế toán",
         is_active: true,
+        version: 1,
         membership_mode: "MANAGED_MEMBERSHIP",
         default_policy_code: "VENDOR_FINANCE_VIEW_AND_RECORD",
         active_member_count: 1,
         team_count: null,
         active_team_count: null,
+        active_head: null,
+        created_at: "2026-10-24T00:00:00.000Z",
+        updated_at: "2026-10-24T00:00:00.000Z",
+      },
+      {
+        department_id: "77777777-7777-4777-8777-777777777777",
+        system_key: null,
+        code: "OPERATIONS",
+        name: "Phòng Vận hành",
+        is_active: true,
+        version: 1,
+        membership_mode: "MANAGED_MEMBERSHIP",
+        default_policy_code: "ORGANIZATIONAL_MEMBERSHIP_ONLY",
+        active_member_count: 0,
+        team_count: null,
+        active_team_count: null,
+        active_head: null,
         created_at: "2026-10-24T00:00:00.000Z",
         updated_at: "2026-10-24T00:00:00.000Z",
       },
@@ -314,6 +349,7 @@ test("response projectors accept canonical shapes and fail closed on PII or sche
   assert.ok(
     projectDepartmentDetailResponse({
       authorization_date: "2026-10-24",
+      as_of: "2026-10-24T00:00:00.000Z",
       department: listPayload.departments[1],
     }),
   );
@@ -467,7 +503,7 @@ test("resolveOrgShellVfinDefaultAuthority honors only Full Admin or active immut
     }).allowed,
     false,
   );
-  assert.equal(
+    assert.equal(
     resolveOrgShellVfinDefaultAuthority({
       enabled: true,
       capabilities: ["catalog_master_manage", "payment_view", "payment_edit", "report_analytics_view"],
@@ -479,4 +515,178 @@ test("resolveOrgShellVfinDefaultAuthority honors only Full Admin or active immut
     }).allowed,
     false,
   );
+});
+
+test("WP3 department, person-membership, and HEAD parsers distinguish IDEMPOTENCY_KEY_INVALID vs IDEMPOTENCY_KEY_MISMATCH and block schedule fields", () => {
+  const OTHER_IDEM = "88888888-8888-4888-8888-888888888888";
+  assert.deepEqual(
+    parseCreateDepartmentBody(
+      {
+        code: "OPS_CENTRAL",
+        name: "Phòng Vận hành Trung tâm",
+        reason: "Tạo phòng ban mới",
+        idempotency_key: IDEM_KEY,
+      },
+      IDEM_KEY,
+    ),
+    {
+      ok: true,
+      value: {
+        code: "OPS_CENTRAL",
+        name: "Phòng Vận hành Trung tâm",
+        reason: "Tạo phòng ban mới",
+        idempotency_key: IDEM_KEY,
+      },
+    },
+  );
+  assert.deepEqual(
+    parseCreateDepartmentBody(
+      {
+        code: "OPS_CENTRAL",
+        name: "Phòng Vận hành",
+        reason: "Mismatch header",
+        idempotency_key: IDEM_KEY,
+      },
+      OTHER_IDEM,
+    ),
+    { ok: false, code: "IDEMPOTENCY_KEY_MISMATCH" },
+  );
+  assert.deepEqual(
+    parseCreateDepartmentBody(
+      {
+        code: "OPS_CENTRAL",
+        name: "Phòng Vận hành",
+        reason: "Bad header",
+        idempotency_key: IDEM_KEY,
+      },
+      "not-uuid",
+    ),
+    { ok: false, code: "IDEMPOTENCY_KEY_INVALID" },
+  );
+
+  assert.equal(
+    parseUpdateDepartmentBody(
+      {
+        expected_department_version: 1,
+        name: "Phòng Vận hành 2",
+        is_active: true,
+        reason: "Đổi tên",
+        idempotency_key: IDEM_KEY,
+      },
+      IDEM_KEY,
+    ).ok,
+    true,
+  );
+
+  assert.equal(
+    parseAssignPersonMemberBody(
+      {
+        person_id: USER_REF,
+        expected_person_version: 1,
+        started_at: "2026-10-24T00:00:00.000Z",
+        reason: "Gửi kèm lịch cấm",
+        idempotency_key: IDEM_KEY,
+      },
+      IDEM_KEY,
+    ).code,
+    "CLIENT_SCHEDULE_FIELD_FORBIDDEN",
+  );
+  assert.equal(
+    parseEndPersonMemberBody(
+      {
+        expected_person_version: 1,
+        reason: "Kết thúc tư cách thành viên",
+        idempotency_key: IDEM_KEY,
+      },
+      IDEM_KEY,
+    ).ok,
+    true,
+  );
+  assert.equal(
+    parseDesignateHeadBody(
+      {
+        person_id: USER_REF,
+        expected_department_version: 1,
+        expected_current_head_assignment_id: null,
+        reason: "Chỉ định trưởng phòng",
+        idempotency_key: IDEM_KEY,
+      },
+      IDEM_KEY,
+    ).ok,
+    true,
+  );
+  assert.equal(
+    parseEndHeadBody(
+      {
+        expected_department_version: 2,
+        expected_current_head_assignment_id: MEMBERSHIP_ID,
+        reason: "Miễn nhiệm trưởng phòng",
+        idempotency_key: IDEM_KEY,
+      },
+      IDEM_KEY,
+    ).ok,
+    true,
+  );
+
+  assert.equal(
+    parseListDepartmentPersonMembershipsQuery(
+      DEPT_ACCOUNTING,
+      new URL("https://bi.local/api/admin/departments/x/memberships?status=active"),
+    ).ok,
+    true,
+  );
+  assert.equal(
+    parseListDepartmentHeadsQuery(
+      DEPT_ACCOUNTING,
+      new URL("https://bi.local/api/admin/departments/x/head?include_history=true"),
+    ).ok,
+    true,
+  );
+
+  // Distinct fingerprints per op + target
+  const fp1 = computeCreateDepartmentFingerprint({
+    actor_app_user_id: ACTOR_ID,
+    code: "OPS",
+    name: "Ops",
+    reason: "r",
+  });
+  const fp2 = computeUpdateDepartmentFingerprint({
+    actor_app_user_id: ACTOR_ID,
+    department_id: DEPT_ACCOUNTING,
+    expected_department_version: 1,
+    name: "Ops",
+    is_active: true,
+    reason: "r",
+  });
+  const fp3 = computeAssignPersonMemberFingerprint({
+    actor_app_user_id: ACTOR_ID,
+    department_id: DEPT_ACCOUNTING,
+    person_id: USER_REF,
+    expected_person_version: 1,
+    reason: "r",
+  });
+  const fp4 = computeEndPersonMemberFingerprint({
+    actor_app_user_id: ACTOR_ID,
+    department_id: DEPT_ACCOUNTING,
+    membership_id: MEMBERSHIP_ID,
+    expected_person_version: 1,
+    reason: "r",
+  });
+  const fp5 = computeDesignateHeadFingerprint({
+    actor_app_user_id: ACTOR_ID,
+    department_id: DEPT_ACCOUNTING,
+    person_id: USER_REF,
+    expected_department_version: 1,
+    expected_current_head_assignment_id: null,
+    reason: "r",
+  });
+  const fp6 = computeEndHeadFingerprint({
+    actor_app_user_id: ACTOR_ID,
+    department_id: DEPT_ACCOUNTING,
+    expected_department_version: 1,
+    expected_current_head_assignment_id: MEMBERSHIP_ID,
+    reason: "r",
+  });
+  const uniqueFps = new Set([fp1, fp2, fp3, fp4, fp5, fp6]);
+  assert.equal(uniqueFps.size, 6);
 });

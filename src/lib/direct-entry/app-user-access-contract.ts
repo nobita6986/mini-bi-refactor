@@ -3,12 +3,26 @@ import { projectOptionalActionReason } from "./action-reason.ts";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REASON_MAX = 4000;
 
+export const ACCOUNT_TYPES = ["NORMAL", "SHARED", "SERVICE"] as const;
+export type AccountType = (typeof ACCOUNT_TYPES)[number];
+
+export type ActivePersonLinkSummary = {
+  link_id: string;
+  person_id: string;
+  employee_code: string;
+  full_name: string;
+  started_at: string;
+  person_version: number;
+};
+
 export type ExistingAccount = {
   account_ref: string;
   display_name: string | null;
   login_id: string | null;
   enabled: boolean;
   version: number;
+  account_type: AccountType;
+  active_person_link: ActivePersonLinkSummary | null;
 };
 export type ExistingAccountList = {
   search: string | null;
@@ -30,10 +44,41 @@ export type AccountAccessParsed<T> =
   | { ok: true; value: T }
   | { ok: false; code: "ACCOUNT_INVALID" };
 
+export function projectActivePersonLink(value: unknown): ActivePersonLinkSummary | null {
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    Object.keys(row).sort().join(",") !==
+    "employee_code,full_name,link_id,person_id,person_version,started_at"
+  ) {
+    return null;
+  }
+  if (typeof row.link_id !== "string" || !UUID.test(row.link_id)) return null;
+  if (typeof row.person_id !== "string" || !UUID.test(row.person_id)) return null;
+  if (typeof row.employee_code !== "string" || row.employee_code.trim() === "" ||
+      row.employee_code !== row.employee_code.trim() || row.employee_code.length > 64) return null;
+  if (typeof row.full_name !== "string" || row.full_name.trim() === "" ||
+      row.full_name !== row.full_name.trim() || row.full_name.length > 160) return null;
+  if (typeof row.started_at !== "string" || row.started_at.trim() === "" ||
+      Number.isNaN(Date.parse(row.started_at))) return null;
+  if (typeof row.person_version !== "number" ||
+      !Number.isSafeInteger(row.person_version) || row.person_version < 1) return null;
+  return {
+    link_id: row.link_id,
+    person_id: row.person_id,
+    employee_code: row.employee_code,
+    full_name: row.full_name,
+    started_at: row.started_at,
+    person_version: row.person_version,
+  };
+}
+
 export function projectExistingAccount(value: unknown): ExistingAccount | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  if (Object.keys(row).sort().join(",") !== "account_ref,display_name,enabled,login_id,version") return null;
+  if (Object.keys(row).sort().join(",") !==
+      "account_ref,account_type,active_person_link,display_name,enabled,login_id,version") return null;
   if (typeof row.account_ref !== "string" || !UUID.test(row.account_ref)) return null;
   if (row.display_name !== null && (typeof row.display_name !== "string" ||
       row.display_name !== row.display_name.trim() || row.display_name === "" ||
@@ -42,12 +87,20 @@ export function projectExistingAccount(value: unknown): ExistingAccount | null {
       !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(row.login_id))) return null;
   if (typeof row.enabled !== "boolean" || typeof row.version !== "number" ||
       !Number.isSafeInteger(row.version) || row.version < 1) return null;
+  if (typeof row.account_type !== "string" ||
+      !(ACCOUNT_TYPES as readonly string[]).includes(row.account_type)) return null;
+  const activePersonLink = row.active_person_link === null
+    ? null
+    : projectActivePersonLink(row.active_person_link);
+  if (row.active_person_link !== null && !activePersonLink) return null;
   return {
     account_ref: row.account_ref,
     display_name: row.display_name as string | null,
     login_id: row.login_id as string | null,
     enabled: row.enabled,
     version: row.version,
+    account_type: row.account_type as AccountType,
+    active_person_link: activePersonLink,
   };
 }
 

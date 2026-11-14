@@ -19,6 +19,8 @@ const account = {
   login_id: "vana.td",
   enabled: true,
   version: 3,
+  account_type: "NORMAL",
+  active_person_link: null,
 };
 
 function listPayload(overrides = {}) {
@@ -39,8 +41,15 @@ function listPayload(overrides = {}) {
 test("strict list projection retains only contracted account fields and echoes the query", () => {
   const list = projectAccountListForQuery(listPayload(), { search: "", enabled: "all", page: 1 });
   assert.ok(list);
-  assert.deepEqual(Object.keys(list.accounts[0]).sort(),
-    ["account_ref", "display_name", "enabled", "login_id", "version"]);
+  assert.deepEqual(Object.keys(list.accounts[0]).sort(), [
+    "account_ref",
+    "account_type",
+    "active_person_link",
+    "display_name",
+    "enabled",
+    "login_id",
+    "version",
+  ]);
   assert.equal(list.accounts[0].display_name, "Nguyễn Văn A");
   assert.equal(list.total, 1);
   // Echo mismatch fails closed.
@@ -78,7 +87,15 @@ test("list and item projections fail closed on any malformed or widened payload"
     { search: "", enabled: "all", page: 1 }), null);
   const ok = projectAccountItem({ ok: true, account });
   assert.ok(ok);
-  assert.deepEqual(Object.keys(ok).sort(), ["account_ref", "display_name", "enabled", "login_id", "version"]);
+  assert.deepEqual(Object.keys(ok).sort(), [
+    "account_ref",
+    "account_type",
+    "active_person_link",
+    "display_name",
+    "enabled",
+    "login_id",
+    "version",
+  ]);
   assert.equal(projectAccountItem({ ok: true, account: { ...account, login_id: "bad@login" } }), null);
 });
 

@@ -15,6 +15,7 @@ import {
   DEPARTMENT_UI_MAX_REASON_LENGTH,
   DEPARTMENT_UI_MAX_SEARCH_LENGTH,
   DEPARTMENT_UI_PAGE_SIZE,
+  ORGANIZATIONAL_DEFAULT_POLICY_DESCRIPTION,
   RECRUITMENT_DEFAULT_POLICY_DESCRIPTION,
   RESERVED_VENDOR_TEAM_CODE,
   buildAccountingCandidatesQuery,
@@ -59,11 +60,13 @@ function makeRecruitmentDepartment(overrides = {}) {
     code: "RECRUITMENT",
     name: "Phòng Tuyển dụng",
     is_active: true,
-    membership_mode: "READ_ONLY_TEAMS_PROJECTION",
+    version: 1,
+    membership_mode: "MANAGED_MEMBERSHIP_AND_TEAMS",
     default_policy_code: "EXISTING_TEAM_AUTHORITY_READ_ONLY",
-    active_member_count: null,
+    active_member_count: 0,
     team_count: 6,
     active_team_count: 5,
+    active_head: null,
     created_at: "2026-10-20T08:00:00.000Z",
     updated_at: "2026-10-20T08:00:00.000Z",
     ...overrides,
@@ -77,11 +80,40 @@ function makeAccountingDepartment(overrides = {}) {
     code: "ACCOUNTING",
     name: "Phòng Kế toán",
     is_active: true,
+    version: 1,
     membership_mode: "MANAGED_MEMBERSHIP",
     default_policy_code: "VENDOR_FINANCE_VIEW_AND_RECORD",
     active_member_count: 2,
     team_count: null,
     active_team_count: null,
+    active_head: null,
+    created_at: "2026-10-20T08:00:00.000Z",
+    updated_at: "2026-10-20T08:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function makeMarketingDepartment(overrides = {}) {
+  return {
+    department_id: "33333333-4444-4444-8444-333333333333",
+    system_key: "MARKETING",
+    code: "MARKETING",
+    name: "Phòng Marketing",
+    is_active: true,
+    version: 2,
+    membership_mode: "MANAGED_MEMBERSHIP",
+    default_policy_code: "ORGANIZATIONAL_MEMBERSHIP_ONLY",
+    active_member_count: 3,
+    team_count: null,
+    active_team_count: null,
+    active_head: {
+      head_assignment_id: "99999999-1111-4111-8111-999999999999",
+      person_id: "88888888-1111-4111-8111-888888888888",
+      employee_code: "MKT-001",
+      full_name: "Trần Trưởng Phòng",
+      started_at: "2026-10-20T08:00:00.000Z",
+      version: 1,
+    },
     created_at: "2026-10-20T08:00:00.000Z",
     updated_at: "2026-10-20T08:00:00.000Z",
     ...overrides,
@@ -219,22 +251,34 @@ test("query builders enforce contract bounds and round-trip cleanly through T1A 
 test("department list & detail projectors validate system invariants and fail closed", () => {
   const recruitment = makeRecruitmentDepartment();
   const accounting = makeAccountingDepartment();
+  const marketing = makeMarketingDepartment();
+  const custom = makeMarketingDepartment({
+    department_id: "77777777-2222-4222-8222-777777777777",
+    system_key: null,
+    code: "DESIGN",
+    name: "Phòng Thiết kế",
+    active_head: null,
+  });
 
   const projectedList = projectDepartmentListEnvelope({
     ok: true,
     authorization_date: "2026-10-24",
-    departments: [recruitment, accounting],
+    as_of: "2026-10-24T08:00:00.000Z",
+    departments: [recruitment, accounting, marketing, custom],
   });
   assert.ok(projectedList);
-  assert.equal(projectedList.departments.length, 2);
+  assert.equal(projectedList.departments.length, 4);
   assert.equal(projectedList.departments[0].name, "Phòng Tuyển dụng");
   assert.equal(projectedList.departments[1].name, "Phòng Kế toán");
+  assert.equal(projectedList.departments[2].active_head?.employee_code, "MKT-001");
+  assert.equal(projectedList.departments[3].system_key, null);
 
   // Extra fields, wrong mode/policy, or impossible calendar dates fail closed
   assert.equal(
     projectDepartmentListEnvelope({
       ok: true,
       authorization_date: "2026-02-30",
+      as_of: "2026-10-24T08:00:00.000Z",
       departments: [recruitment],
     }),
     null,
@@ -243,6 +287,7 @@ test("department list & detail projectors validate system invariants and fail cl
     projectDepartmentListEnvelope({
       ok: true,
       authorization_date: "2026-10-24",
+      as_of: "2026-10-24T08:00:00.000Z",
       departments: [makeRecruitmentDepartment({ membership_mode: "MANAGED_MEMBERSHIP" })],
     }),
     null,
@@ -251,6 +296,7 @@ test("department list & detail projectors validate system invariants and fail cl
     projectDepartmentListEnvelope({
       ok: true,
       authorization_date: "2026-10-24",
+      as_of: "2026-10-24T08:00:00.000Z",
       departments: [makeAccountingDepartment({ team_count: 1 })],
     }),
     null,
@@ -261,6 +307,7 @@ test("department list & detail projectors validate system invariants and fail cl
     {
       ok: true,
       authorization_date: "2026-10-24",
+      as_of: "2026-10-24T08:00:00.000Z",
       department: accounting,
     },
     ACCOUNTING_ID.toUpperCase(),
@@ -273,6 +320,7 @@ test("department list & detail projectors validate system invariants and fail cl
       {
         ok: true,
         authorization_date: "2026-10-24",
+        as_of: "2026-10-24T08:00:00.000Z",
         department: accounting,
       },
       RECRUITMENT_ID,
@@ -771,10 +819,12 @@ test("department policy and membership capability helpers lock Recruitment read-
   const recruitment = makeRecruitmentDepartment();
   const accounting = makeAccountingDepartment();
   const inactiveAccounting = makeAccountingDepartment({ is_active: false });
+  const marketing = makeMarketingDepartment();
 
   assert.equal(canManageDepartmentMemberships(recruitment), false);
   assert.equal(canManageDepartmentMemberships(accounting), true);
   assert.equal(canManageDepartmentMemberships(inactiveAccounting), false);
+  assert.equal(canManageDepartmentMemberships(marketing), false);
 
   assert.equal(
     departmentDefaultPolicyDescription(accounting),
@@ -788,11 +838,17 @@ test("department policy and membership capability helpers lock Recruitment read-
     departmentDefaultPolicyDescription(recruitment),
     RECRUITMENT_DEFAULT_POLICY_DESCRIPTION,
   );
+  assert.equal(
+    departmentDefaultPolicyDescription(marketing),
+    ORGANIZATIONAL_DEFAULT_POLICY_DESCRIPTION,
+  );
 
   assert.equal(departmentMembershipModeLabel(accounting), "Quản lý thành viên");
   assert.equal(departmentMembershipModeLabel(recruitment), "Chỉ đọc danh sách Nhóm");
+  assert.equal(departmentMembershipModeLabel(marketing), "Quản lý theo cơ cấu tổ chức");
   assert.equal(departmentScaleSummary(recruitment), "5 / 6 nhóm hoạt động");
   assert.equal(departmentScaleSummary(accounting), "2 thành viên đang hiệu lực");
+  assert.equal(departmentScaleSummary(marketing), "3 thành viên đang hiệu lực");
 
   assert.deepEqual(membershipStateBadge("CURRENT"), {
     label: "Đang hiệu lực",

@@ -10,16 +10,24 @@ export const DEPARTMENT_MAX_REASON_LENGTH = 4000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
-const ISO_UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ISO_UTC_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/i;
 const DEPARTMENT_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,63}$/;
 const SEARCH_CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 const REASON_CONTROL_CHAR_PATTERN = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+const WP3_MAX_REASON_LENGTH = 500;
 
-export const DEPARTMENT_SYSTEM_KEYS = ["RECRUITMENT", "ACCOUNTING"] as const;
+export const DEPARTMENT_SYSTEM_KEYS = [
+  "RECRUITMENT",
+  "ACCOUNTING",
+  "MARKETING",
+  "IT",
+  "MANAGEMENT_BOD",
+] as const;
 export type DepartmentSystemKey = (typeof DEPARTMENT_SYSTEM_KEYS)[number];
 
 export const DEPARTMENT_MEMBERSHIP_MODES = [
-  "READ_ONLY_TEAMS_PROJECTION",
+  "MANAGED_MEMBERSHIP_AND_TEAMS",
   "MANAGED_MEMBERSHIP",
 ] as const;
 export type DepartmentMembershipMode = (typeof DEPARTMENT_MEMBERSHIP_MODES)[number];
@@ -27,6 +35,7 @@ export type DepartmentMembershipMode = (typeof DEPARTMENT_MEMBERSHIP_MODES)[numb
 export const DEPARTMENT_DEFAULT_POLICY_CODES = [
   "EXISTING_TEAM_AUTHORITY_READ_ONLY",
   "VENDOR_FINANCE_VIEW_AND_RECORD",
+  "ORGANIZATIONAL_MEMBERSHIP_ONLY",
 ] as const;
 export type DepartmentDefaultPolicyCode = (typeof DEPARTMENT_DEFAULT_POLICY_CODES)[number];
 
@@ -58,7 +67,21 @@ export const DEPARTMENT_ERROR_CODES = [
   "DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT",
   "DEPARTMENT_MEMBERSHIP_OVERLAP",
   "DEPARTMENT_MEMBERSHIP_ALREADY_ENDED",
+  "DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS",
+  "DUPLICATE_CODE",
+  "VERSION_CONFLICT",
+  "PERSON_NOT_FOUND",
+  "PERSON_INACTIVE",
+  "PERSON_ALREADY_IN_DEPARTMENT",
+  "PERSON_ALREADY_IN_OTHER_DEPARTMENT",
+  "PERSON_IS_ACTIVE_DEPARTMENT_HEAD",
+  "PERSON_NOT_ACTIVE_MEMBER_OF_DEPARTMENT",
+  "HEAD_ALREADY_ENDED",
+  "CLIENT_SCHEDULE_FIELD_FORBIDDEN",
+  "CLIENT_AUTHORITY_FIELD_FORBIDDEN",
+  "ORG_VALIDATION_ERROR",
   "IDEMPOTENCY_KEY_INVALID",
+  "IDEMPOTENCY_KEY_MISMATCH",
   "IDEMPOTENCY_CONFLICT",
   "DEPARTMENT_UNAVAILABLE",
 ] as const;
@@ -75,7 +98,7 @@ const ERROR_HTTP_STATUS: Readonly<Record<DepartmentErrorCode, number>> = {
   DEPARTMENT_QUERY_INVALID: 400,
   DEPARTMENT_SEARCH_INVALID: 400,
   DEPARTMENT_NOT_FOUND: 404,
-  DEPARTMENT_INACTIVE: 400,
+  DEPARTMENT_INACTIVE: 409,
   DEPARTMENT_MEMBERSHIP_UNSUPPORTED: 400,
   DEPARTMENT_MEMBERSHIP_PAYLOAD_INVALID: 400,
   DEPARTMENT_MEMBERSHIP_REASON_INVALID: 400,
@@ -86,7 +109,21 @@ const ERROR_HTTP_STATUS: Readonly<Record<DepartmentErrorCode, number>> = {
   DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT: 409,
   DEPARTMENT_MEMBERSHIP_OVERLAP: 409,
   DEPARTMENT_MEMBERSHIP_ALREADY_ENDED: 409,
+  DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS: 409,
+  DUPLICATE_CODE: 409,
+  VERSION_CONFLICT: 409,
+  PERSON_NOT_FOUND: 404,
+  PERSON_INACTIVE: 409,
+  PERSON_ALREADY_IN_DEPARTMENT: 409,
+  PERSON_ALREADY_IN_OTHER_DEPARTMENT: 409,
+  PERSON_IS_ACTIVE_DEPARTMENT_HEAD: 409,
+  PERSON_NOT_ACTIVE_MEMBER_OF_DEPARTMENT: 409,
+  HEAD_ALREADY_ENDED: 409,
+  CLIENT_SCHEDULE_FIELD_FORBIDDEN: 400,
+  CLIENT_AUTHORITY_FIELD_FORBIDDEN: 400,
+  ORG_VALIDATION_ERROR: 400,
   IDEMPOTENCY_KEY_INVALID: 400,
+  IDEMPOTENCY_KEY_MISMATCH: 400,
   IDEMPOTENCY_CONFLICT: 409,
   DEPARTMENT_UNAVAILABLE: 503,
 };
@@ -95,28 +132,41 @@ export function departmentHttpStatusForError(code: DepartmentErrorCode): number 
   return ERROR_HTTP_STATUS[code];
 }
 
+export type DepartmentActiveHeadProjection = {
+  head_assignment_id: string;
+  person_id: string;
+  employee_code: string;
+  full_name: string;
+  started_at: string;
+  version: number;
+};
+
 export type DepartmentProjection = {
   department_id: string;
-  system_key: DepartmentSystemKey;
+  system_key: DepartmentSystemKey | null;
   code: string;
   name: string;
   is_active: boolean;
+  version: number;
   membership_mode: DepartmentMembershipMode;
   default_policy_code: DepartmentDefaultPolicyCode;
-  active_member_count: number | null;
+  active_member_count: number;
   team_count: number | null;
   active_team_count: number | null;
+  active_head: DepartmentActiveHeadProjection | null;
   created_at: string;
   updated_at: string;
 };
 
 export type DepartmentListProjection = {
   authorization_date: string;
+  as_of: string;
   departments: readonly DepartmentProjection[];
 };
 
 export type DepartmentDetailProjection = {
   authorization_date: string;
+  as_of: string;
   department: DepartmentProjection;
 };
 
@@ -285,7 +335,11 @@ function isValidIsoCalendarDate(value: unknown): value is string {
 }
 
 function isIsoUtcTimestamp(value: unknown): value is string {
-  return typeof value === "string" && ISO_UTC_TIMESTAMP_PATTERN.test(value);
+  return (
+    typeof value === "string" &&
+    ISO_UTC_TIMESTAMP_PATTERN.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
 }
 
 function isSafeNonNegativeInt(value: unknown): value is number {
@@ -383,11 +437,34 @@ function parseOptionalSearchParam(
   return { ok: true, search: trimmed };
 }
 
-export function parseListDepartmentsQuery(url: URL): ParseResult<Record<string, never>> {
-  if (url.search.length > 0) {
+export function parseListDepartmentsQuery(url: URL): ParseResult<{
+  include_inactive: boolean;
+  as_of: string | null;
+}> {
+  const params = collectSingleQueryParams(url, new Set(["include_inactive", "as_of"]));
+  if (!params) {
     return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
   }
-  return { ok: true, value: {} };
+  let includeInactive = true;
+  const rawIncludeInactive = params.get("include_inactive");
+  if (rawIncludeInactive !== undefined) {
+    if (rawIncludeInactive === "true") {
+      includeInactive = true;
+    } else if (rawIncludeInactive === "false") {
+      includeInactive = false;
+    } else {
+      return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+    }
+  }
+  const rawAsOf = params.get("as_of");
+  let asOf: string | null = null;
+  if (rawAsOf !== undefined && rawAsOf !== "") {
+    if (!isIsoUtcTimestamp(rawAsOf)) {
+      return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+    }
+    asOf = new Date(rawAsOf).toISOString();
+  }
+  return { ok: true, value: { include_inactive: includeInactive, as_of: asOf } };
 }
 
 export function parseDepartmentIdParam(rawId: unknown, url: URL): ParseResult<string> {
@@ -399,6 +476,29 @@ export function parseDepartmentIdParam(rawId: unknown, url: URL): ParseResult<st
     return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
   }
   return { ok: true, value: id };
+}
+
+export function parseGetDepartmentParams(
+  rawId: unknown,
+  url: URL,
+): ParseResult<{ department_id: string; as_of: string | null }> {
+  const params = collectSingleQueryParams(url, new Set(["as_of"]));
+  if (!params) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const id = normalizeUuid(rawId);
+  if (!id) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const rawAsOf = params.get("as_of");
+  let asOf: string | null = null;
+  if (rawAsOf !== undefined && rawAsOf !== "") {
+    if (!isIsoUtcTimestamp(rawAsOf)) {
+      return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+    }
+    asOf = new Date(rawAsOf).toISOString();
+  }
+  return { ok: true, value: { department_id: id, as_of: asOf } };
 }
 
 export function parseListAccountingMembershipsQuery(
@@ -518,6 +618,19 @@ function parseReasonField(raw: unknown): string | null {
   return trimmed;
 }
 
+function parseWp3ReasonField(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (
+    trimmed.length < 1 ||
+    trimmed.length > WP3_MAX_REASON_LENGTH ||
+    REASON_CONTROL_CHAR_PATTERN.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
 function parseMatchedIdempotencyKey(
   headerValue: string | null,
   bodyValue: unknown,
@@ -529,6 +642,26 @@ function parseMatchedIdempotencyKey(
     return null;
   }
   return bodyUuid;
+}
+
+function parseWp3MatchedIdempotencyKey(
+  headerValue: string | null,
+  bodyValue: unknown,
+):
+  | { ok: true; value: string }
+  | { ok: false; code: "IDEMPOTENCY_KEY_INVALID" | "IDEMPOTENCY_KEY_MISMATCH" } {
+  if (typeof headerValue !== "string") {
+    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  }
+  const headerUuid = normalizeUuid(headerValue.trim());
+  const bodyUuid = normalizeUuid(bodyValue);
+  if (!headerUuid || !bodyUuid) {
+    return { ok: false, code: "IDEMPOTENCY_KEY_INVALID" };
+  }
+  if (headerUuid !== bodyUuid) {
+    return { ok: false, code: "IDEMPOTENCY_KEY_MISMATCH" };
+  }
+  return { ok: true, value: bodyUuid };
 }
 
 function resolveDepartmentBusinessTodayVn(todayVn?: string | null): string {
@@ -722,14 +855,54 @@ const DEPARTMENT_PROJECTION_KEYS = [
   "code",
   "name",
   "is_active",
+  "version",
   "membership_mode",
   "default_policy_code",
   "active_member_count",
   "team_count",
   "active_team_count",
+  "active_head",
   "created_at",
   "updated_at",
 ] as const;
+
+export function projectDepartmentActiveHead(
+  value: unknown,
+): DepartmentActiveHeadProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "head_assignment_id",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "started_at",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  const headAssignmentId = normalizeUuid(value.head_assignment_id);
+  const personId = normalizeUuid(value.person_id);
+  if (
+    !headAssignmentId ||
+    !personId ||
+    !isNonEmptyDisplayString(value.employee_code, 64) ||
+    !isNonEmptyDisplayString(value.full_name, 160) ||
+    !isIsoUtcTimestamp(value.started_at) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+  return {
+    head_assignment_id: headAssignmentId,
+    person_id: personId,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    started_at: value.started_at,
+    version: value.version,
+  };
+}
 
 export function projectDepartmentItem(value: unknown): DepartmentProjection | null {
   if (!isRecord(value) || !hasExactKeys(value, DEPARTMENT_PROJECTION_KEYS)) {
@@ -741,32 +914,56 @@ export function projectDepartmentItem(value: unknown): DepartmentProjection | nu
   const code = value.code;
   const name = value.name;
   const isActive = value.is_active;
+  const version = value.version;
   const membershipMode = value.membership_mode;
   const defaultPolicyCode = value.default_policy_code;
   const activeMemberCount = value.active_member_count;
   const teamCount = value.team_count;
   const activeTeamCount = value.active_team_count;
+  const rawActiveHead = value.active_head;
   const createdAt = value.created_at;
   const updatedAt = value.updated_at;
 
+  const isValidSystemKey =
+    systemKey === null ||
+    (typeof systemKey === "string" &&
+      (DEPARTMENT_SYSTEM_KEYS as readonly string[]).includes(systemKey));
+
   if (
     !departmentId ||
-    (systemKey !== "RECRUITMENT" && systemKey !== "ACCOUNTING") ||
+    !isValidSystemKey ||
     typeof code !== "string" ||
     !DEPARTMENT_CODE_PATTERN.test(code) ||
     !isNonEmptyDisplayString(name, 256) ||
     typeof isActive !== "boolean" ||
+    !isSafePositiveInt(version) ||
+    !isSafeNonNegativeInt(activeMemberCount) ||
     !isIsoUtcTimestamp(createdAt) ||
     !isIsoUtcTimestamp(updatedAt)
   ) {
     return null;
   }
 
-  if (systemKey === "ACCOUNTING") {
+  const activeHead =
+    rawActiveHead === null ? null : projectDepartmentActiveHead(rawActiveHead);
+  if (rawActiveHead !== null && !activeHead) {
+    return null;
+  }
+
+  if (systemKey === "RECRUITMENT") {
+    if (
+      membershipMode !== "MANAGED_MEMBERSHIP_AND_TEAMS" ||
+      defaultPolicyCode !== "EXISTING_TEAM_AUTHORITY_READ_ONLY" ||
+      !isSafeNonNegativeInt(teamCount) ||
+      !isSafeNonNegativeInt(activeTeamCount) ||
+      activeTeamCount > teamCount
+    ) {
+      return null;
+    }
+  } else if (systemKey === "ACCOUNTING") {
     if (
       membershipMode !== "MANAGED_MEMBERSHIP" ||
       defaultPolicyCode !== "VENDOR_FINANCE_VIEW_AND_RECORD" ||
-      !isSafeNonNegativeInt(activeMemberCount) ||
       teamCount !== null ||
       activeTeamCount !== null
     ) {
@@ -774,12 +971,10 @@ export function projectDepartmentItem(value: unknown): DepartmentProjection | nu
     }
   } else {
     if (
-      membershipMode !== "READ_ONLY_TEAMS_PROJECTION" ||
-      defaultPolicyCode !== "EXISTING_TEAM_AUTHORITY_READ_ONLY" ||
-      activeMemberCount !== null ||
-      !isSafeNonNegativeInt(teamCount) ||
-      !isSafeNonNegativeInt(activeTeamCount) ||
-      activeTeamCount > teamCount
+      membershipMode !== "MANAGED_MEMBERSHIP" ||
+      defaultPolicyCode !== "ORGANIZATIONAL_MEMBERSHIP_ONLY" ||
+      teamCount !== null ||
+      activeTeamCount !== null
     ) {
       return null;
     }
@@ -787,25 +982,31 @@ export function projectDepartmentItem(value: unknown): DepartmentProjection | nu
 
   return {
     department_id: departmentId,
-    system_key: systemKey,
+    system_key: systemKey as DepartmentSystemKey | null,
     code,
     name,
     is_active: isActive,
+    version,
     membership_mode: membershipMode,
     default_policy_code: defaultPolicyCode,
     active_member_count: activeMemberCount,
     team_count: teamCount,
     active_team_count: activeTeamCount,
+    active_head: activeHead,
     created_at: createdAt,
     updated_at: updatedAt,
   };
 }
 
 export function projectDepartmentListResponse(value: unknown): DepartmentListProjection | null {
-  if (!isRecord(value) || !hasExactKeys(value, ["authorization_date", "departments"])) {
+  if (!isRecord(value) || !hasExactKeys(value, ["authorization_date", "as_of", "departments"])) {
     return null;
   }
-  if (!isValidIsoCalendarDate(value.authorization_date) || !Array.isArray(value.departments)) {
+  if (
+    !isValidIsoCalendarDate(value.authorization_date) ||
+    !isIsoUtcTimestamp(value.as_of) ||
+    !Array.isArray(value.departments)
+  ) {
     return null;
   }
 
@@ -818,15 +1019,16 @@ export function projectDepartmentListResponse(value: unknown): DepartmentListPro
 
   return {
     authorization_date: value.authorization_date,
+    as_of: value.as_of,
     departments,
   };
 }
 
 export function projectDepartmentDetailResponse(value: unknown): DepartmentDetailProjection | null {
-  if (!isRecord(value) || !hasExactKeys(value, ["authorization_date", "department"])) {
+  if (!isRecord(value) || !hasExactKeys(value, ["authorization_date", "as_of", "department"])) {
     return null;
   }
-  if (!isValidIsoCalendarDate(value.authorization_date)) {
+  if (!isValidIsoCalendarDate(value.authorization_date) || !isIsoUtcTimestamp(value.as_of)) {
     return null;
   }
   const department = projectDepartmentItem(value.department);
@@ -834,6 +1036,7 @@ export function projectDepartmentDetailResponse(value: unknown): DepartmentDetai
 
   return {
     authorization_date: value.authorization_date,
+    as_of: value.as_of,
     department,
   };
 }
@@ -1213,5 +1416,1055 @@ export function projectRecruitmentTeamsResponse(
     total: value.total,
     has_more: value.has_more,
     teams,
+  };
+}
+
+
+export const DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS = [
+  "active",
+  "ended",
+  "all",
+] as const;
+export type DepartmentPersonMembershipStatusFilter =
+  (typeof DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS)[number];
+
+export type PersonDeptMembershipProjection = {
+  membership_id: string;
+  department_id: string;
+  person_id: string;
+  employee_code: string;
+  full_name: string;
+  person_status: "ACTIVE" | "INACTIVE";
+  person_version: number;
+  active_account_ref: string | null;
+  is_department_head: boolean;
+  started_at: string;
+  ended_at: string | null;
+  source_kind: "ADMIN_MUTATION" | "BACKFILL_DATE_EVIDENCE" | "BACKFILL_CURRENT_STATE_ONLY";
+  evidence_date: string | null;
+  version: number;
+};
+
+export type DepartmentPersonMembershipsListProjection = {
+  authorization_date: string;
+  as_of: string;
+  department_id: string;
+  status: DepartmentPersonMembershipStatusFilter;
+  search: string | null;
+  page: number;
+  page_size: number;
+  total: number;
+  has_more: boolean;
+  memberships: PersonDeptMembershipProjection[];
+};
+
+export type DepartmentHeadProjection = {
+  head_assignment_id: string;
+  department_id: string;
+  person_id: string;
+  employee_code: string;
+  full_name: string;
+  started_at: string;
+  ended_at: string | null;
+  source_kind: "ADMIN_MUTATION" | "BACKFILL_DATE_EVIDENCE" | "BACKFILL_CURRENT_STATE_ONLY";
+  evidence_date: string | null;
+  version: number;
+};
+
+export type DepartmentHeadsListProjection = {
+  authorization_date: string;
+  as_of: string;
+  department_id: string;
+  include_history: boolean;
+  active_head: DepartmentActiveHeadProjection | null;
+  page: number;
+  page_size: number;
+  total: number;
+  has_more: boolean;
+  history: DepartmentHeadProjection[];
+};
+
+export type ParsedCreateDepartmentBody = {
+  code: string;
+  name: string;
+  reason: string;
+  idempotency_key: string;
+};
+
+export type ParsedUpdateDepartmentBody = {
+  expected_department_version: number;
+  name: string;
+  is_active: boolean;
+  reason: string;
+  idempotency_key: string;
+};
+
+export type ParsedListDepartmentPersonMembershipsQuery = {
+  department_id: string;
+  status: DepartmentPersonMembershipStatusFilter;
+  search: string | null;
+  as_of: string | null;
+  page: number;
+  page_size: number;
+};
+
+export type ParsedAssignPersonMemberBody = {
+  person_id: string;
+  expected_person_version: number;
+  reason: string;
+  idempotency_key: string;
+};
+
+export type ParsedEndPersonMemberBody = {
+  expected_person_version: number;
+  reason: string;
+  idempotency_key: string;
+};
+
+export type ParsedListDepartmentHeadsQuery = {
+  department_id: string;
+  include_history: boolean;
+  as_of: string | null;
+  page: number;
+  page_size: number;
+};
+
+export type ParsedDesignateHeadBody = {
+  person_id: string;
+  expected_department_version: number;
+  expected_current_head_assignment_id: string | null;
+  reason: string;
+  idempotency_key: string;
+};
+
+export type ParsedEndHeadBody = {
+  expected_department_version: number;
+  expected_current_head_assignment_id: string;
+  reason: string;
+  idempotency_key: string;
+};
+
+const WP3_DEPARTMENT_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,63}$/;
+const WP3_SCHEDULE_FORBIDDEN_FIELDS = new Set([
+  "started_at",
+  "ended_at",
+  "valid_from",
+  "valid_to",
+  "effective_from",
+  "effective_to",
+]);
+const WP3_AUTHORITY_FORBIDDEN_TOKENS = new Set([
+  "authsubject",
+  "appuser",
+  "appuserid",
+  "actorid",
+  "createdby",
+  "createdbyuserid",
+  "owner",
+  "owneruserid",
+  "actor",
+  "role",
+  "roles",
+  "capability",
+  "capabilities",
+  "scope",
+  "scopes",
+  "scopekind",
+  "team",
+  "teamid",
+  "provider",
+  "providertype",
+]);
+
+function checkNoWp3ForbiddenObjectFields(
+  obj: Record<string, unknown>,
+): { ok: true } | { ok: false; code: DepartmentErrorCode } {
+  for (const key of Object.keys(obj)) {
+    if (WP3_SCHEDULE_FORBIDDEN_FIELDS.has(key.toLowerCase())) {
+      return { ok: false, code: "CLIENT_SCHEDULE_FIELD_FORBIDDEN" };
+    }
+    if (WP3_AUTHORITY_FORBIDDEN_TOKENS.has(key.replace(/[-_]/g, "").toLowerCase())) {
+      return { ok: false, code: "CLIENT_AUTHORITY_FIELD_FORBIDDEN" };
+    }
+  }
+  return { ok: true };
+}
+
+export function parseCreateDepartmentBody(
+  body: unknown,
+  idempotencyHeader: string | null,
+): ParseResult<ParsedCreateDepartmentBody> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const forbidden = checkNoWp3ForbiddenObjectFields(body);
+  if (!forbidden.ok) return forbidden;
+  if (!hasExactKeys(body, ["code", "name", "reason", "idempotency_key"])) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
+  }
+  if (typeof body.code !== "string") {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const trimmedCode = body.code.trim();
+  if (!WP3_DEPARTMENT_CODE_PATTERN.test(trimmedCode)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  if (!isNonEmptyDisplayString(body.name, 256)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const reason = parseWp3ReasonField(body.reason);
+  if (!reason) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  return {
+    ok: true,
+    value: {
+      code: trimmedCode,
+      name: body.name.trim(),
+      reason,
+      idempotency_key: idem.value,
+    },
+  };
+}
+
+export function parseUpdateDepartmentBody(
+  body: unknown,
+  idempotencyHeader: string | null,
+): ParseResult<ParsedUpdateDepartmentBody> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const forbidden = checkNoWp3ForbiddenObjectFields(body);
+  if (!forbidden.ok) return forbidden;
+  if (
+    !hasExactKeys(body, [
+      "expected_department_version",
+      "name",
+      "is_active",
+      "reason",
+      "idempotency_key",
+    ])
+  ) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
+  }
+  if (
+    !isSafePositiveInt(body.expected_department_version) ||
+    !isNonEmptyDisplayString(body.name, 256) ||
+    typeof body.is_active !== "boolean"
+  ) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const reason = parseWp3ReasonField(body.reason);
+  if (!reason) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  return {
+    ok: true,
+    value: {
+      expected_department_version: body.expected_department_version,
+      name: body.name.trim(),
+      is_active: body.is_active,
+      reason,
+      idempotency_key: idem.value,
+    },
+  };
+}
+
+export function parseListDepartmentPersonMembershipsQuery(
+  rawDepartmentId: unknown,
+  url: URL,
+): ParseResult<ParsedListDepartmentPersonMembershipsQuery> {
+  const departmentId = normalizeUuid(rawDepartmentId);
+  if (!departmentId) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const params = collectSingleQueryParams(
+    url,
+    new Set(["status", "search", "as_of", "page", "page_size"]),
+  );
+  if (!params) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const rawStatus = params.get("status") ?? "active";
+  if (!(DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS as readonly string[]).includes(rawStatus)) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const searchResult = parseOptionalSearchParam(params.get("search"));
+  if (!searchResult.ok) return searchResult;
+  const pagination = parsePaginationParams(params);
+  if (!pagination.ok) return pagination;
+  const rawAsOf = params.get("as_of");
+  let asOf: string | null = null;
+  if (rawAsOf !== undefined && rawAsOf !== "") {
+    if (!isIsoUtcTimestamp(rawAsOf)) {
+      return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+    }
+    asOf = new Date(rawAsOf).toISOString();
+  }
+  return {
+    ok: true,
+    value: {
+      department_id: departmentId,
+      status: rawStatus as DepartmentPersonMembershipStatusFilter,
+      search: searchResult.search,
+      as_of: asOf,
+      page: pagination.page,
+      page_size: pagination.page_size,
+    },
+  };
+}
+
+export function parseAssignPersonMemberBody(
+  body: unknown,
+  idempotencyHeader: string | null,
+): ParseResult<ParsedAssignPersonMemberBody> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const forbidden = checkNoWp3ForbiddenObjectFields(body);
+  if (!forbidden.ok) return forbidden;
+  if (!hasExactKeys(body, ["person_id", "expected_person_version", "reason", "idempotency_key"])) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
+  }
+  const personId = normalizeUuid(body.person_id);
+  if (!personId || !isSafePositiveInt(body.expected_person_version)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const reason = parseWp3ReasonField(body.reason);
+  if (!reason) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  return {
+    ok: true,
+    value: {
+      person_id: personId,
+      expected_person_version: body.expected_person_version,
+      reason,
+      idempotency_key: idem.value,
+    },
+  };
+}
+
+export function parseEndPersonMemberBody(
+  body: unknown,
+  idempotencyHeader: string | null,
+): ParseResult<ParsedEndPersonMemberBody> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const forbidden = checkNoWp3ForbiddenObjectFields(body);
+  if (!forbidden.ok) return forbidden;
+  if (!hasExactKeys(body, ["expected_person_version", "reason", "idempotency_key"])) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
+  }
+  if (!isSafePositiveInt(body.expected_person_version)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const reason = parseWp3ReasonField(body.reason);
+  if (!reason) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  return {
+    ok: true,
+    value: {
+      expected_person_version: body.expected_person_version,
+      reason,
+      idempotency_key: idem.value,
+    },
+  };
+}
+
+export function parseListDepartmentHeadsQuery(
+  rawDepartmentId: unknown,
+  url: URL,
+): ParseResult<ParsedListDepartmentHeadsQuery> {
+  const departmentId = normalizeUuid(rawDepartmentId);
+  if (!departmentId) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const params = collectSingleQueryParams(
+    url,
+    new Set(["include_history", "as_of", "page", "page_size"]),
+  );
+  if (!params) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  let includeHistory = false;
+  const rawHistory = params.get("include_history");
+  if (rawHistory !== undefined) {
+    if (rawHistory === "true") {
+      includeHistory = true;
+    } else if (rawHistory === "false") {
+      includeHistory = false;
+    } else {
+      return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+    }
+  }
+  const pagination = parsePaginationParams(params);
+  if (!pagination.ok) return pagination;
+  const rawAsOf = params.get("as_of");
+  let asOf: string | null = null;
+  if (rawAsOf !== undefined && rawAsOf !== "") {
+    if (!isIsoUtcTimestamp(rawAsOf)) {
+      return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+    }
+    asOf = new Date(rawAsOf).toISOString();
+  }
+  return {
+    ok: true,
+    value: {
+      department_id: departmentId,
+      include_history: includeHistory,
+      as_of: asOf,
+      page: pagination.page,
+      page_size: pagination.page_size,
+    },
+  };
+}
+
+export function parseDesignateHeadBody(
+  body: unknown,
+  idempotencyHeader: string | null,
+): ParseResult<ParsedDesignateHeadBody> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const forbidden = checkNoWp3ForbiddenObjectFields(body);
+  if (!forbidden.ok) return forbidden;
+  if (
+    !hasExactKeys(body, [
+      "person_id",
+      "expected_department_version",
+      "expected_current_head_assignment_id",
+      "reason",
+      "idempotency_key",
+    ])
+  ) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
+  }
+  const personId = normalizeUuid(body.person_id);
+  if (!personId || !isSafePositiveInt(body.expected_department_version)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  let expectedHeadId: string | null = null;
+  if (body.expected_current_head_assignment_id !== null) {
+    const normalized = normalizeUuid(body.expected_current_head_assignment_id);
+    if (!normalized) {
+      return { ok: false, code: "ORG_VALIDATION_ERROR" };
+    }
+    expectedHeadId = normalized;
+  }
+  const reason = parseWp3ReasonField(body.reason);
+  if (!reason) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  return {
+    ok: true,
+    value: {
+      person_id: personId,
+      expected_department_version: body.expected_department_version,
+      expected_current_head_assignment_id: expectedHeadId,
+      reason,
+      idempotency_key: idem.value,
+    },
+  };
+}
+
+export function parseEndHeadBody(
+  body: unknown,
+  idempotencyHeader: string | null,
+): ParseResult<ParsedEndHeadBody> {
+  if (!isRecord(body)) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const forbidden = checkNoWp3ForbiddenObjectFields(body);
+  if (!forbidden.ok) return forbidden;
+  if (
+    !hasExactKeys(body, [
+      "expected_department_version",
+      "expected_current_head_assignment_id",
+      "reason",
+      "idempotency_key",
+    ])
+  ) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const idem = parseWp3MatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
+  if (!idem.ok) {
+    return { ok: false, code: idem.code };
+  }
+  const expectedHeadId = normalizeUuid(body.expected_current_head_assignment_id);
+  if (!isSafePositiveInt(body.expected_department_version) || !expectedHeadId) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  const reason = parseWp3ReasonField(body.reason);
+  if (!reason) {
+    return { ok: false, code: "ORG_VALIDATION_ERROR" };
+  }
+  return {
+    ok: true,
+    value: {
+      expected_department_version: body.expected_department_version,
+      expected_current_head_assignment_id: expectedHeadId,
+      reason,
+      idempotency_key: idem.value,
+    },
+  };
+}
+
+export function computeCreateDepartmentFingerprint(input: {
+  actor_app_user_id: string;
+  code: string;
+  name: string;
+  reason: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: "DEPT_CREATED",
+    actor_app_user_id: input.actor_app_user_id.toLowerCase(),
+    code: input.code,
+    name: input.name,
+    reason: input.reason,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function computeUpdateDepartmentFingerprint(input: {
+  actor_app_user_id: string;
+  department_id: string;
+  expected_department_version: number;
+  name: string;
+  is_active: boolean;
+  reason: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: "DEPT_UPDATED",
+    actor_app_user_id: input.actor_app_user_id.toLowerCase(),
+    department_id: input.department_id.toLowerCase(),
+    expected_department_version: input.expected_department_version,
+    name: input.name,
+    is_active: input.is_active,
+    reason: input.reason,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function computeAssignPersonMemberFingerprint(input: {
+  actor_app_user_id: string;
+  department_id: string;
+  person_id: string;
+  expected_person_version: number;
+  reason: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: "PERSON_DEPT_ASSIGNED",
+    actor_app_user_id: input.actor_app_user_id.toLowerCase(),
+    department_id: input.department_id.toLowerCase(),
+    person_id: input.person_id.toLowerCase(),
+    expected_person_version: input.expected_person_version,
+    reason: input.reason,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function computeEndPersonMemberFingerprint(input: {
+  actor_app_user_id: string;
+  department_id: string;
+  membership_id: string;
+  expected_person_version: number;
+  reason: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: "PERSON_DEPT_ENDED",
+    actor_app_user_id: input.actor_app_user_id.toLowerCase(),
+    department_id: input.department_id.toLowerCase(),
+    membership_id: input.membership_id.toLowerCase(),
+    expected_person_version: input.expected_person_version,
+    reason: input.reason,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function computeDesignateHeadFingerprint(input: {
+  actor_app_user_id: string;
+  department_id: string;
+  person_id: string;
+  expected_department_version: number;
+  expected_current_head_assignment_id: string | null;
+  reason: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: "DEPT_HEAD_DESIGNATED",
+    actor_app_user_id: input.actor_app_user_id.toLowerCase(),
+    department_id: input.department_id.toLowerCase(),
+    person_id: input.person_id.toLowerCase(),
+    expected_department_version: input.expected_department_version,
+    expected_current_head_assignment_id:
+      input.expected_current_head_assignment_id?.toLowerCase() ?? null,
+    reason: input.reason,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function computeEndHeadFingerprint(input: {
+  actor_app_user_id: string;
+  department_id: string;
+  expected_department_version: number;
+  expected_current_head_assignment_id: string;
+  reason: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: "DEPT_HEAD_ENDED",
+    actor_app_user_id: input.actor_app_user_id.toLowerCase(),
+    department_id: input.department_id.toLowerCase(),
+    expected_department_version: input.expected_department_version,
+    expected_current_head_assignment_id:
+      input.expected_current_head_assignment_id.toLowerCase(),
+    reason: input.reason,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function parseDepartmentPersonMembershipParams(
+  rawDepartmentId: unknown,
+  rawMembershipId: unknown,
+  url: URL,
+): ParseResult<{ department_id: string; membership_id: string }> {
+  if (url.search.length > 0) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  const departmentId = normalizeUuid(rawDepartmentId);
+  const membershipId = normalizeUuid(rawMembershipId);
+  if (!departmentId || !membershipId) {
+    return { ok: false, code: "DEPARTMENT_QUERY_INVALID" };
+  }
+  return {
+    ok: true,
+    value: {
+      department_id: departmentId,
+      membership_id: membershipId,
+    },
+  };
+}
+
+export type DepartmentMutationProjection = {
+  replayed: boolean;
+  department: DepartmentProjection;
+};
+
+export type DepartmentPersonMemberMutationProjection = {
+  replayed: boolean;
+  person_version: number;
+  membership: PersonDeptMembershipProjection;
+};
+
+export type DesignateDepartmentHeadProjection = {
+  replayed: boolean;
+  department_version: number;
+  replaced_head: {
+    head_assignment_id: string;
+    person_id: string;
+    ended_at: string;
+    version: number;
+  } | null;
+  active_head: DepartmentHeadProjection;
+};
+
+export type EndDepartmentHeadProjection = {
+  replayed: boolean;
+  department_version: number;
+  ended_head: DepartmentHeadProjection;
+};
+
+const PERSON_SOURCE_KINDS_SET = new Set([
+  "ADMIN_MUTATION",
+  "BACKFILL_DATE_EVIDENCE",
+  "BACKFILL_CURRENT_STATE_ONLY",
+]);
+
+function isValidPersonSourceKind(
+  value: unknown,
+): value is PersonDeptMembershipProjection["source_kind"] {
+  return typeof value === "string" && PERSON_SOURCE_KINDS_SET.has(value);
+}
+
+export function projectDepartmentMutationResponse(
+  value: unknown,
+): DepartmentMutationProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["replayed", "department"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean") {
+    return null;
+  }
+  const department = projectDepartmentItem(value.department);
+  if (!department) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    department,
+  };
+}
+
+export function projectPersonDeptMembershipItem(
+  value: unknown,
+): PersonDeptMembershipProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "membership_id",
+      "department_id",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "person_status",
+      "person_version",
+      "active_account_ref",
+      "is_department_head",
+      "started_at",
+      "ended_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  const membershipId = normalizeUuid(value.membership_id);
+  const departmentId = normalizeUuid(value.department_id);
+  const personId = normalizeUuid(value.person_id);
+  const activeAccountRef =
+    value.active_account_ref === null ? null : normalizeUuid(value.active_account_ref);
+
+  if (
+    !membershipId ||
+    !departmentId ||
+    !personId ||
+    !isNonEmptyDisplayString(value.employee_code, 64) ||
+    !isNonEmptyDisplayString(value.full_name, 160) ||
+    (value.person_status !== "ACTIVE" && value.person_status !== "INACTIVE") ||
+    !isSafePositiveInt(value.person_version) ||
+    (value.active_account_ref !== null && !activeAccountRef) ||
+    typeof value.is_department_head !== "boolean" ||
+    !isIsoUtcTimestamp(value.started_at) ||
+    (value.ended_at !== null && !isIsoUtcTimestamp(value.ended_at)) ||
+    !isValidPersonSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoCalendarDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+
+  return {
+    membership_id: membershipId,
+    department_id: departmentId,
+    person_id: personId,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    person_status: value.person_status,
+    person_version: value.person_version,
+    active_account_ref: activeAccountRef,
+    is_department_head: value.is_department_head,
+    started_at: value.started_at,
+    ended_at: value.ended_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+export function projectDepartmentPersonMembershipsListResponse(
+  value: unknown,
+): DepartmentPersonMembershipsListProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "authorization_date",
+      "as_of",
+      "department_id",
+      "status",
+      "search",
+      "page",
+      "page_size",
+      "total",
+      "has_more",
+      "memberships",
+    ])
+  ) {
+    return null;
+  }
+  const departmentId = normalizeUuid(value.department_id);
+  if (
+    !isValidIsoCalendarDate(value.authorization_date) ||
+    !isIsoUtcTimestamp(value.as_of) ||
+    !departmentId ||
+    typeof value.status !== "string" ||
+    !(DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS as readonly string[]).includes(value.status) ||
+    (value.search !== null &&
+      !isNonEmptyDisplayString(value.search, DEPARTMENT_MAX_SEARCH_LENGTH)) ||
+    !isSafePositiveInt(value.page) ||
+    value.page > DEPARTMENT_MAX_PAGE ||
+    !isSafePositiveInt(value.page_size) ||
+    value.page_size > DEPARTMENT_MAX_PAGE_SIZE ||
+    !isSafeNonNegativeInt(value.total) ||
+    typeof value.has_more !== "boolean" ||
+    !Array.isArray(value.memberships) ||
+    value.memberships.length > value.page_size
+  ) {
+    return null;
+  }
+
+  const memberships: PersonDeptMembershipProjection[] = [];
+  for (const raw of value.memberships) {
+    const item = projectPersonDeptMembershipItem(raw);
+    if (!item || item.department_id !== departmentId) return null;
+    memberships.push(item);
+  }
+
+  return {
+    authorization_date: value.authorization_date,
+    as_of: value.as_of,
+    department_id: departmentId,
+    status: value.status as DepartmentPersonMembershipStatusFilter,
+    search: value.search,
+    page: value.page,
+    page_size: value.page_size,
+    total: value.total,
+    has_more: value.has_more,
+    memberships,
+  };
+}
+
+export function projectDepartmentPersonMemberMutationResponse(
+  value: unknown,
+): DepartmentPersonMemberMutationProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["replayed", "person_version", "membership"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.person_version)) {
+    return null;
+  }
+  const membership = projectPersonDeptMembershipItem(value.membership);
+  if (!membership) return null;
+  return {
+    replayed: value.replayed,
+    person_version: value.person_version,
+    membership,
+  };
+}
+
+export function projectDepartmentHeadItem(value: unknown): DepartmentHeadProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "head_assignment_id",
+      "department_id",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "started_at",
+      "ended_at",
+      "source_kind",
+      "evidence_date",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+  const headAssignmentId = normalizeUuid(value.head_assignment_id);
+  const departmentId = normalizeUuid(value.department_id);
+  const personId = normalizeUuid(value.person_id);
+  if (
+    !headAssignmentId ||
+    !departmentId ||
+    !personId ||
+    !isNonEmptyDisplayString(value.employee_code, 64) ||
+    !isNonEmptyDisplayString(value.full_name, 160) ||
+    !isIsoUtcTimestamp(value.started_at) ||
+    (value.ended_at !== null && !isIsoUtcTimestamp(value.ended_at)) ||
+    !isValidPersonSourceKind(value.source_kind) ||
+    (value.evidence_date !== null && !isValidIsoCalendarDate(value.evidence_date)) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+
+  return {
+    head_assignment_id: headAssignmentId,
+    department_id: departmentId,
+    person_id: personId,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    started_at: value.started_at,
+    ended_at: value.ended_at,
+    source_kind: value.source_kind,
+    evidence_date: value.evidence_date,
+    version: value.version,
+  };
+}
+
+export function projectDepartmentHeadsListResponse(
+  value: unknown,
+): DepartmentHeadsListProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "authorization_date",
+      "as_of",
+      "department_id",
+      "include_history",
+      "active_head",
+      "page",
+      "page_size",
+      "total",
+      "has_more",
+      "history",
+    ])
+  ) {
+    return null;
+  }
+  const departmentId = normalizeUuid(value.department_id);
+  if (
+    !isValidIsoCalendarDate(value.authorization_date) ||
+    !isIsoUtcTimestamp(value.as_of) ||
+    !departmentId ||
+    typeof value.include_history !== "boolean" ||
+    !isSafePositiveInt(value.page) ||
+    value.page > DEPARTMENT_MAX_PAGE ||
+    !isSafePositiveInt(value.page_size) ||
+    value.page_size > DEPARTMENT_MAX_PAGE_SIZE ||
+    !isSafeNonNegativeInt(value.total) ||
+    typeof value.has_more !== "boolean" ||
+    !Array.isArray(value.history) ||
+    value.history.length > value.page_size
+  ) {
+    return null;
+  }
+
+  let activeHead: DepartmentActiveHeadProjection | null = null;
+  if (value.active_head !== null) {
+    activeHead = projectDepartmentActiveHead(value.active_head);
+    if (!activeHead) return null;
+  }
+
+  const history: DepartmentHeadProjection[] = [];
+  for (const raw of value.history) {
+    const item = projectDepartmentHeadItem(raw);
+    if (!item || item.department_id !== departmentId) return null;
+    history.push(item);
+  }
+
+  return {
+    authorization_date: value.authorization_date,
+    as_of: value.as_of,
+    department_id: departmentId,
+    include_history: value.include_history,
+    active_head: activeHead,
+    page: value.page,
+    page_size: value.page_size,
+    total: value.total,
+    has_more: value.has_more,
+    history,
+  };
+}
+
+export function projectDesignateDepartmentHeadResponse(
+  value: unknown,
+): DesignateDepartmentHeadProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["replayed", "department_version", "replaced_head", "active_head"])
+  ) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.department_version)) {
+    return null;
+  }
+
+  let replacedHead: DesignateDepartmentHeadProjection["replaced_head"] = null;
+  if (value.replaced_head !== null) {
+    if (
+      !isRecord(value.replaced_head) ||
+      !hasExactKeys(value.replaced_head, [
+        "head_assignment_id",
+        "person_id",
+        "ended_at",
+        "version",
+      ])
+    ) {
+      return null;
+    }
+    const headAssignmentId = normalizeUuid(value.replaced_head.head_assignment_id);
+    const personId = normalizeUuid(value.replaced_head.person_id);
+    if (
+      !headAssignmentId ||
+      !personId ||
+      !isIsoUtcTimestamp(value.replaced_head.ended_at) ||
+      !isSafePositiveInt(value.replaced_head.version)
+    ) {
+      return null;
+    }
+    replacedHead = {
+      head_assignment_id: headAssignmentId,
+      person_id: personId,
+      ended_at: value.replaced_head.ended_at,
+      version: value.replaced_head.version,
+    };
+  }
+
+  const activeHead = projectDepartmentHeadItem(value.active_head);
+  if (!activeHead) return null;
+
+  return {
+    replayed: value.replayed,
+    department_version: value.department_version,
+    replaced_head: replacedHead,
+    active_head: activeHead,
+  };
+}
+
+export function projectEndDepartmentHeadResponse(
+  value: unknown,
+): EndDepartmentHeadProjection | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["replayed", "department_version", "ended_head"])) {
+    return null;
+  }
+  if (typeof value.replayed !== "boolean" || !isSafePositiveInt(value.department_version)) {
+    return null;
+  }
+  const endedHead = projectDepartmentHeadItem(value.ended_head);
+  if (!endedHead || endedHead.ended_at === null) {
+    return null;
+  }
+  return {
+    replayed: value.replayed,
+    department_version: value.department_version,
+    ended_head: endedHead,
   };
 }

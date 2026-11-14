@@ -254,16 +254,70 @@ export function DepartmentDetailManager({
             parentReloadToken={detailReloadToken}
             onReloadDetail={reloadDetail}
           />
-        ) : (
+        ) : effectiveState.detail.department.system_key === "ACCOUNTING" ? (
           <AccountingDepartmentMembershipsSection
             detail={effectiveState.detail}
             parentReloadToken={detailReloadToken}
             onReloadDetail={reloadDetail}
             onMembershipMutated={() => setDetailReloadToken((value) => value + 1)}
           />
+        ) : (
+          <StandardDepartmentOverviewSection
+            detail={effectiveState.detail}
+            onReloadDetail={reloadDetail}
+          />
         )
       ) : null}
     </PageShell>
+  );
+}
+
+function StandardDepartmentOverviewSection({
+  detail,
+  onReloadDetail,
+}: {
+  detail: DepartmentDetailProjection;
+  onReloadDetail: () => void;
+}) {
+  const department = detail.department;
+  return (
+    <Card>
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <CardHeader
+            title={department.name}
+            description={`Mã: ${department.code} · Ngày phân quyền: ${detail.authorization_date}`}
+          />
+          <StatusBadge tone={department.is_active ? "success" : "neutral"} dot>
+            {department.is_active ? "Đang hoạt động" : "Ngừng hoạt động"}
+          </StatusBadge>
+        </div>
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
+            <div className="text-xs text-muted">Quy mô hiện tại</div>
+            <div className="mt-1 font-medium text-foreground">
+              {departmentScaleSummary(department)}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
+            <div className="text-xs text-muted">Trưởng phòng (HEAD) hiện tại</div>
+            <div className="mt-1 font-medium text-foreground">
+              {department.active_head
+                ? `${department.active_head.full_name} (${department.active_head.employee_code})`
+                : "Chưa bổ nhiệm"}
+            </div>
+          </div>
+        </div>
+        <Alert tone="info" title="Chính sách phân quyền phòng ban">
+          {departmentDefaultPolicyDescription(department)}
+        </Alert>
+        <div>
+          <Button variant="secondary" onClick={onReloadDetail}>
+            Tải lại
+          </Button>
+        </div>
+      </div>
+    </Card>
   );
 }
 

@@ -13,12 +13,14 @@ import type {
   AccountingMembershipListProjection,
   AccountingMembershipMutationProjection,
   AccountingMembershipProjection,
+  DepartmentActiveHeadProjection,
   DepartmentDefaultPolicyCode,
   DepartmentDetailProjection,
   DepartmentErrorCode,
   DepartmentListProjection,
   DepartmentMembershipState,
   DepartmentProjection,
+  DepartmentSystemKey,
   RecruitmentTeamListProjection,
   RecruitmentTeamProjection,
 } from "../departments/department-contract.ts";
@@ -33,11 +35,22 @@ export const RESERVED_VENDOR_TEAM_CODE = "__system_vendor__";
 export const ACCOUNTING_DEFAULT_POLICY_DESCRIPTION = "Xem và ghi nhận tài chính Vendor";
 export const RECRUITMENT_DEFAULT_POLICY_DESCRIPTION =
   "Chiếu danh sách Nhóm (Team) hiện có ở chế độ chỉ đọc; toàn bộ quản trị Nhóm, Team Leader và phạm vi Dự án ↔ Nhóm giữ nguyên tại màn hình hiện hành.";
+export const ORGANIZATIONAL_DEFAULT_POLICY_DESCRIPTION =
+  "Ghi nhận tư cách thành viên và cơ cấu tổ chức phòng ban; không tự động cấp thêm quyền dữ liệu nghiệp vụ.";
+
+const DEPARTMENT_SYSTEM_KEYS = [
+  "RECRUITMENT",
+  "ACCOUNTING",
+  "MARKETING",
+  "IT",
+  "MANAGEMENT_BOD",
+] as const;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
-const ISO_UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ISO_UTC_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/i;
 const DEPARTMENT_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,63}$/;
 const SEARCH_CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 const SEARCH_CONTROL_CHAR_GLOBAL = /[\x00-\x1f\x7f]/g;
@@ -140,7 +153,11 @@ export function isValidIsoCalendarDate(value: unknown): value is string {
 }
 
 function isIsoUtcTimestamp(value: unknown): value is string {
-  return typeof value === "string" && ISO_UTC_TIMESTAMP_PATTERN.test(value);
+  return (
+    typeof value === "string" &&
+    ISO_UTC_TIMESTAMP_PATTERN.test(value) &&
+    Number.isFinite(Date.parse(value))
+  );
 }
 
 function isSafeNonNegativeInt(value: unknown): value is number {
@@ -257,14 +274,57 @@ const DEPARTMENT_PROJECTION_KEYS = [
   "code",
   "name",
   "is_active",
+  "version",
   "membership_mode",
   "default_policy_code",
   "active_member_count",
   "team_count",
   "active_team_count",
+  "active_head",
   "created_at",
   "updated_at",
 ] as const;
+
+export function projectDepartmentActiveHead(
+  value: unknown,
+): DepartmentActiveHeadProjection | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "head_assignment_id",
+      "person_id",
+      "employee_code",
+      "full_name",
+      "started_at",
+      "version",
+    ])
+  ) {
+    return null;
+  }
+
+  const headAssignmentId = normalizeDepartmentUuid(value.head_assignment_id);
+  const personId = normalizeDepartmentUuid(value.person_id);
+  if (
+    !headAssignmentId ||
+    !personId ||
+    !isNonEmptyDisplayString(value.employee_code, 64) ||
+    value.employee_code.trim().length < 2 ||
+    !isNonEmptyDisplayString(value.full_name, 256) ||
+    !isIsoUtcTimestamp(value.started_at) ||
+    !isSafePositiveInt(value.version)
+  ) {
+    return null;
+  }
+
+  return {
+    head_assignment_id: headAssignmentId,
+    person_id: personId,
+    employee_code: value.employee_code,
+    full_name: value.full_name,
+    started_at: value.started_at,
+    version: value.version,
+  };
+}
 
 export function projectDepartmentProjectionItem(value: unknown): DepartmentProjection | null {
   if (!isRecord(value) || !hasExactKeys(value, DEPARTMENT_PROJECTION_KEYS)) {
@@ -276,32 +336,56 @@ export function projectDepartmentProjectionItem(value: unknown): DepartmentProje
   const code = value.code;
   const name = value.name;
   const isActive = value.is_active;
+  const version = value.version;
   const membershipMode = value.membership_mode;
   const defaultPolicyCode = value.default_policy_code;
   const activeMemberCount = value.active_member_count;
   const teamCount = value.team_count;
   const activeTeamCount = value.active_team_count;
+  const rawActiveHead = value.active_head;
   const createdAt = value.created_at;
   const updatedAt = value.updated_at;
 
+  const isValidSystemKey =
+    systemKey === null ||
+    (typeof systemKey === "string" &&
+      (DEPARTMENT_SYSTEM_KEYS as readonly string[]).includes(systemKey));
+
   if (
     !departmentId ||
-    (systemKey !== "RECRUITMENT" && systemKey !== "ACCOUNTING") ||
+    !isValidSystemKey ||
     typeof code !== "string" ||
     !DEPARTMENT_CODE_PATTERN.test(code) ||
     !isNonEmptyDisplayString(name, 256) ||
     typeof isActive !== "boolean" ||
+    !isSafePositiveInt(version) ||
+    !isSafeNonNegativeInt(activeMemberCount) ||
     !isIsoUtcTimestamp(createdAt) ||
     !isIsoUtcTimestamp(updatedAt)
   ) {
     return null;
   }
 
-  if (systemKey === "ACCOUNTING") {
+  const activeHead =
+    rawActiveHead === null ? null : projectDepartmentActiveHead(rawActiveHead);
+  if (rawActiveHead !== null && !activeHead) {
+    return null;
+  }
+
+  if (systemKey === "RECRUITMENT") {
+    if (
+      membershipMode !== "MANAGED_MEMBERSHIP_AND_TEAMS" ||
+      defaultPolicyCode !== "EXISTING_TEAM_AUTHORITY_READ_ONLY" ||
+      !isSafeNonNegativeInt(teamCount) ||
+      !isSafeNonNegativeInt(activeTeamCount) ||
+      activeTeamCount > teamCount
+    ) {
+      return null;
+    }
+  } else if (systemKey === "ACCOUNTING") {
     if (
       membershipMode !== "MANAGED_MEMBERSHIP" ||
       defaultPolicyCode !== "VENDOR_FINANCE_VIEW_AND_RECORD" ||
-      !isSafeNonNegativeInt(activeMemberCount) ||
       teamCount !== null ||
       activeTeamCount !== null
     ) {
@@ -309,12 +393,10 @@ export function projectDepartmentProjectionItem(value: unknown): DepartmentProje
     }
   } else {
     if (
-      membershipMode !== "READ_ONLY_TEAMS_PROJECTION" ||
-      defaultPolicyCode !== "EXISTING_TEAM_AUTHORITY_READ_ONLY" ||
-      activeMemberCount !== null ||
-      !isSafeNonNegativeInt(teamCount) ||
-      !isSafeNonNegativeInt(activeTeamCount) ||
-      activeTeamCount > teamCount
+      membershipMode !== "MANAGED_MEMBERSHIP" ||
+      defaultPolicyCode !== "ORGANIZATIONAL_MEMBERSHIP_ONLY" ||
+      teamCount !== null ||
+      activeTeamCount !== null
     ) {
       return null;
     }
@@ -322,15 +404,17 @@ export function projectDepartmentProjectionItem(value: unknown): DepartmentProje
 
   return {
     department_id: departmentId,
-    system_key: systemKey,
+    system_key: systemKey as DepartmentSystemKey | null,
     code,
     name,
     is_active: isActive,
+    version,
     membership_mode: membershipMode,
     default_policy_code: defaultPolicyCode,
     active_member_count: activeMemberCount,
     team_count: teamCount,
     active_team_count: activeTeamCount,
+    active_head: activeHead,
     created_at: createdAt,
     updated_at: updatedAt,
   };
@@ -339,9 +423,10 @@ export function projectDepartmentProjectionItem(value: unknown): DepartmentProje
 export function projectDepartmentListEnvelope(payload: unknown): DepartmentListProjection | null {
   if (
     !isRecord(payload) ||
-    !hasExactKeys(payload, ["ok", "authorization_date", "departments"]) ||
+    !hasExactKeys(payload, ["ok", "authorization_date", "as_of", "departments"]) ||
     payload.ok !== true ||
     !isValidIsoCalendarDate(payload.authorization_date) ||
+    !isIsoUtcTimestamp(payload.as_of) ||
     !Array.isArray(payload.departments)
   ) {
     return null;
@@ -356,6 +441,7 @@ export function projectDepartmentListEnvelope(payload: unknown): DepartmentListP
 
   return {
     authorization_date: payload.authorization_date,
+    as_of: payload.as_of,
     departments,
   };
 }
@@ -366,9 +452,10 @@ export function projectDepartmentDetailEnvelope(
 ): DepartmentDetailProjection | null {
   if (
     !isRecord(payload) ||
-    !hasExactKeys(payload, ["ok", "authorization_date", "department"]) ||
+    !hasExactKeys(payload, ["ok", "authorization_date", "as_of", "department"]) ||
     payload.ok !== true ||
-    !isValidIsoCalendarDate(payload.authorization_date)
+    !isValidIsoCalendarDate(payload.authorization_date) ||
+    !isIsoUtcTimestamp(payload.as_of)
   ) {
     return null;
   }
@@ -385,6 +472,7 @@ export function projectDepartmentDetailEnvelope(
 
   return {
     authorization_date: payload.authorization_date,
+    as_of: payload.as_of,
     department,
   };
 }
@@ -1238,7 +1326,13 @@ export function departmentDefaultPolicyDescription(
   ) {
     return ACCOUNTING_DEFAULT_POLICY_DESCRIPTION;
   }
-  return RECRUITMENT_DEFAULT_POLICY_DESCRIPTION;
+  if (
+    department.system_key === "RECRUITMENT" ||
+    policyCode === "EXISTING_TEAM_AUTHORITY_READ_ONLY"
+  ) {
+    return RECRUITMENT_DEFAULT_POLICY_DESCRIPTION;
+  }
+  return ORGANIZATIONAL_DEFAULT_POLICY_DESCRIPTION;
 }
 
 export function canManageDepartmentMemberships(
@@ -1257,13 +1351,17 @@ export function departmentScaleSummary(department: DepartmentProjection): string
     const total = department.team_count ?? 0;
     return `${active} / ${total} nhóm hoạt động`;
   }
-  return `${department.active_member_count ?? 0} thành viên đang hiệu lực`;
+  return `${department.active_member_count} thành viên đang hiệu lực`;
 }
 
 export function departmentMembershipModeLabel(department: DepartmentProjection): string {
-  return department.system_key === "ACCOUNTING"
-    ? "Quản lý thành viên"
-    : "Chỉ đọc danh sách Nhóm";
+  if (department.system_key === "ACCOUNTING") {
+    return "Quản lý thành viên";
+  }
+  if (department.system_key === "RECRUITMENT") {
+    return "Chỉ đọc danh sách Nhóm";
+  }
+  return "Quản lý theo cơ cấu tổ chức";
 }
 
 export function membershipStateBadge(state: DepartmentMembershipState): {

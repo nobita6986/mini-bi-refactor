@@ -317,12 +317,12 @@ test("Leave Management WP1 full PGlite integration & business rule verification"
   }
 
   const { rows: sysDepts } = await db.query(
-    "select system_key from public.organization_departments order by system_key",
+    "select system_key from public.organization_departments where system_key is not null order by system_key",
   );
   assert.deepEqual(
     sysDepts.map((r) => r.system_key),
-    ["ACCOUNTING", "RECRUITMENT"],
-    "WP1 migration must not alter system organization_departments",
+    ["ACCOUNTING", "IT", "MANAGEMENT_BOD", "MARKETING", "RECRUITMENT"],
+    "WP1 migration must only carry the expected seeded system_key values across subsequent migrations",
   );
 
   // Verify 13 public RPC signatures exist and are granted only to service_role
