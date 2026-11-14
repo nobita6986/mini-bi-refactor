@@ -75,8 +75,8 @@ test("real display name is primary and login id is secondary; account_ref and ve
     assert.doesNotMatch(file, /Phiên bản|auth_subject|revision|account_ref<\/th>|UUID<\/th/i);
     assert.doesNotMatch(file, /\.email|display_name \|\|/);
   }
-  // Exactly three visible columns.
-  assert.equal(source.match(/<th scope="col"/g)?.length, 3);
+  // Five columns: Tên hiển thị, Phân loại, Hồ sơ người liên kết, Trạng thái, Thao tác.
+  assert.equal(source.match(/<th scope="col"/g)?.length, 5);
 });
 
 test("no optimistic success: applied/conflict lock the account until strict authoritative reload", () => {
@@ -133,4 +133,19 @@ test("canonical pnpm test invokes the W05-A lane exactly once", () => {
   ]) {
     assert.match(packageJson.scripts["test:p3-1-w05-a-existing-account-ui"], member);
   }
+});
+
+test("WP4 account manager supports classification, searchable Person linking, manual recruiter mismatch confirmation, and session-loss clearing", () => {
+  assert.match(source, /accountTypeBadgeMeta\(account\.account_type\)/);
+  assert.match(source, /PersonSearchPicker/);
+  assert.match(source, /RecruiterConfirmPicker/);
+  assert.match(source, /confirmedRecruiterId:/);
+  assert.match(source, /mismatchConfirmRequired/);
+  assert.match(source, /\/api\/admin\/access\/accounts\/\$\{encodeURIComponent\(targetAccount\.account_ref\)\}\/classification/);
+  assert.match(source, /\/api\/admin\/access\/accounts\/\$\{encodeURIComponent\(targetAccount\.account_ref\)\}\/person-link\/end/);
+  assert.match(source, /Khóa tài khoản không làm ngừng hồ sơ nhân sự/);
+  assert.match(source, /Thử gửi lại cùng yêu cầu/);
+  assert.match(source, /handleOrgSessionLost/);
+  // Never require manual UUID input for person or recruiter linking
+  assert.doesNotMatch(source, /Nhập UUID|person_id.*<input/i);
 });

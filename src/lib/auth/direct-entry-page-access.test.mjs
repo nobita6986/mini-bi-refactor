@@ -313,3 +313,24 @@ test("Project Operations page admits Team Leader; mapping page stays Full Admin-
   const operationsPage = readFileSync(new URL("../../app/direct-entry/projects/page.tsx", import.meta.url), "utf8");
   assert.match(operationsPage, /canManageProjectMasterForEmptyList=\{canManageProjectMasterFromActor\(actor\)\}/);
 });
+
+test("WP4 Organization Persons page decision mirrors Full Admin triple and rejects BoD, Team Leader, Accounting, and Project Admin", async () => {
+  const { decideOrganizationPersonsPageAccess } = await import("./direct-entry-page-access.ts");
+  const withAll = (capabilities) => ({
+    ...actor(capabilities),
+    actor: {
+      ...actor(capabilities).actor,
+      scopes: [{ kind: "all", reference: "all", valid_from: "2026-01-01", valid_to: null }],
+    },
+  });
+  const triple = ["entry_admin", "recruiter_master_manage", "team_master_manage"];
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: withAll(triple) }), "ALLOW");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: withAll(["entry_privileged_edit"]) }), "ACCESS_DENIED");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: withAll(["report_analytics_view", "report_view"]) }), "ACCESS_DENIED");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: withAll(["catalog_master_manage"]) }), "ACCESS_DENIED");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: withAll(["entry_admin"]) }), "ACCESS_DENIED");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: withAll(["team_manager_assign"]) }), "ACCESS_DENIED");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: { ok: false, reason: "UNAUTHENTICATED" } }), "REDIRECT_LOGIN");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: { ok: false, reason: "ACTOR_DISABLED" } }), "ACCOUNT_UNAVAILABLE");
+  assert.equal(decideOrganizationPersonsPageAccess({ actor: { ok: false, reason: "ACTOR_MAPPING_MISSING" } }), "ACCOUNT_UNAVAILABLE");
+});

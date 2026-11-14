@@ -170,3 +170,97 @@ test("each intent gets a fresh UUID idempotency key", () => {
   assert.notEqual(first, second);
   assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 });
+
+test("WP4 account classification, person link/unlink builders, and recruiter conflict classification", async () => {
+  const model = await import("./account-access-model.ts");
+  const PERSON_ID = "70000000-0000-4000-8000-000000000010";
+  const LINK_ID = "80000000-0000-4000-8000-000000000011";
+  const REC_ID = "90000000-0000-4000-8000-000000000012";
+
+  assert.equal(
+    model.canLinkPersonToAccount({ account_type: "NORMAL", active_person_link: null }),
+    true,
+  );
+  assert.equal(
+    model.canLinkPersonToAccount({ account_type: "SHARED", active_person_link: null }),
+    false,
+  );
+  assert.equal(
+    model.canLinkPersonToAccount({ account_type: "SERVICE", active_person_link: null }),
+    false,
+  );
+
+  const clsReq = model.buildSetAccountClassificationRequest({
+    expectedAccountVersion: 2,
+    accountType: "SHARED",
+    reason: "Tài khoản trực ca dùng chung",
+    idempotencyKey: KEY,
+  });
+  assert.equal(clsReq.ok, true);
+  if (clsReq.ok) {
+    assert.deepEqual(clsReq.body, {
+      account_type: "SHARED",
+      expected_account_version: 2,
+      reason: "Tài khoản trực ca dùng chung",
+      idempotency_key: KEY,
+    });
+  }
+
+  const linkReq = model.buildLinkAccountPersonRequest({
+    personId: PERSON_ID,
+    expectedAccountVersion: 3,
+    expectedPersonVersion: 4,
+    confirmedRecruiterId: REC_ID,
+    reason: "Xác nhận liên kết hồ sơ",
+    idempotencyKey: KEY,
+  });
+  assert.equal(linkReq.ok, true);
+  if (linkReq.ok) {
+    assert.equal(linkReq.body.confirmed_recruiter_id, REC_ID);
+  }
+
+  const unlinkReq = model.buildUnlinkAccountPersonRequest({
+    expectedAccountVersion: 5,
+    expectedPersonVersion: 6,
+    expectedLinkId: LINK_ID,
+    reason: "Thay đổi sử dụng tài khoản",
+    idempotencyKey: KEY,
+  });
+  assert.equal(unlinkReq.ok, true);
+
+  assert.equal(
+    model.classifyAccountOrgMutation(409, { ok: false, code: "RECRUITER_LINK_MISMATCH" }, "link").kind,
+    "recruiter-mismatch",
+  );
+  assert.equal(
+    model.classifyAccountOrgMutation(409, { ok: false, code: "RECRUITER_IDENTITY_CONFLICT" }, "link").kind,
+    "hard-conflict",
+  );
+  assert.equal(
+    model.classifyAccountOrgMutation(
+      409,
+      { ok: false, code: "RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT" },
+      "link",
+    ).kind,
+    "hard-conflict",
+  );
+  assert.equal(
+    model.classifyAccountOrgMutation(
+      409,
+      { ok: false, code: "ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS" },
+      "classification",
+    ).kind,
+    "personal-assignments-block",
+  );
+  assert.equal(
+    model.classifyAccountOrgMutation(422, { ok: false, code: "ACCOUNT_TYPE_LINK_FORBIDDEN" }, "link").kind,
+    "link-forbidden",
+  );
+  const uncertain = model.classifyAccountOrgMutation(503, null, "link");
+  assert.equal(uncertain.kind, "uncertain");
+  assert.equal(uncertain.preserveIdempotencyKey, true);
+  assert.equal(
+    model.classifyAccountOrgMutation(401, { ok: false, code: "UNAUTHENTICATED" }, "unlink").kind,
+    "session-lost",
+  );
+});

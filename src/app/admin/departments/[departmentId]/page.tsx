@@ -36,7 +36,7 @@ export default async function AdminDepartmentDetailPage({
       return <AccessDenied />;
     case "ALLOW": {
       const { departmentId } = await params;
-      return <DepartmentDetailManager departmentId={departmentId} />;
+      return <DepartmentDetailManager key={departmentId} departmentId={departmentId} />;
     }
   }
 }

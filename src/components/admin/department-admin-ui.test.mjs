@@ -55,17 +55,22 @@ test("/admin/departments list view uses shared house primitives and handles load
   assert.match(listManager, /StatusBadge/);
   assert.match(listManager, /EmptyState/);
   assert.match(listManager, /ErrorState/);
-  assert.match(listManager, /fetch\("\/api\/admin\/departments"/);
+  assert.match(listManager, /buildDepartmentListQuery\(\{\s*includeInactive\s*\}\)/);
+  assert.match(listManager, /fetch\(`\/api\/admin\/departments\?\$\{query\.toString\(\)\}`/);
   assert.match(listManager, /projectDepartmentListEnvelope\(payload\)/);
   assert.match(listManager, /classifyDepartmentReadError\(response\.status,\s*payload\)/);
   assert.match(listManager, /Thử tải lại/);
   assert.match(listManager, /Làm mới/);
+  assert.match(listManager, /Tạo phòng ban tùy chỉnh/);
+  assert.match(listManager, /canToggleDepartmentActive\(department\)/);
   assert.match(
     listManager,
     /href=\{`\/admin\/departments\/\$\{encodeURIComponent\(department\.department_id\)\}`\}/,
   );
-  // List page is strictly read-only
-  assert.doesNotMatch(listManager, /method:\s*"(POST|PUT|PATCH|DELETE)"/);
+  // List page creates custom departments and renames/toggles via WP3 contract helpers with Idempotency-Key
+  assert.match(listManager, /buildCreateDepartmentRequest\(\{/);
+  assert.match(listManager, /buildUpdateDepartmentRequest\(\{/);
+  assert.match(listManager, /"Idempotency-Key":\s*intent\.idempotencyKey/);
 });
 
 test("Recruitment department detail is strictly read-only, hides __system_vendor__, and exposes zero Team/Leader/Scope write controls", () => {
@@ -161,7 +166,7 @@ test("Department UI modules contain no capability editor/checkboxes, no browser 
     /@supabase\/|supabase\.from\(|rest\/v1/i,
   );
 
-  // Client & pure model files must stay browser-bundle safe (only `import type` from department-contract)
+  // Client & pure model files must stay browser-bundle safe (no node:* or server-only or fingerprint helpers)
   for (const [name, src] of [
     ["department-ui-model.ts", uiModel],
     ["department-list-manager.tsx", listManager],
@@ -171,8 +176,36 @@ test("Department UI modules contain no capability editor/checkboxes, no browser 
     assert.doesNotMatch(src, /["']server-only["']/, `${name} must not import server-only`);
     assert.doesNotMatch(
       src,
+      /compute[A-Za-z]+Fingerprint/,
+      `${name} must not import node:crypto fingerprint helpers`,
+    );
+  }
+  for (const [name, src] of [
+    ["department-list-manager.tsx", listManager],
+    ["department-detail-manager.tsx", detailManager],
+  ]) {
+    assert.doesNotMatch(
+      src,
       /import\s+(?!type\b)[^;]*department-contract/,
       `${name} must only use import type from department-contract`,
     );
   }
+});
+
+test("WP4 Department Head and Person membership panels wire OCC, immediate effective mutations, active-head blocks, and zero scheduling fields", () => {
+  const wp4Sections = detailManager.slice(0, detailManager.indexOf("function RecruitmentDepartmentReadOnlySection"));
+  assert.match(wp4Sections, /DepartmentGovernanceHeaderCard/);
+  assert.match(wp4Sections, /DepartmentHeadManagementSection/);
+  assert.match(wp4Sections, /DepartmentPersonMembershipsSection/);
+  assert.match(wp4Sections, /\/api\/admin\/departments\/\$\{encodeURIComponent\(department\.department_id\)\}\/head\?/);
+  assert.match(wp4Sections, /\/api\/admin\/departments\/\$\{encodeURIComponent\(department\.department_id\)\}\/head\/end/);
+  assert.match(wp4Sections, /\/api\/admin\/departments\/\$\{encodeURIComponent\(department\.department_id\)\}\/memberships/);
+  assert.match(wp4Sections, /\/api\/admin\/organization\/persons\/\$\{encodeURIComponent\([^)]+\)\}\/transfer-department/);
+  assert.match(wp4Sections, /PERSON_IS_ACTIVE_DEPARTMENT_HEAD/);
+  assert.match(wp4Sections, /Thử gửi lại cùng yêu cầu/);
+  assert.match(wp4Sections, /Tải lại để đối chiếu/);
+  assert.match(wp4Sections, /onSessionLost/);
+  // Zero scheduling inputs in WP4 department forms
+  assert.doesNotMatch(listManager + wp4Sections, /valid_from|valid_to|effective_from|effective_to/);
+  assert.doesNotMatch(listManager + wp4Sections, /type="date"/);
 });

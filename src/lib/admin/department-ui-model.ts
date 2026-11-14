@@ -7,22 +7,53 @@
  * closed and never derive or send client-side authority fields.
  */
 import type { BadgeTone } from "../../components/ui/badge.tsx";
-import type {
-  AccountingCandidateListProjection,
-  AccountingCandidateProjection,
-  AccountingMembershipListProjection,
-  AccountingMembershipMutationProjection,
-  AccountingMembershipProjection,
-  DepartmentActiveHeadProjection,
-  DepartmentDefaultPolicyCode,
-  DepartmentDetailProjection,
-  DepartmentErrorCode,
-  DepartmentListProjection,
-  DepartmentMembershipState,
-  DepartmentProjection,
-  DepartmentSystemKey,
-  RecruitmentTeamListProjection,
-  RecruitmentTeamProjection,
+import {
+  DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS,
+  parseAssignPersonMemberBody,
+  parseCreateDepartmentBody,
+  parseDesignateHeadBody,
+  parseEndHeadBody,
+  parseEndPersonMemberBody,
+  parseListDepartmentHeadsQuery,
+  parseListDepartmentPersonMembershipsQuery,
+  parseListDepartmentsQuery,
+  parseUpdateDepartmentBody,
+  projectDepartmentHeadsListResponse,
+  projectDepartmentMutationResponse,
+  projectDepartmentPersonMemberMutationResponse,
+  projectDepartmentPersonMembershipsListResponse,
+  projectDesignateDepartmentHeadResponse,
+  projectEndDepartmentHeadResponse,
+  type AccountingCandidateListProjection,
+  type AccountingCandidateProjection,
+  type AccountingMembershipListProjection,
+  type AccountingMembershipMutationProjection,
+  type AccountingMembershipProjection,
+  type DepartmentActiveHeadProjection,
+  type DepartmentDefaultPolicyCode,
+  type DepartmentDetailProjection,
+  type DepartmentErrorCode,
+  type DepartmentHeadProjection,
+  type DepartmentHeadsListProjection,
+  type DepartmentListProjection,
+  type DepartmentMembershipState,
+  type DepartmentMutationProjection,
+  type DepartmentPersonMemberMutationProjection,
+  type DepartmentPersonMembershipStatusFilter,
+  type DepartmentPersonMembershipsListProjection,
+  type DepartmentProjection,
+  type DepartmentSystemKey,
+  type DesignateDepartmentHeadProjection,
+  type EndDepartmentHeadProjection,
+  type ParsedAssignPersonMemberBody,
+  type ParsedCreateDepartmentBody,
+  type ParsedDesignateHeadBody,
+  type ParsedEndHeadBody,
+  type ParsedEndPersonMemberBody,
+  type ParsedUpdateDepartmentBody,
+  type PersonDeptMembershipProjection,
+  type RecruitmentTeamListProjection,
+  type RecruitmentTeamProjection,
 } from "../departments/department-contract.ts";
 import { newIdempotencyKey } from "../direct-entry/project-operations-model.ts";
 
@@ -1415,3 +1446,570 @@ export function formatAccountSecondaryMeta(account: {
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
+
+// ---------------------------------------------------------------------------
+// WP4 Extensions — Department CRUD, Person Memberships & Department HEAD
+// ---------------------------------------------------------------------------
+
+export { DEPARTMENT_PERSON_MEMBERSHIP_STATUS_FILTERS };
+export const DEPARTMENT_WP3_MAX_REASON_LENGTH = 500;
+export const DEPARTMENT_CODE_MAX_LENGTH = 64;
+export const DEPARTMENT_NAME_MAX_LENGTH = 256;
+
+export type DepartmentWp3MutationErrorKind =
+  | "session-lost"
+  | "conflict"
+  | "active-head"
+  | "business-error"
+  | "uncertain";
+
+export type DepartmentWp3MutationFailure = {
+  kind: DepartmentWp3MutationErrorKind;
+  code: string | null;
+  message: string;
+  preserveIdempotencyKey: boolean;
+  needsReload: boolean;
+};
+
+export type DepartmentWp3MutationResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; failure: DepartmentWp3MutationFailure };
+
+function unwrapWp3OkEnvelope(payload: unknown): Record<string, unknown> | null {
+  if (!isRecord(payload) || payload.ok !== true) return null;
+  const copy: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (k !== "ok") copy[k] = v;
+  }
+  return copy;
+}
+
+function validateWp3Reason(raw: string): { ok: true; value: string } | { ok: false; message: string } {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, message: "Vui lòng nhập lý do thao tác." };
+  }
+  if (trimmed.length > DEPARTMENT_WP3_MAX_REASON_LENGTH) {
+    return {
+      ok: false,
+      message: `Lý do thao tác không được vượt quá ${DEPARTMENT_WP3_MAX_REASON_LENGTH} ký tự.`,
+    };
+  }
+  if (REASON_CONTROL_CHAR_PATTERN.test(trimmed)) {
+    return { ok: false, message: "Lý do thao tác không được chứa ký tự điều khiển." };
+  }
+  return { ok: true, value: trimmed };
+}
+
+export function canToggleDepartmentActive(
+  department: Pick<DepartmentProjection, "system_key">,
+): boolean {
+  return department.system_key === null;
+}
+
+export function buildDepartmentListQuery(input: {
+  includeInactive: boolean;
+}): URLSearchParams {
+  const params = new URLSearchParams({
+    include_inactive: input.includeInactive ? "true" : "false",
+  });
+  const parsed = parseListDepartmentsQuery(new URL(`https://local.invalid/?${params.toString()}`));
+  if (!parsed.ok) {
+    return new URLSearchParams({ include_inactive: "true" });
+  }
+  return params;
+}
+
+export function buildCreateDepartmentRequest(input: {
+  code: string;
+  name: string;
+  reason: string;
+  idempotencyKey: string;
+}):
+  | { ok: true; idempotencyKey: string; body: ParsedCreateDepartmentBody }
+  | { ok: false; message: string } {
+  const code = typeof input.code === "string" ? input.code.trim() : "";
+  if (!DEPARTMENT_CODE_PATTERN.test(code)) {
+    return {
+      ok: false,
+      message:
+        "Mã phòng ban gồm 2–64 ký tự chữ hoa (A-Z), số (0-9), dấu gạch dưới hoặc gạch ngang, bắt đầu bằng chữ/số.",
+    };
+  }
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (name.length === 0 || name.length > DEPARTMENT_NAME_MAX_LENGTH || SEARCH_CONTROL_CHAR_PATTERN.test(name)) {
+    return {
+      ok: false,
+      message: "Tên phòng ban phải từ 1–256 ký tự và không chứa ký tự điều khiển.",
+    };
+  }
+  const reasonCheck = validateWp3Reason(input.reason);
+  if (!reasonCheck.ok) return reasonCheck;
+
+  const idempotencyKey = normalizeDepartmentUuid(input.idempotencyKey);
+  if (!idempotencyKey) {
+    return { ok: false, message: "Khóa chống gửi trùng không hợp lệ. Vui lòng thử lại." };
+  }
+
+  const candidate: ParsedCreateDepartmentBody = {
+    code,
+    name,
+    reason: reasonCheck.value,
+    idempotency_key: idempotencyKey,
+  };
+  const verified = parseCreateDepartmentBody(candidate, idempotencyKey);
+  if (!verified.ok) {
+    return { ok: false, message: "Dữ liệu tạo phòng ban không hợp lệ." };
+  }
+  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+}
+
+export function buildUpdateDepartmentRequest(input: {
+  expectedDepartmentVersion: number;
+  name: string;
+  isActive: boolean;
+  reason: string;
+  idempotencyKey: string;
+}):
+  | { ok: true; idempotencyKey: string; body: ParsedUpdateDepartmentBody }
+  | { ok: false; message: string } {
+  if (!isSafePositiveInt(input.expectedDepartmentVersion)) {
+    return {
+      ok: false,
+      message: "Dữ liệu đồng bộ phòng ban không hợp lệ. Vui lòng tải lại.",
+    };
+  }
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (name.length === 0 || name.length > DEPARTMENT_NAME_MAX_LENGTH || SEARCH_CONTROL_CHAR_PATTERN.test(name)) {
+    return {
+      ok: false,
+      message: "Tên phòng ban phải từ 1–256 ký tự và không chứa ký tự điều khiển.",
+    };
+  }
+  if (typeof input.isActive !== "boolean") {
+    return { ok: false, message: "Trạng thái hoạt động không hợp lệ." };
+  }
+  const reasonCheck = validateWp3Reason(input.reason);
+  if (!reasonCheck.ok) return reasonCheck;
+
+  const idempotencyKey = normalizeDepartmentUuid(input.idempotencyKey);
+  if (!idempotencyKey) {
+    return { ok: false, message: "Khóa chống gửi trùng không hợp lệ. Vui lòng thử lại." };
+  }
+
+  const candidate: ParsedUpdateDepartmentBody = {
+    expected_department_version: input.expectedDepartmentVersion,
+    name,
+    is_active: input.isActive,
+    reason: reasonCheck.value,
+    idempotency_key: idempotencyKey,
+  };
+  const verified = parseUpdateDepartmentBody(candidate, idempotencyKey);
+  if (!verified.ok) {
+    return { ok: false, message: "Dữ liệu cập nhật phòng ban không hợp lệ." };
+  }
+  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+}
+
+export function buildDepartmentPersonMembershipsQuery(input: {
+  departmentId: string;
+  status: DepartmentPersonMembershipStatusFilter;
+  search: string;
+  page: number;
+  pageSize?: number;
+}): URLSearchParams | null {
+  const departmentId = normalizeDepartmentUuid(input.departmentId);
+  if (!departmentId) return null;
+  const search = normalizeQuerySearch(input.search);
+  if (!search.ok) return null;
+  const pageSize = input.pageSize ?? DEPARTMENT_UI_PAGE_SIZE;
+  const params = new URLSearchParams({
+    status: input.status,
+    page: String(input.page),
+    page_size: String(pageSize),
+  });
+  if (search.value !== null) {
+    params.set("search", search.value);
+  }
+  const verified = parseListDepartmentPersonMembershipsQuery(
+    departmentId,
+    new URL(`https://local.invalid/?${params.toString()}`),
+  );
+  if (!verified.ok) return null;
+  return params;
+}
+
+export function buildAssignDepartmentPersonMemberRequest(input: {
+  personId: string;
+  expectedPersonVersion: number;
+  reason: string;
+  idempotencyKey: string;
+}):
+  | { ok: true; idempotencyKey: string; body: ParsedAssignPersonMemberBody }
+  | { ok: false; message: string } {
+  const personId = normalizeDepartmentUuid(input.personId);
+  if (!personId) {
+    return { ok: false, message: "Vui lòng chọn nhân sự nội bộ hợp lệ." };
+  }
+  if (!isSafePositiveInt(input.expectedPersonVersion)) {
+    return { ok: false, message: "Dữ liệu đồng bộ nhân sự không hợp lệ. Vui lòng tải lại." };
+  }
+  const reasonCheck = validateWp3Reason(input.reason);
+  if (!reasonCheck.ok) return reasonCheck;
+
+  const idempotencyKey = normalizeDepartmentUuid(input.idempotencyKey);
+  if (!idempotencyKey) {
+    return { ok: false, message: "Khóa chống gửi trùng không hợp lệ. Vui lòng thử lại." };
+  }
+
+  const candidate: ParsedAssignPersonMemberBody = {
+    person_id: personId,
+    expected_person_version: input.expectedPersonVersion,
+    reason: reasonCheck.value,
+    idempotency_key: idempotencyKey,
+  };
+  const verified = parseAssignPersonMemberBody(candidate, idempotencyKey);
+  if (!verified.ok) {
+    return { ok: false, message: "Dữ liệu gán thành viên phòng ban không hợp lệ." };
+  }
+  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+}
+
+export function buildEndDepartmentPersonMemberRequest(input: {
+  expectedPersonVersion: number;
+  reason: string;
+  idempotencyKey: string;
+}):
+  | { ok: true; idempotencyKey: string; body: ParsedEndPersonMemberBody }
+  | { ok: false; message: string } {
+  if (!isSafePositiveInt(input.expectedPersonVersion)) {
+    return { ok: false, message: "Dữ liệu đồng bộ nhân sự không hợp lệ. Vui lòng tải lại." };
+  }
+  const reasonCheck = validateWp3Reason(input.reason);
+  if (!reasonCheck.ok) return reasonCheck;
+
+  const idempotencyKey = normalizeDepartmentUuid(input.idempotencyKey);
+  if (!idempotencyKey) {
+    return { ok: false, message: "Khóa chống gửi trùng không hợp lệ. Vui lòng thử lại." };
+  }
+
+  const candidate: ParsedEndPersonMemberBody = {
+    expected_person_version: input.expectedPersonVersion,
+    reason: reasonCheck.value,
+    idempotency_key: idempotencyKey,
+  };
+  const verified = parseEndPersonMemberBody(candidate, idempotencyKey);
+  if (!verified.ok) {
+    return { ok: false, message: "Dữ liệu kết thúc thành viên phòng ban không hợp lệ." };
+  }
+  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+}
+
+export function buildDepartmentHeadsQuery(input: {
+  departmentId: string;
+  includeHistory: boolean;
+  page: number;
+  pageSize?: number;
+}): URLSearchParams | null {
+  const departmentId = normalizeDepartmentUuid(input.departmentId);
+  if (!departmentId) return null;
+  const pageSize = input.pageSize ?? DEPARTMENT_UI_PAGE_SIZE;
+  const params = new URLSearchParams({
+    include_history: input.includeHistory ? "true" : "false",
+    page: String(input.page),
+    page_size: String(pageSize),
+  });
+  const verified = parseListDepartmentHeadsQuery(
+    departmentId,
+    new URL(`https://local.invalid/?${params.toString()}`),
+  );
+  if (!verified.ok) return null;
+  return params;
+}
+
+export function buildDesignateDepartmentHeadRequest(input: {
+  personId: string;
+  expectedDepartmentVersion: number;
+  expectedCurrentHeadAssignmentId: string | null;
+  reason: string;
+  idempotencyKey: string;
+}):
+  | { ok: true; idempotencyKey: string; body: ParsedDesignateHeadBody }
+  | { ok: false; message: string } {
+  const personId = normalizeDepartmentUuid(input.personId);
+  if (!personId) {
+    return { ok: false, message: "Vui lòng chọn thành viên đang hoạt động để bổ nhiệm Trưởng phòng." };
+  }
+  if (!isSafePositiveInt(input.expectedDepartmentVersion)) {
+    return { ok: false, message: "Dữ liệu đồng bộ phòng ban không hợp lệ. Vui lòng tải lại." };
+  }
+  let expectedHeadId: string | null = null;
+  if (input.expectedCurrentHeadAssignmentId !== null) {
+    expectedHeadId = normalizeDepartmentUuid(input.expectedCurrentHeadAssignmentId);
+    if (!expectedHeadId) {
+      return { ok: false, message: "Mã phân công Trưởng phòng hiện tại không hợp lệ. Vui lòng tải lại." };
+    }
+  }
+  const reasonCheck = validateWp3Reason(input.reason);
+  if (!reasonCheck.ok) return reasonCheck;
+
+  const idempotencyKey = normalizeDepartmentUuid(input.idempotencyKey);
+  if (!idempotencyKey) {
+    return { ok: false, message: "Khóa chống gửi trùng không hợp lệ. Vui lòng thử lại." };
+  }
+
+  const candidate: ParsedDesignateHeadBody = {
+    person_id: personId,
+    expected_department_version: input.expectedDepartmentVersion,
+    expected_current_head_assignment_id: expectedHeadId,
+    reason: reasonCheck.value,
+    idempotency_key: idempotencyKey,
+  };
+  const verified = parseDesignateHeadBody(candidate, idempotencyKey);
+  if (!verified.ok) {
+    return { ok: false, message: "Dữ liệu bổ nhiệm Trưởng phòng không hợp lệ." };
+  }
+  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+}
+
+export function buildEndDepartmentHeadRequest(input: {
+  expectedDepartmentVersion: number;
+  expectedCurrentHeadAssignmentId: string;
+  reason: string;
+  idempotencyKey: string;
+}):
+  | { ok: true; idempotencyKey: string; body: ParsedEndHeadBody }
+  | { ok: false; message: string } {
+  if (!isSafePositiveInt(input.expectedDepartmentVersion)) {
+    return { ok: false, message: "Dữ liệu đồng bộ phòng ban không hợp lệ. Vui lòng tải lại." };
+  }
+  const expectedHeadId = normalizeDepartmentUuid(input.expectedCurrentHeadAssignmentId);
+  if (!expectedHeadId) {
+    return { ok: false, message: "Không xác định được phân công Trưởng phòng hiện tại. Vui lòng tải lại." };
+  }
+  const reasonCheck = validateWp3Reason(input.reason);
+  if (!reasonCheck.ok) return reasonCheck;
+
+  const idempotencyKey = normalizeDepartmentUuid(input.idempotencyKey);
+  if (!idempotencyKey) {
+    return { ok: false, message: "Khóa chống gửi trùng không hợp lệ. Vui lòng thử lại." };
+  }
+
+  const candidate: ParsedEndHeadBody = {
+    expected_department_version: input.expectedDepartmentVersion,
+    expected_current_head_assignment_id: expectedHeadId,
+    reason: reasonCheck.value,
+    idempotency_key: idempotencyKey,
+  };
+  const verified = parseEndHeadBody(candidate, idempotencyKey);
+  if (!verified.ok) {
+    return { ok: false, message: "Dữ liệu kết thúc chức danh Trưởng phòng không hợp lệ." };
+  }
+  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+}
+
+export function projectDepartmentMutationEnvelope(
+  payload: unknown,
+): DepartmentMutationProjection | null {
+  const data = unwrapWp3OkEnvelope(payload);
+  return data ? projectDepartmentMutationResponse(data) : null;
+}
+
+export function projectDepartmentPersonMembershipsListEnvelope(
+  payload: unknown,
+  expectedDepartmentId?: string,
+): DepartmentPersonMembershipsListProjection | null {
+  const data = unwrapWp3OkEnvelope(payload);
+  if (!data) return null;
+  const projected = projectDepartmentPersonMembershipsListResponse(data);
+  if (!projected) return null;
+  if (expectedDepartmentId !== undefined) {
+    const normalizedExpected = normalizeDepartmentUuid(expectedDepartmentId);
+    if (!normalizedExpected || projected.department_id !== normalizedExpected) return null;
+  }
+  return projected;
+}
+
+export function projectDepartmentPersonMemberMutationEnvelope(
+  payload: unknown,
+): DepartmentPersonMemberMutationProjection | null {
+  const data = unwrapWp3OkEnvelope(payload);
+  return data ? projectDepartmentPersonMemberMutationResponse(data) : null;
+}
+
+export function projectDepartmentHeadsListEnvelope(
+  payload: unknown,
+  expectedDepartmentId?: string,
+): DepartmentHeadsListProjection | null {
+  const data = unwrapWp3OkEnvelope(payload);
+  if (!data) return null;
+  const projected = projectDepartmentHeadsListResponse(data);
+  if (!projected) return null;
+  if (expectedDepartmentId !== undefined) {
+    const normalizedExpected = normalizeDepartmentUuid(expectedDepartmentId);
+    if (!normalizedExpected || projected.department_id !== normalizedExpected) return null;
+  }
+  return projected;
+}
+
+export function projectDesignateDepartmentHeadEnvelope(
+  payload: unknown,
+): DesignateDepartmentHeadProjection | null {
+  const data = unwrapWp3OkEnvelope(payload);
+  return data ? projectDesignateDepartmentHeadResponse(data) : null;
+}
+
+export function projectEndDepartmentHeadEnvelope(
+  payload: unknown,
+): EndDepartmentHeadProjection | null {
+  const data = unwrapWp3OkEnvelope(payload);
+  return data ? projectEndDepartmentHeadResponse(data) : null;
+}
+
+export function classifyWp3DepartmentMutationFailure(
+  status: number,
+  payload: unknown,
+): DepartmentWp3MutationFailure {
+  const rawCode =
+    isRecord(payload) && payload.ok === false && typeof payload.code === "string"
+      ? payload.code
+      : null;
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    rawCode === "UNAUTHENTICATED" ||
+    rawCode === "DEPARTMENT_ACCESS_DENIED" ||
+    rawCode === "ORG_ACCESS_DENIED" ||
+    rawCode === "ACTOR_NOT_AVAILABLE" ||
+    rawCode === "CSRF_REJECTED"
+  ) {
+    return {
+      kind: "session-lost",
+      code: rawCode,
+      message: "Phiên đăng nhập hoặc quyền quản trị không còn hiệu lực. Vui lòng đăng nhập lại.",
+      preserveIdempotencyKey: false,
+      needsReload: false,
+    };
+  }
+
+  if (rawCode === "PERSON_IS_ACTIVE_DEPARTMENT_HEAD") {
+    return {
+      kind: "active-head",
+      code: rawCode,
+      message:
+        "Nhân sự này đang giữ chức danh Trưởng phòng hiệu lực. Vui lòng kết thúc hoặc bổ nhiệm Trưởng phòng thay thế trước khi chuyển phòng hoặc ngừng hoạt động nhân sự.",
+      preserveIdempotencyKey: false,
+      needsReload: false,
+    };
+  }
+
+  if (rawCode === "IDEMPOTENCY_IN_PROGRESS" || status >= 500 || status === 0) {
+    return {
+      kind: "uncertain",
+      code: rawCode,
+      message:
+        "Chưa nhận được kết quả xác nhận từ máy chủ. Yêu cầu và khóa gửi trùng được giữ nguyên để bạn thử lại hoặc tải lại đối chiếu.",
+      preserveIdempotencyKey: true,
+      needsReload: true,
+    };
+  }
+
+  const businessMessages: Record<string, string> = {
+    DUPLICATE_CODE: "Mã phòng ban này đã tồn tại. Vui lòng nhập mã khác.",
+    DEPARTMENT_SYSTEM_RECORD_IMMUTABLE:
+      "Phòng ban mặc định của hệ thống chỉ cho phép đổi tên, không thể ngừng hoạt động.",
+    DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS:
+      "Phòng ban vẫn còn thành viên đang hiệu lực hoặc Trưởng phòng chưa kết thúc nên chưa thể ngừng hoạt động.",
+    DEPARTMENT_INACTIVE: "Phòng ban đang ngừng hoạt động nên không thể gán thêm thành viên hoặc bổ nhiệm Trưởng phòng.",
+    PERSON_INACTIVE:
+      "Nhân sự đã ngừng hoạt động (INACTIVE), không thể gán vào phòng ban hoặc bổ nhiệm làm Trưởng phòng.",
+    PERSON_ALREADY_IN_DEPARTMENT: "Nhân sự này hiện đã là thành viên của phòng ban.",
+    PERSON_ALREADY_IN_OTHER_DEPARTMENT:
+      "Nhân sự đang thuộc một phòng ban khác. Hãy dùng thao tác chuyển phòng ban.",
+    PERSON_NOT_ACTIVE_MEMBER_OF_DEPARTMENT:
+      "Trưởng phòng phải là nhân sự đang hoạt động (ACTIVE) thuộc chính phòng ban này.",
+    PERSON_NOT_FOUND: "Không tìm thấy hồ sơ nhân sự nội bộ được chọn.",
+    DEPARTMENT_NOT_FOUND: "Không tìm thấy phòng ban theo yêu cầu.",
+    CLIENT_SCHEDULE_FIELD_FORBIDDEN: "Thao tác này áp dụng ngay, không hỗ trợ trường đặt lịch hiệu lực.",
+    CLIENT_AUTHORITY_FIELD_FORBIDDEN: "Không được gửi thông tin phân quyền từ trình duyệt.",
+    ORG_VALIDATION_ERROR: "Thông tin gửi lên chưa đúng định dạng yêu cầu. Vui lòng kiểm tra lại.",
+  };
+
+  if (rawCode && rawCode in businessMessages) {
+    return {
+      kind: "business-error",
+      code: rawCode,
+      message: businessMessages[rawCode],
+      preserveIdempotencyKey: false,
+      needsReload: false,
+    };
+  }
+
+  if (
+    rawCode === "VERSION_CONFLICT" ||
+    rawCode === "IDEMPOTENCY_CONFLICT" ||
+    rawCode === "HEAD_ALREADY_ENDED" ||
+    status === 409
+  ) {
+    return {
+      kind: "conflict",
+      code: rawCode,
+      message:
+        rawCode === "HEAD_ALREADY_ENDED"
+          ? "Chức danh Trưởng phòng hiện tại đã kết thúc trước đó. Vui lòng tải lại dữ liệu mới nhất."
+          : "Dữ liệu đã thay đổi ở phiên làm việc khác. Vui lòng tải lại bản mới nhất trước khi tiếp tục.",
+      preserveIdempotencyKey: false,
+      needsReload: true,
+    };
+  }
+
+  return {
+    kind: "business-error",
+    code: rawCode,
+    message: "Không thể hoàn tất thao tác. Vui lòng kiểm tra lại dữ liệu hoặc tải lại trang.",
+    preserveIdempotencyKey: false,
+    needsReload: status === 404,
+  };
+}
+
+export function resolveWp3DepartmentMutationResult<T>(
+  status: number,
+  payload: unknown,
+  projector: (raw: unknown) => T | null,
+  expectedCreated = false,
+): DepartmentWp3MutationResult<T> {
+  if (status === 200 || (expectedCreated && status === 201)) {
+    const projected = projector(payload);
+    if (projected) {
+      return { ok: true, data: projected };
+    }
+    return {
+      ok: false,
+      failure: {
+        kind: "uncertain",
+        code: null,
+        message:
+          "Phản hồi máy chủ không đúng định dạng chuẩn. Vui lòng tải lại để đối chiếu trước khi gửi lại.",
+        preserveIdempotencyKey: true,
+        needsReload: true,
+      },
+    };
+  }
+  return {
+    ok: false,
+    failure: classifyWp3DepartmentMutationFailure(status, payload),
+  };
+}
+
+export type {
+  DepartmentHeadProjection,
+  DepartmentHeadsListProjection,
+  DepartmentMutationProjection,
+  DepartmentPersonMemberMutationProjection,
+  DepartmentPersonMembershipStatusFilter,
+  DepartmentPersonMembershipsListProjection,
+  DesignateDepartmentHeadProjection,
+  EndDepartmentHeadProjection,
+  PersonDeptMembershipProjection,
+};

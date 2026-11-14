@@ -711,10 +711,10 @@ export function PersonnelCatalogManager() {
     <div className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-foreground">Danh mục nhân sự</h1>
+          <h1 className="text-2xl font-semibold text-foreground">Hồ sơ tính công tuyển dụng</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted">
-            Quản lý thông tin hồ sơ HRP. Vị trí trong hồ sơ chỉ là thuộc tính nghiệp vụ,
-            không cấp quyền truy cập.
+            Quản lý hồ sơ tính công tuyển dụng và dữ liệu HRP (phân biệt với hồ sơ Nhân sự nội bộ
+            trong cơ cấu tổ chức). Vị trí trong hồ sơ chỉ là thuộc tính nghiệp vụ, không cấp quyền truy cập.
           </p>
         </div>
           <Dialog.Trigger asChild>

@@ -275,9 +275,11 @@ test("W06D: mobile contract uses bounded inner table overflow, not body-level ov
 });
 
 test("W06D: approved Admin navigation labels are exact and routes remain unchanged", () => {
-  assert.match(nav, /id: "personnel", label: "Nhân sự", href: "\/admin\/catalog\/personnel"/);
+  assert.match(nav, /id: "personnel", label: "Hồ sơ tính công tuyển dụng", href: "\/admin\/catalog\/personnel"/);
+  assert.match(nav, /id: "organization-persons", label: "Nhân sự nội bộ", href: "\/admin\/organization\/persons"/);
   assert.match(nav, /id: "accounts", label: "Tài khoản truy cập", href: "\/admin\/access\/accounts"/);
-  assert.match(navTest, /Nhân sự/);
+  assert.match(navTest, /Hồ sơ tính công tuyển dụng/);
+  assert.match(navTest, /Nhân sự nội bộ/);
   assert.match(navTest, /Tài khoản truy cập/);
   assert.match(accountTest, /label: "Tài khoản truy cập"/);
 });

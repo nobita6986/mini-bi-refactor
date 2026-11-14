@@ -107,6 +107,7 @@ const TEST_WEIGHTS = {
   "test:wp1-s1-immediate-assignments": 10.0,
   "test:wp2a-effective-access-shadow": 8.0,
   "test:wp3-person-account-org": 12.0,
+  "test:wp4-org-person-admin-ui": 2.5,
 };
 
 const target = process.argv[2];
