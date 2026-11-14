@@ -608,6 +608,81 @@ test("4. D10 lifecycle: TL revoke while disabled preserves ADMIN grants, and pre
   assert.deepEqual(histCtx.effective_grants, []);
 });
 
+function buildProbeBriefPayload(projectId, parkId) {
+  return {
+    project_id: projectId,
+    industrial_park_id: parkId,
+    general: {
+      customer_name: "Công ty TNHH Điện tử Việt Hàn",
+      investment_origin: "Hàn Quốc",
+      manufacturing_industry: "Sản xuất linh kiện điện tử",
+      job_description: "Lắp ráp và kiểm tra ngoại quan linh kiện điện tử",
+      environment_types: ["CLEAN_ROOM", "NORMAL_ROOM"],
+      work_postures: ["SITTING", "STANDING"],
+      shift_pattern: "TWO_SHIFTS",
+      shift_details: null,
+      manager_name: "Trần Quản Lý",
+      manager_phone: "0912345678",
+      labor_type_keys: ["CHINH_THUC"],
+      supply_schedule_text: "Tuyển liên tục các ngày trong tuần",
+      expected_headcount: 100,
+    },
+    candidate: {
+      age_min: 18,
+      age_max: 40,
+      gender_requirement: "ANY",
+      education_requirement: "SECONDARY",
+      experience_required: false,
+      experience_details: null,
+      accept_former_customer_workers: true,
+      entry_assessment_text: "Test tay khéo và phỏng vấn trực tiếp",
+      other_requirements_text: "Không dị ứng phòng sạch",
+    },
+    compensation: {
+      base_salary_vnd: "6000000",
+      base_salary_conditions: "Đủ 26 ngày công tiêu chuẩn",
+      attendance_bonus_vnd: "500000",
+      attendance_bonus_conditions: "Không đi muộn về sớm",
+      living_allowance_vnd: "400000",
+      living_allowance_conditions: null,
+      seniority_allowance_vnd: "300000",
+      seniority_allowance_conditions: "Từ tháng thứ 2",
+      eyesight_allowance_vnd: null,
+      eyesight_allowance_conditions: null,
+      other_allowance_text: null,
+      average_income_min_vnd: "9500000",
+      average_income_max_vnd: "13000000",
+      salary_payment_schedule: "Ngày 10 hàng tháng qua ngân hàng",
+      salary_advance_available: true,
+      salary_advance_amount_vnd: "2000000",
+      salary_advance_schedule: "Ngày 25 hàng tháng",
+      weekly_salary_available: false,
+      weekly_salary_payment_schedule: null,
+      day_shift_8h_vnd: "240000",
+      day_shift_11h_vnd: "350000",
+      night_shift_8h_vnd: "290000",
+      night_shift_11h_vnd: "420000",
+      sunday_day_11h_vnd: "520000",
+      sunday_night_11h_vnd: "600000",
+      holiday_day_11h_vnd: "780000",
+      holiday_night_11h_vnd: "880000",
+      ppe_provided: true,
+      ppe_details: "Phát miễn phí 2 bộ quần áo và giày phòng sạch",
+      other_benefits: "Hỗ trợ 2 bữa ăn ca tại nhà máy",
+    },
+    documents: {
+      require_original_cccd_and_copy: true,
+      require_certified_resume: false,
+      require_health_certificate_within_6_months: false,
+      require_photo_3x4: true,
+      require_degree_or_certificate: false,
+      require_social_insurance_book: false,
+      require_other_documents: false,
+      other_documents_text: null,
+    },
+  };
+}
+
 test("5. Contextual roles (DEPARTMENT_HEAD, PROJECT_ACCOUNTANT), work_reports delegation, C4 PM-only, account_type guard, and create_personnel/link_recruiter", async () => {
   // Query existing RECRUITMENT department
   const { rows: [{ department_id: deptId }] } = await db.query(
@@ -686,82 +761,40 @@ test("5. Contextual roles (DEPARTMENT_HEAD, PROJECT_ACCOUNTANT), work_reports de
   assertNoEmailOrAt(acctDetail, "acct_detail");
   assert.equal(acctDetail.module_authorities.some((m) => m.module === "work_reports" && m.authority_code === "REPORT_REVIEWER" && m.is_effective === true), true);
 
+  // R3: work_report_delegations stays template-scoped in module_authorities & effective_report_review_scopes,
+  // and must NEVER materialize blanket (report_review | report_assign) into effective_grants or direct_entry_scope_grants
+  const { rows: [{ payload: acctDelegCtx }] } = await db.query(
+    "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
+    [ACCT_USER.auth],
+  );
+  assertNoEmailOrAt(acctDelegCtx, "acct_deleg_actor_context");
+  assert.equal(
+    acctDelegCtx.effective_grants.some((g) => g.capability === "report_review" || g.capability === "report_assign"),
+    false,
+    "R3: work_report_delegations must NOT emit blanket report_review/report_assign grants into actor_context effective_grants",
+  );
+  assert.equal(
+    Array.isArray(acctDelegCtx.effective_report_review_scopes) &&
+      acctDelegCtx.effective_report_review_scopes.some((s) => s.kind === "all"),
+    true,
+    "R3: work_report_delegations must preserve runtime effective_report_review_scopes",
+  );
+  assert.equal(
+    acctDetail.effective_grants.some((g) => g.capability === "report_review" || g.capability === "report_assign"),
+    false,
+    "R3: work_report_delegations must NOT emit blanket report_review/report_assign grants into detail effective_grants",
+  );
+  const { rows: acctAllScopes } = await db.query(
+    "select count(*)::int as cnt from public.direct_entry_scope_grants where app_user_id = $1::uuid and scope_kind = 'all' and is_current = true and valid_to is null",
+    [ACCT_USER.app],
+  );
+  assert.equal(acctAllScopes[0].cnt, 0, "R3: work_report_delegations must never write 'all' to direct_entry_scope_grants");
+
   // C4: Pure ADMIN without PM assignment MUST be denied recruitment_post_create (42501); PM succeeds
   const { rows: [{ industrial_park_id: parkId }] } = await db.query(
     "select industrial_park_id from public.industrial_parks where industrial_park_code = 'VP_BA_THIEN_1' limit 1",
   );
-  const briefPayload = {
-    project_id: PROJECT_ID,
-    industrial_park_id: parkId,
-    general: {
-      customer_name: "Công ty TNHH Điện tử Việt Hàn",
-      investment_origin: "Hàn Quốc",
-      manufacturing_industry: "Sản xuất linh kiện điện tử",
-      job_description: "Lắp ráp và kiểm tra ngoại quan linh kiện điện tử",
-      environment_types: ["CLEAN_ROOM", "NORMAL_ROOM"],
-      work_postures: ["SITTING", "STANDING"],
-      shift_pattern: "TWO_SHIFTS",
-      shift_details: null,
-      manager_name: "Trần Quản Lý",
-      manager_phone: "0912345678",
-      labor_type_keys: ["CHINH_THUC"],
-      supply_schedule_text: "Tuyển liên tục các ngày trong tuần",
-      expected_headcount: 100,
-    },
-    candidate: {
-      age_min: 18,
-      age_max: 40,
-      gender_requirement: "ANY",
-      education_requirement: "SECONDARY",
-      experience_required: false,
-      experience_details: null,
-      accept_former_customer_workers: true,
-      entry_assessment_text: "Test tay khéo và phỏng vấn trực tiếp",
-      other_requirements_text: "Không dị ứng phòng sạch",
-    },
-    compensation: {
-      base_salary_vnd: "6000000",
-      base_salary_conditions: "Đủ 26 ngày công tiêu chuẩn",
-      attendance_bonus_vnd: "500000",
-      attendance_bonus_conditions: "Không đi muộn về sớm",
-      living_allowance_vnd: "400000",
-      living_allowance_conditions: null,
-      seniority_allowance_vnd: "300000",
-      seniority_allowance_conditions: "Từ tháng thứ 2",
-      eyesight_allowance_vnd: null,
-      eyesight_allowance_conditions: null,
-      other_allowance_text: null,
-      average_income_min_vnd: "9500000",
-      average_income_max_vnd: "13000000",
-      salary_payment_schedule: "Ngày 10 hàng tháng qua ngân hàng",
-      salary_advance_available: true,
-      salary_advance_amount_vnd: "2000000",
-      salary_advance_schedule: "Ngày 25 hàng tháng",
-      weekly_salary_available: false,
-      weekly_salary_payment_schedule: null,
-      day_shift_8h_vnd: "240000",
-      day_shift_11h_vnd: "350000",
-      night_shift_8h_vnd: "290000",
-      night_shift_11h_vnd: "420000",
-      sunday_day_11h_vnd: "520000",
-      sunday_night_11h_vnd: "600000",
-      holiday_day_11h_vnd: "780000",
-      holiday_night_11h_vnd: "880000",
-      ppe_provided: true,
-      ppe_details: "Phát miễn phí 2 bộ quần áo và giày phòng sạch",
-      other_benefits: "Hỗ trợ 2 bữa ăn ca tại nhà máy",
-    },
-    documents: {
-      require_original_cccd_and_copy: true,
-      require_certified_resume: false,
-      require_health_certificate_within_6_months: false,
-      require_photo_3x4: true,
-      require_degree_or_certificate: false,
-      require_social_insurance_book: false,
-      require_other_documents: false,
-      other_documents_text: null,
-    },
-  };
+  const briefPayload = buildProbeBriefPayload(PROJECT_ID, parkId);
 
   await assert.rejects(
     db.query(
@@ -830,4 +863,245 @@ test("5. Contextual roles (DEPARTMENT_HEAD, PROJECT_ACCOUNTANT), work_reports de
   );
   assertNoEmailOrAt(summary, "list_accounts_summary_admin");
   assert.ok(summary.total >= 2);
+});
+
+test("6. R2 PROJECT_MANAGER lifecycle & guard parity: active, same-day close, revoke+reassign, multi-day revoke, project inactive, and D10 disable/enable", async () => {
+  const PM_LIFE = {
+    auth: "10000000-0000-4000-8000-000000000061",
+    app: "20000000-0000-4000-8000-000000000061",
+    recruiter: "30000000-0000-4000-8000-000000000061",
+    email: "pm.lifecycle@hrpartner.vn",
+    name: "PM Lifecycle Probe",
+  };
+  const PROJECT_PM_LIFE = "PROJ_WP5_PM_LIFE";
+
+  await db.query(
+    `insert into public.direct_entry_projects (project_id, display_name, active, version)
+     values ($1, 'WP5 PM Lifecycle Project', true, 1)`,
+    [PROJECT_PM_LIFE],
+  );
+  await seedAccount(db, PM_LIFE, { caps: [], scopes: [] });
+
+  const { rows: [{ industrial_park_id: parkId }] } = await db.query(
+    "select industrial_park_id from public.industrial_parks where industrial_park_code = 'VP_BA_THIEN_1' limit 1",
+  );
+  const lifeBrief = buildProbeBriefPayload(PROJECT_PM_LIFE, parkId);
+
+  const getProjVer = async () =>
+    (await db.query("select version from public.direct_entry_projects where project_id = $1", [PROJECT_PM_LIFE])).rows[0].version;
+  const getCurrentPmRow = async () =>
+    (await db.query(
+      "select assignment_id::text as assignment_id, version from public.direct_entry_project_manager_assignments where project_id = $1 and manager_recruiter_id = $2::uuid and is_current = true",
+      [PROJECT_PM_LIFE, PM_LIFE.recruiter],
+    )).rows[0];
+  const getUserVer = async () =>
+    (await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [PM_LIFE.app])).rows[0].version;
+
+  const assertPmParity = async ({
+    label,
+    expectEffective,
+    expectRawHelperOk = expectEffective,
+    expectedRejectCode = null,
+    expectInSummary,
+    expectedAssignmentId,
+    expectedInactiveReason = null,
+    expectPostOk,
+    summaryEnabledFilter = "true",
+  }) => {
+    const { rows: [{ ok: guardOk }] } = await db.query(
+      "select public.direct_entry_actor_is_assigned_project_manager($1::uuid, $2) as ok",
+      [PM_LIFE.app, PROJECT_PM_LIFE],
+    );
+    assert.equal(guardOk, expectRawHelperOk, `${label}: direct_entry_actor_is_assigned_project_manager mismatch`);
+
+    if (expectPostOk) {
+      const { rows: [{ result: created }] } = await db.query(
+        "select public.recruitment_post_create($1::uuid, $2::uuid, $3::jsonb, $4) as result",
+        [PM_LIFE.auth, PM_LIFE.app, JSON.stringify(lifeBrief), uuidSeq()],
+      );
+      assert.ok(created?.post?.brief_id, `${label}: recruitment_post_create must succeed`);
+    } else {
+      await assert.rejects(
+        db.query(
+          "select public.recruitment_post_create($1::uuid, $2::uuid, $3::jsonb, $4)",
+          [PM_LIFE.auth, PM_LIFE.app, JSON.stringify(lifeBrief), uuidSeq()],
+        ),
+        (err) => (
+          expectedRejectCode
+            ? err?.code === expectedRejectCode
+            : (err?.code === "42501" || err?.code === "22023" || err?.code === "PT409")
+        ),
+        `${label}: recruitment_post_create must reject`,
+      );
+    }
+
+    const { rows: [{ payload: ctx }] } = await db.query(
+      "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
+      [PM_LIFE.auth],
+    );
+    assertNoEmailOrAt(ctx, `${label} actor_context`);
+    const ctxPm = ctx.assigned_roles.filter((r) => r.role_code === "PROJECT_MANAGER" && r.scope_id === PROJECT_PM_LIFE);
+    if (expectEffective) {
+      assert.equal(ctxPm.length, 1, `${label}: actor_context must have strictly 1 PROJECT_MANAGER role`);
+      assert.equal(ctxPm[0].assignment_id, expectedAssignmentId, `${label}: actor_context assignment_id mismatch`);
+    } else {
+      assert.equal(ctxPm.length, 0, `${label}: actor_context must have 0 effective PROJECT_MANAGER roles`);
+    }
+
+    const { rows: [{ payload: summary }] } = await db.query(
+      "select public.direct_entry_authz_list_accounts_summary_admin($1::uuid, $2::uuid, null, $3, 'PROJECT_MANAGER', 1, 50) as payload",
+      [OWNER.auth, OWNER.app, summaryEnabledFilter],
+    );
+    assertNoEmailOrAt(summary, `${label} accounts-summary`);
+    const summaryHits = summary.accounts.filter((a) => a.account_ref === PM_LIFE.app);
+    if (expectInSummary) {
+      assert.equal(summaryHits.length, 1, `${label}: accounts-summary must include PM_LIFE exactly once`);
+      const sumPm = summaryHits[0].contextual_roles.filter((c) => c.role_code === "PROJECT_MANAGER" && c.target_ref === PROJECT_PM_LIFE);
+      assert.equal(sumPm.length, 1, `${label}: summary contextual_roles must have strictly 1 PROJECT_MANAGER item`);
+      assert.equal(sumPm[0].is_effective, expectEffective, `${label}: summary contextual_roles.is_effective mismatch`);
+    } else {
+      assert.equal(summaryHits.length, 0, `${label}: accounts-summary filter PROJECT_MANAGER must exclude PM_LIFE`);
+    }
+
+    const { rows: [{ payload: detail }] } = await db.query(
+      "select public.direct_entry_authz_get_account_access_admin($1::uuid, $2::uuid, $3::uuid) as payload",
+      [OWNER.auth, OWNER.app, PM_LIFE.app],
+    );
+    assertNoEmailOrAt(detail, `${label} account_access_detail`);
+    const detPm = detail.contextual_assignments.filter((c) => c.role_code === "PROJECT_MANAGER" && c.target_ref === PROJECT_PM_LIFE);
+    if (expectedAssignmentId) {
+      assert.equal(detPm.length, 1, `${label}: account_access detail must expose strictly 1 open/suspended PM row`);
+      assert.equal(detPm[0].assignment_id, expectedAssignmentId, `${label}: detail assignment_id mismatch`);
+      assert.equal(detPm[0].is_effective, expectEffective, `${label}: detail is_effective mismatch`);
+      assert.equal(detPm[0].inactive_reason, expectedInactiveReason, `${label}: detail inactive_reason mismatch`);
+    } else {
+      assert.equal(detPm.length, 0, `${label}: revoked PM assignment must not appear in detail contextual_assignments`);
+    }
+  };
+
+  // (a) Current active PM -> a1
+  await db.query(
+    "select public.direct_entry_assign_project_manager($1::uuid, $2::uuid, $3, $4::uuid, null::date, $5, 'Assign PM a1', $6)",
+    [OWNER.auth, OWNER.app, PROJECT_PM_LIFE, PM_LIFE.recruiter, await getProjVer(), `pm-a1-${seq++}`],
+  );
+  const rowA1 = await getCurrentPmRow();
+  await assertPmParity({
+    label: "6a active PM",
+    expectEffective: true,
+    expectInSummary: true,
+    expectedAssignmentId: rowA1.assignment_id,
+    expectedInactiveReason: null,
+    expectPostOk: true,
+  });
+
+  // (b) Same-day closed PM (valid_to = valid_from, revoked_at IS NOT NULL)
+  await db.query(
+    "select public.direct_entry_unassign_project_manager($1::uuid, $2::uuid, $3::uuid, $4, $5, 'Same-day revoke a1', $6)",
+    [OWNER.auth, OWNER.app, rowA1.assignment_id, rowA1.version, await getProjVer(), `pm-un-a1-${seq++}`],
+  );
+  await assertPmParity({
+    label: "6b same-day closed PM",
+    expectEffective: false,
+    expectInSummary: false,
+    expectedAssignmentId: null,
+    expectPostOk: false,
+  });
+
+  // (c) Revoke then re-assign same project -> a2 (no duplicate / mixed historical a1)
+  await db.query(
+    "select public.direct_entry_assign_project_manager($1::uuid, $2::uuid, $3, $4::uuid, null::date, $5, 'Reassign PM a2', $6)",
+    [OWNER.auth, OWNER.app, PROJECT_PM_LIFE, PM_LIFE.recruiter, await getProjVer(), `pm-a2-${seq++}`],
+  );
+  const rowA2 = await getCurrentPmRow();
+  assert.notEqual(rowA2.assignment_id, rowA1.assignment_id);
+  await assertPmParity({
+    label: "6c revoke then reassign same project",
+    expectEffective: true,
+    expectInSummary: true,
+    expectedAssignmentId: rowA2.assignment_id,
+    expectedInactiveReason: null,
+    expectPostOk: true,
+  });
+
+  // (d) Multi-day open then revoked
+  await db.query(
+    "update public.direct_entry_project_manager_assignments set valid_from = public.direct_entry_authorization_date() - 5 where assignment_id = $1::uuid",
+    [rowA2.assignment_id],
+  );
+  await db.query(
+    "select public.direct_entry_unassign_project_manager($1::uuid, $2::uuid, $3::uuid, $4, $5, 'Multi-day revoke a2', $6)",
+    [OWNER.auth, OWNER.app, rowA2.assignment_id, rowA2.version, await getProjVer(), `pm-un-a2-${seq++}`],
+  );
+  await assertPmParity({
+    label: "6d multi-day revoked PM",
+    expectEffective: false,
+    expectInSummary: false,
+    expectedAssignmentId: null,
+    expectPostOk: false,
+  });
+
+  // Re-assign a3 for project active/inactive and D10 disable/enable checks
+  await db.query(
+    "select public.direct_entry_assign_project_manager($1::uuid, $2::uuid, $3, $4::uuid, null::date, $5, 'Assign PM a3', $6)",
+    [OWNER.auth, OWNER.app, PROJECT_PM_LIFE, PM_LIFE.recruiter, await getProjVer(), `pm-a3-${seq++}`],
+  );
+  const rowA3 = await getCurrentPmRow();
+
+  // (e) Project deactivated / reactivated
+  await db.query(
+    "select public.direct_entry_set_project_active($1::uuid, $2::uuid, $3, false, $4, 'Deactivate project', $5)",
+    [OWNER.auth, OWNER.app, PROJECT_PM_LIFE, await getProjVer(), `pm-proj-off-${seq++}`],
+  );
+  await assertPmParity({
+    label: "6e project deactivated",
+    expectEffective: false,
+    expectRawHelperOk: true,
+    expectedRejectCode: "22023",
+    expectInSummary: false,
+    expectedAssignmentId: rowA3.assignment_id,
+    expectedInactiveReason: "PROJECT_INACTIVE",
+    expectPostOk: false,
+  });
+
+  await db.query(
+    "select public.direct_entry_set_project_active($1::uuid, $2::uuid, $3, true, $4, 'Reactivate project', $5)",
+    [OWNER.auth, OWNER.app, PROJECT_PM_LIFE, await getProjVer(), `pm-proj-on-${seq++}`],
+  );
+  await assertPmParity({
+    label: "6e project reactivated",
+    expectEffective: true,
+    expectInSummary: true,
+    expectedAssignmentId: rowA3.assignment_id,
+    expectedInactiveReason: null,
+    expectPostOk: true,
+  });
+
+  // (f) D10 Account disabled / re-enabled
+  await db.query(
+    "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Disable PM_LIFE', $5)",
+    [OWNER.auth, OWNER.app, PM_LIFE.app, await getUserVer(), `pm-dis-${seq++}`],
+  );
+  await assertPmParity({
+    label: "6f D10 disabled PM",
+    expectEffective: false,
+    expectInSummary: true,
+    expectedAssignmentId: rowA3.assignment_id,
+    expectedInactiveReason: "ACCOUNT_DISABLED",
+    expectPostOk: false,
+    summaryEnabledFilter: "false",
+  });
+
+  await db.query(
+    "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Re-enable PM_LIFE', $5)",
+    [OWNER.auth, OWNER.app, PM_LIFE.app, await getUserVer(), `pm-en-${seq++}`],
+  );
+  await assertPmParity({
+    label: "6f D10 re-enabled PM",
+    expectEffective: true,
+    expectInSummary: true,
+    expectedAssignmentId: rowA3.assignment_id,
+    expectedInactiveReason: null,
+    expectPostOk: true,
+    summaryEnabledFilter: "true",
+  });
 });

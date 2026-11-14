@@ -17,6 +17,12 @@
  *   4. Parallel `PROTECTED_OWNER_ADMIN` revoke race (Owner self-revoke + another Admin):
  *      both reject `PT409 AUTHZ_PROTECTED_ASSIGNMENT`, `0` version bump, protected
  *      assignment remains open.
+ *   5. `enable_app_user` vs `designate_team_leader` (replace TL) — both T0 pause pattern
+ *      (target account lock held before replace) and reverse replace-first + burst:
+ *      `0` `40P01` deadlocks, `0` resurrected TL authority, independent grants intact.
+ *   6. `enable_app_user` vs `revoke_team_leader` — both T0 pause pattern and reverse
+ *      revoke-first + burst: `0` `40P01` deadlocks, `0` resurrected TL authority,
+ *      independent grants intact.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -106,6 +112,82 @@ const USER_Z2 = {
   name: "WP5 Race User Z2",
 };
 
+const TL_5A_OLD = {
+  auth: "19500000-0000-4000-8000-000000000021",
+  app: "29500000-0000-4000-8000-000000000021",
+  recruiter: "39500000-0000-4000-8000-000000000021",
+  email: "tl.5a.old@hrpartner.vn",
+  name: "WP5 Race TL 5A Old",
+};
+const TL_5A_NEW = {
+  auth: "19500000-0000-4000-8000-000000000022",
+  app: "29500000-0000-4000-8000-000000000022",
+  recruiter: "39500000-0000-4000-8000-000000000022",
+  email: "tl.5a.new@hrpartner.vn",
+  name: "WP5 Race TL 5A New",
+};
+const TL_5B_NEW = {
+  auth: "19500000-0000-4000-8000-000000000023",
+  app: "29500000-0000-4000-8000-000000000023",
+  recruiter: "39500000-0000-4000-8000-000000000023",
+  email: "tl.5b.new@hrpartner.vn",
+  name: "WP5 Race TL 5B New",
+};
+const TL_5B_OLD = {
+  auth: "19500000-0000-4000-8000-000000000024",
+  app: "29500000-0000-4000-8000-000000000024",
+  recruiter: "39500000-0000-4000-8000-000000000024",
+  email: "tl.5b.old@hrpartner.vn",
+  name: "WP5 Race TL 5B Old",
+};
+const TL_5C_OLD = {
+  auth: "19500000-0000-4000-8000-000000000025",
+  app: "29500000-0000-4000-8000-000000000025",
+  recruiter: "39500000-0000-4000-8000-000000000025",
+  email: "tl.5c.old@hrpartner.vn",
+  name: "WP5 Race TL 5C Old",
+};
+const TL_5C_NEW = {
+  auth: "19500000-0000-4000-8000-000000000026",
+  app: "29500000-0000-4000-8000-000000000026",
+  recruiter: "39500000-0000-4000-8000-000000000026",
+  email: "tl.5c.new@hrpartner.vn",
+  name: "WP5 Race TL 5C New",
+};
+const TL_6A_OLD = {
+  auth: "19500000-0000-4000-8000-000000000027",
+  app: "29500000-0000-4000-8000-000000000027",
+  recruiter: "39500000-0000-4000-8000-000000000027",
+  email: "tl.6a.old@hrpartner.vn",
+  name: "WP5 Race TL 6A Old",
+};
+const TL_6B_OLD = {
+  auth: "19500000-0000-4000-8000-000000000028",
+  app: "29500000-0000-4000-8000-000000000028",
+  recruiter: "39500000-0000-4000-8000-000000000028",
+  email: "tl.6b.old@hrpartner.vn",
+  name: "WP5 Race TL 6B Old",
+};
+const TL_6C_OLD = {
+  auth: "19500000-0000-4000-8000-000000000029",
+  app: "29500000-0000-4000-8000-000000000029",
+  recruiter: "39500000-0000-4000-8000-000000000029",
+  email: "tl.6c.old@hrpartner.vn",
+  name: "WP5 Race TL 6C Old",
+};
+
+const TL_USERS = [
+  TL_5A_OLD,
+  TL_5A_NEW,
+  TL_5B_NEW,
+  TL_5B_OLD,
+  TL_5C_OLD,
+  TL_5C_NEW,
+  TL_6A_OLD,
+  TL_6B_OLD,
+  TL_6C_OLD,
+];
+
 const ALL_USERS = [
   OWNER,
   ADMIN_A,
@@ -119,6 +201,7 @@ const ALL_USERS = [
   USER_DUP2,
   USER_Z,
   USER_Z2,
+  ...TL_USERS,
 ];
 
 let keySeq = 1;
@@ -215,6 +298,12 @@ const REVOKE_SQL =
   "select public.direct_entry_authz_revoke_global_role_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6, $7::uuid, $8) as data";
 const DISABLE_SQL =
   "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4::int, $5, $6) as data";
+const ENABLE_SQL =
+  "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4::int, $5, $6) as data";
+const DESIGNATE_TL_SQL =
+  "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, $5::int, $6, $7) as data";
+const REVOKE_TL_SQL =
+  "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, null::date, $4::int, $5, $6) as data";
 
 function assignArgs(actor, targetAppId, roleCode, expectedVersion, reason) {
   const idempotencyKey = nextKey();
@@ -649,6 +738,387 @@ test("WP5B-1 real PostgreSQL concurrency: duplicate assign, swap-order lock, act
       [OWNER.app],
     );
     assert.equal(ownerRevokeAudits, 0, "Protected reject must produce 0 partial audit writes");
+
+    // -------------------------------------------------------------------------
+    // Helper for Races 5 & 6: seed team + recruiter links + RECRUITER/HR_OPERATOR + disabled TL
+    // -------------------------------------------------------------------------
+    const setupTlRaceTeam = async (code, teamId, oldTl, newTl = null) => {
+      await observer.query(
+        `insert into public.teams (team_id, code, display_name, active, version)
+         values ($1::uuid, $2, $3, true, 1)`,
+        [teamId, code, `Race Team ${code}`],
+      );
+      const members = newTl ? [oldTl, newTl] : [oldTl];
+      for (const m of members) {
+        await observer.query(
+          `insert into public.recruiters (recruiter_id, display_name, active, version)
+           values ($1::uuid, $2, true, 1)`,
+          [m.recruiter, m.name],
+        );
+        await observer.query(
+          `insert into public.recruiter_provider_memberships (recruiter_id, provider_type, valid_from, is_current)
+           values ($1::uuid, 'hrp', '2020-01-01', true)`,
+          [m.recruiter],
+        );
+        await observer.query(
+          `insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current)
+           values ($1::uuid, $2::uuid, true, '2020-01-01', true)`,
+          [m.app, m.recruiter],
+        );
+        await observer.query(
+          `insert into public.recruiter_team_memberships (recruiter_id, team_id, valid_from, is_current)
+           values ($1::uuid, $2::uuid, '2020-01-01', true)`,
+          [m.recruiter, teamId],
+        );
+        for (const roleCode of ["RECRUITER", "HR_OPERATOR"]) {
+          const {
+            rows: [{ version: vCur }],
+          } = await observer.query(
+            "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+            [m.app],
+          );
+          await observer.query("set role service_role");
+          try {
+            await observer.query(ASSIGN_SQL, assignArgs(OWNER, m.app, roleCode, vCur, `Seed ${roleCode}`));
+          } finally {
+            await observer.query("reset role");
+          }
+        }
+      }
+      await observer.query("set role service_role");
+      try {
+        await observer.query(DESIGNATE_TL_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          teamId,
+          oldTl.app,
+          1,
+          `Initial designate ${code}`,
+          nextKey(),
+        ]);
+      } finally {
+        await observer.query("reset role");
+      }
+      const {
+        rows: [{ version: vOldBeforeDisable }],
+      } = await observer.query(
+        "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+        [oldTl.app],
+      );
+      await observer.query("set role service_role");
+      try {
+        await observer.query(DISABLE_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          oldTl.app,
+          vOldBeforeDisable,
+          `Disable ${code} TL`,
+          nextKey(),
+        ]);
+      } finally {
+        await observer.query("reset role");
+      }
+      const {
+        rows: [{ version: oldVer }],
+      } = await observer.query(
+        "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+        [oldTl.app],
+      );
+      const {
+        rows: [{ version: teamVer }],
+      } = await observer.query(
+        "select version from public.teams where team_id = $1::uuid",
+        [teamId],
+      );
+      return { oldVer, teamVer };
+    };
+
+    const assertIndependentGrantsIntact = async (user, label) => {
+      const { rows: grantRows } = await observer.query(
+        "select capability from public.direct_entry_capability_grants where app_user_id = $1::uuid and is_current = true and valid_to is null order by capability",
+        [user.app],
+      );
+      const caps = grantRows.map((r) => r.capability);
+      for (const expected of ["audit_view", "document_view", "entry_own", "recruiter_master_manage", "team_master_manage"]) {
+        assert.ok(caps.includes(expected), `${label}: independent grant ${expected} must remain intact`);
+      }
+      const { rows: scopeRows } = await observer.query(
+        "select scope_kind, team_id from public.direct_entry_scope_grants where app_user_id = $1::uuid and is_current = true and valid_to is null",
+        [user.app],
+      );
+      assert.ok(scopeRows.some((r) => r.scope_kind === "own"), `${label}: own scope must remain intact`);
+      assert.ok(scopeRows.some((r) => r.scope_kind === "all"), `${label}: HR_OPERATOR all scope must remain intact`);
+    };
+
+    const settleTx = async (client, queryPromise) => {
+      try {
+        const res = await queryPromise;
+        await client.query("commit");
+        return { status: "fulfilled", value: res };
+      } catch (err) {
+        await client.query("rollback");
+        return { status: "rejected", reason: err };
+      }
+    };
+
+    // -------------------------------------------------------------------------
+    // Race 5a: T0 exact pause-at-disabled-TL pattern (enable vs replace TL)
+    // worker1 holds TL_5A_OLD FOR UPDATE -> worker2 calls designate_team_leader
+    // (blocks cleanly on account lock, BEFORE teams) -> worker1 calls enable & commits
+    // -------------------------------------------------------------------------
+    await Promise.all([worker1.query("reset role"), worker2.query("reset role")]);
+    const TEAM_5A = "59500000-0000-4000-8000-000000000051";
+    const s5a = await setupTlRaceTeam("RACE_TL_5A", TEAM_5A, TL_5A_OLD, TL_5A_NEW);
+    await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+    await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    await worker1.query(
+      "select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update",
+      [TL_5A_OLD.app],
+    );
+    const p5aReplace = settleTx(
+      worker2,
+      worker2.query(DESIGNATE_TL_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        TEAM_5A,
+        TL_5A_NEW.app,
+        s5a.teamVer,
+        "Race 5a replace while enable paused",
+        nextKey(),
+      ]),
+    );
+    await waitUntilBlocked(observer, "wp5-worker-2");
+    await worker1.query("set local role service_role");
+    const p5aEnable = settleTx(
+      worker1,
+      worker1.query(ENABLE_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        TL_5A_OLD.app,
+        s5a.oldVer,
+        "Race 5a enable old TL",
+        nextKey(),
+      ]),
+    );
+    const [r5aEnable, r5aReplace] = await Promise.all([p5aEnable, p5aReplace]);
+    assert.notEqual(r5aEnable.reason?.code, "40P01", "Race 5a enable must never deadlock (40P01)");
+    assert.notEqual(r5aReplace.reason?.code, "40P01", "Race 5a replace must never deadlock (40P01)");
+    assert.equal(r5aEnable.status, "fulfilled", `Race 5a enable failed: ${r5aEnable.reason?.message}`);
+    assert.equal(r5aReplace.status, "fulfilled", `Race 5a replace failed: ${r5aReplace.reason?.message}`);
+
+    const { rows: tla5a } = await observer.query(
+      "select leader_app_user_id, is_current, valid_to, suspended_by_account_disable from public.direct_entry_team_leader_assignments where team_id = $1::uuid and is_current = true",
+      [TEAM_5A],
+    );
+    assert.equal(tla5a.length, 1);
+    assert.equal(tla5a[0].leader_app_user_id, TL_5A_NEW.app, "Race 5a: incoming TL_5A_NEW must hold current TL");
+    assert.equal(
+      (
+        await observer.query(
+          "select count(*)::int as cnt from public.work_report_team_leader_capability_grants x join public.direct_entry_capability_grants g on g.grant_id = x.capability_grant_id where g.app_user_id = $1::uuid and g.is_current = true and g.valid_to is null",
+          [TL_5A_OLD.app],
+        )
+      ).rows[0].cnt,
+      0,
+      "Race 5a: outgoing TL_5A_OLD must have 0 open WR TL grants",
+    );
+    await assertIndependentGrantsIntact(TL_5A_OLD, "Race 5a old TL");
+
+    // -------------------------------------------------------------------------
+    // Race 5b: Reverse replace-first + opposite UUID order (TL_5B_NEW < TL_5B_OLD)
+    // worker1 runs designate_team_leader uncommitted -> worker2 calls enable (blocks)
+    // -> worker1 commits -> enable must NEVER resurrect replaced TL
+    // -------------------------------------------------------------------------
+    const TEAM_5B = "59500000-0000-4000-8000-000000000052";
+    const s5b = await setupTlRaceTeam("RACE_TL_5B", TEAM_5B, TL_5B_OLD, TL_5B_NEW);
+    await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    await worker1.query(DESIGNATE_TL_SQL, [
+      OWNER.auth,
+      OWNER.app,
+      TEAM_5B,
+      TL_5B_NEW.app,
+      s5b.teamVer,
+      "Race 5b replace uncommitted",
+      nextKey(),
+    ]);
+    await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    const p5bEnable = settleTx(
+      worker2,
+      worker2.query(ENABLE_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        TL_5B_OLD.app,
+        s5b.oldVer,
+        "Race 5b enable after replace",
+        nextKey(),
+      ]),
+    );
+    await waitUntilBlocked(observer, "wp5-worker-2");
+    await worker1.query("commit");
+    const r5bEnable = await p5bEnable;
+    assert.notEqual(r5bEnable.reason?.code, "40P01", "Race 5b enable must never deadlock (40P01)");
+    if (r5bEnable.status === "rejected") {
+      assert.equal(r5bEnable.reason?.code, "PT409", `Race 5b unexpected reject: ${r5bEnable.reason?.message}`);
+      const {
+        rows: [{ version: vAfterReplace }],
+      } = await observer.query(
+        "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+        [TL_5B_OLD.app],
+      );
+      await observer.query("set role service_role");
+      await observer.query(ENABLE_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        TL_5B_OLD.app,
+        vAfterReplace,
+        "Race 5b enable after version refresh",
+        nextKey(),
+      ]);
+      await observer.query("reset role");
+    }
+    const { rows: tla5b } = await observer.query(
+      "select leader_app_user_id, is_current, valid_to, suspended_by_account_disable from public.direct_entry_team_leader_assignments where team_id = $1::uuid and leader_app_user_id = $2::uuid",
+      [TEAM_5B, TL_5B_OLD.app],
+    );
+    assert.equal(tla5b.every((r) => !r.is_current && !r.suspended_by_account_disable && r.valid_to !== null), true, "Race 5b: replaced TL must NOT resurrect after enable");
+    const { rows: cur5b } = await observer.query(
+      "select leader_app_user_id from public.direct_entry_team_leader_assignments where team_id = $1::uuid and is_current = true",
+      [TEAM_5B],
+    );
+    assert.deepEqual(cur5b.map((r) => r.leader_app_user_id), [TL_5B_NEW.app]);
+    assert.equal(
+      (
+        await observer.query(
+          "select count(*)::int as cnt from public.work_report_team_leader_capability_grants x join public.direct_entry_capability_grants g on g.grant_id = x.capability_grant_id where g.app_user_id = $1::uuid and g.is_current = true and g.valid_to is null",
+          [TL_5B_OLD.app],
+        )
+      ).rows[0].cnt,
+      0,
+      "Race 5b: outgoing TL_5B_OLD must have 0 open WR TL grants after enable",
+    );
+    await assertIndependentGrantsIntact(TL_5B_OLD, "Race 5b old TL");
+
+    // -------------------------------------------------------------------------
+    // Race 5c: True simultaneous enable vs replace collision behind blocker barrier
+    // -------------------------------------------------------------------------
+    const TEAM_5C = "59500000-0000-4000-8000-000000000053";
+    const s5c = await setupTlRaceTeam("RACE_TL_5C", TEAM_5C, TL_5C_OLD, TL_5C_NEW);
+    await blocker.query("begin");
+    await blocker.query("select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update", [TL_5C_OLD.app]);
+    await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    const p5cEnable = settleTx(
+      worker1,
+      worker1.query(ENABLE_SQL, [OWNER.auth, OWNER.app, TL_5C_OLD.app, s5c.oldVer, "Race 5c enable", nextKey()]),
+    );
+    const p5cReplace = settleTx(
+      worker2,
+      worker2.query(DESIGNATE_TL_SQL, [OWNER.auth, OWNER.app, TEAM_5C, TL_5C_NEW.app, s5c.teamVer, "Race 5c replace", nextKey()]),
+    );
+    await Promise.all([waitUntilBlocked(observer, "wp5-worker-1"), waitUntilBlocked(observer, "wp5-worker-2")]);
+    await blocker.query("rollback");
+    const [r5cE, r5cR] = await Promise.all([p5cEnable, p5cReplace]);
+    assert.notEqual(r5cE.reason?.code, "40P01", "Race 5c enable must never deadlock (40P01)");
+    assert.notEqual(r5cR.reason?.code, "40P01", "Race 5c replace must never deadlock (40P01)");
+    assert.equal(r5cR.status, "fulfilled", `Race 5c replace must succeed cleanly: ${r5cR.reason?.message}`);
+    assert.deepEqual(
+      (await observer.query("select leader_app_user_id from public.direct_entry_team_leader_assignments where team_id = $1::uuid and is_current = true", [TEAM_5C])).rows.map((r) => r.leader_app_user_id),
+      [TL_5C_NEW.app],
+    );
+
+    // -------------------------------------------------------------------------
+    // Race 6a & 6b: enable_app_user vs revoke_team_leader (T0 pause + reverse revoke-first + simultaneous)
+    // -------------------------------------------------------------------------
+    const TEAM_6A = "59500000-0000-4000-8000-000000000061";
+    const s6a = await setupTlRaceTeam("RACE_TL_6A", TEAM_6A, TL_6A_OLD);
+    await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+    await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    await worker1.query("select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update", [TL_6A_OLD.app]);
+    const p6aRevoke = settleTx(
+      worker2,
+      worker2.query(REVOKE_TL_SQL, [OWNER.auth, OWNER.app, TEAM_6A, s6a.teamVer, "Race 6a revoke while enable paused", nextKey()]),
+    );
+    await waitUntilBlocked(observer, "wp5-worker-2");
+    await worker1.query("set local role service_role");
+    const p6aEnable = settleTx(
+      worker1,
+      worker1.query(ENABLE_SQL, [OWNER.auth, OWNER.app, TL_6A_OLD.app, s6a.oldVer, "Race 6a enable old TL", nextKey()]),
+    );
+    const [r6aEnable, r6aRevoke] = await Promise.all([p6aEnable, p6aRevoke]);
+    assert.notEqual(r6aEnable.reason?.code, "40P01", "Race 6a enable must never deadlock (40P01)");
+    assert.notEqual(r6aRevoke.reason?.code, "40P01", "Race 6a revoke must never deadlock (40P01)");
+    assert.equal(r6aEnable.status, "fulfilled", `Race 6a enable failed: ${r6aEnable.reason?.message}`);
+    assert.equal(r6aRevoke.status, "fulfilled", `Race 6a revoke failed: ${r6aRevoke.reason?.message}`);
+    assert.equal(
+      (await observer.query("select count(*)::int as cnt from public.direct_entry_team_leader_assignments where team_id = $1::uuid and is_current = true", [TEAM_6A])).rows[0].cnt,
+      0,
+    );
+    assert.equal(
+      (await observer.query("select count(*)::int as cnt from public.work_report_team_leader_capability_grants x join public.direct_entry_capability_grants g on g.grant_id = x.capability_grant_id where g.app_user_id = $1::uuid and g.is_current = true and g.valid_to is null", [TL_6A_OLD.app])).rows[0].cnt,
+      0,
+    );
+    await assertIndependentGrantsIntact(TL_6A_OLD, "Race 6a revoked TL");
+
+    // Race 6b: revoke commits BEFORE enable -> enable MUST NOT resurrect revoked TL
+    const TEAM_6B = "59500000-0000-4000-8000-000000000062";
+    const s6b = await setupTlRaceTeam("RACE_TL_6B", TEAM_6B, TL_6B_OLD);
+    await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    await worker1.query(REVOKE_TL_SQL, [OWNER.auth, OWNER.app, TEAM_6B, s6b.teamVer, "Race 6b revoke uncommitted", nextKey()]);
+    await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    const p6bEnable = settleTx(
+      worker2,
+      worker2.query(ENABLE_SQL, [OWNER.auth, OWNER.app, TL_6B_OLD.app, s6b.oldVer, "Race 6b enable after revoke", nextKey()]),
+    );
+    await waitUntilBlocked(observer, "wp5-worker-2");
+    await worker1.query("commit");
+    const r6bEnable = await p6bEnable;
+    assert.notEqual(r6bEnable.reason?.code, "40P01", "Race 6b enable must never deadlock (40P01)");
+    if (r6bEnable.status === "rejected") {
+      assert.equal(r6bEnable.reason?.code, "PT409", `Race 6b unexpected reject: ${r6bEnable.reason?.message}`);
+      const {
+        rows: [{ version: v6bCur }],
+      } = await observer.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [TL_6B_OLD.app]);
+      await observer.query("set role service_role");
+      await observer.query(ENABLE_SQL, [OWNER.auth, OWNER.app, TL_6B_OLD.app, v6bCur, "Race 6b enable refresh", nextKey()]);
+      await observer.query("reset role");
+    }
+    const { rows: tla6b } = await observer.query(
+      "select is_current, valid_to, suspended_by_account_disable from public.direct_entry_team_leader_assignments where team_id = $1::uuid and leader_app_user_id = $2::uuid",
+      [TEAM_6B, TL_6B_OLD.app],
+    );
+    assert.equal(tla6b.every((r) => !r.is_current && !r.suspended_by_account_disable && r.valid_to !== null), true, "Race 6b: revoked TL must NOT resurrect on enable");
+    assert.equal(
+      (await observer.query("select count(*)::int as cnt from public.direct_entry_scope_grants where app_user_id = $1::uuid and scope_kind = 'team' and is_current = true and valid_to is null", [TL_6B_OLD.app])).rows[0].cnt,
+      0,
+      "Race 6b: revoked TL must have 0 open CONTEXT_TEAM scopes after enable",
+    );
+    await assertIndependentGrantsIntact(TL_6B_OLD, "Race 6b revoked TL");
+
+    // Race 6c: Simultaneous enable vs revoke behind blocker barrier
+    const TEAM_6C = "59500000-0000-4000-8000-000000000063";
+    const s6c = await setupTlRaceTeam("RACE_TL_6C", TEAM_6C, TL_6C_OLD);
+    await blocker.query("begin");
+    await blocker.query("select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update", [TL_6C_OLD.app]);
+    await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
+    const p6cEnable = settleTx(
+      worker1,
+      worker1.query(ENABLE_SQL, [OWNER.auth, OWNER.app, TL_6C_OLD.app, s6c.oldVer, "Race 6c enable", nextKey()]),
+    );
+    const p6cRevoke = settleTx(
+      worker2,
+      worker2.query(REVOKE_TL_SQL, [OWNER.auth, OWNER.app, TEAM_6C, s6c.teamVer, "Race 6c revoke", nextKey()]),
+    );
+    await Promise.all([waitUntilBlocked(observer, "wp5-worker-1"), waitUntilBlocked(observer, "wp5-worker-2")]);
+    await blocker.query("rollback");
+    const [r6cE, r6cR] = await Promise.all([p6cEnable, p6cRevoke]);
+    assert.notEqual(r6cE.reason?.code, "40P01", "Race 6c enable must never deadlock (40P01)");
+    assert.notEqual(r6cR.reason?.code, "40P01", "Race 6c revoke must never deadlock (40P01)");
+    assert.equal(r6cR.status, "fulfilled", `Race 6c revoke must succeed cleanly: ${r6cR.reason?.message}`);
+    assert.equal(
+      (await observer.query("select count(*)::int as cnt from public.direct_entry_team_leader_assignments where team_id = $1::uuid and is_current = true", [TEAM_6C])).rows[0].cnt,
+      0,
+    );
   } finally {
     await Promise.allSettled(
       [worker1, worker2, blocker, observer, setup, adminClient]

@@ -1032,6 +1032,7 @@ declare
   v_cap text;
   v_scope text;
   v_next_start date;
+  v_lock_key text;
   v_prev_marker text := pg_catalog.current_setting('direct_entry.team_leader_marker', true);
 begin
   if p_app_user_id is null then
@@ -1139,17 +1140,47 @@ begin
 
   perform pg_catalog.set_config('direct_entry.team_leader_marker', 'on', true);
 
-  -- 1) Close capability grants no longer in desired set (never re-closing closed rows)
-  update public.direct_entry_capability_grants g
-     set valid_to = greatest(v_today, g.valid_from),
-         is_current = false,
-         suspended_by_account_disable = false
-   where g.app_user_id = p_app_user_id
-     and (g.is_current or g.valid_to is null or g.valid_to > v_today)
-     and g.valid_from <= v_today
-     and not (g.capability = any(v_desired_caps));
+  -- Canonical child lock order: Tier 12 SG (+ 'scope:' adv) -> Tier 14 CG (+ 'capability:' adv)
+  perform s.grant_id
+    from public.direct_entry_scope_grants s
+   where s.app_user_id = p_app_user_id
+     and s.scope_kind in ('own', 'all')
+   order by s.grant_id asc
+   for update;
 
-  -- 2) Close global scope grants ('own', 'all') no longer in desired set (leave 'team' untouched)
+  for v_lock_key in
+    select distinct k
+      from unnest(array[
+        'scope:' || p_app_user_id::text || ':all:' || p_app_user_id::text,
+        'scope:' || p_app_user_id::text || ':own:' || p_app_user_id::text
+      ]) as t(k)
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  perform g.grant_id
+    from public.direct_entry_capability_grants g
+   where g.app_user_id = p_app_user_id
+   order by g.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct 'capability:' || p_app_user_id::text || ':' || cap as k
+      from (
+        select unnest(coalesce(v_desired_caps, array[]::text[])) as cap
+        union
+        select g.capability as cap
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = p_app_user_id
+      ) caps
+     where cap is not null
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  -- 1) Close global scope grants ('own', 'all') no longer in desired set (Tier 12 before Tier 14; leave 'team' untouched)
   update public.direct_entry_scope_grants s
      set valid_to = greatest(v_today, s.valid_from),
          is_current = false,
@@ -1160,48 +1191,18 @@ begin
      and s.valid_from <= v_today
      and not (s.scope_kind = any(v_desired_scopes));
 
-  -- 3) When enabled = true, activate or insert desired capabilities and global scopes
+  -- 2) Close capability grants no longer in desired set (never re-closing closed rows)
+  update public.direct_entry_capability_grants g
+     set valid_to = greatest(v_today, g.valid_from),
+         is_current = false,
+         suspended_by_account_disable = false
+   where g.app_user_id = p_app_user_id
+     and (g.is_current or g.valid_to is null or g.valid_to > v_today)
+     and g.valid_from <= v_today
+     and not (g.capability = any(v_desired_caps));
+
+  -- 3) When enabled = true, activate or insert desired global scopes (Tier 12) then capabilities (Tier 14)
   if v_user.enabled then
-    foreach v_cap in array v_desired_caps loop
-      if not exists (
-        select 1 from public.direct_entry_capability_grants g
-         where g.app_user_id = p_app_user_id
-           and g.capability = v_cap
-           and g.is_current
-      ) then
-        update public.direct_entry_capability_grants g
-           set is_current = true,
-               suspended_by_account_disable = false
-         where g.grant_id = (
-           select g2.grant_id
-             from public.direct_entry_capability_grants g2
-            where g2.app_user_id = p_app_user_id
-              and g2.capability = v_cap
-              and g2.valid_from <= v_today
-              and (g2.valid_to is null or (g2.valid_to > g2.valid_from and v_today < g2.valid_to))
-            order by g2.valid_from desc, g2.grant_id desc
-            limit 1
-         );
-
-        if not found then
-          select min(g.valid_from)
-            into v_next_start
-            from public.direct_entry_capability_grants g
-           where g.app_user_id = p_app_user_id
-             and g.capability = v_cap
-             and g.valid_from > v_today
-             and (g.valid_to is null or g.valid_to > g.valid_from);
-
-          insert into public.direct_entry_capability_grants (
-            app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable
-          ) values (
-            p_app_user_id, v_cap, v_today, v_next_start, true, false
-          )
-          on conflict do nothing;
-        end if;
-      end if;
-    end loop;
-
     foreach v_scope in array v_desired_scopes loop
       if not exists (
         select 1 from public.direct_entry_scope_grants s
@@ -1236,6 +1237,46 @@ begin
             app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable
           ) values (
             p_app_user_id, v_scope, null, v_today, v_next_start, true, false
+          )
+          on conflict do nothing;
+        end if;
+      end if;
+    end loop;
+
+    foreach v_cap in array v_desired_caps loop
+      if not exists (
+        select 1 from public.direct_entry_capability_grants g
+         where g.app_user_id = p_app_user_id
+           and g.capability = v_cap
+           and g.is_current
+      ) then
+        update public.direct_entry_capability_grants g
+           set is_current = true,
+               suspended_by_account_disable = false
+         where g.grant_id = (
+           select g2.grant_id
+             from public.direct_entry_capability_grants g2
+            where g2.app_user_id = p_app_user_id
+              and g2.capability = v_cap
+              and g2.valid_from <= v_today
+              and (g2.valid_to is null or (g2.valid_to > g2.valid_from and v_today < g2.valid_to))
+            order by g2.valid_from desc, g2.grant_id desc
+            limit 1
+         );
+
+        if not found then
+          select min(g.valid_from)
+            into v_next_start
+            from public.direct_entry_capability_grants g
+           where g.app_user_id = p_app_user_id
+             and g.capability = v_cap
+             and g.valid_from > v_today
+             and (g.valid_to is null or g.valid_to > g.valid_from);
+
+          insert into public.direct_entry_capability_grants (
+            app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable
+          ) values (
+            p_app_user_id, v_cap, v_today, v_next_start, true, false
           )
           on conflict do nothing;
         end if;
@@ -1424,7 +1465,11 @@ begin
         and exists (
           select 1
             from public.direct_entry_team_leader_assignments tla
+            join public.teams t
+              on t.team_id = tla.team_id
+             and t.code <> '__system_vendor__'
            where tla.leader_app_user_id = u.app_user_id
+             and tla.valid_from <= v_today
              and (tla.valid_to is null or v_today < tla.valid_to)
              and (tla.valid_to is null or tla.valid_to > tla.valid_from)
              and (tla.is_current or tla.suspended_by_account_disable)
@@ -1438,6 +1483,7 @@ begin
             from public.organization_department_heads dh
            where dh.person_id = p.person_id
              and dh.ended_at is null
+             and dh.started_at <= v_now
         )
       )
       or (
@@ -1445,12 +1491,41 @@ begin
         and exists (
           select 1
             from public.direct_entry_project_manager_assignments pma
+            join public.direct_entry_projects pr
+              on pr.project_id = pma.project_id
+             and pr.active = true
+            join public.recruiters r
+              on r.recruiter_id = pma.manager_recruiter_id
+             and r.active = true
             join public.direct_entry_app_user_recruiter_links rl
               on rl.recruiter_id = pma.manager_recruiter_id
              and rl.app_user_id = u.app_user_id
              and rl.verified = true
-             and (rl.valid_to is null or v_today < rl.valid_to)
+             and rl.valid_from <= v_today
+             and (rl.valid_to is null or (rl.valid_to > rl.valid_from and v_today < rl.valid_to))
              and (rl.is_current or rl.suspended_by_account_disable)
+           where pma.revoked_at is null
+             and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
+             and pma.valid_from <= v_today
+             and (
+               (u.enabled and public.direct_entry_actor_is_assigned_project_manager(u.app_user_id, pr.project_id))
+               or (
+                 not u.enabled
+                 and u.auth_subject is not null
+                 and pma.is_current = true
+                 and rl.suspended_by_account_disable = true
+                 and not exists (
+                   select 1
+                     from public.direct_entry_app_user_recruiter_links other
+                    where other.link_id <> rl.link_id
+                      and (other.is_current or other.suspended_by_account_disable)
+                      and (
+                        other.app_user_id = u.app_user_id
+                        or (other.verified and other.recruiter_id = pma.manager_recruiter_id)
+                      )
+                 )
+               )
+             )
         )
       )
       or (
@@ -1583,8 +1658,11 @@ begin
                 (
                   b.enabled
                   and pr.active
-                  and r.active
-                  and rl.is_current
+                  and pma.is_current
+                  and pma.revoked_at is null
+                  and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
+                  and pma.valid_from <= v_today
+                  and public.direct_entry_actor_is_assigned_project_manager(b.app_user_id, pr.project_id)
                 ) as is_effective
               from public.direct_entry_project_manager_assignments pma
               join public.direct_entry_projects pr on pr.project_id = pma.project_id
@@ -1593,8 +1671,26 @@ begin
                 on rl.recruiter_id = pma.manager_recruiter_id
                and rl.app_user_id = b.app_user_id
                and rl.verified = true
-               and (rl.valid_to is null or v_today < rl.valid_to)
+               and rl.valid_from <= v_today
+               and (rl.valid_to is null or (rl.valid_to > rl.valid_from and v_today < rl.valid_to))
                and (rl.is_current or rl.suspended_by_account_disable)
+              where pma.revoked_at is null
+                and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
+                and pma.valid_from <= v_today
+                and (
+                  pma.is_current
+                  or (not b.enabled and rl.suspended_by_account_disable)
+                )
+                and not exists (
+                  select 1
+                    from public.direct_entry_app_user_recruiter_links other
+                   where other.link_id <> rl.link_id
+                     and (other.is_current or other.suspended_by_account_disable)
+                     and (
+                       other.app_user_id = b.app_user_id
+                       or (other.verified and other.recruiter_id = pma.manager_recruiter_id)
+                     )
+                )
               union all
               select
                 4 as sort_order,
@@ -1810,6 +1906,7 @@ begin
           when g.ended_at is not null then 'REVOKED'
           when not v_user.enabled then 'ACCOUNT_DISABLED'
           when g.scope_kind = 'CONTEXT_TEAM' and (tm.team_id is null or not tm.active) then 'TEAM_INACTIVE'
+          when g.scope_kind = 'CONTEXT_PROJECT' and (pr.project_id is null or not pr.active) then 'PROJECT_INACTIVE'
           when g.scope_kind = 'CONTEXT_DEPARTMENT' and (dm.department_id is null or not dm.is_active) then 'DEPARTMENT_INACTIVE'
           else null
         end
@@ -1918,12 +2015,26 @@ begin
         coalesce(pr.display_name, pr.project_id) as target_label,
         'CONTEXT_PROJECT'::text as scope_kind,
         pr.project_id as scope_id,
-        null::uuid as assignment_id,
+        pma.assignment_id,
         pg_catalog.to_char(pma.created_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00' as started_at_iso,
-        (v_user.enabled and pr.active and r.active and rl.is_current) as is_effective,
+        (
+          v_user.enabled
+          and pr.active
+          and pma.is_current
+          and pma.revoked_at is null
+          and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
+          and pma.valid_from <= v_today
+          and public.direct_entry_actor_is_assigned_project_manager(p_target_app_user_id, pr.project_id)
+        ) as is_effective,
         case
+          when pma.revoked_at is not null or (pma.valid_to is not null and (pma.valid_to <= pma.valid_from or v_today >= pma.valid_to)) then 'REVOKED'
           when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when not r.active then 'PERSON_INACTIVE'
+          when not pr.active then 'PROJECT_INACTIVE'
+          when not r.active then 'RECRUITER_INACTIVE'
+          when not pma.is_current
+            or not rl.is_current
+            or not public.direct_entry_actor_is_assigned_project_manager(p_target_app_user_id, pr.project_id)
+            then 'REVOKED'
           else null
         end as inactive_reason,
         '[]'::jsonb as derived_capabilities
@@ -1934,8 +2045,26 @@ begin
         on rl.recruiter_id = pma.manager_recruiter_id
        and rl.app_user_id = p_target_app_user_id
        and rl.verified = true
-       and (rl.valid_to is null or v_today < rl.valid_to)
-       and (rl.is_current or rl.suspended_by_account_disable)
+       and rl.valid_from <= v_today
+       and (rl.valid_to is null or (rl.valid_to > rl.valid_from and v_today < rl.valid_to))
+       and (rl.is_current or rl.suspended_by_account_disable or not v_user.enabled)
+      where pma.revoked_at is null
+        and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
+        and pma.valid_from <= v_today
+        and (
+          pma.is_current
+          or (not v_user.enabled and rl.suspended_by_account_disable)
+        )
+        and not exists (
+          select 1
+            from public.direct_entry_app_user_recruiter_links other
+           where other.link_id <> rl.link_id
+             and (other.is_current or other.suspended_by_account_disable)
+             and (
+               other.app_user_id = p_target_app_user_id
+               or (other.verified and other.recruiter_id = pma.manager_recruiter_id)
+             )
+        )
       union all
       select
         4 as sort_order,
@@ -1952,6 +2081,7 @@ begin
         case
           when pa.ended_at is not null or (pa.valid_to is not null and v_today >= pa.valid_to) then 'REVOKED'
           when not v_user.enabled then 'ACCOUNT_DISABLED'
+          when not pr.active then 'PROJECT_INACTIVE'
           else null
         end as inactive_reason,
         '["vendor_finance_view"]'::jsonb as derived_capabilities
@@ -2775,18 +2905,89 @@ revoke all on function public.direct_entry__internal_capability_grant_effective(
 -- 8.2 Trigger 1 (D10): direct_entry_clear_authority_on_disable()
 -- Only changes direct_entry_app_users branch: sets is_current = false,
 -- suspended_by_account_disable = true while keeping valid_to NULL and keeping
--- authz_* / is_protected completely untouched.
+-- authz_* / is_protected completely untouched. Canonical lock order before writes.
 create or replace function public.direct_entry_clear_authority_on_disable()
 returns trigger
 language plpgsql
 security definer
 set search_path = pg_catalog, public
 as $function$
+declare
+  v_lock_key text;
+  v_affected_tl_user_ids uuid[];
 begin
   if tg_op = 'UPDATE' then
     if tg_table_name = 'direct_entry_app_users' then
       if old.enabled and not new.enabled then
-        update public.direct_entry_capability_grants
+        perform l.link_id
+          from public.direct_entry_app_user_recruiter_links l
+         where l.app_user_id = new.app_user_id
+         order by l.link_id asc
+         for update;
+
+        perform pg_advisory_xact_lock(hashtextextended('recruiter-link:' || new.app_user_id::text, 0));
+        for v_lock_key in
+          select distinct 'recruiter-link-recruiter:' || l.recruiter_id::text as k
+            from public.direct_entry_app_user_recruiter_links l
+           where l.app_user_id = new.app_user_id
+           order by k asc
+        loop
+          perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+        end loop;
+
+        perform s.grant_id
+          from public.direct_entry_scope_grants s
+         where s.app_user_id = new.app_user_id
+         order by s.grant_id asc
+         for update;
+
+        for v_lock_key in
+          select distinct
+            'scope:' || s.app_user_id::text || ':' || s.scope_kind || ':' || coalesce(s.team_id::text, s.app_user_id::text) as k
+            from public.direct_entry_scope_grants s
+           where s.app_user_id = new.app_user_id
+           order by k asc
+        loop
+          perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+        end loop;
+
+        perform a.assignment_id
+          from public.direct_entry_team_leader_assignments a
+         where a.leader_app_user_id = new.app_user_id
+         order by a.assignment_id asc
+         for update;
+
+        perform g.grant_id
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = new.app_user_id
+         order by g.grant_id asc
+         for update;
+
+        for v_lock_key in
+          select distinct 'capability:' || new.app_user_id::text || ':' || caps.capability as k
+            from (
+              select g.capability
+                from public.direct_entry_capability_grants g
+               where g.app_user_id = new.app_user_id
+              union
+              select unnest(array[
+                'report_analytics_view',
+                'report_assign',
+                'report_review',
+                'report_view'
+              ]::text[]) as capability
+               where exists (
+                 select 1
+                   from public.direct_entry_team_leader_assignments a
+                  where a.leader_app_user_id = new.app_user_id
+               )
+            ) caps
+           order by k asc
+        loop
+          perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+        end loop;
+
+        update public.direct_entry_app_user_recruiter_links
            set is_current = false,
                suspended_by_account_disable = true
          where app_user_id = new.app_user_id
@@ -2796,25 +2997,98 @@ begin
                suspended_by_account_disable = true
          where app_user_id = new.app_user_id
            and is_current = true;
-        update public.direct_entry_app_user_recruiter_links
-           set is_current = false,
-               suspended_by_account_disable = true
-         where app_user_id = new.app_user_id
-           and is_current = true;
         update public.direct_entry_team_leader_assignments
            set is_current = false,
                suspended_by_account_disable = true
          where leader_app_user_id = new.app_user_id
            and is_current = true;
+        update public.direct_entry_capability_grants
+           set is_current = false,
+               suspended_by_account_disable = true
+         where app_user_id = new.app_user_id
+           and is_current = true;
       end if;
     elsif tg_table_name = 'recruiters' then
       if old.active and not new.active then
-        update public.recruiter_team_memberships set is_current = false where recruiter_id = new.recruiter_id;
+        perform m.membership_id
+          from public.recruiter_provider_memberships m
+         where m.recruiter_id = new.recruiter_id
+         order by m.membership_id asc
+         for update;
+        perform pg_advisory_xact_lock(hashtextextended('provider:' || new.recruiter_id::text, 0));
+
+        perform m.membership_id
+          from public.recruiter_team_memberships m
+         where m.recruiter_id = new.recruiter_id
+         order by m.membership_id asc
+         for update;
+        perform pg_advisory_xact_lock(hashtextextended('team-membership:' || new.recruiter_id::text, 0));
+
+        perform l.link_id
+          from public.direct_entry_app_user_recruiter_links l
+         where l.recruiter_id = new.recruiter_id
+         order by l.link_id asc
+         for update;
+        for v_lock_key in
+          select distinct 'recruiter-link:' || l.app_user_id::text as k
+            from public.direct_entry_app_user_recruiter_links l
+           where l.recruiter_id = new.recruiter_id
+           order by k asc
+        loop
+          perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+        end loop;
+        perform pg_advisory_xact_lock(hashtextextended('recruiter-link-recruiter:' || new.recruiter_id::text, 0));
+
+        perform a.assignment_id
+          from public.direct_entry_project_manager_assignments a
+         where a.manager_recruiter_id = new.recruiter_id
+         order by a.assignment_id asc
+         for update;
+
+        perform a.assignment_id
+          from public.direct_entry_team_leader_assignments a
+         where a.leader_recruiter_id = new.recruiter_id
+         order by a.assignment_id asc
+         for update;
+
+        select coalesce(array_agg(distinct a.leader_app_user_id order by a.leader_app_user_id), array[]::uuid[])
+          into v_affected_tl_user_ids
+          from public.direct_entry_team_leader_assignments a
+         where a.leader_recruiter_id = new.recruiter_id;
+
+        if cardinality(v_affected_tl_user_ids) > 0 then
+          perform g.grant_id
+            from public.direct_entry_capability_grants g
+           where g.app_user_id = any(v_affected_tl_user_ids)
+           order by g.grant_id asc
+           for update;
+          for v_lock_key in
+            select distinct 'capability:' || uid::text || ':' || cap as k
+              from unnest(v_affected_tl_user_ids) as uid
+              cross join unnest(array[
+                'report_analytics_view',
+                'report_assign',
+                'report_review',
+                'report_view'
+              ]::text[]) as cap
+             order by k asc
+          loop
+            perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+          end loop;
+        end if;
+
         update public.recruiter_provider_memberships set is_current = false where recruiter_id = new.recruiter_id;
+        update public.recruiter_team_memberships set is_current = false where recruiter_id = new.recruiter_id;
         update public.direct_entry_app_user_recruiter_links set is_current = false, suspended_by_account_disable = false where recruiter_id = new.recruiter_id;
         update public.direct_entry_project_manager_assignments set is_current = false where manager_recruiter_id = new.recruiter_id;
         update public.direct_entry_team_leader_assignments set is_current = false, suspended_by_account_disable = false where leader_recruiter_id = new.recruiter_id;
       elsif not old.active and new.active then
+        perform m.membership_id
+          from public.recruiter_provider_memberships m
+         where m.recruiter_id = new.recruiter_id
+         order by m.membership_id asc
+         for update;
+        perform pg_advisory_xact_lock(hashtextextended('provider:' || new.recruiter_id::text, 0));
         update public.recruiter_provider_memberships set is_current = true
          where recruiter_id = new.recruiter_id and valid_to is null
            and (select count(*) from public.recruiter_provider_memberships m
@@ -2822,9 +3096,76 @@ begin
       end if;
     elsif tg_table_name = 'teams' then
       if old.active and not new.active then
-        update public.direct_entry_scope_grants set is_current = false, suspended_by_account_disable = false where team_id = new.team_id;
+        perform m.membership_id
+          from public.recruiter_team_memberships m
+         where m.team_id = new.team_id
+         order by m.membership_id asc
+         for update;
+        for v_lock_key in
+          select distinct 'team-membership:' || m.recruiter_id::text as k
+            from public.recruiter_team_memberships m
+           where m.team_id = new.team_id
+           order by k asc
+        loop
+          perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+        end loop;
+
+        perform p.mapping_id
+          from public.direct_entry_project_team_scopes p
+         where p.team_id = new.team_id
+         order by p.mapping_id asc
+         for update;
+
+        perform s.grant_id
+          from public.direct_entry_scope_grants s
+         where s.team_id = new.team_id
+         order by s.grant_id asc
+         for update;
+        for v_lock_key in
+          select distinct
+            'scope:' || s.app_user_id::text || ':' || s.scope_kind || ':' || coalesce(s.team_id::text, s.app_user_id::text) as k
+            from public.direct_entry_scope_grants s
+           where s.team_id = new.team_id
+           order by k asc
+        loop
+          perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+        end loop;
+
+        perform a.assignment_id
+          from public.direct_entry_team_leader_assignments a
+         where a.team_id = new.team_id
+         order by a.assignment_id asc
+         for update;
+
+        select coalesce(array_agg(distinct a.leader_app_user_id order by a.leader_app_user_id), array[]::uuid[])
+          into v_affected_tl_user_ids
+          from public.direct_entry_team_leader_assignments a
+         where a.team_id = new.team_id;
+
+        if cardinality(v_affected_tl_user_ids) > 0 then
+          perform g.grant_id
+            from public.direct_entry_capability_grants g
+           where g.app_user_id = any(v_affected_tl_user_ids)
+           order by g.grant_id asc
+           for update;
+          for v_lock_key in
+            select distinct 'capability:' || uid::text || ':' || cap as k
+              from unnest(v_affected_tl_user_ids) as uid
+              cross join unnest(array[
+                'report_analytics_view',
+                'report_assign',
+                'report_review',
+                'report_view'
+              ]::text[]) as cap
+             order by k asc
+          loop
+            perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+          end loop;
+        end if;
+
         update public.recruiter_team_memberships set is_current = false where team_id = new.team_id;
         update public.direct_entry_project_team_scopes set is_current = false where team_id = new.team_id;
+        update public.direct_entry_scope_grants set is_current = false, suspended_by_account_disable = false where team_id = new.team_id;
         update public.direct_entry_team_leader_assignments set is_current = false, suspended_by_account_disable = false where team_id = new.team_id;
       end if;
     elsif tg_table_name = 'direct_entry_projects' then
@@ -2856,7 +3197,49 @@ declare
   v_grant_id uuid;
   v_grant_from date;
   v_now timestamptz := pg_catalog.clock_timestamp();
+  v_lock_key text;
+  v_leader_ids uuid[];
 begin
+  v_leader_ids := array_remove(array[
+    case when tg_op = 'UPDATE' then old.leader_app_user_id end,
+    new.leader_app_user_id
+  ]::uuid[], null);
+
+  if new.is_current or (
+    tg_op = 'UPDATE' and (
+      (old.is_current and not new.is_current)
+      or (new.valid_to is not null and old.valid_to is distinct from new.valid_to)
+    )
+  ) then
+    perform g.grant_id
+      from public.direct_entry_capability_grants g
+     where g.app_user_id = any(v_leader_ids)
+       and (
+         g.capability in ('report_analytics_view', 'report_assign', 'report_review', 'report_view')
+         or g.grant_id in (
+           select x.capability_grant_id
+             from public.work_report_team_leader_capability_grants x
+            where x.leader_assignment_id = coalesce(new.assignment_id, case when tg_op = 'UPDATE' then old.assignment_id end)
+         )
+       )
+     order by g.grant_id asc
+     for update;
+
+    for v_lock_key in
+      select distinct 'capability:' || uid::text || ':' || cap as k
+        from unnest(v_leader_ids) as uid
+        cross join unnest(array[
+          'report_analytics_view',
+          'report_assign',
+          'report_review',
+          'report_view'
+        ]::text[]) as cap
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+  end if;
+
   if new.is_current then
     if tg_op = 'UPDATE'
        and old.valid_to is null
@@ -3068,6 +3451,9 @@ declare
   v_tla record;
   v_can_restore_tl boolean;
   v_prev_marker text := pg_catalog.current_setting('direct_entry.team_leader_marker', true);
+  v_recruiter_ids uuid[];
+  v_team_ids uuid[];
+  v_lock_key text;
 begin
   if p_reason is not null and length(p_reason) > 4000 then
     raise exception 'reason exceeds maximum length' using errcode = '22023';
@@ -3087,10 +3473,19 @@ begin
     select u.app_user_id
       from public.direct_entry_app_users u
      where u.app_user_id in (p_actor_app_user_id, p_target_app_user_id)
-     order by u.app_user_id
-     for update
+     order by u.app_user_id asc
   loop
-    null;
+    if v_locked_id = p_target_app_user_id then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_locked_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_locked_id
+       for share;
+    end if;
   end loop;
 
   select u.* into v_actor
@@ -3149,6 +3544,165 @@ begin
     return v_prior;
   end if;
 
+  -- Canonical child lock acquisition before any writes (R -> T -> RPM -> RTM -> URL -> SG -> TLA -> CG)
+  select coalesce(array_agg(distinct rid order by rid), array[]::uuid[])
+    into v_recruiter_ids
+    from (
+      select l.recruiter_id as rid
+        from public.direct_entry_app_user_recruiter_links l
+       where l.app_user_id = p_target_app_user_id
+      union
+      select a.leader_recruiter_id as rid
+        from public.direct_entry_team_leader_assignments a
+       where a.leader_app_user_id = p_target_app_user_id
+    ) rids
+   where rid is not null;
+
+  select coalesce(array_agg(distinct tid order by tid), array[]::uuid[])
+    into v_team_ids
+    from (
+      select a.team_id as tid
+        from public.direct_entry_team_leader_assignments a
+       where a.leader_app_user_id = p_target_app_user_id
+      union
+      select s.team_id as tid
+        from public.direct_entry_scope_grants s
+       where s.app_user_id = p_target_app_user_id
+         and s.team_id is not null
+    ) tids
+   where tid is not null;
+
+  if cardinality(v_recruiter_ids) > 0 then
+    perform r.recruiter_id
+      from public.recruiters r
+     where r.recruiter_id = any(v_recruiter_ids)
+     order by r.recruiter_id asc
+     for update;
+  end if;
+
+  if cardinality(v_team_ids) > 0 then
+    perform t.team_id
+      from public.teams t
+     where t.team_id = any(v_team_ids)
+     order by t.team_id asc
+     for update;
+  end if;
+
+  if cardinality(v_recruiter_ids) > 0 then
+    perform m.membership_id
+      from public.recruiter_provider_memberships m
+     where m.recruiter_id = any(v_recruiter_ids)
+     order by m.membership_id asc
+     for update;
+
+    for v_lock_key in
+      select 'provider:' || rid::text as k
+        from unnest(v_recruiter_ids) as rid
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+
+    perform m.membership_id
+      from public.recruiter_team_memberships m
+     where m.recruiter_id = any(v_recruiter_ids)
+     order by m.membership_id asc
+     for update;
+
+    for v_lock_key in
+      select 'team-membership:' || rid::text as k
+        from unnest(v_recruiter_ids) as rid
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+  end if;
+
+  perform l.link_id
+    from public.direct_entry_app_user_recruiter_links l
+   where l.app_user_id = p_target_app_user_id
+      or (cardinality(v_recruiter_ids) > 0 and l.recruiter_id = any(v_recruiter_ids))
+   order by l.link_id asc
+   for update;
+
+  perform pg_advisory_xact_lock(hashtextextended('recruiter-link:' || p_target_app_user_id::text, 0));
+  for v_lock_key in
+    select 'recruiter-link-recruiter:' || rid::text as k
+      from unnest(coalesce(v_recruiter_ids, array[]::uuid[])) as rid
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  perform s.grant_id
+    from public.direct_entry_scope_grants s
+   where s.app_user_id = p_target_app_user_id
+   order by s.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct k
+      from (
+        select 'scope:' || p_target_app_user_id::text || ':all:' || p_target_app_user_id::text as k
+        union
+        select 'scope:' || p_target_app_user_id::text || ':own:' || p_target_app_user_id::text as k
+        union
+        select 'scope:' || p_target_app_user_id::text || ':team:' || tid::text as k
+          from unnest(coalesce(v_team_ids, array[]::uuid[])) as tid
+        union
+        select 'scope:' || s.app_user_id::text || ':' || s.scope_kind || ':' || coalesce(s.team_id::text, s.app_user_id::text) as k
+          from public.direct_entry_scope_grants s
+         where s.app_user_id = p_target_app_user_id
+      ) keys
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  perform a.assignment_id
+    from public.direct_entry_team_leader_assignments a
+   where a.leader_app_user_id = p_target_app_user_id
+      or (cardinality(v_team_ids) > 0 and a.team_id = any(v_team_ids))
+   order by a.assignment_id asc
+   for update;
+
+  perform g.grant_id
+    from public.direct_entry_capability_grants g
+   where g.app_user_id = p_target_app_user_id
+   order by g.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct 'capability:' || p_target_app_user_id::text || ':' || caps.capability as k
+      from (
+        select g.capability
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = p_target_app_user_id
+        union
+        select rc.capability
+          from public.authz_account_role_assignments ara
+          join public.authz_role_capabilities rc on rc.role_code = ara.role_code
+         where ara.app_user_id = p_target_app_user_id
+           and ara.ended_at is null
+        union
+        select dg.capability
+          from public.authz_direct_capability_grants dg
+         where dg.app_user_id = p_target_app_user_id
+           and dg.ended_at is null
+        union
+        select unnest(array[
+          'team_manager_assign',
+          'report_analytics_view',
+          'report_assign',
+          'report_review',
+          'report_view'
+        ]::text[]) as capability
+      ) caps
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
   v_before := public.direct_entry_app_user_snapshot(
     p_target_app_user_id, v_target.enabled, p_actor_app_user_id
   );
@@ -3171,7 +3725,6 @@ begin
        where l.app_user_id = p_target_app_user_id
          and l.suspended_by_account_disable = true
        order by l.link_id
-       for update of l, r
     loop
       if (v_rl.valid_to is null or v_rl.valid_to > v_today)
          and v_rl.valid_from <= v_today
@@ -3206,7 +3759,6 @@ begin
        where a.leader_app_user_id = p_target_app_user_id
          and a.suspended_by_account_disable = true
        order by a.assignment_id
-       for update of a, t, r
     loop
       v_can_restore_tl := (
         v_tla.valid_to is null
@@ -3258,6 +3810,11 @@ begin
            and s.suspended_by_account_disable = true
            and s.valid_to is null;
 
+        update public.direct_entry_team_leader_assignments a
+           set is_current = true,
+               suspended_by_account_disable = false
+         where a.assignment_id = v_tla.assignment_id;
+
         update public.direct_entry_capability_grants g
            set is_current = true,
                suspended_by_account_disable = false
@@ -3266,11 +3823,6 @@ begin
            and g.suspended_by_account_disable = true
            and g.valid_from = v_tla.valid_from
            and g.valid_to is null;
-
-        update public.direct_entry_team_leader_assignments a
-           set is_current = true,
-               suspended_by_account_disable = false
-         where a.assignment_id = v_tla.assignment_id;
       else
         perform pg_catalog.set_config('direct_entry.team_leader_marker', 'on', true);
 
@@ -3284,6 +3836,12 @@ begin
            and s.suspended_by_account_disable = true
            and s.valid_from <= v_tla.valid_from;
 
+        update public.direct_entry_team_leader_assignments a
+           set is_current = false,
+               suspended_by_account_disable = false,
+               valid_to = coalesce(a.valid_to, greatest(v_today, a.valid_from))
+         where a.assignment_id = v_tla.assignment_id;
+
         update public.direct_entry_capability_grants g
            set is_current = false,
                suspended_by_account_disable = false,
@@ -3292,12 +3850,6 @@ begin
            and g.capability = 'team_manager_assign'
            and g.suspended_by_account_disable = true
            and g.valid_from = v_tla.valid_from;
-
-        update public.direct_entry_team_leader_assignments a
-           set is_current = false,
-               suspended_by_account_disable = false,
-               valid_to = coalesce(a.valid_to, greatest(v_today, a.valid_from))
-         where a.assignment_id = v_tla.assignment_id;
 
         perform pg_catalog.set_config('direct_entry.team_leader_marker', coalesce(v_prev_marker, ''), true);
       end if;
@@ -3468,7 +4020,10 @@ declare
   v_changed_fields text[] := array[
     'team_leader_assignment', 'team_scope', 'team_manager_assign'
   ];
-  v_actor_ids uuid[];
+  v_write_user_ids uuid[];
+  v_all_user_ids uuid[];
+  v_locked_recruiter_ids uuid[];
+  v_locked_id uuid;
   v_lock_key text;
   v_post_team_assignment_count integer;
   v_post_target_team_assignment_count integer;
@@ -3508,6 +4063,92 @@ begin
     raise exception 'idempotency key required' using errcode = '22023';
   end if;
 
+  -- Phase 1: Unlocked candidate discovery before acquiring U -> R -> T locks
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_write_user_ids
+    from (
+      select p_target_leader_app_user_id as uid
+      union
+      select a.leader_app_user_id as uid
+        from public.direct_entry_team_leader_assignments a
+       where a.team_id = p_team_id
+         and (
+           a.is_current
+           or a.suspended_by_account_disable
+           or a.valid_to is null
+           or a.valid_to >= v_today
+           or exists (
+             select 1
+               from public.direct_entry_capability_grants g
+              where g.app_user_id = a.leader_app_user_id
+                and g.capability = 'team_manager_assign'
+                and g.is_current
+           )
+         )
+    ) users
+   where uid is not null;
+
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union
+      select unnest(v_write_user_ids) as uid
+    ) all_users
+   where uid is not null;
+
+  -- Phase 2: Canonical Tier 2 (U: FOR UPDATE targets, FOR SHARE pure operator)
+  for v_locked_id in
+    select u.app_user_id
+      from public.direct_entry_app_users u
+     where u.app_user_id = any(v_all_user_ids)
+     order by u.app_user_id asc
+  loop
+    if v_locked_id = any(v_write_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_locked_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_locked_id
+       for share;
+    end if;
+  end loop;
+
+  -- Re-assert operator authority under U lock
+  p_authority := public.direct_entry_assert_catalog_operator(p_auth_subject, p_app_user_id);
+
+  -- Canonical Tier 3 (R: affected recruiters in ascending ID order)
+  select coalesce(array_agg(distinct rid order by rid), array[]::uuid[])
+    into v_locked_recruiter_ids
+    from (
+      select a.leader_recruiter_id as rid
+        from public.direct_entry_team_leader_assignments a
+       where (a.team_id = p_team_id or a.leader_app_user_id = any(v_write_user_ids))
+         and (
+           a.is_current
+           or a.suspended_by_account_disable
+           or a.valid_to is null
+           or a.valid_to >= v_today
+         )
+      union
+      select l.recruiter_id as rid
+        from public.direct_entry_app_user_recruiter_links l
+       where l.app_user_id = any(v_write_user_ids)
+    ) rids
+   where rid is not null;
+
+  if cardinality(v_locked_recruiter_ids) > 0 then
+    perform r.recruiter_id
+      from public.recruiters r
+     where r.recruiter_id = any(v_locked_recruiter_ids)
+     order by r.recruiter_id asc
+     for update;
+  end if;
+
+  -- Canonical Tier 4 (T: target team)
   select t.* into v_team
     from public.teams t
    where t.team_id = p_team_id
@@ -3563,14 +4204,154 @@ begin
     raise exception 'target team is inactive' using errcode = '23514';
   end if;
 
-  update public.direct_entry_team_leader_assignments a
-     set is_current = false,
-         suspended_by_account_disable = false
-   where a.team_id = p_team_id
-     and a.is_current
-     and a.valid_to is not null
-     and a.valid_to <= v_today;
+  -- Post-lock completeness guard: abort cleanly instead of upgrading parent locks out of order
+  if exists (
+    select 1
+      from public.direct_entry_team_leader_assignments a
+     where a.team_id = p_team_id
+       and (
+         a.is_current
+         or a.suspended_by_account_disable
+         or a.valid_to is null
+         or a.valid_to >= v_today
+         or exists (
+           select 1
+             from public.direct_entry_capability_grants g
+            where g.app_user_id = a.leader_app_user_id
+              and g.capability = 'team_manager_assign'
+              and g.is_current
+         )
+       )
+       and (
+         not (a.leader_app_user_id = any(v_write_user_ids))
+         or not (a.leader_recruiter_id = any(v_locked_recruiter_ids))
+       )
+  ) or exists (
+    select 1
+      from public.direct_entry_app_user_recruiter_links l
+     where l.app_user_id = any(v_write_user_ids)
+       and not (l.recruiter_id = any(v_locked_recruiter_ids))
+  ) then
+    raise exception 'team version conflict' using errcode = 'PT409';
+  end if;
 
+  -- Canonical child tiers: RPM -> RTM -> URL -> SG -> TLA -> CG
+  if cardinality(v_locked_recruiter_ids) > 0 then
+    perform m.membership_id
+      from public.recruiter_provider_memberships m
+     where m.recruiter_id = any(v_locked_recruiter_ids)
+     order by m.membership_id asc
+     for update;
+
+    for v_lock_key in
+      select 'provider:' || rid::text as k
+        from unnest(v_locked_recruiter_ids) as rid
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+
+    perform m.membership_id
+      from public.recruiter_team_memberships m
+     where m.recruiter_id = any(v_locked_recruiter_ids)
+     order by m.membership_id asc
+     for update;
+
+    for v_lock_key in
+      select 'team-membership:' || rid::text as k
+        from unnest(v_locked_recruiter_ids) as rid
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+  end if;
+
+  if cardinality(v_write_user_ids) > 0 or cardinality(v_locked_recruiter_ids) > 0 then
+    perform l.link_id
+      from public.direct_entry_app_user_recruiter_links l
+     where (cardinality(v_write_user_ids) > 0 and l.app_user_id = any(v_write_user_ids))
+        or (cardinality(v_locked_recruiter_ids) > 0 and l.recruiter_id = any(v_locked_recruiter_ids))
+     order by l.link_id asc
+     for update;
+
+    for v_lock_key in
+      select distinct 'recruiter-link:' || uid::text as k
+        from unnest(coalesce(v_write_user_ids, array[]::uuid[])) as uid
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+
+    for v_lock_key in
+      select distinct 'recruiter-link-recruiter:' || rid::text as k
+        from unnest(coalesce(v_locked_recruiter_ids, array[]::uuid[])) as rid
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+  end if;
+
+  perform s.grant_id
+    from public.direct_entry_scope_grants s
+   where (cardinality(v_write_user_ids) > 0 and s.app_user_id = any(v_write_user_ids) and s.scope_kind = 'team')
+      or s.team_id = p_team_id
+   order by s.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct k
+      from (
+        select 'scope:' || uid::text || ':team:' || p_team_id::text as k
+          from unnest(coalesce(v_write_user_ids, array[]::uuid[])) as uid
+        union
+        select 'scope:' || s.app_user_id::text || ':' || s.scope_kind || ':' || coalesce(s.team_id::text, s.app_user_id::text) as k
+          from public.direct_entry_scope_grants s
+         where (cardinality(v_write_user_ids) > 0 and s.app_user_id = any(v_write_user_ids) and s.scope_kind = 'team')
+            or s.team_id = p_team_id
+      ) keys
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  perform a.assignment_id
+    from public.direct_entry_team_leader_assignments a
+   where a.team_id = p_team_id
+      or (cardinality(v_write_user_ids) > 0 and a.leader_app_user_id = any(v_write_user_ids))
+   order by a.assignment_id asc
+   for update;
+
+  if cardinality(v_write_user_ids) > 0 then
+    perform g.grant_id
+      from public.direct_entry_capability_grants g
+     where g.app_user_id = any(v_write_user_ids)
+     order by g.grant_id asc
+     for update;
+
+    for v_lock_key in
+      select distinct 'capability:' || caps.uid::text || ':' || caps.capability as k
+        from (
+          select g.app_user_id as uid, g.capability
+            from public.direct_entry_capability_grants g
+           where g.app_user_id = any(v_write_user_ids)
+          union
+          select uid, cap as capability
+            from unnest(v_write_user_ids) as uid
+            cross join unnest(array[
+              'team_manager_assign',
+              'report_analytics_view',
+              'report_assign',
+              'report_review',
+              'report_view'
+            ]::text[]) as cap
+        ) caps
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+  end if;
+
+  -- Phase 3: Materialize expired/effective state under full locks (SG -> TLA -> CG)
   update public.direct_entry_scope_grants s
      set is_current = false,
          suspended_by_account_disable = false
@@ -3579,6 +4360,14 @@ begin
      and s.is_current
      and s.valid_to is not null
      and s.valid_to <= v_today;
+
+  update public.direct_entry_team_leader_assignments a
+     set is_current = false,
+         suspended_by_account_disable = false
+   where a.team_id = p_team_id
+     and a.is_current
+     and a.valid_to is not null
+     and a.valid_to <= v_today;
 
   update public.direct_entry_capability_grants g
      set is_current = false,
@@ -3597,13 +4386,6 @@ begin
      );
 
   -- D10: NEVER reactivate suspended_by_account_disable rows here
-  update public.direct_entry_team_leader_assignments a
-     set is_current = true
-   where a.team_id = p_team_id
-     and not a.is_current
-     and not a.suspended_by_account_disable
-     and public.direct_entry__internal_team_leader_assignment_effective(a.assignment_id, v_today);
-
   update public.direct_entry_scope_grants s
      set is_current = true
    where s.scope_kind = 'team'
@@ -3611,6 +4393,13 @@ begin
      and not s.is_current
      and not s.suspended_by_account_disable
      and public.direct_entry__internal_team_scope_grant_effective(s.grant_id, v_today);
+
+  update public.direct_entry_team_leader_assignments a
+     set is_current = true
+   where a.team_id = p_team_id
+     and not a.is_current
+     and not a.suspended_by_account_disable
+     and public.direct_entry__internal_team_leader_assignment_effective(a.assignment_id, v_today);
 
   update public.direct_entry_capability_grants g
      set is_current = true
@@ -3700,17 +4489,6 @@ begin
     end if;
   end if;
 
-  v_actor_ids := array_remove(array[
-    case when v_old_count = 1 then v_old.leader_app_user_id end,
-    p_target_leader_app_user_id,
-    v_previous.leader_app_user_id
-  ]::uuid[], null);
-
-  perform u.app_user_id
-    from public.direct_entry_app_users u
-   where u.app_user_id = any(v_actor_ids)
-   order by u.app_user_id
-   for update;
   if p_operation = 'designate' then
     select u.enabled into v_candidate_user_enabled
       from public.direct_entry_app_users u
@@ -3718,52 +4496,7 @@ begin
     if not found or not coalesce(v_candidate_user_enabled, false) then
       raise exception 'target leader account is not enabled' using errcode = '42501';
     end if;
-  end if;
-  perform s.grant_id
-    from public.direct_entry_scope_grants s
-   where s.app_user_id = any(v_actor_ids)
-     and s.scope_kind = 'team'
-   order by s.app_user_id, s.grant_id
-   for update;
-  perform g.grant_id
-    from public.direct_entry_capability_grants g
-   where g.app_user_id = any(v_actor_ids)
-     and g.capability = 'team_manager_assign'
-   order by g.app_user_id, g.grant_id
-   for update;
 
-  for v_lock_key in
-    select distinct key
-      from unnest(array[
-        case when v_old_count = 1 then
-          'capability:' || v_old.leader_app_user_id::text || ':team_manager_assign' end,
-        case when v_old_count = 1 then
-          'scope:' || v_old.leader_app_user_id::text || ':team:' || p_team_id::text end,
-        case when v_previous.assignment_id is not null then
-          'capability:' || v_previous.leader_app_user_id::text || ':team_manager_assign' end,
-        case when v_previous.assignment_id is not null then
-          'scope:' || v_previous.leader_app_user_id::text || ':team:' || p_team_id::text end,
-        case when v_previous.assignment_id is not null then
-          'recruiter-link:' || v_previous.leader_app_user_id::text end,
-        case when p_operation = 'designate' then
-          'capability:' || p_target_leader_app_user_id::text || ':team_manager_assign' end,
-        case when p_operation = 'designate' then
-          'scope:' || p_target_leader_app_user_id::text || ':team:' || p_team_id::text end,
-        case when p_operation = 'designate' then
-          'recruiter-link:' || p_target_leader_app_user_id::text end
-      ]) as keys(key)
-     where key is not null
-     order by key
-  loop
-    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
-  end loop;
-
-  if p_operation = 'designate' then
-    perform l.link_id
-      from public.direct_entry_app_user_recruiter_links l
-     where l.app_user_id = p_target_leader_app_user_id
-     order by l.link_id
-     for update;
     select count(*)::int,
            count(*) filter (where l.verified)::int,
            (array_agg(l.recruiter_id order by l.link_id))[1]
@@ -3786,28 +4519,11 @@ begin
 
     select r.active into v_recruiter_active
       from public.recruiters r
-     where r.recruiter_id = v_recruiter_id
-     for update;
+     where r.recruiter_id = v_recruiter_id;
     if not found or not coalesce(v_recruiter_active, false) then
       raise exception 'target recruiter is not active' using errcode = '42501';
     end if;
 
-    for v_lock_key in
-      select key
-        from unnest(array[
-          'provider:' || v_recruiter_id::text,
-          'team-membership:' || v_recruiter_id::text
-        ]) as keys(key)
-       order by key
-    loop
-      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
-    end loop;
-
-    perform m.membership_id
-      from public.recruiter_provider_memberships m
-     where m.recruiter_id = v_recruiter_id
-     order by m.membership_id
-     for update;
     select count(*)::int,
            count(*) filter (
              where m.provider_type = 'hrp' and m.vendor_id is null
@@ -3821,11 +4537,6 @@ begin
         using errcode = '42501';
     end if;
 
-    perform m.membership_id
-      from public.recruiter_team_memberships m
-     where m.recruiter_id = v_recruiter_id
-     order by m.membership_id
-     for update;
     select count(*)::int,
            count(*) filter (where m.team_id = p_team_id)::int
       into v_membership_count, v_matching_membership_count
@@ -3895,11 +4606,6 @@ begin
   end if;
 
   if v_old_count = 1 then
-    perform a.assignment_id
-      from public.direct_entry_team_leader_assignments a
-     where a.assignment_id = v_old.assignment_id
-     for update;
-
     select count(*)::int, (array_agg(s.grant_id order by s.grant_id))[1]
       into v_scope_count, v_scope_grant_id
       from public.direct_entry_scope_grants s
@@ -3956,11 +4662,6 @@ begin
   end if;
 
   if p_operation = 'revoke' and v_previous.assignment_id is not null then
-    perform a.assignment_id
-      from public.direct_entry_team_leader_assignments a
-     where a.assignment_id = v_previous.assignment_id
-     for update;
-
     select count(*)::int, (array_agg(s.grant_id order by s.grant_id))[1]
       into v_prev_scope_grant_count, v_prev_scope_grant_id
       from public.direct_entry_scope_grants s
@@ -4068,21 +4769,21 @@ begin
     end if;
   end if;
 
+  -- Close outgoing TL in canonical SG -> TLA -> CG order (and clear suspended_by_account_disable)
   if v_old_count = 1 then
     if p_effective_date = v_old.valid_from then
       perform set_config('direct_entry.team_leader_marker', 'on', true);
     end if;
-    -- Close outgoing TL cleanly and clear suspended_by_account_disable (even if target was disabled!)
-    update public.direct_entry_team_leader_assignments
-       set valid_to = p_effective_date,
-           is_current = (p_effective_date > v_old.valid_from and v_old.valid_from <= v_today and v_today < p_effective_date and exists (select 1 from public.direct_entry_app_users u where u.app_user_id = v_old.leader_app_user_id and u.enabled)),
-           suspended_by_account_disable = false
-     where assignment_id = v_old.assignment_id;
     update public.direct_entry_scope_grants
        set valid_to = p_effective_date,
            is_current = (p_effective_date > valid_from and valid_from <= v_today and v_today < p_effective_date and exists (select 1 from public.direct_entry_app_users u where u.app_user_id = v_old.leader_app_user_id and u.enabled)),
            suspended_by_account_disable = false
      where grant_id = v_scope_grant_id;
+    update public.direct_entry_team_leader_assignments
+       set valid_to = p_effective_date,
+           is_current = (p_effective_date > v_old.valid_from and v_old.valid_from <= v_today and v_today < p_effective_date and exists (select 1 from public.direct_entry_app_users u where u.app_user_id = v_old.leader_app_user_id and u.enabled)),
+           suspended_by_account_disable = false
+     where assignment_id = v_old.assignment_id;
     update public.direct_entry_capability_grants
        set valid_to = p_effective_date,
            is_current = (p_effective_date > valid_from and valid_from <= v_today and v_today < p_effective_date and exists (select 1 from public.direct_entry_app_users u where u.app_user_id = v_old.leader_app_user_id and u.enabled)),
@@ -4091,16 +4792,16 @@ begin
   end if;
 
   if v_restore then
-    update public.direct_entry_team_leader_assignments
-       set valid_to = null,
-           is_current = (v_previous.valid_from <= v_today),
-           suspended_by_account_disable = false
-     where assignment_id = v_previous.assignment_id;
     update public.direct_entry_scope_grants
        set valid_to = null,
            is_current = (valid_from <= v_today),
            suspended_by_account_disable = false
      where grant_id = v_prev_scope_grant_id;
+    update public.direct_entry_team_leader_assignments
+       set valid_to = null,
+           is_current = (v_previous.valid_from <= v_today),
+           suspended_by_account_disable = false
+     where assignment_id = v_previous.assignment_id;
     update public.direct_entry_capability_grants
        set valid_to = null,
            is_current = (valid_from <= v_today),
@@ -4109,15 +4810,15 @@ begin
   end if;
 
   if p_operation = 'designate' then
+    insert into public.direct_entry_scope_grants
+      (app_user_id, scope_kind, team_id, valid_from, is_current, suspended_by_account_disable)
+    values
+      (p_target_leader_app_user_id, 'team', p_team_id, p_effective_date, (p_effective_date <= v_today), false);
     insert into public.direct_entry_team_leader_assignments
       (team_id, leader_app_user_id, leader_recruiter_id, valid_from, is_current, suspended_by_account_disable)
     values
       (p_team_id, p_target_leader_app_user_id, v_recruiter_id, p_effective_date, (p_effective_date <= v_today), false)
     returning * into v_new;
-    insert into public.direct_entry_scope_grants
-      (app_user_id, scope_kind, team_id, valid_from, is_current, suspended_by_account_disable)
-    values
-      (p_target_leader_app_user_id, 'team', p_team_id, p_effective_date, (p_effective_date <= v_today), false);
     insert into public.direct_entry_capability_grants
       (app_user_id, capability, valid_from, is_current, suspended_by_account_disable)
     values
@@ -4667,6 +5368,8 @@ declare
   v_recruiter public.recruiters;
   v_acct_person_id uuid := null;
   v_rec_person_id uuid := null;
+  v_current_acct_person_id uuid := null;
+  v_current_rec_person_id uuid := null;
   v_lock_person_id uuid;
   v_acct_person public.organization_persons;
   v_rec_person public.organization_persons;
@@ -4757,17 +5460,6 @@ begin
     end if;
   end loop;
 
-  for v_lock_key in
-    select k
-      from unnest(array[
-        'recruiter-link:' || p_account_ref::text,
-        'recruiter-link-recruiter:' || p_recruiter_id::text
-      ]) as t(k)
-     order by k
-  loop
-    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
-  end loop;
-
   select u.* into v_account
     from public.direct_entry_app_users u
    where u.app_user_id = p_account_ref
@@ -4783,26 +5475,112 @@ begin
   select r.* into v_recruiter
     from public.recruiters r
    where r.recruiter_id = p_recruiter_id
-     and exists (
-       select 1
-         from public.recruiter_provider_memberships m
-        where m.recruiter_id = r.recruiter_id
-          and m.provider_type = 'hrp'
-          and m.vendor_id is null
-          and (m.is_current or (not r.active and m.valid_to is null
-            and (select count(*) from public.recruiter_provider_memberships x
-                  where x.recruiter_id = r.recruiter_id and x.valid_to is null) = 1))
-     )
    for update;
   if not found then
     raise exception 'personnel not found' using errcode = 'P0002';
   end if;
 
+  -- Re-verify person links under lock to avoid stale unlocked discovery
+  select l.person_id
+    into v_current_acct_person_id
+    from public.organization_account_person_links l
+   where l.app_user_id = p_account_ref
+     and l.ended_at is null
+   limit 1;
+
+  select p.person_id
+    into v_current_rec_person_id
+    from public.organization_persons p
+   where p.recruiter_id = p_recruiter_id
+   limit 1;
+
+  if v_current_acct_person_id is distinct from v_acct_person_id
+     or v_current_rec_person_id is distinct from v_rec_person_id then
+    raise exception 'RECRUITER_IDENTITY_CONFLICT' using errcode = 'PT409';
+  end if;
+
   perform m.membership_id
     from public.recruiter_provider_memberships m
    where m.recruiter_id = p_recruiter_id
-   order by m.membership_id
+   order by m.membership_id asc
    for update;
+
+  perform pg_advisory_xact_lock(hashtextextended('provider:' || p_recruiter_id::text, 0));
+
+  if not exists (
+    select 1
+      from public.recruiter_provider_memberships m
+     where m.recruiter_id = v_recruiter.recruiter_id
+       and m.provider_type = 'hrp'
+       and m.vendor_id is null
+       and (m.is_current or (not v_recruiter.active and m.valid_to is null
+         and (select count(*) from public.recruiter_provider_memberships x
+               where x.recruiter_id = v_recruiter.recruiter_id and x.valid_to is null) = 1))
+  ) then
+    raise exception 'personnel not found' using errcode = 'P0002';
+  end if;
+
+  perform l.link_id
+    from public.direct_entry_app_user_recruiter_links l
+   where l.app_user_id = p_account_ref
+      or l.recruiter_id = p_recruiter_id
+   order by l.link_id asc
+   for update;
+
+  perform pg_advisory_xact_lock(hashtextextended('recruiter-link:' || p_account_ref::text, 0));
+  perform pg_advisory_xact_lock(hashtextextended('recruiter-link-recruiter:' || p_recruiter_id::text, 0));
+
+  perform s.grant_id
+    from public.direct_entry_scope_grants s
+   where s.app_user_id = p_account_ref
+     and s.scope_kind in ('own', 'all')
+   order by s.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct k
+      from unnest(array[
+        'scope:' || p_account_ref::text || ':all:' || p_account_ref::text,
+        'scope:' || p_account_ref::text || ':own:' || p_account_ref::text
+      ]) as t(k)
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  perform g.grant_id
+    from public.direct_entry_capability_grants g
+   where g.app_user_id = p_account_ref
+   order by g.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct 'capability:' || p_account_ref::text || ':' || caps.capability as k
+      from (
+        select g.capability
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = p_account_ref
+        union
+        select rc.capability
+          from public.authz_account_role_assignments ara
+          join public.authz_role_capabilities rc on rc.role_code = ara.role_code
+         where ara.app_user_id = p_account_ref
+           and ara.ended_at is null
+        union
+        select dg.capability
+          from public.authz_direct_capability_grants dg
+         where dg.app_user_id = p_account_ref
+           and dg.ended_at is null
+        union
+        select unnest(array[
+          'entry_create', 'entry_own', 'submission_create', 'change_request_create',
+          'employment_status.request', 'document_upload', 'document_view'
+        ]::text[]) as capability
+      ) caps
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
 
   if v_acct_person.person_id is not null and v_rec_person.person_id is not null
      and v_acct_person.person_id <> v_rec_person.person_id then
@@ -4896,6 +5674,48 @@ begin
     p_account_ref, p_recruiter_id, true, v_today, true
   ) returning link_id into v_link_id;
 
+  if not exists (
+    select 1
+      from public.direct_entry_scope_grants g
+     where g.app_user_id = p_account_ref
+       and g.scope_kind = 'own'
+       and g.is_current
+  ) then
+    if exists (
+      select 1
+        from public.direct_entry_scope_grants g
+       where g.app_user_id = p_account_ref
+         and g.scope_kind = 'own'
+         and g.valid_from <= v_today
+         and (g.valid_to is null or v_today < g.valid_to)
+    ) then
+      update public.direct_entry_scope_grants g
+         set is_current = true
+       where g.app_user_id = p_account_ref
+         and g.scope_kind = 'own'
+         and g.valid_from <= v_today
+         and (g.valid_to is null or v_today < g.valid_to);
+    else
+      select min(g.valid_from)
+        into v_next_scope_start
+        from public.direct_entry_scope_grants g
+       where g.app_user_id = p_account_ref
+         and g.scope_kind = 'own'
+         and g.valid_from > v_today;
+      insert into public.direct_entry_scope_grants (
+        app_user_id, scope_kind, valid_from, valid_to, is_current
+      ) values (
+        p_account_ref, 'own', v_today, v_next_scope_start, true
+      );
+    end if;
+    insert into public.direct_entry_audit_events (
+      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
+    ) values (
+      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
+      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
+    );
+  end if;
+
   foreach v_capability in array array[
     'entry_create', 'entry_own', 'submission_create', 'change_request_create',
     'employment_status.request', 'document_upload', 'document_view'
@@ -4943,48 +5763,6 @@ begin
       );
     end if;
   end loop;
-
-  if not exists (
-    select 1
-      from public.direct_entry_scope_grants g
-     where g.app_user_id = p_account_ref
-       and g.scope_kind = 'own'
-       and g.is_current
-  ) then
-    if exists (
-      select 1
-        from public.direct_entry_scope_grants g
-       where g.app_user_id = p_account_ref
-         and g.scope_kind = 'own'
-         and g.valid_from <= v_today
-         and (g.valid_to is null or v_today < g.valid_to)
-    ) then
-      update public.direct_entry_scope_grants g
-         set is_current = true
-       where g.app_user_id = p_account_ref
-         and g.scope_kind = 'own'
-         and g.valid_from <= v_today
-         and (g.valid_to is null or v_today < g.valid_to);
-    else
-      select min(g.valid_from)
-        into v_next_scope_start
-        from public.direct_entry_scope_grants g
-       where g.app_user_id = p_account_ref
-         and g.scope_kind = 'own'
-         and g.valid_from > v_today;
-      insert into public.direct_entry_scope_grants (
-        app_user_id, scope_kind, valid_from, valid_to, is_current
-      ) values (
-        p_account_ref, 'own', v_today, v_next_scope_start, true
-      );
-    end if;
-    insert into public.direct_entry_audit_events (
-      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
-    ) values (
-      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
-      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
-    );
-  end if;
 
   v_auto_reason := left(coalesce(p_reason, 'Auto-granted upon recruiter account link'), 500);
   if pg_catalog.length(pg_catalog.btrim(v_auto_reason)) < 3 then
@@ -5372,7 +6150,7 @@ begin
           'CONTEXTUAL'::text as assignment_mode,
           'CONTEXT_PROJECT'::text as scope_kind,
           pma.project_id as scope_id,
-          null::text as assignment_id,
+          pma.assignment_id::text as assignment_id,
           false as is_protected,
           false as can_revoke,
           null::text as cannot_revoke_reason
@@ -5385,6 +6163,13 @@ begin
          and rl.verified = true
          and rl.is_current = true
          and (rl.valid_to is null or v_today < rl.valid_to)
+        where pma.is_current = true
+          and pma.revoked_at is null
+          and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
+          and pma.valid_from <= v_today
+          and rl.valid_from <= v_today
+          and (rl.valid_to > rl.valid_from or rl.valid_to is null)
+          and public.direct_entry_actor_is_assigned_project_manager(v_app_user_id, pr.project_id)
         union all
         select
           8 as sort_order,
