@@ -32,6 +32,7 @@ import {
 } from "./lib/wp3b-backfill-manifest.mjs";
 import {
   assertSafeBackfillConnectionTarget,
+  normalizeIsoDateString,
   runQ1HrpRecruiterAudit,
   runWp3bBackfill,
 } from "./wp3b-backfill-person-account-org.mjs";
@@ -1585,6 +1586,21 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
   await checkSync("Tên Từ Personnel RPC");
 
   await db.close();
+});
+
+test("PostgreSQL DATE replay preserves its calendar day across client timezones", () => {
+  const previous = process.env.TZ;
+  try {
+    for (const timezone of ["Asia/Ho_Chi_Minh", "Pacific/Kiritimati", "America/Los_Angeles", "UTC"]) {
+      process.env.TZ = timezone;
+      assert.equal(normalizeIsoDateString(new Date(2026, 9, 6)), "2026-10-06");
+      assert.equal(normalizeIsoDateString("2026-10-06"), "2026-10-06");
+    }
+    assert.equal(normalizeIsoDateString(null), null);
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
 });
 
 test("Legacy organization helper ACL drift is repaired before WP3B migration", async () => {

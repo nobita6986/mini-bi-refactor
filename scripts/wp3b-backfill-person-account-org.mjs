@@ -37,10 +37,11 @@ function deterministicUuidFromHex(hex) {
   ].join("-");
 }
 
-function normalizeIsoDateString(value) {
+export function normalizeIsoDateString(value) {
   if (value === null || value === undefined) return null;
   if (value instanceof Date) {
-    return value.toISOString().slice(0, 10);
+    // PostgreSQL DATE uses the local calendar; UTC formatting can change its day.
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
   }
   const s = String(value).trim();
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
