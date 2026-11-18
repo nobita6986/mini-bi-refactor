@@ -3,7 +3,10 @@ import { redirect } from "next/navigation";
 import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { TeamCatalogManager } from "@/components/admin/team-catalog-manager";
-import { decideTeamCatalogPageAccess } from "@/lib/auth/direct-entry-page-access";
+import {
+  canManageTeamLeadersFromActor,
+  decideTeamCatalogPageAccess,
+} from "@/lib/auth/direct-entry-page-access";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +25,10 @@ export default async function TeamCatalogPage() {
     case "NOT_FOUND":
       return <AccessDenied />;
     case "ALLOW":
-      return <TeamCatalogManager />;
+      return (
+        <TeamCatalogManager
+          canManageTeamLeaders={canManageTeamLeadersFromActor(actor)}
+        />
+      );
   }
 }

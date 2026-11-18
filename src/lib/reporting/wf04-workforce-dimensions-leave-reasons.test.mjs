@@ -920,21 +920,30 @@ test("WF-04 Hotfix (6): Tab navigation order, content split (Báo cáo tổng qu
 });
 
 test("WF-04 Hotfix (7): Authority helper, overview/project_page parsers, and paged attention insights", async () => {
-  // 1. canViewDeepWorkforceReport authority matrix
-  const makeActor = (scopes) => ({
+  // 1. canViewDeepWorkforceReport authority matrix (paired @ ALL)
+  const makeActor = (scopes, effective_grants) => ({
     ok: true,
     actor: {
       auth_subject: uuid(900),
       app_user_id: uuid(901),
       display_name: "Test User",
       enabled: true,
-      capabilities: ["reporting_view"],
+      capabilities: ["entry_admin"],
       scopes,
+      effective_grants: effective_grants ?? (scopes.some((s) => s.kind === "all")
+        ? [{ capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "LEGACY_BRIDGE", source_id: uuid(902) }]
+        : []),
       self_recruiter_suggestion: null,
       session: { provider: "supabase", verification: "getUser", authenticated_at: null },
     },
   });
   assert.equal(canViewDeepWorkforceReport(makeActor([{ kind: "all", reference: "all" }])), true);
+  assert.equal(
+    canViewDeepWorkforceReport(
+      makeActor([{ kind: "all", reference: "all" }], [{ capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "LEGACY_BRIDGE", source_id: uuid(902) }]),
+    ),
+    false,
+  );
   assert.equal(canViewDeepWorkforceReport(makeActor([{ kind: "team", reference: uuid(10) }])), false);
   assert.equal(canViewDeepWorkforceReport(makeActor([{ kind: "own", reference: "own" }])), false);
   assert.equal(canViewDeepWorkforceReport(null), false);

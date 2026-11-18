@@ -14,14 +14,29 @@ import {
   visibleAdminSections,
 } from "./admin-navigation.ts";
 
-const fullAdmin = {
-  capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
-  scopes: [{ kind: "all" }],
-};
-const accountingCatalog = {
-  capabilities: ["catalog_master_manage"],
-  scopes: [{ kind: "all" }],
-};
+function makeNavActor(capabilities, scopes) {
+  const effective_grants = [];
+  for (const s of scopes) {
+    const scope_kind = s.kind === "all" ? "ALL" : s.kind === "team" ? "CONTEXT_TEAM" : "OWN";
+    const scope_id = s.kind === "team" ? (s.reference ?? "team-1") : null;
+    for (const cap of capabilities) {
+      effective_grants.push({
+        capability: cap,
+        scope_kind,
+        scope_id,
+        source_type: "LEGACY_BRIDGE",
+        source_id: "00000000-0000-4000-8000-000000000001",
+      });
+    }
+  }
+  return { capabilities, scopes, effective_grants };
+}
+
+const fullAdmin = makeNavActor(
+  ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+  [{ kind: "all" }],
+);
+const accountingCatalog = makeNavActor(["catalog_master_manage"], [{ kind: "all" }]);
 
 test("Admin authority predicate: Full Admin and Accounting catalog operator allow", () => {
   assert.equal(adminSecurityNavPredicate(fullAdmin), true);
@@ -31,10 +46,27 @@ test("Admin authority predicate: Full Admin and Accounting catalog operator allo
 });
 
 test("Admin authority predicate fails closed without effective all or canonical capability", () => {
-  assert.equal(adminAreaNavPredicate({ capabilities: ["catalog_master_manage"], scopes: [{ kind: "team" }] }), false);
-  assert.equal(adminAreaNavPredicate({ capabilities: ["entry_admin"], scopes: [{ kind: "all" }] }), false);
-  assert.equal(adminAreaNavPredicate({ capabilities: ["team_manager_assign"], scopes: [{ kind: "all" }] }), false);
-  assert.equal(adminAreaNavPredicate({ capabilities: [], scopes: [{ kind: "all" }] }), false);
+  assert.equal(adminAreaNavPredicate(makeNavActor(["catalog_master_manage"], [{ kind: "team" }])), false);
+  assert.equal(adminAreaNavPredicate(makeNavActor(["entry_admin"], [{ kind: "all" }])), false);
+  assert.equal(adminAreaNavPredicate(makeNavActor(["team_manager_assign"], [{ kind: "all" }])), false);
+  assert.equal(adminAreaNavPredicate(makeNavActor([], [{ kind: "all" }])), false);
+  // Cross-grant without paired @ ALL must fail closed (WP5B-2 Group A)
+  assert.equal(
+    adminAreaNavPredicate({
+      capabilities: ["catalog_master_manage", "entry_own"],
+      scopes: [{ kind: "own" }, { kind: "team" }],
+      effective_grants: [
+        {
+          capability: "catalog_master_manage",
+          scope_kind: "OWN",
+          scope_id: null,
+          source_type: "LEGACY_BRIDGE",
+          source_id: "00000000-0000-4000-8000-000000000001",
+        },
+      ],
+    }),
+    false,
+  );
 });
 
 test("one top-level /admin entry is independently authorized and is not a Direct Entry route", () => {
@@ -89,15 +121,15 @@ test("Admin internal navigation exposes mapping, departments, organization perso
   const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "accounts", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
   const fullAdminWithoutHistory = serializableSections.filter(({ id }) => id !== "worker-edit-history");
-  const allowlistedAdmin = {
-    capabilities: [...fullAdmin.capabilities, "worker_edit_history_view"],
-    scopes: [{ kind: "all" }],
-  };
+  const allowlistedAdmin = makeNavActor(
+    [...fullAdmin.capabilities, "worker_edit_history_view"],
+    [{ kind: "all" }],
+  );
   // Accounting (catalog operator) sees catalog sections, never provinces, industrial-parks, departments, accounts, project mappings, attendance, or worker edit history.
   assert.deepEqual(visibleAdminSections(accountingCatalog), catalogOnly);
   // Canonical BoD (entry_privileged_edit @ all or report_analytics_view + report_view @ all) sees Provinces, Industrial Parks, and Attendance Report.
-  assert.deepEqual(visibleAdminSections({ capabilities: ["entry_privileged_edit"], scopes: [{ kind: "all" }] }), bodSections);
-  assert.deepEqual(visibleAdminSections({ capabilities: ["report_analytics_view", "report_view"], scopes: [{ kind: "all" }] }), bodSections);
+  assert.deepEqual(visibleAdminSections(makeNavActor(["entry_privileged_edit"], [{ kind: "all" }])), bodSections);
+  assert.deepEqual(visibleAdminSections(makeNavActor(["report_analytics_view", "report_view"], [{ kind: "all" }])), bodSections);
   // Canonical Team Leader (team_manager_assign + report_view + report_analytics_view @ team) sees ONLY Attendance Report, never Provinces or Industrial Parks.
   assert.deepEqual(
     visibleAdminSections({

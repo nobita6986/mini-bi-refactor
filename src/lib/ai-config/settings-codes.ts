@@ -5,6 +5,7 @@
 
 export const SETTINGS_HTTP_STATUS: Record<string, number> = {
   AI_SETTINGS_DISABLED: 404,
+  AI_FORBIDDEN: 403,
   AI_CSRF_REJECTED: 403,
   AI_RATE_LIMITED: 429,
   AI_INPUT_INVALID: 422,
@@ -46,6 +47,7 @@ const LIBRARY_TO_API: Record<string, string> = {
   TEST_FAILED: "AI_TEST_FAILED",
   RATE_LIMITED: "AI_RATE_LIMITED",
   CSRF_REJECTED: "AI_CSRF_REJECTED",
+  FORBIDDEN: "AI_FORBIDDEN",
 };
 
 /** Mã API ổn định cho client; mã lạ ⇒ AI_INTERNAL (không rò mã nội bộ). */

@@ -1876,6 +1876,10 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             [appUser],
           );
           await client.query(
+            "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1, 'entry_admin', '2020-01-01', true)",
+            [appUser],
+          );
+          await client.query(
             "insert into public.teams (team_id, code, display_name) values ($1, 'WF01_T', 'WF01 Team')",
             [teamId],
           );

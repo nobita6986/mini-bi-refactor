@@ -813,6 +813,29 @@ export function hasPairedCapability(
   });
 }
 
+/**
+ * WP5B-2 paired evaluator for Full Admin triple (`entry_admin` + `recruiter_master_manage`
+ * + `team_master_manage` all paired with `ALL`). Used for AI Settings (`OD-WP5-04`) and admin gates.
+ */
+export function hasPairedFullAdmin(actor: DirectEntryActor | null | undefined): boolean {
+  return (
+    hasPairedCapability(actor, "entry_admin", { kind: "all" }) &&
+    hasPairedCapability(actor, "recruiter_master_manage", { kind: "all" }) &&
+    hasPairedCapability(actor, "team_master_manage", { kind: "all" })
+  );
+}
+
+/**
+ * WP5B-2 Group A paired evaluator for company-wide reporting access (`entry_admin` or
+ * `report_analytics_view` paired with `ALL`). Never falls back to unpaired `scopes`.
+ */
+export function hasPairedAllReportingAccess(actor: DirectEntryActor | null | undefined): boolean {
+  return (
+    hasPairedCapability(actor, "entry_admin", { kind: "all" }) ||
+    hasPairedCapability(actor, "report_analytics_view", { kind: "all" })
+  );
+}
+
 function isAllowedByPairedGrants(
   actor: DirectEntryActor,
   requiredCapability: Capability,

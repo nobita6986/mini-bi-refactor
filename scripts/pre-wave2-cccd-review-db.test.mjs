@@ -795,7 +795,7 @@ test("Hồ sơ thiếu & Lịch sử chỉnh sửa NLĐ: enforces Recruiter view
   // 2. Seed actors:
   // - recruiterOnly: linked to RECRUITER_A, NOT a QLDA, has document_upload grant (to prove server still blocks Recruiter upload on non-created entry!)
   // - allowlistedAdmin: lienvu@hrpartner.vn with worker_edit_history_view + entry_admin + document_upload @ all
-  // - nonAllowlistedAdmin: otheradmin@hrpartner.vn with entry_admin @ all (NOT in 3-Admin allowlist, NOT QLDA, NOT recruiter)
+  // - nonAllowlistedAdmin: otheradmin@hrpartner.vn with full admin triple ONLY (no worker_edit_history_view)
   const recruiterOnly = {
     auth_subject: "11000000-0000-4000-8000-000000000091",
     app_user_id: "21000000-0000-4000-8000-000000000091",
@@ -876,13 +876,12 @@ test("Hồ sơ thiếu & Lịch sử chỉnh sửa NLĐ: enforces Recruiter view
   );
   assert.equal(fullAdminDirectEdit.rows[0].authority, "admin_all");
 
-  // Grant nonAllowlistedAdmin entry_admin + worker_edit_history_view @ all (still blocked because email is not in 3-Admin allowlist!)
+  // Grant nonAllowlistedAdmin full admin triple WITHOUT worker_edit_history_view (WP5B-2 Group A enforces paired worker_edit_history_view @ ALL)
   await db.query(
     "insert into public.direct_entry_capability_grants(app_user_id, capability, valid_from, is_current) values " +
       "($1, 'entry_admin', '2020-01-01', true), " +
       "($1, 'recruiter_master_manage', '2020-01-01', true), " +
-      "($1, 'team_master_manage', '2020-01-01', true), " +
-      "($1, 'worker_edit_history_view', '2020-01-01', true)",
+      "($1, 'team_master_manage', '2020-01-01', true)",
     [nonAllowlistedAdmin.app_user_id],
   );
   await db.query(
@@ -950,14 +949,14 @@ test("Hồ sơ thiếu & Lịch sử chỉnh sửa NLĐ: enforces Recruiter view
     "Recruiter must be rejected by server when attempting to upload documents",
   );
 
-  // 5. Other roles not in (Recruiter, QLDA, 3-Admin allowlist) are rejected from Hồ sơ thiếu
+  // 5. Other admins without (Recruiter, QLDA, worker_edit_history_view @ ALL) are rejected from Hồ sơ thiếu
   await assert.rejects(
     db.query(
       "select public.direct_entry_list_missing_document_workers($1::uuid, $2::uuid, 'ALL', null, 'ALL', null, 1, 25)",
       [nonAllowlistedAdmin.auth_subject, nonAllowlistedAdmin.app_user_id],
     ),
     (err) => err.code === "42501",
-    "Non-allowlisted admin without QLDA/recruiter link must be denied missing documents list",
+    "Admin without worker_edit_history_view / QLDA / recruiter link must be denied missing documents list",
   );
 
   // 6. QLDA (ACTORS.owner, assigned project manager of projectId):
@@ -1019,7 +1018,7 @@ test("Hồ sơ thiếu & Lịch sử chỉnh sửa NLĐ: enforces Recruiter view
     );
   }
 
-  // - Allowed to allowlistedAdmin (lienvu@hrpartner.vn): returns NEW_ENTRY and DOCUMENT_CHANGE revisions
+  // - Allowed to admin holding paired worker_edit_history_view @ ALL: returns NEW_ENTRY and DOCUMENT_CHANGE revisions
   const historySearchRes = await db.query(
     "select public.worker_edit_history_search($1::uuid, $2::uuid, null, null, " +
       "(clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date - 92, (clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date, $3::text, $4::text, null, 50, null) as data",

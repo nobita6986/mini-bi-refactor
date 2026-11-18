@@ -48,7 +48,21 @@ const { CURRENT_NAV_ENTRIES, filterEntriesForActor, groupNavEntries } = reg;
 
 /** @param {readonly string[]} capabilities @param {readonly NavScope[]} [scopes] @returns {NavActorProjection} */
 function makeActor(capabilities, scopes = [{ kind: "all", reference: "all" }]) {
-  return { capabilities, scopes };
+  const effective_grants = [];
+  for (const s of scopes) {
+    const scope_kind = s.kind === "all" ? "ALL" : s.kind === "team" ? "CONTEXT_TEAM" : "OWN";
+    const scope_id = s.kind === "team" ? (s.reference ?? "team-1") : null;
+    for (const cap of capabilities) {
+      effective_grants.push({
+        capability: cap,
+        scope_kind,
+        scope_id,
+        source_type: "LEGACY_BRIDGE",
+        source_id: "00000000-0000-4000-8000-000000000001",
+      });
+    }
+  }
+  return { capabilities, scopes, effective_grants };
 }
 
 test("directEntryNavPredicate: entry_own / entry_team / entry_admin đều đủ điều kiện", () => {
@@ -646,8 +660,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
 
   // 4a. BoD (executive reader + reviewer + finance view): sees attendance, salary-advances and finance, not hidden report menu actions.
   const bodActor = {
-    capabilities: ["entry_privileged_edit", "report_analytics_view", "report_view", "change_review", "vendor_finance_view"],
-    scopes: all,
+    ...makeActor(["entry_privileged_edit", "report_analytics_view", "report_view", "change_review", "vendor_finance_view"], all),
     hasLeaveManagementAccess: true,
     hasLeaveAdminAccess: true,
   };
@@ -669,10 +682,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
   assert.equal(bodMenu.ids.includes("admin"), false, "BoD without catalog/full-admin does not see duplicate /admin link");
 
   // 4b. Full Admin: thấy đầy đủ Công việc của tôi, toàn bộ nhóm Quản trị (gồm Quản trị hệ thống /admin) và Tài chính.
-  const fullAdmin = {
-    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
-    scopes: all,
-  };
+  const fullAdmin = makeActor(["entry_admin", "recruiter_master_manage", "team_master_manage"], all);
   const fullAdminMenu = projectMenuForBothViewports(fullAdmin);
   assert.deepEqual(fullAdminMenu.topLevelIds, ["dashboard", "group:my-work", "finance", "group:management"]);
   assert.deepEqual(fullAdminMenu.groups, [
@@ -703,8 +713,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
 
   // 5. Kế toán (Accounting): thấy Tổng quan, Công việc của tôi (Nghỉ phép của tôi, Tin tuyển dụng), Quản trị (Quản trị hệ thống cho danh mục được cấp) và Tài chính.
   const accountingActor = {
-    capabilities: ["catalog_master_manage"],
-    scopes: all,
+    ...makeActor(["catalog_master_manage"], all),
     hasVendorFinanceAccess: true,
     hasVendorFinanceRecordAccess: true,
     hasLeaveManagementAccess: true,

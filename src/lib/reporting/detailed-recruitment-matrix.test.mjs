@@ -336,10 +336,49 @@ test("Detailed Matrix (3): Server handler enforces scope=all (403 FORBIDDEN for 
   const bodActor = {
     auth_subject: uuid(1),
     app_user_id: uuid(11),
+    enabled: true,
     roles: ["SYSTEM_ADMIN"],
-    capabilities: ["direct_entry_read"],
+    capabilities: ["entry_admin"],
     scopes: [{ kind: "all" }],
+    effective_grants: [
+      {
+        capability: "entry_admin",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "LEGACY_BRIDGE",
+        source_id: uuid(91),
+      },
+    ],
   };
+
+  // Orphan all scope without reporting capability @ ALL must be rejected too (WP5B-2 Group A)
+  const orphanAllActor = {
+    auth_subject: uuid(3),
+    app_user_id: uuid(13),
+    enabled: true,
+    capabilities: ["catalog_master_manage"],
+    scopes: [{ kind: "all" }],
+    effective_grants: [
+      {
+        capability: "catalog_master_manage",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "LEGACY_BRIDGE",
+        source_id: uuid(92),
+      },
+    ],
+  };
+  const deniedOrphan = await fetchDetailedRecruitmentMatrixReport({}, orphanAllActor, {
+    callScopedFactsRpc: () => {
+      throw new Error("should not call DB for unpaired all actor");
+    },
+    callCatalogRpc: () => {
+      throw new Error("should not call DB for unpaired all actor");
+    },
+  });
+  assert.equal(deniedOrphan.ok, false);
+  assert.equal(deniedOrphan.status, 403);
+  assert.equal(deniedOrphan.code, "FORBIDDEN_DETAILED_MATRIX_REPORT");
 
   // Non-all actor is rejected before hitting DB
   const denied = await fetchDetailedRecruitmentMatrixReport({}, teamLeaderActor, {
@@ -643,6 +682,11 @@ test("Detailed Matrix (5): Ephemeral PGlite DB integration for direct_entry_repo
       "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values " +
         "($1,'all',null,'2020-01-01',true), ($2,'own',null,'2020-01-01',true), ($3,'own',null,'2020-01-01',true)",
       [USER_BOD, USER_REC, USER_UNCONFIG],
+    );
+    await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values " +
+        "($1,'entry_admin','2020-01-01',true)",
+      [USER_BOD],
     );
     await db.query(
       "insert into public.recruiters (recruiter_id, display_name, personnel_code, active) values " +

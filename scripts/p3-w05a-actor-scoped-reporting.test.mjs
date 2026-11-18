@@ -64,9 +64,13 @@ async function seedBase(db) {
   await db.query("insert into public.direct_entry_projects (project_id, display_name) values ('proj_b','Project B')");
   for (const [app, rec] of [[APP_OWNA1, REC_A1], [APP_OWNB1, REC_B1], [APP_PM, REC_PM]]) {
     await db.query("insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current) values ($1,$2,true,'2020-01-01',true)", [app, rec]);
+    await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'own',null,'2020-01-01',true)", [app]);
+    await db.query("insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_own','2020-01-01',true)", [app]);
   }
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'all',null,'2020-01-01',true)", [APP_ALL]);
+  await db.query("insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_admin','2020-01-01',true)", [APP_ALL]);
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'team',$2,'2020-01-01',true)", [APP_TEAMA, TEAM_A]);
+  await db.query("insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_team','2020-01-01',true)", [APP_TEAMA]);
   // project-manager assignment for APP_PM (must NOT confer team scope).
   await db.query("insert into public.direct_entry_project_manager_assignments (project_id, manager_recruiter_id, is_current) values ('proj_a',$1,true)", [REC_PM]);
 }
@@ -332,6 +336,7 @@ test("R1: reporting scope authority follows the explicit current marker, not gra
     await db.query("insert into public.direct_entry_app_users (app_user_id,auth_subject,enabled,display_name) values ($1,$2,true,'Synthetic Account')", [app, auth]);
 
     // A scheduled grant remains false even when its date fields are moved into the past.
+    await db.query("insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_team','2020-01-01',true)", [app]);
     await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'team',$2,(select public.direct_entry_authorization_date() + 1),false)", [app, TEAM_A]);
     assert.equal((await audience(db, app, auth)).audience, "own", "a false current marker is not effective");
     await db.query("update public.direct_entry_scope_grants set valid_from='2020-01-01',valid_to='2021-01-01' where app_user_id=$1", [app]);

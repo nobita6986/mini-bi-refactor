@@ -5,10 +5,13 @@ import {
   ADMIN_NON_AUTO_GRANT_TOKENS,
   CANONICAL_OWNER_EMAIL,
   INITIAL_ADMIN_LOGIN_IDS,
+  INTENTIONAL_POLICY_CHANGE_REASONS,
   PROTECTED_OWNER_REASON,
   WP5_CUTOVER_MANIFEST_VERSION,
   WP5_ROLE_CATALOG,
   buildWp5CutoverPlan,
+  buildWp5FullCutoverManifest,
+  computeWp5CutoverActionDiff,
   isCanonicalOwnerEmail,
   normalizeCanonicalEmail,
   resolveCanonicalOwnerAccount,
@@ -223,4 +226,254 @@ test("buildWp5CutoverPlan emits exact 4 ADMIN assignments, 1 protected Owner, le
       ]),
     /INITIAL_ADMIN_AMBIGUOUS/,
   );
+});
+
+
+test("buildWp5FullCutoverManifest and computeWp5CutoverActionDiff cover full cohort, intentional shifts, WR delegation non-escalation, and reject unexpected drift", () => {
+  const TL_ID = "10000000-0000-4000-8000-000000000007";
+  const HAIDX_ID = "10000000-0000-4000-8000-000000000008";
+  const KT_ID = "10000000-0000-4000-8000-000000000009";
+  const CATALOG_ONLY_ID = "10000000-0000-4000-8000-000000000010";
+  const HR_OP_ID = "10000000-0000-4000-8000-000000000011";
+  const SHARED_ID = "10000000-0000-4000-8000-000000000012";
+  const TEAM_1 = "20000000-0000-4000-8000-000000000001";
+  const REC_1 = "30000000-0000-4000-8000-000000000001";
+
+  const inventory = {
+    authorization_date: "2026-11-18",
+    accounts: [
+      {
+        app_user_id: OWNER_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000001",
+        email: "nobita6986@gmail.com",
+        display_name: "Owner",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: LUANPT_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000002",
+        email: "luanpt@hrpartner.vn",
+        display_name: "Luan PT",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: LIENVU_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000003",
+        email: "lienvu@hrpartner.vn",
+        display_name: "Lien Vu",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: NGATTT_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000004",
+        email: "ngattt@hrpartner.vn",
+        display_name: "Nga TTT",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: TL_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000007",
+        email: "tl.user@hrpartner.vn",
+        display_name: "Team Leader",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: HAIDX_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000008",
+        email: "haidx.td@hrpartner.vn",
+        display_name: "Hai DX",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: KT_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000009",
+        email: "hieu.kt@hrpartner.vn",
+        display_name: "Ke Toan",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: CATALOG_ONLY_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000010",
+        email: "catalog.only@hrpartner.vn",
+        display_name: "Catalog Only",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: HR_OP_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000011",
+        email: "hrop@hrpartner.vn",
+        display_name: "HR Operator",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: DISABLED_HIST_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000005",
+        email: "former.staff@hrpartner.vn",
+        display_name: "Disabled",
+        enabled: false,
+        account_type: "NORMAL",
+        version: 2,
+      },
+      {
+        app_user_id: SHARED_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000012",
+        email: "shared.bot@hrpartner.vn",
+        display_name: "Shared Service",
+        enabled: true,
+        account_type: "SHARED",
+        version: 1,
+      },
+    ],
+    capability_grants: [
+      { app_user_id: OWNER_ID, capability: "entry_admin" },
+      { app_user_id: OWNER_ID, capability: "worker_edit_history_view" },
+      { app_user_id: LIENVU_ID, capability: "entry_admin" },
+      { app_user_id: NGATTT_ID, capability: "entry_admin" },
+      // luanpt deliberately has 0 capabilities and orphan ALL scope
+      // TL has partial bundle (missing entry_team) -> should normalize via TEAM_LEADER_BUNDLE_ENTRY_TEAM_NORMALIZED
+      { app_user_id: TL_ID, capability: "team_manager_assign" },
+      { app_user_id: TL_ID, capability: "report_view" },
+      { app_user_id: TL_ID, capability: "report_analytics_view" },
+      { app_user_id: TL_ID, capability: "report_assign" },
+      // haidx.td holds full RECRUITER bundle
+      ...WP5_ROLE_CATALOG.RECRUITER.capabilities.map((c) => ({
+        app_user_id: HAIDX_ID,
+        capability: c.capability,
+      })),
+      // catalog-only operator has catalog_master_manage @ ALL without team_master_manage
+      { app_user_id: CATALOG_ONLY_ID, capability: "catalog_master_manage" },
+      // HR operator has exact HR_OPERATOR bundle
+      ...WP5_ROLE_CATALOG.HR_OPERATOR.capabilities.map((c) => ({
+        app_user_id: HR_OP_ID,
+        capability: c.capability,
+      })),
+    ],
+    scope_grants: [
+      { app_user_id: OWNER_ID, scope_kind: "all", team_id: null },
+      { app_user_id: LUANPT_ID, scope_kind: "all", team_id: null },
+      { app_user_id: LIENVU_ID, scope_kind: "all", team_id: null },
+      { app_user_id: NGATTT_ID, scope_kind: "all", team_id: null },
+      { app_user_id: TL_ID, scope_kind: "team", team_id: TEAM_1 },
+      { app_user_id: HAIDX_ID, scope_kind: "own", team_id: null },
+      { app_user_id: CATALOG_ONLY_ID, scope_kind: "all", team_id: null },
+      { app_user_id: HR_OP_ID, scope_kind: "all", team_id: null },
+    ],
+    recruiter_links: [
+      { app_user_id: HAIDX_ID, recruiter_id: REC_1, recruiter_active: true },
+    ],
+    team_leader_assignments: [
+      { assignment_id: "40000000-0000-4000-8000-000000000001", leader_app_user_id: TL_ID, team_id: TEAM_1 },
+    ],
+    wr_tl_capability_grants: [],
+    department_heads: [],
+    project_managers: [],
+    project_accountants: [],
+    open_person_links: [
+      { app_user_id: KT_ID, person_id: "50000000-0000-4000-8000-000000000009", person_status: "ACTIVE" },
+    ],
+    // Template-scoped Work Report delegation to haidx.td MUST NOT produce report_review/report_assign grants
+    work_report_delegations: [
+      {
+        delegation_id: "60000000-0000-4000-8000-000000000001",
+        template_id: "0922819d-6957-4b1d-8e50-b749f5cd35c5",
+        grantee_app_user_id: HAIDX_ID,
+      },
+    ],
+  };
+
+  const manifest = buildWp5FullCutoverManifest(inventory);
+  assert.match(manifest.manifest_fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(manifest.summary.admin_count, 4);
+  assert.equal(manifest.summary.protected_assignment_count, 1);
+  assert.equal(manifest.summary.work_report_delegation_count, 1);
+
+  const luanPlan = manifest.account_plans.find((p) => p.app_user_id === LUANPT_ID);
+  assert.ok(luanPlan);
+  assert.deepEqual(luanPlan.global_roles, ["EMPLOYEE_BASE", "ADMIN"]);
+  assert.equal(
+    luanPlan.post_cutover_effective_grants.some((g) => g.capability === "recruitment_post_create"),
+    false,
+  );
+
+  const haidxPlan = manifest.account_plans.find((p) => p.app_user_id === HAIDX_ID);
+  assert.ok(haidxPlan);
+  assert.deepEqual(haidxPlan.global_roles, ["EMPLOYEE_BASE", "RECRUITER"]);
+  assert.equal(
+    haidxPlan.post_cutover_effective_grants.some(
+      (g) => g.capability === "report_review" || g.capability === "report_assign",
+    ),
+    false,
+  );
+
+  const ktPlan = manifest.account_plans.find((p) => p.app_user_id === KT_ID);
+  assert.deepEqual(ktPlan.global_roles, ["EMPLOYEE_BASE"]);
+  assert.equal(ktPlan.post_cutover_effective_grants.length, 0);
+
+  const disabledPlan = manifest.account_plans.find((p) => p.app_user_id === DISABLED_HIST_ID);
+  assert.equal(disabledPlan.set_authz_managed, true);
+  assert.deepEqual(disabledPlan.global_roles, []);
+  assert.deepEqual(disabledPlan.post_cutover_effective_grants, []);
+
+  const sharedPlan = manifest.account_plans.find((p) => p.app_user_id === SHARED_ID);
+  assert.equal(sharedPlan.set_authz_managed, true);
+  assert.deepEqual(sharedPlan.global_roles, []);
+
+  const diff = computeWp5CutoverActionDiff(inventory, manifest);
+  assert.equal(diff.unexpected_diff_count, 0, JSON.stringify(diff.rows.filter((r) => r.anomalies.length > 0)));
+  const catalogRow = diff.rows.find((r) => r.app_user_id === CATALOG_ONLY_ID);
+  assert.equal(catalogRow.before_actions.can_manage_team_leaders, true);
+  assert.equal(catalogRow.after_actions.can_manage_team_leaders, false);
+  assert.ok(catalogRow.reasons.includes(INTENTIONAL_POLICY_CHANGE_REASONS.CATALOG_ONLY_TEAM_LEADER_MUTATION_TIGHTENED));
+
+  const hrOpRow = diff.rows.find((r) => r.app_user_id === HR_OP_ID);
+  assert.equal(hrOpRow.before_actions.can_manage_team_leaders, true);
+  assert.equal(hrOpRow.after_actions.can_manage_team_leaders, true);
+
+  const tlRow = diff.rows.find((r) => r.app_user_id === TL_ID);
+  assert.ok(tlRow.reasons.includes(INTENTIONAL_POLICY_CHANGE_REASONS.TEAM_LEADER_BUNDLE_ENTRY_TEAM_NORMALIZED));
+
+  // Negative check: reject non-NORMAL account holding personal links/assignments
+  assert.throws(
+    () =>
+      buildWp5FullCutoverManifest({
+        ...inventory,
+        open_person_links: [
+          ...inventory.open_person_links,
+          { app_user_id: SHARED_ID, person_id: "50000000-0000-4000-8000-000000000099", person_status: "ACTIVE" },
+        ],
+      }),
+    /NON_NORMAL_ACCOUNT_PERSONAL_ASSIGNMENT_VIOLATION/,
+  );
+
+  // Negative check: detect UNEXPECTED_DIFF when manifest omits an account's legacy grant or injects unexpected grant
+  const corruptedManifest = structuredClone(manifest);
+  const haidxMut = corruptedManifest.account_plans.find((p) => p.app_user_id === HAIDX_ID);
+  haidxMut.post_cutover_effective_grants.push({
+    capability: "report_review",
+    scope_kind: "ALL",
+    scope_id: null,
+  });
+  const corruptedDiff = computeWp5CutoverActionDiff(inventory, corruptedManifest);
+  assert.equal(corruptedDiff.unexpected_diff_count, 1);
+  const failedHaidx = corruptedDiff.rows.find((r) => r.app_user_id === HAIDX_ID);
+  assert.equal(failedHaidx.classification, "UNEXPECTED_DIFF");
+  assert.ok(failedHaidx.anomalies.some((a) => a.startsWith("UNEXPECTED_NON_ADMIN_GAINS")));
 });
