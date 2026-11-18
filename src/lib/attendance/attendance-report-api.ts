@@ -103,6 +103,9 @@ async function resolveVerifiedActor(
     nav_actor: {
       capabilities: actor.capabilities,
       scopes: actor.scopes.map((scope) => ({ kind: scope.kind })),
+      ...(actor.effective_grants !== undefined
+        ? { effective_grants: actor.effective_grants }
+        : {}),
     },
   };
 }

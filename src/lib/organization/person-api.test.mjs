@@ -43,6 +43,11 @@ function makeFullAdminSession() {
         enabled: true,
         capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
         scopes: [{ kind: "all" }],
+        effective_grants: [
+          { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "LEGACY_BRIDGE" },
+          { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "LEGACY_BRIDGE" },
+          { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "LEGACY_BRIDGE" },
+        ],
       },
     },
   };
@@ -58,6 +63,14 @@ function makeScopedSession() {
         enabled: true,
         capabilities: ["entry_admin"],
         scopes: [{ kind: "team", team_id: "80000000-0000-4000-8000-000000000001" }],
+        effective_grants: [
+          {
+            capability: "entry_admin",
+            scope_kind: "CONTEXT_TEAM",
+            scope_id: "80000000-0000-4000-8000-000000000001",
+            source_type: "LEGACY_BRIDGE",
+          },
+        ],
       },
     },
   };

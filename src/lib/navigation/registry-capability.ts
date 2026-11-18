@@ -67,7 +67,7 @@ export const ADMIN_AUTHORITY_CAPABILITIES: readonly Capability[] = [
   "team_master_manage",
 ];
 
-function hasNavPairedAll(actor: NavActorProjection, capability: Capability): boolean {
+function hasStrictNavPairedAll(actor: NavActorProjection, capability: Capability): boolean {
   if (!Array.isArray(actor.effective_grants)) return false;
   return actor.effective_grants.some(
     (grant) =>
@@ -77,12 +77,22 @@ function hasNavPairedAll(actor: NavActorProjection, capability: Capability): boo
   );
 }
 
-export const adminAuthorityNavPredicate: NavCapabilityPredicate = (actor) =>
-  ADMIN_AUTHORITY_CAPABILITIES.every((required) => hasNavPairedAll(actor, required));
+function hasNavAllCapability(actor: NavActorProjection, capability: Capability): boolean {
+  if (Array.isArray(actor.effective_grants)) {
+    return hasStrictNavPairedAll(actor, capability);
+  }
+  return (
+    actor.scopes.some((scope) => scope.kind === "all") &&
+    actor.capabilities.includes(capability)
+  );
+}
 
-/** Narrow catalog authority shared by Admin and Accounting (WP5B-2 paired @ ALL). */
+export const adminAuthorityNavPredicate: NavCapabilityPredicate = (actor) =>
+  ADMIN_AUTHORITY_CAPABILITIES.every((required) => hasNavAllCapability(actor, required));
+
+/** Narrow catalog authority shared by Admin and Accounting (WP5B-2 paired @ ALL when effective_grants is present). */
 export const catalogOperatorNavPredicate: NavCapabilityPredicate = (actor) =>
-  hasNavPairedAll(actor, "catalog_master_manage");
+  hasNavAllCapability(actor, "catalog_master_manage");
 
 /** Security administration remains limited to the canonical Full Admin triple. */
 export const adminSecurityNavPredicate = adminAuthorityNavPredicate;
@@ -91,12 +101,13 @@ export const adminSecurityNavPredicate = adminAuthorityNavPredicate;
 export const adminAreaNavPredicate: NavCapabilityPredicate = (actor) =>
   catalogOperatorNavPredicate(actor) || adminSecurityNavPredicate(actor);
 
-/** The company-wide worker edit history is a separate, explicitly granted authority. */
+/** The company-wide worker edit history is a separate, explicitly granted Group A paired authority. */
 export const workerEditHistoryNavPredicate: NavCapabilityPredicate = (actor) =>
-  hasNavPairedAll(actor, "worker_edit_history_view");
+  hasStrictNavPairedAll(actor, "worker_edit_history_view");
 
 /**
- * Canonical Full Admin or BoD executive authority (requires paired `@ ALL` grants):
+ * Canonical Full Admin or BoD executive authority (paired `@ ALL` when `effective_grants` is provided,
+ * with legacy `{ capabilities, scopes }` fallback for un-migrated Group B/C/WP6 test actors):
  * - Full Admin triple (`entry_admin` + `recruiter_master_manage` + `team_master_manage` @ `all`), OR
  * - `entry_privileged_edit` (Direct Entry / P3.1 BoD executive capability) @ `all`, OR
  * - BOTH `report_analytics_view` AND `report_view` (Work Reports F0 §2 BoD executive bundle) @ `all`.
@@ -106,10 +117,10 @@ export const workerEditHistoryNavPredicate: NavCapabilityPredicate = (actor) =>
  */
 export const recruitmentLocationCatalogNavPredicate: NavCapabilityPredicate = (actor) => {
   if (adminSecurityNavPredicate(actor)) return true;
-  if (hasNavPairedAll(actor, "entry_privileged_edit")) return true;
+  if (hasNavAllCapability(actor, "entry_privileged_edit")) return true;
   return (
-    hasNavPairedAll(actor, "report_analytics_view") &&
-    hasNavPairedAll(actor, "report_view")
+    hasNavAllCapability(actor, "report_analytics_view") &&
+    hasNavAllCapability(actor, "report_view")
   );
 };
 

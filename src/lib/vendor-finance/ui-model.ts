@@ -439,6 +439,9 @@ export function decideVendorFinancePageAccess(input: {
   const baseProjection: NavActorProjection = {
     capabilities: actor.actor.capabilities,
     scopes: actor.actor.scopes.map((scope) => ({ kind: scope.kind })),
+    ...(actor.actor.effective_grants !== undefined
+      ? { effective_grants: actor.actor.effective_grants }
+      : {}),
   };
 
   if (input.requiredMode === "admin") {

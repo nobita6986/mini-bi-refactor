@@ -178,6 +178,33 @@ function makeSession({
       actor: { ok: false, reason: "UNAUTHENTICATED" },
     };
   }
+  const effective_grants = [];
+  for (const cap of capabilities) {
+    for (const scope of scopes) {
+      if (scope.kind === "all") {
+        effective_grants.push({
+          capability: cap,
+          scope_kind: "ALL",
+          scope_id: null,
+          source_type: "LEGACY_BRIDGE",
+        });
+      } else if (scope.kind === "team") {
+        effective_grants.push({
+          capability: cap,
+          scope_kind: "CONTEXT_TEAM",
+          scope_id: scope.team_id ?? scope.id ?? scope.reference ?? null,
+          source_type: "LEGACY_BRIDGE",
+        });
+      } else if (scope.kind === "own") {
+        effective_grants.push({
+          capability: cap,
+          scope_kind: "OWN",
+          scope_id: null,
+          source_type: "LEGACY_BRIDGE",
+        });
+      }
+    }
+  }
   return {
     actor: {
       ok: true,
@@ -187,6 +214,7 @@ function makeSession({
         enabled,
         capabilities,
         scopes,
+        effective_grants,
       },
     },
   };
