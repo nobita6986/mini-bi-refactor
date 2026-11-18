@@ -185,8 +185,8 @@ test("HF-R5: the actor context RPC returns display_name and never an email", asy
     const ctx = rows[0].ctx;
     assert.equal(ctx.display_name, "Nguyễn Văn A");
     assert.deepEqual(Object.keys(ctx).sort(), [
-      "all_scope_grants", "allowed_worker_tabs", "app_user_id", "auth_subject", "capabilities",
-      "display_name", "enabled", "recruiter_links", "team_scope_grants", "teams",
+      "all_scope_grants", "allowed_worker_tabs", "app_user_id", "assigned_roles", "auth_subject", "capabilities",
+      "display_name", "effective_grants", "enabled", "recruiter_links", "team_scope_grants", "teams",
     ]);
     assert.equal(JSON.stringify(ctx).includes("@"), false, "no email may be projected");
     assert.equal(JSON.stringify(ctx).toLowerCase().includes("nguyenvana@"), false);

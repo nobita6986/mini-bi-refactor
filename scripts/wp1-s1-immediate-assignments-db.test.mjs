@@ -94,6 +94,7 @@ import { AUTH_PROLOGUE } from "./lib/s04c-read-fixture.mjs";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
 const WP1_MIGRATION_NAME = "20261112120000_wp1_s1_block_future_org_authz_assignments.sql";
+const WP1_LAST_HOTFIX_MIGRATION_NAME = "20261112180000_hf_wp1_leave_department_approver_optional_reason.sql";
 const WP0_SQL_DIR = path.resolve("../bi-refactor-wp0/sql");
 
 const ACTORS = {
@@ -792,6 +793,8 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
     const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
     const wp1Idx = names.indexOf(WP1_MIGRATION_NAME);
     assert.ok(wp1Idx >= 0, `Migration ${WP1_MIGRATION_NAME} must exist`);
+    const wp1HotfixIdx = names.indexOf(WP1_LAST_HOTFIX_MIGRATION_NAME);
+    assert.ok(wp1HotfixIdx >= wp1Idx, `Migration ${WP1_LAST_HOTFIX_MIGRATION_NAME} must exist at or after WP1`);
 
     // 1. Apply all migrations BEFORE WP1
     for (const name of names.slice(0, wp1Idx)) {
@@ -932,8 +935,8 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       );
     }
 
-    // 4. Apply WP1 Migration (`20261112120000_wp1_s1_block_future_org_authz_assignments.sql`) and subsequent hotfix migrations
-    for (const name of names.slice(wp1Idx)) {
+    // 4. Apply WP1 Migration (`20261112120000_wp1_s1_block_future_org_authz_assignments.sql`) through WP1 hotfix
+    for (const name of names.slice(wp1Idx, wp1HotfixIdx + 1)) {
       await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
     }
     await setBusinessDate(db, TODAY);
@@ -944,6 +947,35 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       postWp1Snapshot,
       preWp1Snapshot,
       "WP1 migration must produce 0 diff in effective permissions and preserve pre-existing rows untouched",
+    );
+
+    // 5b. Apply post-WP1 migrations (WP2A/WP3B/WP5B-1) and verify additive-only context parity
+    for (const name of names.slice(wp1HotfixIdx + 1)) {
+      await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+    }
+    await setBusinessDate(db, TODAY);
+
+    const postForwardSnapshot = await captureEffectiveAuthorizationSnapshot(db, TODAY);
+    const normalizedForwardActorContexts = Object.fromEntries(
+      Object.entries(postForwardSnapshot.actorContexts).map(([actorKey, ctx]) => {
+        assert.equal(
+          Array.isArray(ctx.assigned_roles),
+          true,
+          `${actorKey} direct_entry_resolve_actor_context must include assigned_roles array`,
+        );
+        assert.equal(
+          Array.isArray(ctx.effective_grants),
+          true,
+          `${actorKey} direct_entry_resolve_actor_context must include effective_grants array`,
+        );
+        const { assigned_roles: _assignedRoles, effective_grants: _effectiveGrants, ...legacyCtx } = ctx;
+        return [actorKey, legacyCtx];
+      }),
+    );
+    assert.deepEqual(
+      { ...postForwardSnapshot, actorContexts: normalizedForwardActorContexts },
+      preWp1Snapshot,
+      "Post-WP1 migrations (including WP5B-1) must preserve pre-existing actor context fields, leave authorities, and raw tables identically",
     );
 
     // 6. Verify RPC Future-Date AND Past-Date Rejection (`ERRCODE = '22023'`) across all WP1 RPCs

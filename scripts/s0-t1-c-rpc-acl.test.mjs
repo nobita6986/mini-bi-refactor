@@ -117,6 +117,8 @@ import {
   WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME,
   WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES,
   WP3B_SUPERSEDED_ORG_RPC_SIGNATURES,
+  WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME,
+  WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
   OFFBOARDING_REPORT_RPC_SIGNATURES,
   migrationChecksum,
@@ -1129,7 +1131,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES,
         ...RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES,
         ...WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES,
-        ...WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES);
+        ...WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES,
+        ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES);
       assert.ok(expectedSignatures.length > 0, "the explicit server/invoker allowlist is not empty");
       assert.equal(new Set(expectedSignatures).size, expectedSignatures.length, "the allowlist has no duplicates");
       const { rows: resolvedExpected } = await client.query(
@@ -1192,7 +1195,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...RECRUITMENT_POST_PUBLIC_FEED_V1_RPC_SIGNATURES,
           ...RECRUITMENT_POST_LIST_WITH_FACETS_RPC_SIGNATURES,
           ...WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES,
-          ...WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES].sort(),
+          ...WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES,
+          ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES].sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
       const recruitmentLocationCatalogMigration = await readFile(
@@ -1368,6 +1372,29 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `grant execute on function ${sig.toLowerCase()} to service_role;`,
           ),
           `WP3B RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const wp5b1Migration = await readFile(
+        path.join(MIGRATION_DIR, WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
+        "utf8",
+      );
+      const wp5b1Normalized = wp5b1Migration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES) {
+        assert.ok(
+          wp5b1Normalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `WP5B-1 RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          wp5b1Normalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `WP5B-1 RPC ${sig} grants EXECUTE only to service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(
@@ -1973,6 +2000,123 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
       await client.query(migrationSqlForTransaction(wf02Migration));
       await assertWf01CatalogInvariants("postgres");
       await assertWf01RuntimeReadUnderServiceRole();
+
+      // WP5B-1 security boundary verification:
+      // 1. Internal helpers & triggers have zero EXECUTE privileges for PUBLIC/anon/authenticated/service_role.
+      {
+        const { rows: wp5InternalPrivs } = await client.query(
+          `select p.oid::pg_catalog.regprocedure::text as signature
+             from pg_catalog.pg_proc p
+             join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public'
+              and (p.proname like 'direct_entry_authz\\_\\_internal\\_%' escape '\\'
+                   or p.proname like 'direct_entry_authz\\_\\_trg\\_%' escape '\\')
+              and (
+                pg_catalog.has_function_privilege('public', p.oid, 'EXECUTE')
+                or pg_catalog.has_function_privilege('anon', p.oid, 'EXECUTE')
+                or pg_catalog.has_function_privilege('authenticated', p.oid, 'EXECUTE')
+                or pg_catalog.has_function_privilege('service_role', p.oid, 'EXECUTE')
+                or exists (
+                  select 1
+                    from pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+                   where a.grantee = 0 and a.privilege_type = 'EXECUTE'
+                )
+              )`,
+        );
+        assert.deepEqual(
+          wp5InternalPrivs,
+          [],
+          "WP5B-1 internal helpers and trigger functions expose zero EXECUTE privileges",
+        );
+
+        // 2. All 7 authz_* tables enforce FORCE ROW LEVEL SECURITY with 0 permissive policies and 0 direct table grants.
+        const wp5Tables = [
+          "authz_system_state",
+          "authz_role_definitions",
+          "authz_role_capabilities",
+          "authz_account_role_assignments",
+          "authz_direct_capability_grants",
+          "authz_audit_events",
+          "authz_idempotency",
+        ];
+        const { rows: wp5TableRows } = await client.query(
+          `select c.relname,
+                  c.relrowsecurity,
+                  c.relforcerowsecurity,
+                  (select count(*)::integer from pg_catalog.pg_policy pol where pol.polrelid = c.oid) as policy_count,
+                  pg_catalog.has_table_privilege('public', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as pub_priv,
+                  pg_catalog.has_table_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as anon_priv,
+                  pg_catalog.has_table_privilege('authenticated', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as auth_priv,
+                  pg_catalog.has_table_privilege('service_role', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as service_priv
+             from pg_catalog.pg_class c
+             join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'public'
+              and c.relname = any($1::text[])
+            order by c.relname`,
+          [wp5Tables],
+        );
+        assert.equal(wp5TableRows.length, wp5Tables.length, "all 7 WP5B-1 authz_* tables exist");
+        for (const row of wp5TableRows) {
+          assert.equal(row.relrowsecurity, true, `${row.relname} has RLS enabled`);
+          assert.equal(row.relforcerowsecurity, true, `${row.relname} has FORCE RLS enabled`);
+          assert.equal(row.policy_count, 0, `${row.relname} has 0 policies (default deny)`);
+          assert.equal(row.pub_priv, false, `${row.relname} grants nothing to PUBLIC`);
+          assert.equal(row.anon_priv, false, `${row.relname} grants nothing to anon`);
+          assert.equal(row.auth_priv, false, `${row.relname} grants nothing to authenticated`);
+          assert.equal(row.service_priv, false, `${row.relname} grants nothing directly to service_role`);
+        }
+
+        // 3. Direct table reads/writes under service_role must fail with 42501.
+        await client.query("set role service_role");
+        try {
+          for (const tbl of wp5Tables) {
+            await assert.rejects(
+              client.query(`select count(*) from public.${tbl}`),
+              (error) => error?.code === "42501",
+              `service_role cannot directly SELECT from public.${tbl}`,
+            );
+          }
+        } finally {
+          await client.query("reset role");
+        }
+
+        // 4. Fail-closed WP5B-1 migration self-checks when runner or function owner lacks BYPASSRLS:
+        await client.query("begin");
+        try {
+          await client.query("alter role s0_t1c_runner nobypassrls");
+          await client.query("set local session authorization s0_t1c_runner");
+          await assert.rejects(
+            client.query(migrationSqlForTransaction(wp5b1Migration)),
+            (error) => error?.code === "42501",
+            "WP5B-1 migration must fail closed under FORCE RLS when runner lacks BYPASSRLS",
+          );
+        } finally {
+          await client.query("rollback");
+        }
+
+        const alignStart = wp5b1Migration.indexOf("do $align_wp5b$");
+        const checkEnd = wp5b1Migration.lastIndexOf("$check_wp5b$;");
+        assert.ok(alignStart >= 0 && checkEnd > alignStart, "WP5B-1 migration includes $align_wp5b$ and $check_wp5b$ blocks");
+        const wp5b1VerifyBlocks = wp5b1Migration.slice(alignStart, checkEnd + "$check_wp5b$;".length);
+
+        await client.query("begin");
+        try {
+          await client.query("alter role s0_t1c_runner nobypassrls");
+          await client.query(
+            "alter function public.direct_entry_authz_list_roles_admin(uuid, uuid) owner to s0_t1c_runner",
+          );
+          await client.query("set local session authorization s0_t1c_runner");
+          await assert.rejects(
+            client.query(wp5b1VerifyBlocks),
+            (error) =>
+              error?.code === "55000" &&
+              String(error?.message).includes("WP5B1 RPC security definer owner/RLS/ACL boundary drift"),
+            "WP5B-1 $check_wp5b$ block must fail closed with 55000 if an RPC owner lacks BYPASSRLS",
+          );
+        } finally {
+          await client.query("rollback");
+        }
+      }
 
       // Real PostgreSQL concurrency proof for duplicate CCCD self-withdraw under service_role:
       // two concurrent creators self-withdrawing the two episodes of a 2-row ON duplicate pair

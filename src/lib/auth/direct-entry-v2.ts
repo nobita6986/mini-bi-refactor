@@ -72,6 +72,54 @@ export type SessionIdentity = {
   authenticated_at: string | null;
 };
 
+export type AuthzScopeKind =
+  | "OWN"
+  | "ALL"
+  | "CONTEXT_TEAM"
+  | "CONTEXT_DEPARTMENT"
+  | "CONTEXT_PROJECT";
+
+export type EffectiveGrantSourceType =
+  | "ROLE_BUNDLE"
+  | "CONTEXTUAL_ASSIGNMENT"
+  | "DIRECT_GRANT"
+  | "LEGACY_BRIDGE";
+
+export type PairedEffectiveGrant = {
+  capability: Capability;
+  scope_kind: AuthzScopeKind;
+  scope_id: string | null;
+  source_type: EffectiveGrantSourceType;
+  source_id: string | null;
+};
+
+export type AssignedRoleSummary = {
+  role_code:
+    | "EMPLOYEE_BASE"
+    | "RECRUITER"
+    | "HR_OPERATOR"
+    | "ADMIN"
+    | "TEAM_LEADER"
+    | "DEPARTMENT_HEAD"
+    | "PROJECT_MANAGER"
+    | "PROJECT_ACCOUNTANT";
+  display_name: string;
+  assignment_mode: "GLOBAL" | "CONTEXTUAL";
+  scope_kind: AuthzScopeKind | null;
+  scope_id: string | null;
+  assignment_id: string | null;
+  is_protected: boolean;
+  can_revoke: boolean;
+  cannot_revoke_reason: "PROTECTED_OWNER_ADMIN" | null;
+};
+
+export type PairedScopeTarget =
+  | { kind: "all" }
+  | { kind: "own" }
+  | { kind: "team"; team_id: string }
+  | { kind: "department"; department_id: string }
+  | { kind: "project"; project_id: string };
+
 export type DirectEntryActor = {
   auth_subject: string;
   app_user_id: string;
@@ -80,6 +128,8 @@ export type DirectEntryActor = {
   enabled: boolean;
   capabilities: readonly Capability[];
   scopes: readonly EffectiveScope[];
+  effective_grants?: readonly PairedEffectiveGrant[];
+  assigned_roles?: readonly AssignedRoleSummary[];
   effective_report_review_scopes?: readonly EffectiveReportReviewScope[];
   self_recruiter_suggestion: string | null;
   allowed_worker_tabs?: readonly WorkerOperationsTabId[];
@@ -112,6 +162,8 @@ export type ActorAuthorizationRecord = {
   team_scope_grants: unknown;
   all_scope_grants: unknown;
   allowed_worker_tabs?: unknown;
+  effective_grants?: unknown;
+  assigned_roles?: unknown;
 };
 
 export type ActorRepository = {
@@ -186,6 +238,7 @@ export type ClientPayloadResult =
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[a-z][a-z0-9]*_[a-z0-9][a-z0-9._:-]{0,100})$/i;
+const SAFE_PROJECT_REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[a-z0-9][a-z0-9._:-]{0,127})$/i;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const CAPABILITY_SET = new Set<string>(CAPABILITIES);
 const LEGACY_CAPABILITIES = new Set([
@@ -264,6 +317,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isSafeRef(value: unknown): value is string {
   return typeof value === "string" && SAFE_REF.test(value);
+}
+
+function isSafeProjectRef(value: unknown): value is string {
+  return typeof value === "string" && SAFE_PROJECT_REF.test(value);
 }
 
 type CurrentRecruiterLink = Pick<ExplicitRecruiterLink,
@@ -433,6 +490,40 @@ async function resolveActorInternal(input: {
     });
   }
 
+  const rawEffectiveGrants = (record as Record<string, unknown>).effective_grants;
+  let effectiveGrants: readonly PairedEffectiveGrant[] | undefined;
+  if (rawEffectiveGrants !== undefined) {
+    if (!Array.isArray(rawEffectiveGrants) || !rawEffectiveGrants.every(isPairedEffectiveGrant)) {
+      return { ok: false, reason: "ACTOR_REPOSITORY_INVALID" };
+    }
+    effectiveGrants = rawEffectiveGrants.map((grant) => ({
+      capability: grant.capability,
+      scope_kind: grant.scope_kind,
+      scope_id: grant.scope_kind === "OWN" || grant.scope_kind === "ALL" ? null : grant.scope_id,
+      source_type: grant.source_type,
+      source_id: grant.source_id,
+    }));
+  }
+
+  const rawAssignedRoles = (record as Record<string, unknown>).assigned_roles;
+  let assignedRoles: readonly AssignedRoleSummary[] | undefined;
+  if (rawAssignedRoles !== undefined) {
+    if (!Array.isArray(rawAssignedRoles) || !rawAssignedRoles.every(isAssignedRoleSummary)) {
+      return { ok: false, reason: "ACTOR_REPOSITORY_INVALID" };
+    }
+    assignedRoles = rawAssignedRoles.map((role) => ({
+      role_code: role.role_code,
+      display_name: role.display_name,
+      assignment_mode: role.assignment_mode,
+      scope_kind: role.assignment_mode === "GLOBAL" ? null : role.scope_kind,
+      scope_id: role.assignment_mode === "GLOBAL" ? null : role.scope_id,
+      assignment_id: role.assignment_id,
+      is_protected: role.is_protected,
+      can_revoke: role.can_revoke,
+      cannot_revoke_reason: role.cannot_revoke_reason,
+    }));
+  }
+
   const rawReviewScopes = (record as Record<string, unknown>).effective_report_review_scopes;
   let effectiveReportReviewScopes: readonly EffectiveReportReviewScope[] | undefined;
   if (rawReviewScopes !== undefined) {
@@ -465,6 +556,12 @@ async function resolveActorInternal(input: {
       enabled: true,
       capabilities: resolvedCapabilities,
       scopes,
+      ...(effectiveGrants !== undefined
+        ? { effective_grants: effectiveGrants }
+        : {}),
+      ...(assignedRoles !== undefined
+        ? { assigned_roles: assignedRoles }
+        : {}),
       ...(effectiveReportReviewScopes !== undefined
         ? { effective_report_review_scopes: effectiveReportReviewScopes }
         : {}),
@@ -479,6 +576,87 @@ async function resolveActorInternal(input: {
       },
     },
   };
+}
+
+const CANONICAL_ROLE_SET = new Set([
+  "EMPLOYEE_BASE",
+  "RECRUITER",
+  "HR_OPERATOR",
+  "ADMIN",
+  "TEAM_LEADER",
+  "DEPARTMENT_HEAD",
+  "PROJECT_MANAGER",
+  "PROJECT_ACCOUNTANT",
+]);
+
+const AUTHZ_SCOPE_KIND_SET = new Set<string>([
+  "OWN",
+  "ALL",
+  "CONTEXT_TEAM",
+  "CONTEXT_DEPARTMENT",
+  "CONTEXT_PROJECT",
+]);
+
+const EFFECTIVE_GRANT_SOURCE_SET = new Set<string>([
+  "ROLE_BUNDLE",
+  "CONTEXTUAL_ASSIGNMENT",
+  "DIRECT_GRANT",
+  "LEGACY_BRIDGE",
+]);
+
+function isPairedEffectiveGrant(value: unknown): value is PairedEffectiveGrant {
+  if (!isRecord(value)) return false;
+  if (typeof value.capability !== "string" || !CAPABILITY_SET.has(value.capability)) return false;
+  if (typeof value.scope_kind !== "string" || !AUTHZ_SCOPE_KIND_SET.has(value.scope_kind)) return false;
+  if (value.scope_kind === "OWN" || value.scope_kind === "ALL") {
+    if (value.scope_id !== null) return false;
+  } else if (value.scope_kind === "CONTEXT_PROJECT") {
+    if (!isSafeProjectRef(value.scope_id)) return false;
+  } else if (!isSafeRef(value.scope_id)) {
+    return false;
+  }
+  if (typeof value.source_type !== "string" || !EFFECTIVE_GRANT_SOURCE_SET.has(value.source_type)) {
+    return false;
+  }
+  if (value.source_id !== null && !isSafeRef(value.source_id)) return false;
+  return true;
+}
+
+function isAssignedRoleSummary(value: unknown): value is AssignedRoleSummary {
+  if (!isRecord(value)) return false;
+  if (typeof value.role_code !== "string" || !CANONICAL_ROLE_SET.has(value.role_code)) return false;
+  if (
+    typeof value.display_name !== "string" ||
+    value.display_name.trim().length === 0 ||
+    value.display_name.length > 128
+  ) {
+    return false;
+  }
+  if (value.assignment_mode !== "GLOBAL" && value.assignment_mode !== "CONTEXTUAL") return false;
+  if (value.assignment_mode === "GLOBAL") {
+    if (value.scope_kind !== null || value.scope_id !== null) return false;
+  } else {
+    if (
+      value.scope_kind !== "CONTEXT_TEAM" &&
+      value.scope_kind !== "CONTEXT_DEPARTMENT" &&
+      value.scope_kind !== "CONTEXT_PROJECT"
+    ) {
+      return false;
+    }
+    if (value.scope_kind === "CONTEXT_PROJECT") {
+      if (!isSafeProjectRef(value.scope_id)) return false;
+    } else if (!isSafeRef(value.scope_id)) {
+      return false;
+    }
+  }
+  if (value.assignment_id !== null && !isSafeRef(value.assignment_id)) return false;
+  if (typeof value.is_protected !== "boolean" || typeof value.can_revoke !== "boolean") {
+    return false;
+  }
+  if (value.cannot_revoke_reason !== null && value.cannot_revoke_reason !== "PROTECTED_OWNER_ADMIN") {
+    return false;
+  }
+  return true;
 }
 
 function isEffectiveReportReviewScope(value: unknown): value is EffectiveReportReviewScope {
@@ -504,6 +682,19 @@ function isValidAuthorizationRecord(
   all_scope_grants: AllScopeGrant[];
 } {
   if (!isRecord(value)) return false;
+  const rawRecord = value as Record<string, unknown>;
+  if (
+    rawRecord.effective_grants !== undefined &&
+    (!Array.isArray(rawRecord.effective_grants) || !rawRecord.effective_grants.every(isPairedEffectiveGrant))
+  ) {
+    return false;
+  }
+  if (
+    rawRecord.assigned_roles !== undefined &&
+    (!Array.isArray(rawRecord.assigned_roles) || !rawRecord.assigned_roles.every(isAssignedRoleSummary))
+  ) {
+    return false;
+  }
   if (
     value.allowed_worker_tabs !== undefined &&
     (!Array.isArray(value.allowed_worker_tabs) ||
@@ -576,6 +767,80 @@ function isAllowedByScope(
 }
 
 /**
+ * WP5B-1 fail-closed paired capability-scope evaluator.
+ * Strictly evaluates `actor.effective_grants` only and NEVER falls back to
+ * unpaired `actor.capabilities` or `actor.scopes`.
+ */
+export function hasPairedCapability(
+  actor: DirectEntryActor | null | undefined,
+  capability: Capability,
+  targetScope: PairedScopeTarget,
+): boolean {
+  if (!actor || actor.enabled !== true) return false;
+  if (!CAPABILITY_SET.has(capability)) return false;
+  if (!Array.isArray(actor.effective_grants)) return false;
+
+  return actor.effective_grants.some((grant) => {
+    if (!isPairedEffectiveGrant(grant) || grant.capability !== capability) {
+      return false;
+    }
+    switch (targetScope.kind) {
+      case "all":
+        return grant.scope_kind === "ALL" && grant.scope_id === null;
+      case "own":
+        return grant.scope_kind === "OWN" && grant.scope_id === null;
+      case "team":
+        return (
+          isSafeRef(targetScope.team_id) &&
+          grant.scope_kind === "CONTEXT_TEAM" &&
+          grant.scope_id === targetScope.team_id
+        );
+      case "department":
+        return (
+          isSafeRef(targetScope.department_id) &&
+          grant.scope_kind === "CONTEXT_DEPARTMENT" &&
+          grant.scope_id === targetScope.department_id
+        );
+      case "project":
+        return (
+          isSafeProjectRef(targetScope.project_id) &&
+          grant.scope_kind === "CONTEXT_PROJECT" &&
+          grant.scope_id === targetScope.project_id
+        );
+      default:
+        return false;
+    }
+  });
+}
+
+function isAllowedByPairedGrants(
+  actor: DirectEntryActor,
+  requiredCapability: Capability,
+  resource: TrustedResourceContext,
+): boolean {
+  const { scope } = resource;
+  if (!isSafeRef(resource.reference)) return false;
+  if (scope.kind === "own") {
+    if (!isSafeRef(scope.reference) || scope.reference !== resource.created_by_user_id) {
+      return false;
+    }
+    if (scope.reference !== actor.app_user_id) {
+      return false;
+    }
+    return hasPairedCapability(actor, requiredCapability, { kind: "own" });
+  }
+  if (scope.kind === "team") {
+    if (!isSafeRef(scope.reference)) return false;
+    return hasPairedCapability(actor, requiredCapability, { kind: "team", team_id: scope.reference });
+  }
+  if (scope.kind === "all") {
+    if (scope.reference !== "all") return false;
+    return hasPairedCapability(actor, requiredCapability, { kind: "all" });
+  }
+  return false;
+}
+
+/**
  * Pure reference contract evaluator for unit/audit tests (`direct-entry-v2.test.mjs`).
  *
  * NOTE (R2.1): Runtime authorization for all Direct Entry and Admin operations is
@@ -587,16 +852,22 @@ export function authorizeDirectEntry(input: AuthorizationInput): AuthorizationDe
   const requiredCapability = input.action;
   let code = "ALLOW";
   const actor = input.actor;
+  const usePairedGrants = actor !== null && actor !== undefined && Array.isArray(actor.effective_grants);
 
   if (!isValidTimestamp(input.timestamp)) code = "INVALID_TIMESTAMP";
   else if (!actor || !actor.enabled) code = "UNAUTHENTICATED";
   else if (!CAPABILITY_SET.has(requiredCapability) ||
-      !actor.capabilities.includes(requiredCapability)) code = "CAPABILITY_DENIED";
+      (!usePairedGrants && !actor.capabilities.includes(requiredCapability)) ||
+      (usePairedGrants && !actor.effective_grants!.some((grant) =>
+        isPairedEffectiveGrant(grant) && grant.capability === requiredCapability
+      ))) code = "CAPABILITY_DENIED";
   else if (REQUIRED_SCOPE_KIND[input.action] !== undefined &&
       input.resource.scope.kind !== REQUIRED_SCOPE_KIND[input.action]) {
     code = "ACTION_SCOPE_MISMATCH";
   }
-  else if (!isAllowedByScope(actor, input.resource)) code = "SCOPE_DENIED";
+  else if (usePairedGrants
+      ? !isAllowedByPairedGrants(actor, requiredCapability, input.resource)
+      : !isAllowedByScope(actor, input.resource)) code = "SCOPE_DENIED";
   else if (REASON_REQUIRED_ACTIONS.has(input.action) &&
       !isSafeRef(input.reason_ref)) code = "REASON_REQUIRED";
   else if (VERSION_REQUIRED_ACTIONS.has(input.action)) {

@@ -293,8 +293,8 @@ test("actor context and capability/scope helpers use only explicit current rows"
       "select public.direct_entry_resolve_actor_context($1) as context", [AUTH],
     )).rows[0].context;
     assert.deepEqual(Object.keys(context).sort(), [
-      "all_scope_grants", "allowed_worker_tabs", "app_user_id", "auth_subject", "capabilities",
-      "display_name", "enabled", "recruiter_links", "team_scope_grants", "teams",
+      "all_scope_grants", "allowed_worker_tabs", "app_user_id", "assigned_roles", "auth_subject", "capabilities",
+      "display_name", "effective_grants", "enabled", "recruiter_links", "team_scope_grants", "teams",
     ]);
     assert.deepEqual(context.allowed_worker_tabs, ["recruited", "all"]);
     assert.ok(context.capabilities.includes("entry_admin"));
@@ -1695,9 +1695,11 @@ test("T1A: direct_entry_resolve_actor_context allowed_worker_tabs matches RPC au
       "all_scope_grants",
       "allowed_worker_tabs",
       "app_user_id",
+      "assigned_roles",
       "auth_subject",
       "capabilities",
       "display_name",
+      "effective_grants",
       "effective_report_review_scopes",
       "enabled",
       "recruiter_links",

@@ -6,6 +6,7 @@ import {
   CAPABILITIES,
   DIRECT_ENTRY_AUTH_CONTRACT_VERSION,
   authorizeDirectEntry,
+  hasPairedCapability,
   resolveActor,
   resolveSelfRecruiterSuggestion,
   validateClientBusinessPayload,
@@ -906,4 +907,252 @@ test("session boundary denies missing or malformed repository mappings", async (
     ok: false,
     reason: "ACTOR_REPOSITORY_INVALID",
   });
+});
+
+test("WP5B-1 resolveActor parses effective_grants and assigned_roles and rejects malformed arrays", async () => {
+  const teamId = "00000000-0000-4000-8000-000000000501";
+  const assignmentId = "00000000-0000-4000-8000-000000000502";
+  const recordWithPaired = {
+    ...structuredClone(fixture.staff.record),
+    effective_grants: [
+      {
+        capability: "entry_own",
+        scope_kind: "OWN",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: assignmentId,
+      },
+      {
+        capability: "entry_team",
+        scope_kind: "CONTEXT_TEAM",
+        scope_id: teamId,
+        source_type: "CONTEXTUAL_ASSIGNMENT",
+        source_id: "00000000-0000-4000-8000-000000000503",
+      },
+    ],
+    assigned_roles: [
+      {
+        role_code: "RECRUITER",
+        display_name: "Tuyển dụng (Recruiter)",
+        assignment_mode: "GLOBAL",
+        scope_kind: null,
+        scope_id: null,
+        assignment_id: assignmentId,
+        is_protected: false,
+        can_revoke: true,
+        cannot_revoke_reason: null,
+      },
+    ],
+  };
+
+  const valid = await resolveActor({
+    session: {
+      auth_subject: fixture.staff.auth_subject,
+      provider: "supabase",
+      authenticated_at: null,
+    },
+    repository: {
+      async loadByAuthSubject() {
+        return structuredClone(recordWithPaired);
+      },
+    },
+    at: timestamp,
+  });
+
+  assert.equal(valid.ok, true);
+  assert.deepEqual(valid.actor.effective_grants, recordWithPaired.effective_grants);
+  assert.deepEqual(valid.actor.assigned_roles, recordWithPaired.assigned_roles);
+
+  const malformedEffective = await resolveActor({
+    session: {
+      auth_subject: fixture.staff.auth_subject,
+      provider: "supabase",
+      authenticated_at: null,
+    },
+    repository: {
+      async loadByAuthSubject() {
+        return {
+          ...structuredClone(fixture.staff.record),
+          effective_grants: [{ capability: "entry_own", scope_kind: "ALL", scope_id: null, source_type: "BOGUS", source_id: null }],
+        };
+      },
+    },
+    at: timestamp,
+  });
+  assert.deepEqual(malformedEffective, { ok: false, reason: "ACTOR_REPOSITORY_INVALID" });
+
+  const malformedAssigned = await resolveActor({
+    session: {
+      auth_subject: fixture.staff.auth_subject,
+      provider: "supabase",
+      authenticated_at: null,
+    },
+    repository: {
+      async loadByAuthSubject() {
+        return {
+          ...structuredClone(fixture.staff.record),
+          assigned_roles: [{ role_code: "BOD_ADMIN", display_name: "Legacy" }],
+        };
+      },
+    },
+    at: timestamp,
+  });
+  assert.deepEqual(malformedAssigned, { ok: false, reason: "ACTOR_REPOSITORY_INVALID" });
+});
+
+test("WP5B-1 hasPairedCapability fails closed, blocks cross-capability scope leakage, and checks exact contextual scope_id", async () => {
+  assert.equal(hasPairedCapability(null, "entry_admin", { kind: "all" }), false);
+  assert.equal(hasPairedCapability(undefined, "entry_admin", { kind: "all" }), false);
+
+  const baseActor = await actorFor(fixture.admin);
+  assert.equal(
+    hasPairedCapability({ ...baseActor, effective_grants: undefined }, "entry_admin", { kind: "all" }),
+    false,
+    "missing effective_grants must NOT fall back to legacy capabilities + all scope",
+  );
+  assert.equal(
+    hasPairedCapability({ ...baseActor, effective_grants: [] }, "entry_admin", { kind: "all" }),
+    false,
+    "empty effective_grants must fail closed despite legacy capabilities + all scope",
+  );
+
+  const teamA = "00000000-0000-4000-8000-000000000601";
+  const teamB = "00000000-0000-4000-8000-000000000602";
+  const deptA = "00000000-0000-4000-8000-000000000603";
+  const deptB = "00000000-0000-4000-8000-000000000604";
+
+  const pairedActor = {
+    ...baseActor,
+    enabled: true,
+    effective_grants: [
+      {
+        capability: "entry_own",
+        scope_kind: "OWN",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: null,
+      },
+      {
+        capability: "audit_view",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: null,
+      },
+      {
+        capability: "entry_team",
+        scope_kind: "CONTEXT_TEAM",
+        scope_id: teamA,
+        source_type: "CONTEXTUAL_ASSIGNMENT",
+        source_id: null,
+      },
+      {
+        capability: "report_view",
+        scope_kind: "CONTEXT_DEPARTMENT",
+        scope_id: deptA,
+        source_type: "DIRECT_GRANT",
+        source_id: null,
+      },
+      {
+        capability: "vendor_finance_view",
+        scope_kind: "CONTEXT_PROJECT",
+        scope_id: "proj_alpha",
+        source_type: "CONTEXTUAL_ASSIGNMENT",
+        source_id: null,
+      },
+    ],
+  };
+
+  assert.equal(hasPairedCapability(pairedActor, "entry_own", { kind: "own" }), true);
+  assert.equal(hasPairedCapability(pairedActor, "audit_view", { kind: "all" }), true);
+  assert.equal(
+    hasPairedCapability(pairedActor, "entry_own", { kind: "all" }),
+    false,
+    "audit_view@ALL must NOT elevate entry_own@OWN to ALL",
+  );
+  assert.equal(
+    hasPairedCapability(pairedActor, "audit_view", { kind: "own" }),
+    false,
+    "audit_view@ALL is strictly paired with ALL unless OWN grant is explicitly present",
+  );
+
+  assert.equal(hasPairedCapability(pairedActor, "entry_team", { kind: "team", team_id: teamA }), true);
+  assert.equal(hasPairedCapability(pairedActor, "entry_team", { kind: "team", team_id: teamB }), false);
+
+  assert.equal(hasPairedCapability(pairedActor, "report_view", { kind: "department", department_id: deptA }), true);
+  assert.equal(hasPairedCapability(pairedActor, "report_view", { kind: "department", department_id: deptB }), false);
+
+  assert.equal(hasPairedCapability(pairedActor, "vendor_finance_view", { kind: "project", project_id: "proj_alpha" }), true);
+  assert.equal(hasPairedCapability(pairedActor, "vendor_finance_view", { kind: "project", project_id: "proj_beta" }), false);
+
+  assert.equal(
+    hasPairedCapability({ ...pairedActor, enabled: false }, "audit_view", { kind: "all" }),
+    false,
+    "disabled actor must fail closed even with populated effective_grants",
+  );
+});
+
+test("WP5B-1 authorizeDirectEntry uses paired effective_grants when present and legacy arrays only when undefined", async () => {
+  const adminBase = await actorFor(fixture.admin);
+  const staffId = fixture.staff.record.app_user_id;
+
+  // Legacy path when effective_grants is undefined
+  const legacyAllowed = authorizeDirectEntry({
+    actor: {
+      ...adminBase,
+      capabilities: ["document_view"],
+      scopes: [{ kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null }],
+      effective_grants: undefined,
+    },
+    action: "document_view",
+    resource: {
+      ...ownResource(staffId),
+      scope: { kind: "all", reference: "all", effective_date: "2026-10-02" },
+    },
+    timestamp,
+  });
+  assert.equal(legacyAllowed.allowed, true);
+
+  // Paired path blocks cross-capability scope leakage even when legacy arrays are broad
+  const pairedActor = {
+    ...adminBase,
+    capabilities: ["document_view", "audit_view"],
+    scopes: [{ kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null }],
+    effective_grants: [
+      {
+        capability: "document_view",
+        scope_kind: "OWN",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: null,
+      },
+      {
+        capability: "audit_view",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: null,
+      },
+    ],
+  };
+
+  const pairedDenied = authorizeDirectEntry({
+    actor: pairedActor,
+    action: "document_view",
+    resource: {
+      ...ownResource(adminBase.app_user_id),
+      scope: { kind: "all", reference: "all", effective_date: "2026-10-02" },
+    },
+    timestamp,
+  });
+  assert.equal(pairedDenied.allowed, false);
+  assert.equal(pairedDenied.code, "SCOPE_DENIED");
+
+  const pairedOwnAllowed = authorizeDirectEntry({
+    actor: pairedActor,
+    action: "document_view",
+    resource: ownResource(adminBase.app_user_id),
+    timestamp,
+  });
+  assert.equal(pairedOwnAllowed.allowed, true);
 });

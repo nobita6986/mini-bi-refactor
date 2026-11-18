@@ -441,6 +441,15 @@ export const WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES = Object.freeze([
   "public.org_department_link_account_person_admin(uuid, uuid, uuid, uuid, integer, integer, uuid, text, uuid, text)",
   "public.org_department_unlink_account_person_admin(uuid, uuid, uuid, integer, integer, uuid, text, uuid, text)",
 ]);
+export const WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME =
+  "20261114150000_wp5b1_role_effective_access_foundation.sql";
+export const WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_authz_list_roles_admin(uuid, uuid)",
+  "public.direct_entry_authz_list_accounts_summary_admin(uuid, uuid, text, text, text, integer, integer)",
+  "public.direct_entry_authz_get_account_access_admin(uuid, uuid, uuid)",
+  "public.direct_entry_authz_assign_global_role_admin(uuid, uuid, uuid, text, integer, text, uuid, text)",
+  "public.direct_entry_authz_revoke_global_role_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -698,7 +707,8 @@ export async function verifyS0T1CHistoricalCompatibility(
     recruitmentPostPublicFeedV1Applied = false,
     recruitmentPostListWithFacetsApplied = false,
     wp2aEffectiveAccessShadowApplied = false,
-    wp3bPersonAccountOrgApplied = false } = {},
+    wp3bPersonAccountOrgApplied = false,
+    wp5b1RoleEffectiveAccessApplied = false } = {},
 ) {
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
   if (baseAllowlist.length === 0) {
@@ -833,6 +843,9 @@ export async function verifyS0T1CHistoricalCompatibility(
       : []),
     ...(wp3bPersonAccountOrgApplied
       ? WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES
+      : []),
+    ...(wp5b1RoleEffectiveAccessApplied
+      ? WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES
       : []),
   ];
 
@@ -1120,6 +1133,8 @@ export async function verifyAppliedMigrationChecksum(
           appliedMap.has(WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME),
         wp3bPersonAccountOrgApplied:
           appliedMap.has(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME),
+        wp5b1RoleEffectiveAccessApplied:
+          appliedMap.has(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
       },
     );
     if (postconditions.ok) {
