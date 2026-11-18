@@ -23,6 +23,7 @@
 import {
   normalizeAllowedWorkerOperationsTabs,
   type Capability,
+  type PairedEffectiveGrant,
   type WorkerOperationsTabId,
 } from "../auth/direct-entry-v2.ts";
 
@@ -30,6 +31,7 @@ import {
 export type NavActorProjection = {
   capabilities: readonly Capability[];
   scopes: readonly { kind: "own" | "team" | "all" }[];
+  effective_grants?: readonly PairedEffectiveGrant[];
   effective_report_review_scopes?: readonly { kind: "all" | "team"; team_id?: string | null; label?: string }[];
   hasHistoricalChangeRequests?: boolean;
   hasWorkReportObligations?: boolean;
