@@ -184,6 +184,7 @@ export function AccountGlobalRolesPanel({
   const [conflictLocked, setConflictLocked] = useState(false);
   const [gateLockedInDialog, setGateLockedInDialog] = useState(false);
   const [postApplyNeedsReload, setPostApplyNeedsReload] = useState(false);
+  const [postApplySuccessMessage, setPostApplySuccessMessage] = useState<string | null>(null);
   const [staleReplayLocked, setStaleReplayLocked] = useState(false);
   const [pendingMutation, setPendingMutation] = useState<PendingRoleMutation | null>(null);
   const [feedback, setFeedback] = useState<DialogFeedback>(null);
@@ -232,6 +233,7 @@ export function AccountGlobalRolesPanel({
       setConflictLocked(false);
       setGateLockedInDialog(false);
       setPostApplyNeedsReload(false);
+      setPostApplySuccessMessage(null);
       setStaleReplayLocked(false);
       setBusy(false);
       setReconciling(false);
@@ -284,49 +286,86 @@ export function AccountGlobalRolesPanel({
     };
   }, [handleSessionLost, isFixturePreview, listReloadToken, workspaceGuard]);
 
-  const fetchSummaryOnce = useCallback(async (): Promise<
-    | { ok: true; list: AccountsSummaryListResponse }
-    | { ok: false; sessionLost: boolean }
-  > => {
-    const built = buildAccountsSummaryUrlQuery({
-      search: appliedSearch,
-      enabled: enabledFilter,
-      roleCode: roleFilter,
-      page,
-      pageSize: DEFAULT_ROLE_ACCESS_PAGE_SIZE,
-    });
-    if (!built.ok) return { ok: false, sessionLost: false };
-    const reqSeq = ++summarySeqRef.current;
-    const tracked = workspaceGuard.trackController();
-    try {
-      const response = await fetch(`/api/admin/access/accounts-summary?${built.params.toString()}`, {
-        method: "GET",
-        cache: "no-store",
-        signal: tracked.controller.signal,
-        headers: { Accept: "application/json" },
+  const fetchSummaryOnce = useCallback(
+    async (
+      expectedEpoch?: number,
+    ): Promise<
+      | { ok: true; list: AccountsSummaryListResponse }
+      | { ok: false; sessionLost: boolean; stale: boolean }
+    > => {
+      const built = buildAccountsSummaryUrlQuery({
+        search: appliedSearch,
+        enabled: enabledFilter,
+        roleCode: roleFilter,
+        page,
+        pageSize: DEFAULT_ROLE_ACCESS_PAGE_SIZE,
       });
-      if (!workspaceGuard.isActive(tracked.epoch, tracked.controller) || reqSeq !== summarySeqRef.current) {
-        return { ok: false, sessionLost: false };
+      if (!built.ok) return { ok: false, sessionLost: false, stale: false };
+      const activeEpoch = expectedEpoch ?? workspaceGuard.getEpoch();
+      if (!mountedRef.current || !workspaceGuard.isActive(activeEpoch)) {
+        return {
+          ok: false,
+          sessionLost: !workspaceGuard.isActive(activeEpoch),
+          stale: true,
+        };
       }
-      const payload: unknown = await response.json().catch(() => null);
-      if (!workspaceGuard.isActive(tracked.epoch, tracked.controller) || reqSeq !== summarySeqRef.current) {
-        return { ok: false, sessionLost: false };
+      const reqSeq = ++summarySeqRef.current;
+      const tracked = workspaceGuard.trackController();
+      try {
+        const response = await fetch(`/api/admin/access/accounts-summary?${built.params.toString()}`, {
+          method: "GET",
+          cache: "no-store",
+          signal: tracked.controller.signal,
+          headers: { Accept: "application/json" },
+        });
+        if (
+          !mountedRef.current ||
+          !workspaceGuard.isActive(activeEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== summarySeqRef.current
+        ) {
+          return {
+            ok: false,
+            sessionLost: !workspaceGuard.isActive(activeEpoch),
+            stale: true,
+          };
+        }
+        const payload: unknown = await response.json().catch(() => null);
+        if (
+          !mountedRef.current ||
+          !workspaceGuard.isActive(activeEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== summarySeqRef.current
+        ) {
+          return {
+            ok: false,
+            sessionLost: !workspaceGuard.isActive(activeEpoch),
+            stale: true,
+          };
+        }
+        if (response.status === 401 || response.status === 403) {
+          const failure = classifyRoleReadFailure(response.status, payload);
+          handleSessionLost(failure.message, failure.kind === "unauthenticated");
+          return { ok: false, sessionLost: true, stale: true };
+        }
+        if (response.status !== 200) return { ok: false, sessionLost: false, stale: false };
+        const list = projectAccountsSummaryForQuery(payload, built.query);
+        if (!list) return { ok: false, sessionLost: false, stale: false };
+        return { ok: true, list };
+      } catch {
+        const sessionInvalidated = !workspaceGuard.isActive(activeEpoch);
+        const stale =
+          !mountedRef.current ||
+          !workspaceGuard.isActive(activeEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== summarySeqRef.current;
+        return { ok: false, sessionLost: sessionInvalidated, stale };
+      } finally {
+        tracked.release();
       }
-      if (response.status === 401 || response.status === 403) {
-        const failure = classifyRoleReadFailure(response.status, payload);
-        handleSessionLost(failure.message, failure.kind === "unauthenticated");
-        return { ok: false, sessionLost: true };
-      }
-      if (response.status !== 200) return { ok: false, sessionLost: false };
-      const list = projectAccountsSummaryForQuery(payload, built.query);
-      if (!list) return { ok: false, sessionLost: false };
-      return { ok: true, list };
-    } catch {
-      return { ok: false, sessionLost: false };
-    } finally {
-      tracked.release();
-    }
-  }, [appliedSearch, enabledFilter, handleSessionLost, page, roleFilter, workspaceGuard]);
+    },
+    [appliedSearch, enabledFilter, handleSessionLost, page, roleFilter, workspaceGuard],
+  );
 
   useEffect(() => {
     if (isFixturePreview) return;
@@ -591,9 +630,15 @@ export function AccountGlobalRolesPanel({
   const reloadAccountAndSummaryAuthoritative = useCallback(
     async (
       targetRef: string,
+      callerEpoch?: number,
     ): Promise<
-      { ok: true; detail: AccountAccessDetail } | { ok: false; sessionLost: boolean }
+      | { ok: true; detail: AccountAccessDetail }
+      | { ok: false; sessionLost: boolean; stale: boolean }
     > => {
+      const startEpoch = callerEpoch ?? workspaceGuard.getEpoch();
+      if (!mountedRef.current || !workspaceGuard.isActive(startEpoch)) {
+        return { ok: false, sessionLost: !workspaceGuard.isActive(startEpoch), stale: true };
+      }
       const reqSeq = ++detailSeqRef.current;
       const tracked = workspaceGuard.trackController();
       try {
@@ -606,36 +651,65 @@ export function AccountGlobalRolesPanel({
             headers: { Accept: "application/json" },
           },
         );
-        if (!workspaceGuard.isActive(tracked.epoch, tracked.controller) || reqSeq !== detailSeqRef.current) {
-          return { ok: false, sessionLost: false };
+        if (
+          !mountedRef.current ||
+          !workspaceGuard.isActive(startEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== detailSeqRef.current
+        ) {
+          return { ok: false, sessionLost: !workspaceGuard.isActive(startEpoch), stale: true };
         }
         const payload: unknown = await response.json().catch(() => null);
-        if (!workspaceGuard.isActive(tracked.epoch, tracked.controller) || reqSeq !== detailSeqRef.current) {
-          return { ok: false, sessionLost: false };
+        if (
+          !mountedRef.current ||
+          !workspaceGuard.isActive(startEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== detailSeqRef.current
+        ) {
+          return { ok: false, sessionLost: !workspaceGuard.isActive(startEpoch), stale: true };
         }
         if (response.status === 401 || response.status === 403) {
           const failure = classifyRoleReadFailure(response.status, payload);
           handleSessionLost(failure.message, failure.kind === "unauthenticated");
-          return { ok: false, sessionLost: true };
+          return { ok: false, sessionLost: true, stale: true };
         }
         if (response.status !== 200) {
-          return { ok: false, sessionLost: false };
+          return { ok: false, sessionLost: false, stale: false };
         }
         const detail = projectAccountAccessForTarget(payload, targetRef);
-        if (!detail) return { ok: false, sessionLost: false };
-        if (mountedRef.current) {
+        if (!detail) return { ok: false, sessionLost: false, stale: false };
+
+        const summaryRes = await fetchSummaryOnce(startEpoch);
+        if (
+          !mountedRef.current ||
+          !workspaceGuard.isActive(startEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== detailSeqRef.current
+        ) {
+          return { ok: false, sessionLost: !workspaceGuard.isActive(startEpoch), stale: true };
+        }
+        if (!summaryRes.ok) {
+          if (summaryRes.sessionLost || summaryRes.stale) {
+            return {
+              ok: false,
+              sessionLost: summaryRes.sessionLost || !workspaceGuard.isActive(startEpoch),
+              stale: true,
+            };
+          }
           setDetailState({ kind: "ready", detail });
+          return { ok: false, sessionLost: false, stale: false };
         }
-        const summaryRes = await fetchSummaryOnce();
-        if (!summaryRes.ok && summaryRes.sessionLost) {
-          return { ok: false, sessionLost: true };
-        }
-        if (summaryRes.ok && mountedRef.current) {
-          setSummaryState({ kind: "ready", list: summaryRes.list });
-        }
+        setDetailState({ kind: "ready", detail });
+        setSummaryState({ kind: "ready", list: summaryRes.list });
         return { ok: true, detail };
       } catch {
-        return { ok: false, sessionLost: false };
+        const sessionInvalidated = !workspaceGuard.isActive(startEpoch);
+        const stale =
+          !mountedRef.current ||
+          !workspaceGuard.isActive(startEpoch, tracked.controller) ||
+          !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+          reqSeq !== detailSeqRef.current;
+        return { ok: false, sessionLost: sessionInvalidated, stale };
       } finally {
         tracked.release();
       }
@@ -669,6 +743,7 @@ export function AccountGlobalRolesPanel({
     setConflictLocked(false);
     setGateLockedInDialog(false);
     setPostApplyNeedsReload(false);
+    setPostApplySuccessMessage(null);
     setStaleReplayLocked(false);
     setReason("");
     setDialog(null);
@@ -687,6 +762,7 @@ export function AccountGlobalRolesPanel({
     setConflictLocked(false);
     setGateLockedInDialog(false);
     setPostApplyNeedsReload(false);
+    setPostApplySuccessMessage(null);
     setStaleReplayLocked(false);
     setReason("");
     setAssignRoleCode(nextDefault as GlobalRoleCode | "");
@@ -708,6 +784,7 @@ export function AccountGlobalRolesPanel({
     setConflictLocked(false);
     setGateLockedInDialog(false);
     setPostApplyNeedsReload(false);
+    setPostApplySuccessMessage(null);
     setStaleReplayLocked(false);
     setReason("");
     setDialog({
@@ -721,10 +798,17 @@ export function AccountGlobalRolesPanel({
 
   const handleReconcileReload = async () => {
     if (!dialog || busy || reconciling) return;
+    const reconcileEpoch = workspaceGuard.getEpoch();
     setReconciling(true);
     try {
-      const result = await reloadAccountAndSummaryAuthoritative(dialog.accountRef);
-      if (!mountedRef.current || (!result.ok && result.sessionLost)) return;
+      const result = await reloadAccountAndSummaryAuthoritative(dialog.accountRef, reconcileEpoch);
+      if (
+        !mountedRef.current ||
+        !workspaceGuard.isActive(reconcileEpoch) ||
+        (!result.ok && (result.sessionLost || result.stale))
+      ) {
+        return;
+      }
       if (!result.ok) {
         setFeedback((prev) => ({
           tone: "warning",
@@ -744,16 +828,42 @@ export function AccountGlobalRolesPanel({
       const freshIdentity = formatAccountDisplayIdentity(freshDetail.account);
       const { activeAssigned } = splitOpenAndEndedGlobalRoles(freshDetail.assigned_global_roles);
 
-      const alreadyCompletedOnServer =
-        dialog.kind === "assign" && pendingMutation?.roleCode
-          ? activeAssigned.some((role) => role.role_code === pendingMutation.roleCode)
-          : dialog.kind === "revoke"
-            ? freshDetail.assigned_global_roles.some(
-                (role) =>
-                  role.assignment_id === dialog.assignment.assignment_id &&
-                  role.ended_at !== null,
-              )
-            : false;
+      // R1: When the original mutation outcome is still ambiguous, GET only refreshes read views
+      // for operator inspection and MUST NEVER clear pendingMutation/Idempotency-Key or rebase
+      // snapshotVersion to the latest version (which would turn a stale retry into a brand-new grant).
+      if (isUncertainLocked && pendingMutation) {
+        const roleCurrentlyPresent =
+          dialog.kind === "assign" && pendingMutation.roleCode
+            ? activeAssigned.some((role) => role.role_code === pendingMutation.roleCode)
+            : dialog.kind === "revoke"
+              ? freshDetail.assigned_global_roles.some(
+                  (role) =>
+                    role.assignment_id === dialog.assignment.assignment_id &&
+                    role.ended_at !== null,
+                )
+              : false;
+        setFeedback({
+          tone: "warning",
+          title:
+            dialog.kind === "assign"
+              ? roleCurrentlyPresent
+                ? "Vai trò đang có mặt trên máy chủ — cần xác nhận lại yêu cầu gốc"
+                : "Chưa thấy vai trò ở bản ghi mới nhất — giữ nguyên yêu cầu gốc"
+              : roleCurrentlyPresent
+                ? "Phân công đã đóng trên máy chủ — cần xác nhận lại yêu cầu gốc"
+                : "Phân công vẫn đang mở ở bản ghi mới nhất — giữ nguyên yêu cầu gốc",
+          message:
+            dialog.kind === "assign"
+              ? roleCurrentlyPresent
+                ? `Bản ghi mới nhất (phiên bản ${freshDetail.account.version}) đang có vai trò này, nhưng có thể do thao tác khác tạo. Khóa gửi trùng và phiên bản gốc (${pendingMutation.snapshotVersion}) vẫn được giữ nguyên; hãy bấm "Thử gửi lại cùng yêu cầu" để xác nhận kết quả thực trên máy chủ.`
+                : `Bản ghi mới nhất (phiên bản ${freshDetail.account.version}) hiện chưa có vai trò này (yêu cầu cũ có thể chưa chạy, đang xử lý hoặc đã bị thao tác khác rút sau đó). Khóa gửi trùng và phiên bản gốc (${pendingMutation.snapshotVersion}) vẫn được giữ nguyên; hãy bấm "Thử gửi lại cùng yêu cầu" để kiểm tra kết quả cũ mà không tạo lệnh cấp mới ở phiên bản ${freshDetail.account.version}.`
+              : roleCurrentlyPresent
+                ? `Bản ghi mới nhất (phiên bản ${freshDetail.account.version}) cho thấy phân công này đã đóng, nhưng có thể do thao tác khác thực hiện. Khóa gửi trùng và phiên bản gốc (${pendingMutation.snapshotVersion}) vẫn được giữ nguyên; hãy bấm "Thử gửi lại cùng yêu cầu" để xác nhận trên máy chủ.`
+                : `Bản ghi mới nhất (phiên bản ${freshDetail.account.version}) cho thấy phân công vẫn đang mở. Khóa gửi trùng và phiên bản gốc (${pendingMutation.snapshotVersion}) vẫn được giữ nguyên; hãy bấm "Thử gửi lại cùng yêu cầu" để xác nhận trên máy chủ mà không tạo lệnh mới ở phiên bản ${freshDetail.account.version}.`,
+          needsReload: true,
+        });
+        return;
+      }
 
       if (staleReplayLocked) {
         resetAndCloseDialog();
@@ -763,12 +873,13 @@ export function AccountGlobalRolesPanel({
         return;
       }
 
-      if (postApplyNeedsReload || (isUncertainLocked && alreadyCompletedOnServer)) {
+      if (postApplyNeedsReload) {
+        const msg =
+          postApplySuccessMessage ??
+          "Đã đối chiếu: thay đổi vai trò đã được ghi nhận trên máy chủ.";
         resetAndCloseDialog();
         notify.success({
-          title:
-            pendingMutation?.successMessage ??
-            "Đã đối chiếu: thay đổi vai trò đã được ghi nhận trên máy chủ.",
+          title: msg,
         });
         return;
       }
@@ -776,6 +887,7 @@ export function AccountGlobalRolesPanel({
       setPendingMutation(null);
       setConflictLocked(false);
       setPostApplyNeedsReload(false);
+      setPostApplySuccessMessage(null);
       setStaleReplayLocked(false);
       setGateLockedInDialog(false);
 
@@ -853,7 +965,7 @@ export function AccountGlobalRolesPanel({
         }
       }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && workspaceGuard.isActive(reconcileEpoch)) {
         setReconciling(false);
       }
     }
@@ -1018,13 +1130,20 @@ export function AccountGlobalRolesPanel({
         return;
       }
 
-      const reloadResult = await reloadAccountAndSummaryAuthoritative(targetAccountRef);
-      if (!mountedRef.current || (!reloadResult.ok && reloadResult.sessionLost)) return;
+      const reloadResult = await reloadAccountAndSummaryAuthoritative(targetAccountRef, tracked.epoch);
+      if (
+        !mountedRef.current ||
+        !workspaceGuard.isActive(tracked.epoch, tracked.controller) ||
+        (!reloadResult.ok && (reloadResult.sessionLost || reloadResult.stale))
+      ) {
+        return;
+      }
 
       if (!reloadResult.ok) {
         setPendingMutation(null);
         setConflictLocked(true);
         setPostApplyNeedsReload(true);
+        setPostApplySuccessMessage(intent.successMessage);
         setFeedback({
           tone: "warning",
           title: "Đã ghi nhận thao tác nhưng chưa tải được dữ liệu mới nhất",
@@ -1035,12 +1154,22 @@ export function AccountGlobalRolesPanel({
         return;
       }
 
+      const staleAfterReload = isStaleMutationReplay(
+        outcome.result.account_version,
+        reloadResult.detail.account.version,
+      );
       resetAndCloseDialog();
-      notify.success({
-        title: outcome.replayed
-          ? `${intent.successMessage} (Đã đối chiếu yêu cầu trùng khớp an toàn)`
-          : intent.successMessage,
-      });
+      if (staleAfterReload) {
+        notify.info({
+          title: "Đã đồng bộ dữ liệu mới nhất trên máy chủ sau khi đối chiếu yêu cầu trước đó.",
+        });
+      } else {
+        notify.success({
+          title: outcome.replayed
+            ? `${intent.successMessage} (Đã đối chiếu yêu cầu trùng khớp an toàn)`
+            : intent.successMessage,
+        });
+      }
     } finally {
       tracked.release();
       mutationInFlightRef.current = false;

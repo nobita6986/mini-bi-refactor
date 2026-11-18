@@ -1195,6 +1195,261 @@ test("React Strict Mode setup -> cleanup -> setup keeps mountedRef=true across 4
   assert.equal(notifications.success.length, 0);
 });
 
+async function submitAssignHrOperator(panel, reasonText = "T0 retry verification") {
+  findButton(panel, "Cấp vai trò toàn cục").props.onClick();
+  await panel.flush();
+  findNode(panel, (n) => n.props?.id === "assign-global-role-select").props.onChange({
+    target: { value: "HR_OPERATOR" },
+  });
+  findNode(panel, (n) => n.props?.id === "role-mutation-reason-input").props.onChange({
+    target: { value: reasonText },
+  });
+  await panel.flush();
+  findDialogForm(panel).props.onSubmit({ preventDefault() {} });
+  await panel.flush();
+  return findLastRequest((r) => r.method === "POST");
+}
+
+test("R1: GET reconciliation after 503 preserves original Idempotency-Key & expected_version even when version moved (4 -> 6) and role is absent", async () => {
+  const { ws, panel } = await mountWorkspaceOnGlobalRoles(OWNER_REF, true);
+  const firstPost = await submitAssignHrOperator(panel);
+  assert.ok(firstPost);
+  const firstKey = firstPost.options.headers["Idempotency-Key"];
+  const firstBody = JSON.parse(firstPost.options.body);
+  assert.equal(firstBody.expected_version, 4);
+
+  respond(firstPost, 503, { ok: false, error: { code: "AUTHZ_UNAVAILABLE" } });
+  await panel.flush();
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.closeDisabled, true);
+
+  // Case A: GET at v4 still has no HR_OPERATOR (request may still be in flight) -> keeps uncertain lock
+  findButton(panel, "Tải lại đối chiếu").props.onClick();
+  await panel.flush();
+  await drainDefaultReads(panel, ws, {
+    detailMap: { [OWNER_REF]: makeDetailEnvelope("canonical_owner_protected") },
+  });
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, true);
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.closeDisabled, true);
+  assert.equal(findButton(panel, "Hủy").props.disabled, true);
+  assert.equal(notifications.success.length, 0);
+
+  // Case B: Original POST committed v5, then another Admin revoked HR_OPERATOR at v6 -> GET sees v6 absent
+  findButton(panel, "Tải lại đối chiếu").props.onClick();
+  await panel.flush();
+  const freshV6 = makeDetailEnvelope("canonical_owner_protected");
+  freshV6.account.version = 6;
+  await drainDefaultReads(panel, ws, { detailMap: { [OWNER_REF]: freshV6 } });
+
+  // Must STILL keep original request locked & NEVER rebase expected_version=4 to 6
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.closeDisabled, true);
+  assert.equal(findButton(panel, "Hủy").props.disabled, true);
+  assert.equal(notifications.success.length, 0);
+
+  // Retry sends exact same Idempotency-Key & expected_version=4 (never creates a new grant at v6!)
+  findDialogForm(panel).props.onSubmit({ preventDefault() {} });
+  await panel.flush();
+  const secondPost = findLastRequest((r) => r.method === "POST");
+  assert.ok(secondPost);
+  assert.equal(secondPost.options.headers["Idempotency-Key"], firstKey);
+  assert.equal(secondPost.options.body, firstPost.options.body);
+  assert.equal(JSON.parse(secondPost.options.body).expected_version, 4);
+
+  // Server ledger replays old commit from v5 (< current v6) -> stale replay guard triggers cleanly
+  const replayedV5 = cloneJson(fixtures.responses.mutations.assign_global_role_created);
+  replayedV5.account_ref = OWNER_REF;
+  replayedV5.account_version = 5;
+  replayedV5.replayed = true;
+  replayedV5.assignment.assignment_id = "bbbbbbbb-bbbb-4bbb-8bbb-000000000099";
+  replayedV5.assignment.role_code = "HR_OPERATOR";
+  replayedV5.assignment.display_name = "Vận hành nhân sự (HR Operator)";
+  respond(secondPost, 200, { ok: true, ...replayedV5 });
+  await panel.flush();
+
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, true);
+  assert.equal(notifications.success.length, 0);
+  assert.match(textOf(panel.tree), /phiên bản cũ hơn hiện tại/i);
+  ws.unmount();
+});
+
+test("R1: GET reconciliation after 503 does not falsely celebrate when another Admin added the role; retry confirms via 409/ledger", async () => {
+  const { ws, panel } = await mountWorkspaceOnGlobalRoles(OWNER_REF, true);
+  const firstPost = await submitAssignHrOperator(panel, "Original request might not have landed");
+  const firstKey = firstPost.options.headers["Idempotency-Key"];
+
+  respond(firstPost, 503, { ok: false, error: { code: "AUTHZ_UNAVAILABLE" } });
+  await panel.flush();
+
+  // Another Admin independently granted HR_OPERATOR at v5
+  findButton(panel, "Tải lại đối chiếu").props.onClick();
+  await panel.flush();
+  const otherAdminV5 = makeDetailEnvelope("canonical_owner_protected");
+  otherAdminV5.account.version = 5;
+  otherAdminV5.assigned_global_roles.push({
+    assignment_id: "bbbbbbbb-bbbb-4bbb-8bbb-000000000088",
+    role_code: "HR_OPERATOR",
+    display_name: "Vận hành nhân sự (HR Operator)",
+    source_kind: "ADMIN_ASSIGNMENT",
+    reason: "Granted by another admin",
+    started_at: "2026-11-14T08:30:00+07:00",
+    ended_at: null,
+    ended_reason: null,
+    assigned_by_display: "Other Admin",
+    is_effective: true,
+    inactive_reason: null,
+    is_protected: false,
+    can_revoke: true,
+    cannot_revoke_reason: null,
+  });
+  await drainDefaultReads(panel, ws, { detailMap: { [OWNER_REF]: otherAdminV5 } });
+
+  // MUST NOT infer "request succeeded" and MUST keep Idempotency-Key locked until retry
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, true);
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.closeDisabled, true);
+  assert.equal(notifications.success.length, 0);
+
+  // Retry confirms original request did not run (server returns 409 VERSION_CONFLICT at v5)
+  findDialogForm(panel).props.onSubmit({ preventDefault() {} });
+  await panel.flush();
+  const retryPost = findLastRequest((r) => r.method === "POST");
+  assert.ok(retryPost);
+  assert.equal(retryPost.options.headers["Idempotency-Key"], firstKey);
+  assert.equal(JSON.parse(retryPost.options.body).expected_version, 4);
+
+  respond(retryPost, 409, cloneJson(fixtures.errors.VERSION_CONFLICT));
+  await panel.flush();
+  assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.closeDisabled, false);
+  assert.equal(findButton(panel, "Hủy").props.disabled, false);
+  assert.equal(notifications.success.length, 0);
+  ws.unmount();
+});
+
+test("R2: parallel 403/401 on catalog during reconcile GET invalidates epoch so aborted summary GET never reopens dialog", async () => {
+  for (const status of [403, 401]) {
+    clearNotifications();
+    setupFetchMock();
+    const panel = mount(AccountGlobalRolesPanel, {
+      canManageGlobalRoles: true,
+      selectedAccountRef: OWNER_REF,
+      onSelectedAccountRefChange() {},
+    });
+    await panel.flush();
+
+    const catalog = findLastRequest((r) => r.url === "/api/admin/access/roles");
+    assert.ok(catalog);
+    for (const req of requests) {
+      if (req.settled || req === catalog) continue;
+      if (req.url.includes("/accounts-summary?")) {
+        respond(req, 200, { ok: true, list: makeSummaryList() });
+      } else if (req.url.endsWith(`/${OWNER_REF}/access`)) {
+        respond(req, 200, makeDetailEnvelope("canonical_owner_protected"));
+      }
+    }
+    await panel.flush();
+
+    const post = await submitAssignHrOperator(panel);
+    respond(post, 503, { ok: false, error: { code: "AUTHZ_UNAVAILABLE" } });
+    await panel.flush();
+
+    findButton(panel, "Tải lại đối chiếu").props.onClick();
+    await panel.flush();
+
+    const reconcileDetail = findLastRequest(
+      (r) => r.method === "GET" && r.url.endsWith(`/${OWNER_REF}/access`),
+    );
+    assert.ok(reconcileDetail);
+    respond(reconcileDetail, 200, makeDetailEnvelope("canonical_owner_protected"));
+    await panel.flush();
+
+    const reconcileSummary = findLastRequest((r) => r.url.includes("/accounts-summary?"));
+    assert.ok(reconcileSummary);
+
+    // Parallel session loss via catalog metadata fetch
+    respond(catalog, status, {
+      ok: false,
+      error: { code: status === 401 ? "UNAUTHENTICATED" : "AUTHZ_FORBIDDEN" },
+    });
+    await panel.flush();
+    assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, false);
+    assert.equal(reconcileSummary.signal.aborted, true);
+
+    rejectRequest(reconcileSummary, new DOMException("Aborted", "AbortError"));
+    await panel.flush();
+
+    assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, false);
+    assert.equal(notifications.success.length, 0);
+    assert.match(
+      textOf(panel.tree),
+      status === 401 ? /Phiên đăng nhập đã hết hiệu lực/ : /Không có quyền truy cập quản trị vai trò toàn cục/,
+    );
+    panel.unmount();
+  }
+});
+
+test("R2: parallel 403/401 during post-apply reload prevents dialog/toast/data restoration after session loss", async () => {
+  for (const status of [403, 401]) {
+    clearNotifications();
+    setupFetchMock();
+    const panel = mount(AccountGlobalRolesPanel, {
+      canManageGlobalRoles: true,
+      selectedAccountRef: OWNER_REF,
+      onSelectedAccountRefChange() {},
+    });
+    await panel.flush();
+
+    const catalog = findLastRequest((r) => r.url === "/api/admin/access/roles");
+    assert.ok(catalog);
+    for (const req of requests) {
+      if (req.settled || req === catalog) continue;
+      if (req.url.includes("/accounts-summary?")) {
+        respond(req, 200, { ok: true, list: makeSummaryList() });
+      } else if (req.url.endsWith(`/${OWNER_REF}/access`)) {
+        respond(req, 200, makeDetailEnvelope("canonical_owner_protected"));
+      }
+    }
+    await panel.flush();
+
+    const post = await submitAssignHrOperator(panel, "Post-apply epoch race");
+    const created = cloneJson(fixtures.responses.mutations.assign_global_role_created);
+    created.account_ref = OWNER_REF;
+    created.account_version = 5;
+    created.assignment.role_code = "HR_OPERATOR";
+    created.assignment.display_name = "Vận hành nhân sự (HR Operator)";
+    respond(post, 201, { ok: true, ...created });
+    await panel.flush();
+
+    const postApplyDetail = findLastRequest(
+      (r) => r.method === "GET" && r.url.endsWith(`/${OWNER_REF}/access`),
+    );
+    assert.ok(postApplyDetail);
+    const updatedOwner = makeDetailEnvelope("canonical_owner_protected");
+    updatedOwner.account.version = 5;
+    respond(postApplyDetail, 200, updatedOwner);
+    await panel.flush();
+
+    const postApplySummary = findLastRequest((r) => r.url.includes("/accounts-summary?"));
+    assert.ok(postApplySummary);
+
+    respond(catalog, status, {
+      ok: false,
+      error: { code: status === 401 ? "UNAUTHENTICATED" : "AUTHZ_FORBIDDEN" },
+    });
+    await panel.flush();
+    assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, false);
+    assert.equal(postApplySummary.signal.aborted, true);
+
+    rejectRequest(postApplySummary, new DOMException("Aborted", "AbortError"));
+    await panel.flush();
+
+    assert.equal(findNode(panel, (n) => n.type?.name === "FormDialog").props.open, false);
+    assert.equal(notifications.success.length, 0);
+    assert.match(
+      textOf(panel.tree),
+      status === 401 ? /Phiên đăng nhập đã hết hiệu lực/ : /Không có quyền truy cập quản trị vai trò toàn cục/,
+    );
+    panel.unmount();
+  }
+});
+
 test("WP6 UI source satisfies a11y, responsive table, contrast/theme guard, and zero authority/identity anti-patterns", () => {
   const files = [
     "src/components/admin/effective-access-workspace.tsx",
