@@ -86,6 +86,33 @@ const BOD_WORK_REPORTS_CAPS = ["report_analytics_view", "report_view"];
 const STAFF_CAPS = ["report_view"];
 
 function makeSessionOk(capabilities = FULL_ADMIN_CAPS, scopes = ALL_SCOPE) {
+  const effective_grants = [];
+  for (const cap of capabilities) {
+    for (const scope of scopes) {
+      if (scope.kind === "all") {
+        effective_grants.push({
+          capability: cap,
+          scope_kind: "ALL",
+          scope_id: null,
+          source_type: "LEGACY_BRIDGE",
+        });
+      } else if (scope.kind === "team") {
+        effective_grants.push({
+          capability: cap,
+          scope_kind: "CONTEXT_TEAM",
+          scope_id: scope.team_id ?? scope.reference ?? null,
+          source_type: "LEGACY_BRIDGE",
+        });
+      } else if (scope.kind === "own") {
+        effective_grants.push({
+          capability: cap,
+          scope_kind: "OWN",
+          scope_id: null,
+          source_type: "LEGACY_BRIDGE",
+        });
+      }
+    }
+  }
   return {
     actor: {
       ok: true,
@@ -96,6 +123,7 @@ function makeSessionOk(capabilities = FULL_ADMIN_CAPS, scopes = ALL_SCOPE) {
         enabled: true,
         capabilities,
         scopes,
+        effective_grants,
         self_recruiter_suggestion: null,
         session: {
           provider: "supabase",

@@ -108,6 +108,7 @@ async function seedFixture(db) {
   // Multi-team actor: verified link plus a synthetic own grant, then TWO
   // effective team grants and out-of-scope ineffective team grants.
   await db.query("insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current) values ($1,$2,true,'2020-01-01',true)", [APP_MULTI, REC_A1]);
+  await db.query("insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_own','2020-01-01',true), ($1,'entry_team','2020-01-01',true)", [APP_MULTI]);
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'own',null,'2020-01-01',true)", [APP_MULTI]);
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'team',$2,'2020-01-01',true)", [APP_MULTI, TEAM_A]);
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'team',$2,'2020-01-01',true)", [APP_MULTI, TEAM_B]);
@@ -115,6 +116,7 @@ async function seedFixture(db) {
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from) values ($1,'team',$2,(select public.direct_entry_authorization_date() + 1))", [APP_MULTI, TEAM_C]);
 
   // Actor whose only team grant is already expired.
+  await db.query("insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_team','2020-01-01',true)", [APP_INACTIVE_SCOPE]);
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, valid_to) values ($1,'team',$2,'2020-01-01','2021-01-01')", [APP_INACTIVE_SCOPE, TEAM_A]);
   // Actor with an explicit own scope but no verified recruiter link.
   await db.query("insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'own',null,'2020-01-01',true)", [APP_OWN_NO_LINK]);

@@ -1010,12 +1010,12 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       await assertInvalidDateRpcRejected(
         `direct_entry_designate_team_leader (${tag})`,
         "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, 2, 'Reason', $6)",
-        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, ACTORS.leader2.app, badDate, `idem-f4-${tag}`],
+        [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, TEAM_A, ACTORS.leader2.app, badDate, `idem-f4-${tag}`],
       );
       await assertInvalidDateRpcRejected(
         `direct_entry_revoke_team_leader (${tag})`,
         "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, $4::date, 2, 'Reason', $5)",
-        [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, badDate, `idem-f5-${tag}`],
+        [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, TEAM_A, badDate, `idem-f5-${tag}`],
       );
       await assertInvalidDateRpcRejected(
         `org_department_assign_accounting_member (${tag})`,
@@ -1168,7 +1168,7 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       `select public.direct_entry_designate_team_leader(
          $1::uuid, $2::uuid, $3::uuid, $4::uuid, null, 2, 'Immediate handover to Leader 2', 'wp1-tl-handover-1'
        ) as result`,
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, ACTORS.leader2.app],
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, TEAM_A, ACTORS.leader2.app],
     );
     assert.equal(tlReplaced.change, "replace");
     assert.equal(tlReplaced.leader_app_user_id, ACTORS.leader2.app);
@@ -1376,7 +1376,7 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       `select public.direct_entry_designate_team_leader(
          $1::uuid, $2::uuid, $3::uuid, $4::uuid, null, 2, 'Immediate handover to Leader 2', 'wp1-tl-handover-1'
        ) as result`,
-      [ACTORS.catalogOp.auth, ACTORS.catalogOp.app, TEAM_A, ACTORS.leader2.app],
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, TEAM_A, ACTORS.leader2.app],
     );
     assert.deepEqual(
       tlReplacedReplayTomorrow,

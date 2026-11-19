@@ -21,6 +21,9 @@ export default async function AdminLayout({ children }: { children: ReactNode })
     ? {
         capabilities: actor.actor.capabilities,
         scopes: actor.actor.scopes.map((scope) => ({ kind: scope.kind })),
+        ...(actor.actor.effective_grants !== undefined
+          ? { effective_grants: actor.actor.effective_grants }
+          : {}),
       }
     : null;
 

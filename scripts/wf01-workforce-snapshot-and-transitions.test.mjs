@@ -264,12 +264,28 @@ test("WF-01 ephemeral DB integration: snapshot as-of, status transitions, supers
       [USER_BOD],
     );
     await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_admin','2020-01-01',true)",
+      [USER_BOD],
+    );
+    await db.query(
       "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'team',$2,'2020-01-01',true)",
       [USER_TEAM_A, TEAM_A_ID],
     );
     await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_team','2020-01-01',true)",
+      [USER_TEAM_A],
+    );
+    await db.query(
       "insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current) values ($1,$2,true,'2020-01-01',true)",
       [USER_OWN_A1, REC_A1_ID],
+    );
+    await db.query(
+      "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1,'own',null,'2020-01-01',true)",
+      [USER_OWN_A1],
+    );
+    await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1,'entry_own','2020-01-01',true)",
+      [USER_OWN_A1],
     );
     await db.query(
       "insert into public.direct_entry_restricted_reasons (reason_id, actor_user_id, reason_text) values ($1, $2, 'Synthetic WF-01 status reason')",

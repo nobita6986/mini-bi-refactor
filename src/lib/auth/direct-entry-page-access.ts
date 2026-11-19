@@ -4,7 +4,11 @@
  * Nhan du lieu DA RESOLVE (khong doc env/cookies/DB); output la discriminated union gioi han.
  * Khong nhan actor/capability/scope tu client; API/DB van la authority.
  */
-import type { ActorResolution } from "./direct-entry-v2";
+import {
+  hasPairedAllReportingAccess,
+  hasPairedCapability,
+  type ActorResolution,
+} from "./direct-entry-v2.ts";
 import type { NavActorProjection, NavCapabilityPredicate } from "../navigation/registry-capability.ts";
 import {
   adminAreaNavPredicate,
@@ -404,7 +408,12 @@ export function canViewCccdReviewReport(actor: ActorResolution | null): boolean 
  * Team Leader (`scope = "team"`) và Recruiter (`scope = "own"`) bị ẩn tab và không gọi API/RPC.
  * Quyền thực tế vẫn được kiểm tra lại tại API `/api/reporting/workforce-deep` và RPC PostgreSQL.
  */
+export function canManageTeamLeadersFromActor(actor: ActorResolution | null): boolean {
+  if (actor?.ok !== true) return false;
+  return hasPairedCapability(actor.actor, "team_master_manage", { kind: "all" });
+}
+
 export function canViewDeepWorkforceReport(actor: ActorResolution | null): boolean {
   if (actor === null || !actor.ok) return false;
-  return actor.actor.scopes.some((scope) => scope.kind === "all");
+  return hasPairedAllReportingAccess(actor.actor);
 }

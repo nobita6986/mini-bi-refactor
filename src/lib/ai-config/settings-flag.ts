@@ -7,9 +7,6 @@
 
 export const AI_SETTINGS_ENABLED_VAR = "AI_SETTINGS_ENABLED";
 
-/** Actor pilot hiện tại (shared Basic Auth) — KHÔNG phải RBAC P3. */
-export const PILOT_ACTOR_REF = "pilot-admin";
-
 export function isAiSettingsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env[AI_SETTINGS_ENABLED_VAR];
   return typeof value === "string" && value.trim() === "true";

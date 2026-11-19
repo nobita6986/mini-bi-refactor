@@ -168,6 +168,11 @@ test("WF-03 ephemeral DB integration: 2.5 active ON tenure & status presence, 2.
         "($1,'all',null,'2020-01-01',true), ($2,'team',$4,'2020-01-01',true), ($3,'own',null,'2020-01-01',true)",
       [USER_BOD, USER_LEAD_A, USER_REC_A1, TEAM_A_ID],
     );
+    await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values " +
+        "($1,'entry_admin','2020-01-01',true), ($2,'entry_team','2020-01-01',true), ($3,'entry_own','2020-01-01',true)",
+      [USER_BOD, USER_LEAD_A, USER_REC_A1],
+    );
 
     const REASON_ID = uuid(99);
     await db.query(

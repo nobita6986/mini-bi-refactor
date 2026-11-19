@@ -16,7 +16,10 @@
  * present in the projection.
  */
 
-import type { DirectEntryActor } from "@/lib/auth/direct-entry-v2";
+import {
+  hasPairedAllReportingAccess,
+  type DirectEntryActor,
+} from "../auth/direct-entry-v2.ts";
 
 export type ReportingAudienceKind = "all" | "team" | "own";
 
@@ -29,14 +32,26 @@ export const REPORTING_AUDIENCE_ALL_LABEL = "Toàn công ty";
 export const REPORTING_AUDIENCE_OWN_FALLBACK_LABEL = "Cá nhân";
 
 /**
- * Resolve the audience KIND from the actor's already-current scopes.
- * Priority: all > team > own (the resolver always synthesizes own).
+ * Resolve the audience KIND strictly from the actor's paired `effective_grants`
+ * (WP5B-2 Group A). Priority: all > team > own (fails closed when grants are missing/unpaired).
  */
 export function resolveReportingAudienceKind(
   actor: DirectEntryActor,
 ): ReportingAudienceKind {
-  if (actor.scopes.some((scope) => scope.kind === "all")) return "all";
-  if (actor.scopes.some((scope) => scope.kind === "team")) return "team";
+  if (hasPairedAllReportingAccess(actor)) return "all";
+  if (
+    actor.enabled === true &&
+    Array.isArray(actor.effective_grants) &&
+    actor.effective_grants.some(
+      (grant) =>
+        grant.scope_kind === "CONTEXT_TEAM" &&
+        typeof grant.scope_id === "string" &&
+        grant.scope_id.length > 0 &&
+        (grant.capability === "entry_team" || grant.capability === "report_analytics_view"),
+    )
+  ) {
+    return "team";
+  }
   return "own";
 }
 

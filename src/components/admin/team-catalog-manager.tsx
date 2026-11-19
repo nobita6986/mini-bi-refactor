@@ -73,7 +73,11 @@ function ActiveBadge({ active }: { active: boolean }) {
   );
 }
 
-export function TeamCatalogManager() {
+export function TeamCatalogManager({
+  canManageTeamLeaders = true,
+}: {
+  canManageTeamLeaders?: boolean;
+} = {}) {
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -456,6 +460,7 @@ export function TeamCatalogManager() {
     <>
       <TeamLeaderManager
         team={leaderTeam}
+        canManageLeaders={canManageTeamLeaders}
         teamOperationLocked={leaderTeam !== null &&
           (busy || conflictLocks.has(leaderTeam.team_id) ||
             (pendingIntent !== null && pendingIntent.lockId === leaderTeam.team_id))}

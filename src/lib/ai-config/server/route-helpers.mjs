@@ -8,8 +8,9 @@ import "server-only";
  */
 
 import { checkSameOriginRequest, sanitizeMessage } from "../../ai/gateway/http-guards.mjs";
+import { hasPairedFullAdmin } from "../../auth/direct-entry-v2.ts";
 import { httpStatusFor, toApiCode } from "../settings-codes.ts";
-import { isAiSettingsEnabled, PILOT_ACTOR_REF } from "../settings-flag.ts";
+import { isAiSettingsEnabled } from "../settings-flag.ts";
 import { createRateLimiter } from "../rate-limit.ts";
 
 /**
@@ -33,7 +34,12 @@ const mutationLimiter = createRateLimiter({
  * serverless, KHÔNG phải hard distributed rate limit (nhiều instance ⇒ trần thực tế có thể cao hơn).
  * P3 PHẢI thay bằng limiter atomic ở DB/KV theo **authenticated actor** (khoá theo user thật + org).
  */
-export function checkSettingsRateLimit(actorRef = PILOT_ACTOR_REF) {
+const ACTOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function checkSettingsRateLimit(actorRef) {
+  if (typeof actorRef !== "string" || actorRef.trim().length === 0) {
+    return { ok: false, code: "INVALID_INPUT", retry_after_ms: 0 };
+  }
   return mutationLimiter.check(actorRef);
 }
 
@@ -59,7 +65,9 @@ export function settingsError(code, message) {
  * @returns {{ok:true} | {ok:false, response:Response}}
  */
 export function guardSettingsRequest(request, options = {}) {
-  const actorRef = options.actor_ref ?? PILOT_ACTOR_REF;
+  const actorRef = typeof options.actor_ref === "string" && options.actor_ref.length > 0
+    ? options.actor_ref
+    : null;
   if (!isAiSettingsEnabled()) {
     return { ok: false, response: settingsError("SETTINGS_DISABLED", "Bảng cấu hình AI đang tắt") };
   }
@@ -72,12 +80,39 @@ export function guardSettingsRequest(request, options = {}) {
     if (!originCheck.ok) {
       return { ok: false, response: settingsError("CSRF_REJECTED", originCheck.message) };
     }
-    const limit = checkSettingsRateLimit(actorRef);
-    if (!limit.ok) {
-      return { ok: false, response: settingsError("RATE_LIMITED", "quá nhiều yêu cầu cấu hình") };
+    if (actorRef !== null) {
+      const limit = checkSettingsRateLimit(actorRef);
+      if (!limit.ok) {
+        return { ok: false, response: settingsError("RATE_LIMITED", "quá nhiều yêu cầu cấu hình") };
+      }
     }
   }
   return { ok: true };
+}
+
+/**
+ * OD-WP5-04: Enforces authenticated Full Admin (`entry_admin` + `recruiter_master_manage`
+ * + `team_master_manage` @ `ALL`) on every `/api/ai/settings/**` route, and applies per-actor
+ * rate limiting using the verified UUID `actor.app_user_id`.
+ */
+export function guardAiSettingsAdminActor(actor, options = {}) {
+  const appUserId = typeof actor?.app_user_id === "string" ? actor.app_user_id.trim() : "";
+  if (!hasPairedFullAdmin(actor) || !ACTOR_UUID_RE.test(appUserId)) {
+    return {
+      ok: false,
+      response: settingsError("AI_FORBIDDEN", "Bạn không có quyền quản trị cấu hình AI"),
+    };
+  }
+  if (options.mutation === true) {
+    const limit = checkSettingsRateLimit(appUserId);
+    if (!limit.ok) {
+      return {
+        ok: false,
+        response: settingsError("RATE_LIMITED", "quá nhiều yêu cầu cấu hình"),
+      };
+    }
+  }
+  return { ok: true, actor_ref: appUserId };
 }
 
 const TOO_LARGE = { ok: false, code: "RESULT_TOO_LARGE", message: "body quá lớn" };

@@ -54,19 +54,22 @@ test("P3-W02E P1: POST /api/ai/settings goi guardApiSession() truoc khi wiring/b
   assert.match(postBody, /if \(!session\.ok\) return session\.response;/,
     "POST phai reject response khi session khong ok");
 
-  // Thu tu fail-closed: settings guard TRUOC, session guard TRUOC wiring TRUOC body.
+  // Thu tu fail-closed: settings guard TRUOC, session guard TRUOC admin guard TRUOC wiring TRUOC body.
   const settingsGuardAt = postBody.indexOf("guardSettingsRequest(request");
   const sessionGuardAt = postBody.indexOf("await guardApiSession()");
-  const wiringAt = postBody.indexOf("createSettingsWiring()");
+  const adminGuardAt = postBody.indexOf("guardAiSettingsAdminActor(session.actor");
+  const wiringAt = postBody.indexOf("createSettingsWiring(");
   const bodyAt = postBody.indexOf("readSettingsJsonBody(request");
 
   assert.ok(settingsGuardAt >= 0, "POST phai goi guardSettingsRequest");
   assert.ok(sessionGuardAt > settingsGuardAt,
-    "session guard phai chay SAU settings guard (flag + CSRF + rate limit truoc)");
-  assert.ok(wiringAt > sessionGuardAt,
-    "wiring phai chay SAU session guard");
-  assert.ok(bodyAt > sessionGuardAt,
-    "doc body phai chay SAU session guard");
+    "session guard phai chay SAU settings guard (flag + CSRF truoc)");
+  assert.ok(adminGuardAt > sessionGuardAt,
+    "Full Admin guard phai chay SAU session guard");
+  assert.ok(wiringAt > adminGuardAt,
+    "wiring phai chay SAU Full Admin guard");
+  assert.ok(bodyAt > adminGuardAt,
+    "doc body phai chay SAU Full Admin guard");
 });
 
 test("P3-W02E P2: GET va POST cung route deu co guardApiSession() (khong chi mot method)", () => {
@@ -76,18 +79,16 @@ test("P3-W02E P2: GET va POST cung route deu co guardApiSession() (khong chi mot
 
   assert.match(getBody, /await guardApiSession\(\)/, "GET phai goi guardApiSession()");
   assert.match(postBody, /await guardApiSession\(\)/, "POST phai goi guardApiSession()");
+  assert.match(getBody, /guardAiSettingsAdminActor\(session\.actor/, "GET phai kiem tra Full Admin");
+  assert.match(postBody, /guardAiSettingsAdminActor\(session\.actor/, "POST phai kiem tra Full Admin");
 
   // Kiem soat duy nhat: source phai chua it nhat 2 lan await guardApiSession()
-  // (GET + POST), va POST khong duoc su dung PILOT_ACTOR_REF thay cho session guard.
+  // (GET + POST), va OD-WP5-04 da loai bo PILOT_ACTOR_REF khoi AI Settings routes.
   const matches = route.match(/await guardApiSession\(\)/g) ?? [];
   assert.equal(matches.length >= 2, true,
     "route phai goi await guardApiSession() it nhat 2 lan (GET + POST)");
-
-  // PILOT_ACTOR_REF van duoc phep lam settings actor_ref key cho rate limit
-  // (P3-W02A follow-up se di chuyen); nhung khong duoc dung de THAY guard session.
-  // Dam bao khong co pattern 'PILOT_ACTOR_REF as session' hoac 'session = PILOT_ACTOR_REF'.
-  assert.equal(/session\s*=\s*PILOT_ACTOR_REF/.test(route), false,
-    "PILOT_ACTOR_REF khong duoc dung thay cho session guard");
+  assert.equal(route.includes("PILOT_ACTOR_REF"), false,
+    "OD-WP5-04: AI Settings khong con dung PILOT_ACTOR_REF");
 });
 
 test("P3-W02E P3: response cua guard phai giu contract private, no-store + 401 UNAUTHENTICATED", () => {
@@ -97,18 +98,14 @@ test("P3-W02E P3: response cua guard phai giu contract private, no-store + 401 U
   assert.match(guard, /"cache-control": "private, no-store"/);
 });
 
-test("P3-W02E P4: PILOT_ACTOR_REF con lai chi lam rate-limit key, khong phai session", () => {
-  // Sau W02E, flag actor_ref trong guardSettingsRequest van la PILOT_ACTOR_REF
-  // (rate limit follow-up P3-W02A). Xac nhan rang no chi xuat hien o settings guard,
-  // khong thay the guard session.
+test("P3-W02E P4 (OD-WP5-04): PILOT_ACTOR_REF da bi loai bo khoi AI Settings va thay bang app_user_id Full Admin", () => {
   const route = source(ROUTE);
+  const flag = source("../ai-config/settings-flag.ts");
   const postBody = sliceFunctionBody(route, "POST");
 
-  // Trong POST, PILOT_ACTOR_REF van xuat hien nhu actor_ref cua settings guard.
-  assert.match(postBody, /actor_ref: PILOT_ACTOR_REF/);
-  // Nhung khong co guard session nao "return" hoac "= PILOT_ACTOR_REF".
+  assert.equal(flag.includes("PILOT_ACTOR_REF"), false);
+  assert.match(postBody, /actor_ref:\s*adminGuard\.actor_ref/);
   assert.equal(/redirect\([^)]*PILOT_ACTOR_REF/.test(postBody), false);
-  // Guard session phai tra Response JSON (khong redirect HTML).
   assert.equal(/redirect\(/.test(postBody), false,
     "POST khong duoc redirect HTML (van la API, khong phai page)");
 });

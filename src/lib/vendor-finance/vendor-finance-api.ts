@@ -177,6 +177,9 @@ async function resolveVendorFinanceAuthority(
   const navActor: NavActorProjection = {
     capabilities: actor.capabilities,
     scopes: actor.scopes.map((scope) => ({ kind: scope.kind })),
+    ...(actor.effective_grants !== undefined
+      ? { effective_grants: actor.effective_grants }
+      : {}),
   };
 
   if (requiredMode === "admin") {

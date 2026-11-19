@@ -77,7 +77,8 @@ export async function seedReportingFixture(db) {
   }
   await db.query("insert into public.direct_entry_projects(project_id,display_name) values ($1,'Project A'),($2,'Project B')", [PROJECT_A, PROJECT_B]);
   await db.query("insert into public.direct_entry_app_user_recruiter_links(app_user_id,recruiter_id,verified,valid_from) values ($1,$2,true,'2020-01-01')", [APP_OWN, REC_A]);
-  await db.query("insert into public.direct_entry_scope_grants(app_user_id,scope_kind,team_id,valid_from,is_current) values ($1,'all',null,'2020-01-01',true),($2,'team',$3,'2020-01-01',true)", [APP_ALL, APP_TEAM, TEAM_A]);
+  await db.query("insert into public.direct_entry_scope_grants(app_user_id,scope_kind,team_id,valid_from,is_current) values ($1,'all',null,'2020-01-01',true),($2,'team',$3,'2020-01-01',true),($4,'own',null,'2020-01-01',true)", [APP_ALL, APP_TEAM, TEAM_A, APP_OWN]);
+  await db.query("insert into public.direct_entry_capability_grants(app_user_id,capability,valid_from,is_current) values ($1,'entry_admin','2020-01-01',true),($2,'entry_team','2020-01-01',true),($3,'entry_own','2020-01-01',true)", [APP_ALL, APP_TEAM, APP_OWN]);
   await db.query("insert into public.data_sources(id,drive_file_id,file_name,sheet_name,active,is_test) values ($1,'legacy','legacy.xlsx','Sheet1',true,false)", [SOURCE]);
   await db.query("insert into public.sync_runs(run_id,source_id,trigger_type,status,started_at,finished_at) values ($1,$2,'manual','succeeded','2026-10-05T00:00:00Z','2026-10-05T00:00:00Z')", [RUN, SOURCE]);
   await db.query("insert into public.daily_recruitment_breakdown(source_id,business_date,project_key,project_display,recruiter_key,recruiter_display,provider_type_key,provider_type_display,employment_type_key,employment_type_display,recruited_count,sync_run_id,snapshot_at) values ($1,'1999-09-25','legacy_proj','Legacy Project','legacy_rec','Legacy Recruiter','hrp','HRP','thời vụ','Thời vụ',7,$2,'2026-10-05T00:00:00Z')", [SOURCE, RUN]);

@@ -227,6 +227,9 @@ export const resolveNavActorForAppShell = cache(
     } = {
       capabilities: actor.actor.capabilities,
       scopes: actor.actor.scopes.map((scope) => ({ kind: scope.kind })),
+      ...(actor.actor.effective_grants !== undefined
+        ? { effective_grants: actor.actor.effective_grants }
+        : {}),
       ...(actor.actor.effective_report_review_scopes !== undefined
         ? { effective_report_review_scopes: actor.actor.effective_report_review_scopes }
         : {}),
