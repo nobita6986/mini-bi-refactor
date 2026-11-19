@@ -63,3 +63,13 @@ test("D3-B: no auth_subject/intent_token/raw identity rendered in the UI surface
     assert.doesNotMatch(file, /app_metadata|account_intent/);
   }
 });
+
+test("hotfix retry: AccountOperationDialogs locks password/inputs/close on uncertain error and never persists secrets", () => {
+  assert.match(source, /type AccountOperationPendingRequest/);
+  assert.match(source, /disabled=\{fieldsDisabled\}/);
+  assert.match(source, /function PasswordField\([^)]*disabled = false/);
+  assert.match(source, /if \(isDialogLocked\) event\.preventDefault\(\)/);
+  assert.match(source, /Thử gửi lại cùng yêu cầu/);
+  assert.match(source, /Tải lại đối chiếu/);
+  assert.doesNotMatch(source, /sessionStorage|localStorage/);
+});
