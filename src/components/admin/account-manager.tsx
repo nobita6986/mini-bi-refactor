@@ -102,7 +102,13 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
   );
 }
 
-export function AccountManager() {
+export function AccountManager({
+  onOpenGlobalRoles,
+  embedded = false,
+}: {
+  onOpenGlobalRoles?: (accountRef: string) => void;
+  embedded?: boolean;
+} = {}) {
   const notify = useNotify();
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
   const [searchInput, setSearchInput] = useState("");
@@ -542,7 +548,11 @@ export function AccountManager() {
     <>
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Tài khoản</h1>
+          {embedded ? (
+            <h2 className="text-lg font-semibold text-foreground">Tài khoản</h2>
+          ) : (
+            <h1 className="text-2xl font-bold text-foreground">Tài khoản</h1>
+          )}
           <p className="mt-1 text-sm text-muted">Quản lý trạng thái hoạt động của tài khoản hiện có. Lý do thao tác không bắt buộc.</p>
         </div>
         <div className="flex gap-2">
@@ -764,6 +774,17 @@ export function AccountManager() {
                               onClick={() => { setOperation({ kind: "reset", account }); }}>
                               Đặt lại mật khẩu
                             </button>
+                            {onOpenGlobalRoles ? (
+                              <button
+                                type="button"
+                                aria-label={`Quản lý vai trò của ${account.display_name ?? account.login_id ?? "tài khoản"}`}
+                                className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
+                                disabled={rowActionsDisabled}
+                                onClick={() => onOpenGlobalRoles(account.account_ref)}
+                              >
+                                Vai trò
+                              </button>
+                            ) : null}
                             <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={rowActionsDisabled}
                               onClick={() => startStateChange(account, !account.enabled)}>
                               {account.enabled ? "Ngừng hoạt động" : "Kích hoạt"}

@@ -100,6 +100,7 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "organization-persons", href: "/admin/organization/persons" },
     { id: "departments", href: "/admin/departments" },
     { id: "accounts", href: "/admin/access/accounts" },
+    { id: "effective-access", href: "/admin/access/effective" },
     { id: "attendance", href: "/admin/attendance" },
     { id: "worker-edit-history", href: "/admin/worker-edit-history" },
   ]);
@@ -114,11 +115,12 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "organization-persons", label: "Nhân sự nội bộ" },
     { id: "departments", label: "Phòng ban" },
     { id: "accounts", label: "Tài khoản truy cập" },
+    { id: "effective-access", label: "Quyền hiệu lực" },
     { id: "attendance", label: "Báo cáo chấm công" },
     { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ" },
   ]);
   const serializableSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
-  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "accounts", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
+  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "accounts", "effective-access", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
   const fullAdminWithoutHistory = serializableSections.filter(({ id }) => id !== "worker-edit-history");
   const allowlistedAdmin = makeNavActor(
@@ -197,6 +199,8 @@ test("catalog and access paths highlight exactly one internal tab", () => {
     ["/admin/departments/40000000-0000-4000-8000-000000000003", "departments"],
     ["/admin/access/accounts", "accounts"],
     ["/admin/access/accounts/record", "accounts"],
+    ["/admin/access/effective", "effective-access"],
+    ["/admin/access/effective/detail", "effective-access"],
     ["/admin/catalog/project-team-scopes", "project-team-scopes"],
   ]) {
     assert.deepEqual(
@@ -220,5 +224,48 @@ test("top-level Admin remains the active registry entry across catalog and acces
   assert.equal(findEntryByPath("/admin/departments")?.id, "admin");
   assert.equal(findEntryByPath("/admin/departments/40000000-0000-4000-8000-000000000003")?.id, "admin");
   assert.equal(findEntryByPath("/admin/access/accounts")?.id, "admin");
+  assert.equal(findEntryByPath("/admin/access/effective")?.id, "admin");
   assert.equal(findEntryByPath("/admin/catalog/project-team-scopes")?.id, "admin");
+});
+
+test("effective-access section fails closed on unpaired/cross-paired grants when effective_grants is present", () => {
+  const crossPairedActor = {
+    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+    scopes: [{ kind: "all" }],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "CONTEXT_TEAM", scope_id: "t-1", source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(
+    visibleAdminSections(crossPairedActor).some((s) => s.id === "effective-access"),
+    false,
+  );
+  const hrOperator = {
+    capabilities: ["recruiter_master_manage", "team_master_manage", "catalog_master_manage", "audit_view", "document_view"],
+    scopes: [{ kind: "all" }],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(
+    visibleAdminSections(hrOperator).some((s) => s.id === "effective-access"),
+    false,
+  );
+  const validPairedAdmin = {
+    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+    scopes: [{ kind: "all" }],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(
+    visibleAdminSections(validPairedAdmin).some((s) => s.id === "effective-access"),
+    true,
+  );
 });

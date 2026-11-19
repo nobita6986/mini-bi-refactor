@@ -7,6 +7,7 @@ import {
   type NavActorProjection,
   type NavCapabilityPredicate,
 } from "../navigation/registry-capability.ts";
+import { effectiveAccessAdminNavPredicate } from "./effective-access-page-guard.ts";
 
 export type AdminSection = {
   readonly id: string;
@@ -38,6 +39,7 @@ export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
   { id: "organization-persons", label: "Nhân sự nội bộ", href: "/admin/organization/persons", visible: adminSecurityNavPredicate },
   { id: "departments", label: "Phòng ban", href: "/admin/departments", visible: adminSecurityNavPredicate },
   { id: "accounts", label: "Tài khoản truy cập", href: "/admin/access/accounts", visible: adminSecurityNavPredicate },
+  { id: "effective-access", label: "Quyền hiệu lực", href: "/admin/access/effective", visible: effectiveAccessAdminNavPredicate },
   { id: "attendance", label: "Báo cáo chấm công", href: "/admin/attendance", visible: attendanceReportNavPredicate },
   { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ", href: "/admin/worker-edit-history", visible: workerEditHistoryNavPredicate },
 ];

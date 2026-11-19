@@ -222,6 +222,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
         "organization-persons",
         "departments",
         "accounts",
+        "effective-access",
         "project-team-scopes",
         "provinces",
         "industrial-parks",

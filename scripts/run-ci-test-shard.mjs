@@ -111,6 +111,7 @@ const TEST_WEIGHTS = {
   "test:wp3-person-account-org": 12.0,
   "test:wp4-org-person-admin-ui": 2.5,
   "test:wp5-role-access-foundation": 14.0,
+  "test:wp6-effective-access-ui": 3.0,
   "test:wp5b2-role-access-cutover": 14.0,
 };
 
