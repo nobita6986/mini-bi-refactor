@@ -517,7 +517,10 @@ function classifyMatrixRpcError(
     ) {
       return "ATTENDANCE_SLOT_POLICY_OVERLAP";
     }
-    if (trimmed.includes("attendance_explanations_employee_date_slot_uq")) {
+    if (
+      trimmed.includes("attendance_explanations_active_slot_uq") ||
+      trimmed.includes("attendance_explanations_employee_date_slot_uq")
+    ) {
       return "ATTENDANCE_EXPLANATION_ALREADY_SUBMITTED";
     }
     return "IDEMPOTENCY_CONFLICT";
