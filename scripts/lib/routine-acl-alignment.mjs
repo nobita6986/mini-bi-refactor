@@ -315,6 +315,17 @@ export async function capturePreservationSnapshot(client) {
   };
 }
 
+export function extractPreservationHashes(preservation) {
+  return {
+    schemaMigrationsHash: preservation.schemaMigrationsHash,
+    routineBodiesHash: preservation.routineBodiesHash,
+    defaultPrivilegesHash: preservation.defaultPrivilegesHash,
+    unrelatedPublicRoutinesAclHash: preservation.unrelatedPublicRoutinesAclHash,
+    bootstrapHelperGrantsHash: preservation.bootstrapHelperGrantsHash,
+    bootstrapMembershipsHash: preservation.bootstrapMembershipsHash,
+  };
+}
+
 export function assertPreservationUnchanged(before, after, stageLabel) {
   const keys = [
     "schemaMigrationsHash",
@@ -330,6 +341,94 @@ export function assertPreservationUnchanged(before, after, stageLabel) {
       `PRESERVATION_INVARIANT_FAILED (${stageLabel}): unexpected mutation detected in [${drifted.join(", ")}]`,
     );
   }
+}
+
+export function assertBootstrapMembershipStateRestored(expectedBootstrap, actualBootstrap, stageLabel) {
+  const diffs = [];
+  if (JSON.stringify(actualBootstrap.memberships) !== JSON.stringify(expectedBootstrap.memberships)) {
+    diffs.push("pg_auth_members rows changed");
+  }
+  if (actualBootstrap.actor.can_set !== expectedBootstrap.actor.can_set) {
+    diffs.push(`SET changed (${expectedBootstrap.actor.can_set} -> ${actualBootstrap.actor.can_set})`);
+  }
+  if (actualBootstrap.actor.usage !== expectedBootstrap.actor.usage) {
+    diffs.push(`USAGE/INHERIT changed (${expectedBootstrap.actor.usage} -> ${actualBootstrap.actor.usage})`);
+  }
+  if (actualBootstrap.actor.member !== expectedBootstrap.actor.member) {
+    diffs.push(`MEMBER changed (${expectedBootstrap.actor.member} -> ${actualBootstrap.actor.member})`);
+  }
+  if (diffs.length > 0) {
+    throw new Error(
+      `BOOTSTRAP_MEMBERSHIP_RESTORE_DRIFT (${stageLabel}): ${diffs.join("; ")}`,
+    );
+  }
+}
+
+/**
+ * Verify all post-COMMIT invariants on a fresh READ ONLY inspection snapshot.
+ * Never claims rollback — throws explicit already-committed / forward-fix error on any drift.
+ */
+export function verifyPostCommitAlignmentInvariants(applied, postCommit) {
+  const failures = [];
+
+  if (!postCommit.postconditions.ok) {
+    failures.push(`acl_postconditions_failed (${postCommit.postconditions.reason ?? "unknown"})`);
+  }
+  if (postCommit.summary.mismatchCount !== 0) {
+    failures.push(`routine_acl_mismatches=${postCommit.summary.mismatchCount}`);
+  }
+
+  let preservationHashesUnchanged = true;
+  try {
+    assertPreservationUnchanged(applied.preservationHashes, postCommit.preservation, "post-commit");
+  } catch (err) {
+    preservationHashesUnchanged = false;
+    failures.push(err.message);
+  }
+
+  let bootstrapMembershipsRestoredExact = true;
+  let bootstrapRoleStateUnchanged = true;
+  try {
+    assertBootstrapMembershipStateRestored(
+      applied.bootstrapBefore,
+      postCommit.bootstrapContext,
+      "post-commit",
+    );
+  } catch (err) {
+    if (
+      JSON.stringify(postCommit.bootstrapContext.memberships) !==
+      JSON.stringify(applied.bootstrapBefore.memberships)
+    ) {
+      bootstrapMembershipsRestoredExact = false;
+    }
+    if (
+      postCommit.bootstrapContext.actor.can_set !== applied.bootstrapBefore.actor.can_set ||
+      postCommit.bootstrapContext.actor.usage !== applied.bootstrapBefore.actor.usage ||
+      postCommit.bootstrapContext.actor.member !== applied.bootstrapBefore.actor.member
+    ) {
+      bootstrapRoleStateUnchanged = false;
+    }
+    failures.push(err.message);
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      "POST_COMMIT_VERIFY_FAILED (TRANSACTION ALREADY COMMITTED — NOT ROLLED BACK; " +
+        "investigate and forward-fix, do not re-expose routine ACLs): " +
+        failures.join("; "),
+    );
+  }
+
+  return {
+    committed: true,
+    readOnlyTransaction: "REPEATABLE READ READ ONLY ... ROLLBACK",
+    aclPostconditionsOk: true,
+    mismatchCount: 0,
+    preservationHashesUnchanged,
+    bootstrapMembershipsRestoredExact,
+    bootstrapRoleStateUnchanged,
+    passed: true,
+  };
 }
 
 /**
@@ -725,16 +824,11 @@ export async function executeRoutineAclAlignmentInTransaction(
     }
 
     const afterCtx = await inspectBootstrapRoleContext(client);
-    if (
-      JSON.stringify(afterCtx.memberships) !== JSON.stringify(ctx.memberships) ||
-      afterCtx.actor.can_set !== ctx.actor.can_set ||
-      afterCtx.actor.usage !== ctx.actor.usage ||
-      afterCtx.actor.member !== ctx.actor.member
-    ) {
+    try {
+      assertBootstrapMembershipStateRestored(ctx, afterCtx, "pre-commit");
+    } catch (err) {
       actions.bootstrapMembershipsRestoredExact = false;
-      throw new Error(
-        "BOOTSTRAP_MEMBERSHIP_RESTORE_DRIFT: pg_auth_members or role capability differed after restore; rolling back.",
-      );
+      throw err;
     }
   }
 
@@ -768,13 +862,6 @@ export async function executeRoutineAclAlignmentInTransaction(
       memberships: after.bootstrapContext.memberships,
     },
     actions,
-    preservationHashes: {
-      schemaMigrationsHash: after.preservation.schemaMigrationsHash,
-      routineBodiesHash: after.preservation.routineBodiesHash,
-      defaultPrivilegesHash: after.preservation.defaultPrivilegesHash,
-      unrelatedPublicRoutinesAclHash: after.preservation.unrelatedPublicRoutinesAclHash,
-      bootstrapHelperGrantsHash: after.preservation.bootstrapHelperGrantsHash,
-      bootstrapMembershipsHash: after.preservation.bootstrapMembershipsHash,
-    },
+    preservationHashes: extractPreservationHashes(after.preservation),
   };
 }

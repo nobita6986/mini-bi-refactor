@@ -23,7 +23,9 @@ import pg from "pg";
 
 import {
   executeRoutineAclAlignmentInTransaction,
+  extractPreservationHashes,
   inspectRoutineAclDrift,
+  verifyPostCommitAlignmentInvariants,
 } from "./lib/routine-acl-alignment.mjs";
 import { buildSslOptions } from "./lib/supabase-tls.mjs";
 import { parseExternalNwcConfig } from "./run-wp2a-effective-access-shadow.mjs";
@@ -128,11 +130,18 @@ export function resolveSafeConnectionTarget(args) {
   };
 }
 
-export async function runRoutineAclAlignmentCli(argv, { log = console.log } = {}) {
+export async function runRoutineAclAlignmentCli(
+  argv,
+  {
+    log = console.log,
+    createClient = (options) => new Client(options),
+    afterCommitHook = null,
+  } = {},
+) {
   const args = parseCliArgs(argv);
   const target = resolveSafeConnectionTarget(args);
 
-  const client = new Client({
+  const client = createClient({
     connectionString: target.connectionString,
     ssl: target.ssl,
     connectionTimeoutMillis: 15000,
@@ -162,14 +171,7 @@ export async function runRoutineAclAlignmentCli(argv, { log = console.log } = {}
           ownerMismatches: inspection.ownerMismatches,
           nonOwnerGrantorMismatches: inspection.nonOwnerGrantorMismatches,
           unownedByCurrentUser: inspection.unownedByCurrentUser,
-          preservationHashes: {
-            schemaMigrationsHash: inspection.preservation.schemaMigrationsHash,
-            routineBodiesHash: inspection.preservation.routineBodiesHash,
-            defaultPrivilegesHash: inspection.preservation.defaultPrivilegesHash,
-            unrelatedPublicRoutinesAclHash: inspection.preservation.unrelatedPublicRoutinesAclHash,
-            bootstrapHelperGrantsHash: inspection.preservation.bootstrapHelperGrantsHash,
-            bootstrapMembershipsHash: inspection.preservation.bootstrapMembershipsHash,
-          },
+          preservationHashes: extractPreservationHashes(inspection.preservation),
           bootstrapMismatches: inspection.bootstrapMismatches,
           mismatchesSample: inspection.mismatches.slice(0, 50),
         };
@@ -178,25 +180,45 @@ export async function runRoutineAclAlignmentCli(argv, { log = console.log } = {}
       }
     } else if (args.mode === "dry-run") {
       await client.query("begin");
+      let rehearsal;
       try {
         await client.query("set local statement_timeout = '60s'; set local lock_timeout = '5s';");
-        const rehearsal = await executeRoutineAclAlignmentInTransaction(client, {
+        rehearsal = await executeRoutineAclAlignmentInTransaction(client, {
           migrationsDir: args.migrationsDir,
           expectedFingerprint: args.expectedFingerprint,
         });
-        report = {
-          mode: "dry-run",
-          target: target.targetLabel,
-          transaction: "BEGIN ... ROLLBACK (rehearsal only, zero persisted changes)",
-          checkedAt: new Date().toISOString(),
-          ...rehearsal,
-        };
-      } finally {
-        await client.query("rollback");
+      } catch (err) {
+        try {
+          await client.query("rollback");
+        } catch {
+          // Preserve original rehearsal error; outer finally closes the connection.
+        }
+        throw err;
       }
+
+      let rolledBack = false;
+      try {
+        await client.query("rollback");
+        rolledBack = true;
+      } catch (rollbackErr) {
+        throw new Error(
+          `DRY_RUN_ROLLBACK_FAILED: rehearsal ROLLBACK failed (${rollbackErr.message}); refusing to emit success report.`,
+          { cause: rollbackErr },
+        );
+      }
+
+      report = {
+        mode: "dry-run",
+        target: target.targetLabel,
+        transaction: "BEGIN ... ROLLBACK (rehearsal only, zero persisted changes)",
+        rolledBack,
+        checkedAt: new Date().toISOString(),
+        ...rehearsal,
+      };
     } else {
       await client.query("begin");
       let applied;
+      let committed = false;
       try {
         await client.query("set local statement_timeout = '60s'; set local lock_timeout = '5s';");
         applied = await executeRoutineAclAlignmentInTransaction(client, {
@@ -204,28 +226,49 @@ export async function runRoutineAclAlignmentCli(argv, { log = console.log } = {}
           expectedFingerprint: args.expectedFingerprint,
         });
         await client.query("commit");
+        committed = true;
       } catch (err) {
-        await client.query("rollback");
+        if (!committed) {
+          try {
+            await client.query("rollback");
+          } catch {
+            // Preserve original apply error; outer finally closes connection.
+          }
+        }
         throw err;
       }
 
-      // Independent post-commit read-only verification
-      await client.query("begin transaction isolation level repeatable read read only");
-      let postCommit;
-      try {
-        await client.query("set local statement_timeout = '30s'; set local lock_timeout = '5s';");
-        postCommit = await inspectRoutineAclDrift(client, {
-          migrationsDir: args.migrationsDir,
-        });
-      } finally {
-        await client.query("rollback");
+      if (typeof afterCommitHook === "function") {
+        await afterCommitHook({ target, applied });
       }
 
-      if (!postCommit.postconditions.ok || postCommit.summary.mismatchCount !== 0) {
+      // Independent post-commit read-only verification.
+      // At this point the alignment transaction has ALREADY COMMITTED; never pretend to rollback
+      // and never revert routine ACLs back to exposed state if verification fails.
+      let postCommit;
+      try {
+        await client.query("begin transaction isolation level repeatable read read only");
+        try {
+          await client.query("set local statement_timeout = '30s'; set local lock_timeout = '5s';");
+          postCommit = await inspectRoutineAclDrift(client, {
+            migrationsDir: args.migrationsDir,
+          });
+        } finally {
+          try {
+            await client.query("rollback");
+          } catch {
+            // Ignore cleanup rollback error on read-only transaction if connection broke.
+          }
+        }
+      } catch (verifyErr) {
         throw new Error(
-          `POST_COMMIT_VERIFY_FAILED: postconditionsOk=${postCommit.postconditions.ok}, mismatches=${postCommit.summary.mismatchCount}`,
+          "POST_COMMIT_VERIFY_FAILED (TRANSACTION ALREADY COMMITTED — NOT ROLLED BACK; " +
+            `post-commit read-only verification error; investigate and forward-fix, do not re-expose routine ACLs): ${verifyErr.message}`,
+          { cause: verifyErr },
         );
       }
+
+      const postCommitVerification = verifyPostCommitAlignmentInvariants(applied, postCommit);
 
       report = {
         mode: "apply",
@@ -235,6 +278,9 @@ export async function runRoutineAclAlignmentCli(argv, { log = console.log } = {}
         ...applied,
         postCommitSummary: postCommit.summary,
         postCommitBootstrapMemberships: postCommit.bootstrapContext.memberships,
+        postCommitBootstrapActor: postCommit.bootstrapContext.actor,
+        postCommitPreservationHashes: extractPreservationHashes(postCommit.preservation),
+        postCommitVerification,
       };
     }
   } finally {

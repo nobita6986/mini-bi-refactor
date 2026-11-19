@@ -19,7 +19,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -313,6 +313,7 @@ test("Real PostgreSQL NWC ACL drift detection, multi-grantor bootstrap role elev
       ["--dry-run", "--db-url", nwcUrl, "--migrations-dir", extraMigDir],
       { log() {} },
     );
+    assert.equal(dryRunReport.rolledBack, true, "R2: dry-run must report rolledBack=true only after ROLLBACK succeeds");
     assert.equal(dryRunReport.afterSummary.mismatchCount, 0);
     assert.equal(dryRunReport.afterSummary.exposedClientOrPublicCount, 0);
     assert.equal(dryRunReport.afterSummary.postconditionsOk, true);
@@ -326,6 +327,32 @@ test("Real PostgreSQL NWC ACL drift detection, multi-grantor bootstrap role elev
     );
     assert.equal(afterDryRunPreflight.summary.mismatchCount, preflightReport.summary.mismatchCount);
     assert.deepEqual(afterDryRunPreflight.bootstrapContext.memberships, topoACtx.memberships);
+
+    // 1c-fault (R2): if ROLLBACK fails after rehearsal, CLI must fail closed and emit NO success report
+    const r2FailOut = path.join(tmpRoot, "r2-rollback-fail-report.json");
+    const r2Logs = [];
+    await assert.rejects(
+      runRoutineAclAlignmentCli(
+        ["--dry-run", "--db-url", nwcUrl, "--migrations-dir", extraMigDir, "--out", r2FailOut],
+        {
+          log: (line) => r2Logs.push(line),
+          createClient: (opts) => {
+            const realClient = new Client(opts);
+            const origQuery = realClient.query.bind(realClient);
+            realClient.query = async (sql, params) => {
+              if (typeof sql === "string" && sql.trim().toLowerCase() === "rollback") {
+                throw new Error("SIMULATED_ROLLBACK_TRANSPORT_FAILURE");
+              }
+              return origQuery(sql, params);
+            };
+            return realClient;
+          },
+        },
+      ),
+      /DRY_RUN_ROLLBACK_FAILED/,
+    );
+    assert.equal(r2Logs.length, 0, "R2: must not emit success JSON log when ROLLBACK fails");
+    await assert.rejects(access(r2FailOut), { code: "ENOENT" });
 
     // 1d. Error injected mid-apply after bootstrap elevation -> rollback restores pg_auth_members & ACLs byte-for-byte!
     await nwcClient.query("begin");
@@ -381,6 +408,18 @@ test("Real PostgreSQL NWC ACL drift detection, multi-grantor bootstrap role elev
     assert.equal(applyReportA.postCommitSummary.postconditionsOk, true);
     assert.equal(applyReportA.actions.bootstrapAligned, 3);
     assert.deepEqual(applyReportA.postCommitBootstrapMemberships, topoACtx.memberships);
+    assert.deepEqual(applyReportA.postCommitPreservationHashes, applyReportA.preservationHashes);
+    assert.equal(applyReportA.postCommitBootstrapActor.can_set, false);
+    assert.deepEqual(applyReportA.postCommitVerification, {
+      committed: true,
+      readOnlyTransaction: "REPEATABLE READ READ ONLY ... ROLLBACK",
+      aclPostconditionsOk: true,
+      mismatchCount: 0,
+      preservationHashesUnchanged: true,
+      bootstrapMembershipsRestoredExact: true,
+      bootstrapRoleStateUnchanged: true,
+      passed: true,
+    });
 
     // Verify SET is STILL false post-commit and runMigrationValidation now PASSES!
     const postApplyCtxA = await inspectBootstrapRoleContext(nwcClient);
@@ -465,6 +504,136 @@ test("Real PostgreSQL NWC ACL drift detection, multi-grantor bootstrap role elev
     );
     const postApplyCtxB = await inspectBootstrapRoleContext(nwcClient);
     assert.equal(postApplyCtxB.actor.can_set, false);
+    assert.equal(applyReportB.postCommitVerification.passed, true);
+    assert.equal(applyReportB.postCommitVerification.preservationHashesUnchanged, true);
+    assert.equal(applyReportB.postCommitVerification.bootstrapMembershipsRestoredExact, true);
+    assert.equal(applyReportB.postCommitVerification.bootstrapRoleStateUnchanged, true);
+    assert.deepEqual(applyReportB.postCommitPreservationHashes, applyReportB.preservationHashes);
+
+    // -------------------------------------------------------------------------
+    // Scenario 2b (R3 fault injection #1): Post-COMMIT preservation drift while
+    // keeping ALL target routine ACLs clean (pg_default_acl changed right after COMMIT).
+    // CLI MUST fail closed with explicit "already committed / forward-fix" error
+    // and MUST NOT revert aligned routine ACLs back to exposed state!
+    // -------------------------------------------------------------------------
+    await injectNwcStyleDrift();
+    const preflightR3a = await runRoutineAclAlignmentCli(
+      ["--preflight", "--db-url", nwcUrl, "--migrations-dir", MIGRATION_DIR],
+      { log() {} },
+    );
+    const r3aOut = path.join(tmpRoot, "r3a-postcommit-fail.json");
+    const r3aLogs = [];
+    await assert.rejects(
+      runRoutineAclAlignmentCli(
+        [
+          "--apply",
+          "--confirm-apply",
+          "--expected-fingerprint",
+          preflightR3a.planFingerprint,
+          "--db-url",
+          nwcUrl,
+          "--migrations-dir",
+          MIGRATION_DIR,
+          "--out",
+          r3aOut,
+        ],
+        {
+          log: (line) => r3aLogs.push(line),
+          afterCommitHook: async () => {
+            await superClient.query(
+              "alter default privileges for role nwc_postgres in schema public grant execute on functions to anon",
+            );
+          },
+        },
+      ),
+      (err) => {
+        assert.match(err.message, /POST_COMMIT_VERIFY_FAILED/);
+        assert.match(err.message, /TRANSACTION ALREADY COMMITTED/i);
+        assert.match(err.message, /NOT ROLLED BACK/i);
+        assert.match(err.message, /forward-fix/i);
+        assert.match(err.message, /defaultPrivilegesHash/);
+        return true;
+      },
+    );
+    assert.equal(r3aLogs.length, 0, "R3: must not emit success report on post-COMMIT verification failure");
+    await assert.rejects(access(r3aOut), { code: "ENOENT" });
+    // Target routine ACLs MUST remain aligned (never re-exposed)
+    const afterR3aValidation = await runMigrationValidation({
+      mode: "dry-run",
+      directory: MIGRATION_DIR,
+      loadConfig: async () => ({ databaseUrl: nwcUrl }),
+      createClient: (url) => new Client({ connectionString: url, ssl: false }),
+      log() {},
+    });
+    assert.deepEqual(afterR3aValidation.mismatches, []);
+    assert.deepEqual(afterR3aValidation.postconditionFailures, []);
+    // Restore default privileges cleanly for subsequent scenario
+    await superClient.query(
+      "alter default privileges for role nwc_postgres in schema public revoke execute on functions from anon",
+    );
+
+    // -------------------------------------------------------------------------
+    // Scenario 2c (R3 fault injection #2): Post-COMMIT bootstrap membership/SET
+    // widening while keeping ALL target routine ACLs clean.
+    // CLI MUST detect widened role state/membership and report committed + forward-fix!
+    // -------------------------------------------------------------------------
+    await injectNwcStyleDrift();
+    const preflightR3b = await runRoutineAclAlignmentCli(
+      ["--preflight", "--db-url", nwcUrl, "--migrations-dir", MIGRATION_DIR],
+      { log() {} },
+    );
+    const r3bOut = path.join(tmpRoot, "r3b-postcommit-fail.json");
+    const r3bLogs = [];
+    await assert.rejects(
+      runRoutineAclAlignmentCli(
+        [
+          "--apply",
+          "--confirm-apply",
+          "--expected-fingerprint",
+          preflightR3b.planFingerprint,
+          "--db-url",
+          nwcUrl,
+          "--migrations-dir",
+          MIGRATION_DIR,
+          "--out",
+          r3bOut,
+        ],
+        {
+          log: (line) => r3bLogs.push(line),
+          afterCommitHook: async () => {
+            await nwcClient.query(
+              "grant direct_entry_catalog_bootstrap_executor to nwc_postgres with set true",
+            );
+          },
+        },
+      ),
+      (err) => {
+        assert.match(err.message, /POST_COMMIT_VERIFY_FAILED/);
+        assert.match(err.message, /TRANSACTION ALREADY COMMITTED/i);
+        assert.match(err.message, /NOT ROLLED BACK/i);
+        assert.match(err.message, /forward-fix/i);
+        assert.match(err.message, /bootstrapMembershipsHash/);
+        assert.match(err.message, /BOOTSTRAP_MEMBERSHIP_RESTORE_DRIFT/);
+        assert.match(err.message, /SET changed \(false -> true\)/);
+        return true;
+      },
+    );
+    assert.equal(r3bLogs.length, 0);
+    await assert.rejects(access(r3bOut), { code: "ENOENT" });
+    // Target routine ACLs remain aligned
+    const afterR3bValidation = await runMigrationValidation({
+      mode: "dry-run",
+      directory: MIGRATION_DIR,
+      loadConfig: async () => ({ databaseUrl: nwcUrl }),
+      createClient: (url) => new Client({ connectionString: url, ssl: false }),
+      log() {},
+    });
+    assert.deepEqual(afterR3bValidation.mismatches, []);
+    assert.deepEqual(afterR3bValidation.postconditionFailures, []);
+    // Restore SET=false cleanly
+    await nwcClient.query(
+      "revoke set option for direct_entry_catalog_bootstrap_executor from nwc_postgres granted by nwc_postgres",
+    );
 
     // -------------------------------------------------------------------------
     // Scenario 3 (Topology C): Operator with MEMBER=true, ADMIN=false, SET=false

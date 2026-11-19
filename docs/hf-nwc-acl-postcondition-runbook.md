@@ -59,13 +59,13 @@ pnpm db:align-routine-acl -- --dry-run --nwc-staging --config <external-config-p
 ```
 
 Điều kiện qua cổng:
-- `rolledBack === true`
+- `rolledBack === true` (tool chỉ gán `rolledBack: true` và xuất báo cáo sau khi lệnh `ROLLBACK` hoàn tất thành công; nếu `ROLLBACK` lỗi, CLI thoát lỗi `DRY_RUN_ROLLBACK_FAILED` và không xuất báo cáo thành công).
 - `afterSummary.mismatchCount === 0`
 - `afterSummary.exposedClientOrPublicCount === 0`
 - `afterSummary.extraServiceRoleCount === 0`
 - `afterSummary.missingServiceRoleCount === 0`
 - `afterSummary.postconditionsOk === true`
-- `actions.bootstrapMembershipsRestoredExact === true` và `bootstrapAfter.memberships` khớp nguyên trạng `bootstrapBefore.memberships` (`can_set` giữ nguyên `false`).
+- `actions.bootstrapMembershipsRestoredExact === true` và `bootstrapAfter.memberships` khớp nguyên trạng `bootstrapBefore.memberships` (`bootstrapAfter.actor.can_set` giữ nguyên giá trị ban đầu, không mở rộng `SET`/`INHERIT`/`ADMIN`).
 
 ### Bước 4 — Apply có kiểm soát (`--apply`)
 Chỉ chạy khi Bước 2 và Bước 3 đạt 100%, truyền đúng `--confirm-apply` và `--expected-fingerprint <planFingerprint>`:
@@ -74,8 +74,14 @@ Chỉ chạy khi Bước 2 và Bước 3 đạt 100%, truyền đúng `--confirm
 pnpm db:align-routine-acl -- --apply --confirm-apply --expected-fingerprint <planFingerprint> --nwc-staging --config <external-config-path> --out <apply-report.json>
 ```
 
-Nếu trạng thái DB thay đổi giữa Bước 2 và Bước 4, tool dừng ngay với `PLAN_FINGERPRINT_MISMATCH`.
-Sau khi `COMMIT`, tool mở một phiên đọc mới (`REPEATABLE READ READ ONLY`) để xác minh lại độc lập (`postCommitSummary.mismatchCount === 0`, `postCommitSummary.postconditionsOk === true`, `postCommitBootstrapMemberships` khớp byte-for-byte, và 6 hash bảo toàn không đổi).
+Nếu trạng thái DB thay đổi giữa Bước 2 và Bước 4, tool dừng ngay với `PLAN_FINGERPRINT_MISMATCH` trước khi ghi.
+Sau khi `COMMIT`, tool mở một phiên đọc mới (`REPEATABLE READ READ ONLY ... ROLLBACK`) và tự động đối chiếu đủ toàn bộ bất biến hậu COMMIT. Điều kiện qua cổng trên `<apply-report.json>`:
+- `postCommitVerification.passed === true` và `postCommitVerification.committed === true`
+- `postCommitVerification.aclPostconditionsOk === true` và `postCommitVerification.mismatchCount === 0` (`postCommitSummary.exposedClientOrPublicCount === 0`, `extraServiceRoleCount === 0`, `missingServiceRoleCount === 0`)
+- `postCommitVerification.preservationHashesUnchanged === true` (`postCommitPreservationHashes` khớp cả 6 mã băm `preservationHashes` đã xác minh trước `COMMIT`)
+- `postCommitVerification.bootstrapMembershipsRestoredExact === true` và `postCommitVerification.bootstrapRoleStateUnchanged === true` (`postCommitBootstrapMemberships` khớp byte-for-byte `bootstrapBefore.memberships`; `postCommitBootstrapActor.can_set`/`usage`/`member` không đổi)
+
+> **Xử lý khi hậu `COMMIT` thất bại (`POST_COMMIT_VERIFY_FAILED`)**: Nếu bất kỳ bất biến nào (ACL, 6 mã băm bảo toàn, `pg_auth_members` hoặc cờ `SET`/`INHERIT`/`ADMIN`) lệch trong lượt đọc sau `COMMIT`, CLI thoát lỗi rõ ràng với thông điệp **`TRANSACTION ALREADY COMMITTED — NOT ROLLED BACK`** và **không** xuất báo cáo thành công. Giao dịch đồng bộ ACL **đã commit**; operator tuyệt đối không giả định đã rollback và **không** khôi phục lại ACL mở rộng lỗi cho `anon`/`authenticated`/`PUBLIC` — tiến hành điều tra sai lệch và áp dụng **forward-fix** có kiểm soát.
 
 ### Bước 5 — Xác minh hậu apply (Migration Gate & API Smoke)
 1. Chạy lại `pnpm db:migrate -- --dry-run` (hoặc tương đương đối chiếu NWC): xác nhận `20261020180000_s0_t1_c_rpc_acl_allowlist.sql` không còn báo `POSTCONDITION FAILED`.
