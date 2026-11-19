@@ -804,6 +804,70 @@ test("PRE-W2-HF-D3-A: reclassify moves stale intents to their terminal states", 
   }
 });
 
+test("PRE-W2-HF-D3-A: retention purges terminal create intents without releasing unresolved logins", async () => {
+  const db = await buildDb();
+  try {
+    await seed(db);
+    const accountsBefore = (await db.query("select * from public.direct_entry_app_users order by app_user_id")).rows;
+    const authBefore = (await db.query("select * from auth.users order by id")).rows;
+    const terminalIds = [];
+    for (const state of ["APPLIED", "FAILED", "EXPIRED"]) {
+      const intent = await begin(db, [ADMIN_AUTH, ADMIN_APP, "CREATE_ACCOUNT", `old${state.toLowerCase()}`,
+        "Old Account", null, "retention test", idemKey()]);
+      await db.query("update public.direct_entry_account_operation_intents set state=$2," +
+        " resolved_at=now()-interval '31 days', account_ref=$3 where intent_id=$1",
+      [intent.intent_id, state, TARGET_APP]);
+      terminalIds.push(intent.intent_id);
+    }
+    const recent = await begin(db, [ADMIN_AUTH, ADMIN_APP, "CREATE_ACCOUNT", "recentcreate",
+      "Recent Account", null, "retention test", idemKey()]);
+    await db.query("update public.direct_entry_account_operation_intents set state='APPLIED'," +
+      " resolved_at=now()-interval '29 days' where intent_id=$1", [recent.intent_id]);
+    const unresolvedIds = [];
+    for (const state of ["PENDING", "IN_FLIGHT", "INDETERMINATE", "BLOCKED", "CONFLICT"]) {
+      const intent = await begin(db, [ADMIN_AUTH, ADMIN_APP, "CREATE_ACCOUNT", `live${state.replaceAll("_", "").toLowerCase()}`,
+        "Unresolved Account", null, "retention test", idemKey()]);
+      await db.query("update public.direct_entry_account_operation_intents set state=$2," +
+        " resolved_at=now()-interval '31 days' where intent_id=$1", [intent.intent_id, state]);
+      unresolvedIds.push(intent.intent_id);
+      await assert.rejects(db.query("update public.direct_entry_account_operation_intents set login_id=null," +
+        " pii_purged_at=now(),tombstone_until=now()+interval '60 days' where intent_id=$1", [intent.intent_id]),
+      (error) => error.code === "23514", `${state} must retain its login reservation`);
+    }
+    const reset = await begin(db, [ADMIN_AUTH, ADMIN_APP, "RESET_PASSWORD", null, null,
+      TARGET_APP, "retention test", idemKey()]);
+    await db.query("update public.direct_entry_account_operation_intents set state='INDETERMINATE'," +
+      " display_name='Old reset',resolved_at=now()-interval '31 days' where intent_id=$1", [reset.intent_id]);
+
+    for (const missing of ["pii_purged_at", "tombstone_until"]) {
+      await assert.rejects(db.query("update public.direct_entry_account_operation_intents set login_id=null," +
+        " pii_purged_at=case when $2='pii_purged_at' then null else now() end," +
+        " tombstone_until=case when $2='tombstone_until' then null else now()+interval '60 days' end" +
+        " where intent_id=$1", [terminalIds[0], missing]),
+      (error) => error.code === "23514");
+    }
+    assert.deepEqual(await reclassify(db, [ADMIN_AUTH, ADMIN_APP]), { reclassified: 0, purged: 4, deleted: 0 });
+    const purged = (await db.query("select state,login_id,display_name,pii_purged_at is not null as purged," +
+      " tombstone_until > pii_purged_at as retained,account_ref from public.direct_entry_account_operation_intents" +
+      " where intent_id=any($1::uuid[]) order by state", [terminalIds])).rows;
+    assert.deepEqual(purged, ["APPLIED", "EXPIRED", "FAILED"].map((state) => ({
+      state, login_id: null, display_name: null, purged: true, retained: true, account_ref: TARGET_APP,
+    })));
+    assert.equal(await count(db, "select count(*) from public.direct_entry_account_operation_intents" +
+      " where intent_id=any($1::uuid[]) and login_id is not null and pii_purged_at is null", [unresolvedIds]), 5);
+    assert.equal(await count(db, "select count(*) from public.direct_entry_account_operation_intents" +
+      " where intent_id=$1 and login_id='recentcreate' and pii_purged_at is null", [recent.intent_id]), 1);
+    assert.deepEqual(await reclassify(db, [ADMIN_AUTH, ADMIN_APP]), { reclassified: 0, purged: 0, deleted: 0 });
+    await db.query("update public.direct_entry_account_operation_intents" +
+      " set tombstone_until=now()-interval '1 second' where intent_id=any($1::uuid[])", [terminalIds]);
+    assert.deepEqual(await reclassify(db, [ADMIN_AUTH, ADMIN_APP]), { reclassified: 0, purged: 0, deleted: 3 });
+    assert.deepEqual((await db.query("select * from public.direct_entry_app_users order by app_user_id")).rows, accountsBefore);
+    assert.deepEqual((await db.query("select * from auth.users order by id")).rows, authBefore);
+  } finally {
+    await db.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 15. Migration self-check: ACL, search_path, signature posture.
 // ---------------------------------------------------------------------------
