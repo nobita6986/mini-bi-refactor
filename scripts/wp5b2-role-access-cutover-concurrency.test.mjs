@@ -577,7 +577,91 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
     assert.match(String(r1bTlRes.reason?.message), /CUTOVER_FINGERPRINT_MISMATCH/);
 
     // -------------------------------------------------------------------------
-    // Race 1 (Combined Cutover Barrier: concurrent apply + R1c reverse enable + R2 finalize_create)
+    // R3 (Finalize-first -> Cutover-second behind intent barrier):
+    //   Exact T0 deadlock regression — finalize_create acquires authz_system_state FOR SHARE
+    //   BEFORE idempotency INSERT (FK KEY SHARE on direct_entry_app_users) and BEFORE intent lock.
+    //   Cutover waits cleanly on authz_system_state FOR UPDATE -> 0 40P01 deadlocks!
+    //   Once finalize commits pre-cutover, cutover wakes up, detects new account, and aborts
+    //   stale plan safely with CUTOVER_FINGERPRINT_MISMATCH.
+    // -------------------------------------------------------------------------
+    const raceFinFirstAuth = "19600000-0000-4000-8000-0000000000fd";
+    await setup.query("insert into auth.users (id, email) values ($1::uuid, 'race.finfirst@hrpartner.vn')", [
+      raceFinFirstAuth,
+    ]);
+    await setup.query("set role service_role");
+    const { rows: [{ data: r3Began }] } = await setup.query(BEGIN_OP_SQL, [
+      OWNER.auth,
+      OWNER.app,
+      "CREATE_ACCOUNT",
+      "race.finfirst",
+      "Race Finalize First Account",
+      null,
+      "R3 finalize before cutover deadlock regression",
+      `r3-begin-${keySeq++}`,
+    ]);
+    await setup.query(CLAIM_OP_SQL, [OWNER.auth, OWNER.app, r3Began.intent_id, r3Began.intent_token]);
+    await setup.query("reset role");
+
+    const stalePlanR3 = await runWp5Cutover(setup, { mode: "read-only-plan" });
+    assert.equal(stalePlanR3.action_diff.unexpected_diff_count, 0);
+
+    await blocker.query("begin");
+    await blocker.query(
+      "select intent_id from public.direct_entry_account_operation_intents where intent_id = $1::uuid for update",
+      [r3Began.intent_id],
+    );
+
+    await worker3.query("set role service_role");
+    const r3FinalizeP = asSettled(
+      worker3.query(FINALIZE_CREATE_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        r3Began.intent_id,
+        r3Began.intent_token,
+        raceFinFirstAuth,
+        `r3-fin-${keySeq++}`,
+      ]),
+    );
+    await waitUntilBlocked(observer, "wp5b2-w3");
+
+    const r3CutoverP = asSettled(
+      runWp5Cutover(worker2, {
+        mode: "apply",
+        confirmApply: true,
+        expectedFingerprint: stalePlanR3.manifest_fingerprint,
+      }),
+    );
+    await waitUntilBlocked(observer, "wp5b2-w2");
+
+    await blocker.query("rollback");
+    const [r3FinalizeRes, r3CutoverRes] = await Promise.all([r3FinalizeP, r3CutoverP]);
+    await worker3.query("reset role");
+
+    assert.notEqual(r3FinalizeRes.reason?.code, "40P01", "R3 finalize must not deadlock");
+    assert.equal(r3FinalizeRes.status, "fulfilled", `R3 finalize failed: ${r3FinalizeRes.reason?.message}`);
+    assert.equal(r3FinalizeRes.value.rows[0].data.intent_state, "APPLIED");
+    const r3FinFirstAccountId = r3FinalizeRes.value.rows[0].data.app_user_id;
+
+    assert.notEqual(r3CutoverRes.reason?.code, "40P01", "R3 cutover must not deadlock with finalize_create");
+    assert.equal(r3CutoverRes.status, "rejected", "R3 cutover must reject stale fingerprint after new account commit");
+    assert.match(String(r3CutoverRes.reason?.message), /CUTOVER_FINGERPRINT_MISMATCH/);
+
+    const { rows: [preCutFinFirst] } = await observer.query(
+      `select u.enabled, u.authz_managed, u.version,
+              (select cutover_ready from public.authz_system_state where singleton_id = true) as cutover_ready
+         from public.direct_entry_app_users u
+        where u.app_user_id = $1::uuid`,
+      [r3FinFirstAccountId],
+    );
+    assert.deepEqual(preCutFinFirst, {
+      enabled: true,
+      authz_managed: false,
+      version: 1,
+      cutover_ready: false,
+    });
+
+    // -------------------------------------------------------------------------
+    // Race 1 (Combined Cutover Barrier: concurrent apply + R1c reverse enable + R2 cutover-first -> finalize-second)
     //   - prepare standalone CREATE_ACCOUNT intent before barrier
     //   - blocker locks ZZZ_LOCK_ANCHOR.app -> worker1 holds authz_system_state FOR UPDATE &
     //     locks OWNER..RACE_TL_CAND FOR UPDATE, pausing right at ZZZ_LOCK_ANCHOR.app
@@ -713,6 +797,17 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
       [r2AccountId],
     );
     assert.deepEqual(postR2Roles, [{ role_code: "EMPLOYEE_BASE" }]);
+
+    const { rows: [postR3FinFirst] } = await observer.query(
+      "select enabled, authz_managed from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [r3FinFirstAccountId],
+    );
+    assert.deepEqual(postR3FinFirst, { enabled: true, authz_managed: true });
+    const { rows: postR3Roles } = await observer.query(
+      "select role_code from public.authz_account_role_assignments where app_user_id = $1::uuid and ended_at is null",
+      [r3FinFirstAccountId],
+    );
+    assert.deepEqual(postR3Roles, [{ role_code: "EMPLOYEE_BASE" }]);
 
     const postRaceCutoverNoop = await runWp5Cutover(setup, {
       mode: "apply",

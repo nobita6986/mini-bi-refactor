@@ -337,6 +337,16 @@ begin
     raise exception 'intent, token and auth subject required' using errcode = '22023';
   end if;
 
+  -- Canonical lock order matching cutover (system_state -> account/FK -> intent/ledger):
+  -- acquire FOR SHARE on authz_system_state BEFORE checking authority or inserting into
+  -- direct_entry_rpc_idempotency (which takes an FK KEY SHARE on direct_entry_app_users).
+  select coalesce(s.cutover_ready, false)
+    into v_cutover_ready
+    from public.authz_system_state s
+   where s.singleton_id = true
+   for share;
+  v_cutover_ready := coalesce(v_cutover_ready, false);
+
   perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_actor_app_user_id);
 
   v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
@@ -389,14 +399,6 @@ begin
     );
     return v_prior;
   end if;
-
-  -- Serialize with active cutover so pre/post-cutover account creation matches system state.
-  select coalesce(s.cutover_ready, false)
-    into v_cutover_ready
-    from public.authz_system_state s
-   where s.singleton_id = true
-   for share;
-  v_cutover_ready := coalesce(v_cutover_ready, false);
 
   v_now := pg_catalog.clock_timestamp();
   v_reason_id := v_intent.reason_id;
