@@ -509,6 +509,8 @@ test("1. WP7A migration hygiene: zero at-signs, atomic rollback, internal ACLs &
         "select * from public.leave_management__internal_resolve_person_department(null::uuid)",
         "select public.leave_management__internal_has_open_department_head(null::uuid)",
         "select public.leave_management__internal_resolve_department_head_user(null::uuid)",
+        "select * from public.leave_management__internal_resolve_routing_snapshot(null::uuid)",
+        "select public.leave_management__internal_resolve_routing(null::uuid)",
         "select public.leave_management__internal_resolve_authority(null::uuid, null::uuid)",
       ]) {
         await assert.rejects(

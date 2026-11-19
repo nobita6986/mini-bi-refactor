@@ -373,15 +373,44 @@ test("WP7A real PostgreSQL concurrency: org HEAD/transfer vs Leave/Explanations,
     }
     await setup.query("reset role");
 
-    const { rows: [{ y1, y2, y3, d1, d2, d3, d4 }] } = await observer.query(
+    const { rows: [{ y1, y2, y3, d1, d2, d3, d4, d5, d6, d7 }] } = await observer.query(
       `select ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date - 1)::text as y1,
               ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date - 2)::text as y2,
               ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date - 3)::text as y3,
               ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 2)::text as d1,
               ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 3)::text as d2,
               ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 4)::text as d3,
-              ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 5)::text as d4`,
+              ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 5)::text as d4,
+              ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 6)::text as d5,
+              ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 7)::text as d6,
+              ((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date + 8)::text as d7`,
     );
+
+    const { rows: [mktMeta] } = await observer.query(
+      "select department_id, code, name from public.organization_departments where department_id = $1::uuid",
+      [mktDept.department_id],
+    );
+    const { rows: [opsMeta] } = await observer.query(
+      "select department_id, code, name from public.organization_departments where department_id = $1::uuid",
+      [opsDeptId],
+    );
+
+    function assertSnapshotTuple(row, allowedTuples, label) {
+      const matched = allowedTuples.some(
+        (t) =>
+          row.route_kind === t.route_kind &&
+          row.primary_approver_app_user_id === t.approver &&
+          row.unit_kind_snapshot === t.unit_kind &&
+          row.routed_department_id === t.department_id &&
+          row.routed_department_code === t.department_code &&
+          row.routed_department_name === t.department_name,
+      );
+      assert.equal(
+        matched,
+        true,
+        `${label}: incoherent snapshot tuple ${JSON.stringify(row)} not in ${JSON.stringify(allowedTuples)}`,
+      );
+    }
 
     for (const c of [w1, w2, w3]) {
       await c.query("set role service_role");
@@ -440,10 +469,20 @@ test("WP7A real PostgreSQL concurrency: org HEAD/transfer vs Leave/Explanations,
       assert.notEqual(res.reason?.code, "40P01", `${label} must never deadlock`);
       assert.equal(res.status, "fulfilled", `${label} failed: ${res.reason?.message}`);
     }
-    const r1LeaveApprover = r1Leave.value.rows[0].data.request.primary_approver_app_user_id;
-    const r1ExpApprover = r1Exp.value.rows[0].data.explanation.primary_approver?.app_user_id;
-    assert.ok([HEAD_ALICE.app, HEAD_BOB.app].includes(r1LeaveApprover), "Leave approver must be valid Alice or Bob");
-    assert.ok([HEAD_ALICE.app, HEAD_BOB.app].includes(r1ExpApprover), "Explanation approver must be valid Alice or Bob");
+    const r1Allowed = [
+      { route_kind: "DEPARTMENT_HEAD", approver: HEAD_ALICE.app, unit_kind: "MARKETING", department_id: mktMeta.department_id, department_code: mktMeta.code, department_name: mktMeta.name },
+      { route_kind: "DEPARTMENT_HEAD", approver: HEAD_BOB.app, unit_kind: "MARKETING", department_id: mktMeta.department_id, department_code: mktMeta.code, department_name: mktMeta.name },
+    ];
+    const { rows: [r1LeaveRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.leave_requests where request_id = $1::uuid",
+      [r1Leave.value.rows[0].data.request.request_id],
+    );
+    const { rows: [r1ExpRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.attendance_explanations where explanation_id = $1::uuid",
+      [r1Exp.value.rows[0].data.explanation.explanation_id],
+    );
+    assertSnapshotTuple(r1LeaveRow, r1Allowed, "R1 Leave");
+    assertSnapshotTuple(r1ExpRow, r1Allowed, "R1 Explanation");
 
     // -------------------------------------------------------------------------
     // Race 2: org_department_transfer_person_member_admin (MARKETING -> OPS_RACE)
@@ -505,8 +544,20 @@ test("WP7A real PostgreSQL concurrency: org HEAD/transfer vs Leave/Explanations,
       assert.notEqual(res.reason?.code, "40P01", `${label} must never deadlock`);
       assert.equal(res.status, "fulfilled", `${label} failed: ${res.reason?.message}`);
     }
-    assert.ok([HEAD_BOB.app, HEAD_CHARLIE.app].includes(r2Leave.value.rows[0].data.request.primary_approver_app_user_id));
-    assert.ok([HEAD_BOB.app, HEAD_CHARLIE.app].includes(r2Exp.value.rows[0].data.explanation.primary_approver?.app_user_id));
+    const r2Allowed = [
+      { route_kind: "DEPARTMENT_HEAD", approver: HEAD_BOB.app, unit_kind: "MARKETING", department_id: mktMeta.department_id, department_code: mktMeta.code, department_name: mktMeta.name },
+      { route_kind: "DEPARTMENT_HEAD", approver: HEAD_CHARLIE.app, unit_kind: "UNCLASSIFIED", department_id: opsMeta.department_id, department_code: opsMeta.code, department_name: opsMeta.name },
+    ];
+    const { rows: [r2LeaveRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.leave_requests where request_id = $1::uuid",
+      [r2Leave.value.rows[0].data.request.request_id],
+    );
+    const { rows: [r2ExpRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.attendance_explanations where explanation_id = $1::uuid",
+      [r2Exp.value.rows[0].data.explanation.explanation_id],
+    );
+    assertSnapshotTuple(r2LeaveRow, r2Allowed, "R2 Leave");
+    assertSnapshotTuple(r2ExpRow, r2Allowed, "R2 Explanation");
 
     // -------------------------------------------------------------------------
     // Race 3: Concurrent decide_request (LUANPT ADMIN vs HEAD_CHARLIE) +
@@ -703,6 +754,292 @@ test("WP7A real PostgreSQL concurrency: org HEAD/transfer vs Leave/Explanations,
       )
     ).rows[0].data;
     assert.equal(tl2Approved.request.status, "APPROVED");
+
+    // -------------------------------------------------------------------------
+    // Race 6 (R1 Regression): Deterministic BEFORE INSERT barriers verifying
+    //         atomic (primary_approver, unit_kind, routed_department) consistency
+    //         for BOTH Leave & Explanations across transfer AND HEAD swap in
+    //         both directions (create-before-org AND org-before-create).
+    // -------------------------------------------------------------------------
+    const mktTupleBob = {
+      route_kind: "DEPARTMENT_HEAD",
+      approver: HEAD_BOB.app,
+      unit_kind: "MARKETING",
+      department_id: mktMeta.department_id,
+      department_code: mktMeta.code,
+      department_name: mktMeta.name,
+    };
+    const mktTupleAlice = {
+      route_kind: "DEPARTMENT_HEAD",
+      approver: HEAD_ALICE.app,
+      unit_kind: "MARKETING",
+      department_id: mktMeta.department_id,
+      department_code: mktMeta.code,
+      department_name: mktMeta.name,
+    };
+    const opsTupleCharlie = {
+      route_kind: "DEPARTMENT_HEAD",
+      approver: HEAD_CHARLIE.app,
+      unit_kind: "UNCLASSIFIED",
+      department_id: opsMeta.department_id,
+      department_code: opsMeta.code,
+      department_name: opsMeta.name,
+    };
+
+    await observer.query(`
+      create or replace function public.a_wp7a_snapshot_barrier()
+      returns trigger
+      language plpgsql
+      as $$
+      begin
+        if new.app_user_id = '${EMP_MKT_B.app}'::uuid then
+          if tg_table_name = 'attendance_explanations' then
+            perform pg_advisory_xact_lock(9071901, 41);
+          elsif tg_table_name = 'leave_requests' then
+            perform pg_advisory_xact_lock(9071901, 42);
+          end if;
+        end if;
+        return new;
+      end;
+      $$;
+      drop trigger if exists a_wp7a_exp_barrier on public.attendance_explanations;
+      create trigger a_wp7a_exp_barrier
+        before insert on public.attendance_explanations
+        for each row execute function public.a_wp7a_snapshot_barrier();
+      drop trigger if exists a_wp7a_leave_barrier on public.leave_requests;
+      create trigger a_wp7a_leave_barrier
+        before insert on public.leave_requests
+        for each row execute function public.a_wp7a_snapshot_barrier();
+    `);
+
+    const w2Pid = (await w2.query("select pg_backend_pid() as pid")).rows[0].pid;
+    const w3Pid = (await w3.query("select pg_backend_pid() as pid")).rows[0].pid;
+    async function waitForAdvisoryWait(pid, label) {
+      for (let i = 0; i < 150; i++) {
+        const { rows: [r] } = await observer.query(
+          "select exists(select 1 from pg_locks where pid = $1 and locktype = 'advisory' and not granted) as waiting",
+          [pid],
+        );
+        if (r.waiting) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.fail(`${label}: backend pid ${pid} did not reach BEFORE INSERT barrier`);
+    }
+
+    const { rows: [{ person_id: pEmpBId }] } = await observer.query(
+      "select person_id from public.organization_account_person_links where app_user_id = $1::uuid and ended_at is null",
+      [EMP_MKT_B.app],
+    );
+
+    // 6a. Explanation paused at BEFORE INSERT while EMP_MKT_B transfers MARKETING -> OPS_RACE
+    await observer.query("select pg_advisory_lock(9071901, 41)");
+    const expBarrierPending = asSettled(
+      w2.query(
+        "select public.attendance_submit_explanation($1::uuid, $2::uuid, $3::date, 'SLOT_1', $4, $5, $6) as data",
+        [EMP_MKT_B.auth, EMP_MKT_B.app, y1, "R1 barrier exp transfer", nextUuid(), sha256("r6a-exp")],
+      ),
+    );
+    let r6aTransfer;
+    try {
+      await waitForAdvisoryWait(w2Pid, "R6a explanation barrier");
+      const { rows: [mB1] } = await observer.query(
+        `select m.membership_id, p.version
+           from public.organization_person_department_memberships m
+           join public.organization_persons p using (person_id)
+          where p.person_id = $1::uuid and m.ended_at is null`,
+        [pEmpBId],
+      );
+      await w1.query("set lock_timeout = '1500ms'");
+      r6aTransfer = await asSettled(
+        w1.query(
+          "select public.org_department_transfer_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, $7, $8::uuid, $9) as data",
+          [OWNER.auth, OWNER.app, pEmpBId, opsDeptId, mB1.version, mB1.membership_id, "R6a transfer MKT->OPS", nextUuid(), sha256("r6a-tr")],
+        ),
+      );
+      await w1.query("reset lock_timeout");
+    } finally {
+      await observer.query("select pg_advisory_unlock(9071901, 41)");
+    }
+    const r6aExp = await expBarrierPending;
+    assert.notEqual(r6aTransfer.reason?.code, "40P01", "R6a transfer must never deadlock");
+    assert.notEqual(r6aExp.reason?.code, "40P01", "R6a explanation must never deadlock");
+    assert.equal(r6aExp.status, "fulfilled", `R6a explanation failed: ${r6aExp.reason?.message}`);
+    const { rows: [r6aExpRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.attendance_explanations where explanation_id = $1::uuid",
+      [r6aExp.value.rows[0].data.explanation.explanation_id],
+    );
+    assertSnapshotTuple(r6aExpRow, [mktTupleBob, opsTupleCharlie], "R6a Explanation vs Transfer");
+
+    // Ensure EMP_MKT_B is in OPS_RACE (in case transfer serialized via lock_timeout), then verify reverse direction (transfer committed before submit)
+    if (r6aTransfer.status !== "fulfilled") {
+      const { rows: [mB1Retry] } = await observer.query(
+        `select m.membership_id, p.version
+           from public.organization_person_department_memberships m
+           join public.organization_persons p using (person_id)
+          where p.person_id = $1::uuid and m.ended_at is null`,
+        [pEmpBId],
+      );
+      await w1.query(
+        "select public.org_department_transfer_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, $7, $8::uuid, $9) as data",
+        [OWNER.auth, OWNER.app, pEmpBId, opsDeptId, mB1Retry.version, mB1Retry.membership_id, "R6a complete transfer MKT->OPS", nextUuid(), sha256("r6a-tr2")],
+      );
+    }
+    const r6aAfterExp = (
+      await w2.query(
+        "select public.attendance_submit_explanation($1::uuid, $2::uuid, $3::date, 'SLOT_2', $4, $5, $6) as data",
+        [EMP_MKT_B.auth, EMP_MKT_B.app, y1, "R1 after transfer exp", nextUuid(), sha256("r6a-after-exp")],
+      )
+    ).rows[0].data;
+    const { rows: [r6aAfterExpRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.attendance_explanations where explanation_id = $1::uuid",
+      [r6aAfterExp.explanation.explanation_id],
+    );
+    assertSnapshotTuple(r6aAfterExpRow, [opsTupleCharlie], "R6a Reverse Direction (Transfer committed before Explanation)");
+
+    // 6b. Leave Request paused at BEFORE INSERT while EMP_MKT_B transfers OPS_RACE -> MARKETING (concurrent release, ZERO 40P01!)
+    await observer.query("select pg_advisory_lock(9071901, 42)");
+    const leaveBarrierPending = asSettled(
+      w2.query(
+        "select public.leave_management_create_request($1::uuid, $2::uuid, $3::jsonb, $4, $5, $6) as data",
+        [
+          EMP_MKT_B.auth,
+          EMP_MKT_B.app,
+          JSON.stringify([{ leave_date: d5, session_code: "AM", leave_type: "UNPAID" }]),
+          "R1 barrier leave transfer",
+          `r6b-l-${seq++}`,
+          sha256("r6b-l"),
+        ],
+      ),
+    );
+    let r6bTransferPromise;
+    try {
+      await waitForAdvisoryWait(w2Pid, "R6b leave barrier");
+      const { rows: [mB2] } = await observer.query(
+        `select m.membership_id, p.version
+           from public.organization_person_department_memberships m
+           join public.organization_persons p using (person_id)
+          where p.person_id = $1::uuid and m.ended_at is null`,
+        [pEmpBId],
+      );
+      r6bTransferPromise = asSettled(
+        w1.query(
+          "select public.org_department_transfer_person_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, $7, $8::uuid, $9) as data",
+          [OWNER.auth, OWNER.app, pEmpBId, mktDept.department_id, mB2.version, mB2.membership_id, "R6b transfer OPS->MKT", nextUuid(), sha256("r6b-tr")],
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      await observer.query("select pg_advisory_unlock(9071901, 42)");
+    }
+    const [r6bLeave, r6bTransfer] = await Promise.all([leaveBarrierPending, r6bTransferPromise]);
+    assert.notEqual(r6bTransfer.reason?.code, "40P01", "R6b transfer must never deadlock");
+    assert.notEqual(r6bLeave.reason?.code, "40P01", "R6b leave must never deadlock");
+    assert.equal(r6bTransfer.status, "fulfilled", `R6b transfer failed: ${r6bTransfer.reason?.message}`);
+    assert.equal(r6bLeave.status, "fulfilled", `R6b leave failed: ${r6bLeave.reason?.message}`);
+    const { rows: [r6bLeaveRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.leave_requests where request_id = $1::uuid",
+      [r6bLeave.value.rows[0].data.request.request_id],
+    );
+    assertSnapshotTuple(r6bLeaveRow, [opsTupleCharlie, mktTupleBob], "R6b Leave vs Transfer (OPS->MKT)");
+
+    // Reverse direction: Leave created right after OPS->MKT transfer committed must get exact Marketing/Bob tuple
+    const r6bAfterLeave = (
+      await w2.query(
+        "select public.leave_management_create_request($1::uuid, $2::uuid, $3::jsonb, $4, $5, $6) as data",
+        [
+          EMP_MKT_B.auth,
+          EMP_MKT_B.app,
+          JSON.stringify([{ leave_date: d6, session_code: "AM", leave_type: "UNPAID" }]),
+          "R1 after transfer leave",
+          `r6b-after-l-${seq++}`,
+          sha256("r6b-after-l"),
+        ],
+      )
+    ).rows[0].data;
+    const { rows: [r6bAfterLeaveRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.leave_requests where request_id = $1::uuid",
+      [r6bAfterLeave.request.request_id],
+    );
+    assertSnapshotTuple(r6bAfterLeaveRow, [mktTupleBob], "R6b Reverse Direction (Transfer committed before Leave)");
+
+    // 6c. HEAD swap (Bob -> Alice on MARKETING) racing against BOTH Explanation & Leave paused at BEFORE INSERT barrier
+    const { rows: [curMktHead] } = await observer.query(
+      `select d.version as dept_version, h.head_assignment_id
+         from public.organization_departments d
+         join public.organization_department_heads h on h.department_id = d.department_id and h.ended_at is null
+        where d.department_id = $1::uuid`,
+      [mktDept.department_id],
+    );
+    await observer.query("select pg_advisory_lock(9071901, 41)");
+    await observer.query("select pg_advisory_lock(9071901, 42)");
+    const r6cExpPending = asSettled(
+      w2.query(
+        "select public.attendance_submit_explanation($1::uuid, $2::uuid, $3::date, 'SLOT_1', $4, $5, $6) as data",
+        [EMP_MKT_B.auth, EMP_MKT_B.app, y2, "R6c barrier exp HEAD swap", nextUuid(), sha256("r6c-exp")],
+      ),
+    );
+    const r6cLeavePending = asSettled(
+      w3.query(
+        "select public.leave_management_create_request($1::uuid, $2::uuid, $3::jsonb, $4, $5, $6) as data",
+        [
+          EMP_MKT_B.auth,
+          EMP_MKT_B.app,
+          JSON.stringify([{ leave_date: d7, session_code: "AM", leave_type: "UNPAID" }]),
+          "R6c barrier leave HEAD swap",
+          `r6c-l-${seq++}`,
+          sha256("r6c-l"),
+        ],
+      ),
+    );
+    let r6cHeadPromise;
+    try {
+      await waitForAdvisoryWait(w2Pid, "R6c explanation barrier");
+      await waitForAdvisoryWait(w3Pid, "R6c leave barrier");
+      r6cHeadPromise = asSettled(
+        w1.query(
+          "select public.org_department_designate_head_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6::uuid, $7, $8::uuid, $9) as data",
+          [OWNER.auth, OWNER.app, mktDept.department_id, pAlice.person_id, curMktHead.dept_version, curMktHead.head_assignment_id, "R6c HEAD swap Bob->Alice", nextUuid(), sha256("r6c-head")],
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      await observer.query("select pg_advisory_unlock(9071901, 41)");
+      await observer.query("select pg_advisory_unlock(9071901, 42)");
+    }
+    const [r6cHead, r6cExp, r6cLeave] = await Promise.all([r6cHeadPromise, r6cExpPending, r6cLeavePending]);
+    for (const [label, res] of [["R6c head", r6cHead], ["R6c exp", r6cExp], ["R6c leave", r6cLeave]]) {
+      assert.notEqual(res.reason?.code, "40P01", `${label} must never deadlock`);
+      assert.equal(res.status, "fulfilled", `${label} failed: ${res.reason?.message}`);
+    }
+    const { rows: [r6cExpRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.attendance_explanations where explanation_id = $1::uuid",
+      [r6cExp.value.rows[0].data.explanation.explanation_id],
+    );
+    const { rows: [r6cLeaveRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.leave_requests where request_id = $1::uuid",
+      [r6cLeave.value.rows[0].data.request.request_id],
+    );
+    assertSnapshotTuple(r6cExpRow, [mktTupleBob, mktTupleAlice], "R6c Explanation vs HEAD swap");
+    assertSnapshotTuple(r6cLeaveRow, [mktTupleBob, mktTupleAlice], "R6c Leave vs HEAD swap");
+
+    // Reverse direction after HEAD swap Bob -> Alice committed: both Explanation & Leave route to Alice on MARKETING
+    const r6cAfterExp = (
+      await w2.query(
+        "select public.attendance_submit_explanation($1::uuid, $2::uuid, $3::date, 'SLOT_2', $4, $5, $6) as data",
+        [EMP_MKT_B.auth, EMP_MKT_B.app, y2, "R6c after HEAD swap exp", nextUuid(), sha256("r6c-after-exp")],
+      )
+    ).rows[0].data;
+    const { rows: [r6cAfterExpRow] } = await observer.query(
+      "select route_kind, primary_approver_app_user_id, unit_kind_snapshot, routed_department_id, routed_department_code, routed_department_name from public.attendance_explanations where explanation_id = $1::uuid",
+      [r6cAfterExp.explanation.explanation_id],
+    );
+    assertSnapshotTuple(r6cAfterExpRow, [mktTupleAlice], "R6c Reverse Direction (HEAD swap committed before Explanation)");
+
+    await observer.query(`
+      drop trigger if exists a_wp7a_exp_barrier on public.attendance_explanations;
+      drop trigger if exists a_wp7a_leave_barrier on public.leave_requests;
+      drop function if exists public.a_wp7a_snapshot_barrier();
+    `);
 
     for (const c of [w1, w2, w3]) {
       await c.query("reset role");
