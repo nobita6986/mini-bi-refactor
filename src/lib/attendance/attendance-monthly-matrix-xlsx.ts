@@ -15,7 +15,7 @@ import {
 import {
   describeMatrixDayCell,
   formatEmployeeSlotPolicySummaryLabel,
-  MATRIX_DAY_STATUS_LABELS,
+  getCurrentVnBusinessDate,
   MATRIX_LEAVE_SESSION_LABELS,
   MATRIX_LEAVE_TYPE_LABELS,
   MATRIX_LEGEND_ITEMS,
@@ -58,8 +58,14 @@ export function formatMatrixExplanationSummary(
   return parts.join("; ");
 }
 
-export function formatMatrixDayCellText(cell: AttendanceMonthlyMatrixDayCellProjection): string {
-  const presentation = describeMatrixDayCell(cell);
+export function formatMatrixDayCellText(
+  cell: AttendanceMonthlyMatrixDayCellProjection,
+  options?: { todayBusinessDate?: string },
+): string {
+  const presentation = describeMatrixDayCell(cell, options);
+  if (presentation.isOutOfScopeOrExempt) {
+    return "— (Ngoài phạm vi)";
+  }
   const slotParts = presentation.slots.map(
     (slot) => `${slot.slotTitle}: ${slot.summaryText}`,
   );
@@ -104,14 +110,18 @@ export function attendanceMonthlyMatrixExportFilename(yearMonth: string): string
   return `attendance-monthly-matrix-${safeMonth}.xlsx`;
 }
 
-export async function buildAttendanceMonthlyMatrixXlsx(input: {
-  year_month: string;
-  from_date: string;
-  to_date: string;
-  calendar_days: AttendanceMonthlyMatrixCalendarDayProjection[];
-  items: AttendanceMonthlyMatrixEmployeeRowProjection[];
-  slot_policy?: AttendanceMonthlyMatrixSlotPolicySummaryProjection;
-}): Promise<Uint8Array> {
+export async function buildAttendanceMonthlyMatrixXlsx(
+  input: {
+    year_month: string;
+    from_date: string;
+    to_date: string;
+    calendar_days: AttendanceMonthlyMatrixCalendarDayProjection[];
+    items: AttendanceMonthlyMatrixEmployeeRowProjection[];
+    slot_policy?: AttendanceMonthlyMatrixSlotPolicySummaryProjection;
+  },
+  options?: { todayBusinessDate?: string },
+): Promise<Uint8Array> {
+  const todayBusinessDate = options?.todayBusinessDate ?? getCurrentVnBusinessDate();
   const imported = await import("exceljs");
   const excel = imported.default ?? imported;
   const workbook = new excel.Workbook();
@@ -179,7 +189,11 @@ export async function buildAttendanceMonthlyMatrixXlsx(input: {
 
     for (const calDay of input.calendar_days) {
       const cell = dayByDate.get(calDay.business_date);
-      rowValues.push(cell ? sanitizeSpreadsheetText(formatMatrixDayCellText(cell)) : "");
+      rowValues.push(
+        cell
+          ? sanitizeSpreadsheetText(formatMatrixDayCellText(cell, { todayBusinessDate }))
+          : "",
+      );
     }
 
     const addedRow = matrixSheet.addRow(rowValues);
@@ -188,9 +202,15 @@ export async function buildAttendanceMonthlyMatrixXlsx(input: {
     input.calendar_days.forEach((calDay, dayIdx) => {
       const cellData = dayByDate.get(calDay.business_date);
       if (!cellData) return;
-      const presentation = describeMatrixDayCell(cellData);
+      const presentation = describeMatrixDayCell(cellData, { todayBusinessDate });
       const excelCell = addedRow.getCell(baseHeaders.length + dayIdx + 1);
-      if (presentation.tone === "emerald") {
+      if (presentation.isOutOfScopeOrExempt) {
+        excelCell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFF1F5F9" },
+        };
+      } else if (presentation.tone === "emerald") {
         excelCell.fill = {
           type: "pattern",
           pattern: "solid",
@@ -250,7 +270,7 @@ export async function buildAttendanceMonthlyMatrixXlsx(input: {
   let maxObservedDaySlots = 0;
   for (const emp of input.items) {
     for (const day of emp.days) {
-      const pres = describeMatrixDayCell(day);
+      const pres = describeMatrixDayCell(day, { todayBusinessDate });
       if (pres.slots.length > maxObservedDaySlots) {
         maxObservedDaySlots = pres.slots.length;
       }
@@ -317,7 +337,7 @@ export async function buildAttendanceMonthlyMatrixXlsx(input: {
       personnelCode: emp.personnel_code,
     });
     for (const day of emp.days) {
-      const presentation = describeMatrixDayCell(day);
+      const presentation = describeMatrixDayCell(day, { todayBusinessDate });
       const targetLabel =
         day.distance_target_kind === "BRANCH"
           ? day.branch_code_used
@@ -328,6 +348,9 @@ export async function buildAttendanceMonthlyMatrixXlsx(input: {
             : "";
 
       const dynamicSlotCells = Array.from({ length: detailSlotCount }, (_, idx) => {
+        if (presentation.isOutOfScopeOrExempt) {
+          return "—";
+        }
         const slotPres = presentation.slots[idx];
         if (!slotPres) {
           return "";
@@ -340,7 +363,7 @@ export async function buildAttendanceMonthlyMatrixXlsx(input: {
         sanitizeSpreadsheetText(resolvedIdentity.displayName),
         sanitizeSpreadsheetText(resolvedIdentity.personnelCode ?? ""),
         sanitizeSpreadsheetText(emp.branch?.display_name ?? "Mặc định (HQ)"),
-        MATRIX_DAY_STATUS_LABELS[day.day_status],
+        presentation.statusLabel,
         sanitizeSpreadsheetText(
           `${presentation.policyProfileNameUsed} (v${presentation.policyVersionUsed})`,
         ),

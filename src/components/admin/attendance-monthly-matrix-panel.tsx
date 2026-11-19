@@ -84,6 +84,7 @@ import {
   describeSlotPolicyAssignmentStatus,
   formatEmployeeSlotPolicySummaryLabel,
   formatMatrixWeekdayLabel,
+  getCurrentVnBusinessDate,
   getVietnamCurrentYearMonth,
   mapBranchAdminMutationError,
   mapMonthlyMatrixExportError,
@@ -135,7 +136,22 @@ type MatrixAppliedFilters = {
 };
 
 function MatrixDayCell({ cell }: { cell: AttendanceMonthlyMatrixDayCellProjection }) {
-  const presentation = describeMatrixDayCell(cell);
+  const presentation = describeMatrixDayCell(cell, {
+    todayBusinessDate: getCurrentVnBusinessDate(),
+  });
+
+  if (presentation.isOutOfScopeOrExempt) {
+    return (
+      <div
+        title={presentation.statusLabel}
+        className="flex min-h-[10.5rem] w-56 flex-col items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/70 p-2 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400"
+      >
+        <span className="inline-flex items-center rounded-full border border-slate-200/80 bg-white/80 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:border-slate-700/80 dark:bg-slate-800/70 dark:text-slate-300">
+          — Ngoài phạm vi
+        </span>
+      </div>
+    );
+  }
 
   const cellToneClass =
     presentation.tone === "red"

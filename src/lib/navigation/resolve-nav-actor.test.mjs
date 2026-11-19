@@ -196,3 +196,58 @@ test("T1A: resolveNavActorForAppShell forwards server-confirmed allowed_worker_t
     /allowed_worker_tabs:\s*actor\.actor\.allowed_worker_tabs/,
   );
 });
+
+test("WP7B R7: resolveLeaveManagementAccessForRequest is wrapped by React cache() and probes read-only getActorAccess instead of getMySummary", () => {
+  assert.match(
+    resolveNavActor,
+    /export\s+const\s+resolveLeaveManagementAccessForRequest\s*=\s*cache\(/,
+  );
+  assert.match(
+    resolveNavActor,
+    /createLeaveRepository\(\)\.getActorAccess\(/,
+  );
+  assert.doesNotMatch(
+    resolveNavActor,
+    /createLeaveRepository\(\)\.getMySummary\(/,
+  );
+  assert.match(resolveNavActor, /canAccess:\s*access\.data\.can_access/);
+  assert.match(resolveNavActor, /canManageConfig:\s*access\.data\.can_manage_config/);
+  assert.match(resolveNavActor, /canViewMonthlyReport:\s*access\.data\.can_view_monthly_report/);
+  assert.match(resolveNavActor, /!leaveManagementNavPredicate\(projection\)/);
+  assert.match(resolveNavActor, /projection\.hasLeaveManagementAccess\s*=\s*true/);
+});
+
+test("WP7B D-WP7B-01: server projection builders project minimal hasAttendanceDepartmentHeadAccess boolean without dumping assigned_roles into NavActorProjection", () => {
+  const adminLayout = readFileSync(new URL("../../app/admin/layout.tsx", HERE), "utf8");
+  const reportApi = readFileSync(new URL("../attendance/attendance-report-api.ts", HERE), "utf8");
+  const matrixApi = readFileSync(
+    new URL("../attendance/attendance-monthly-matrix-api.ts", HERE),
+    "utf8",
+  );
+
+  // NavActorProjection carries ONLY the minimal boolean flag, never assigned_roles
+  const navProjectionBlock = registryCapability.match(
+    /export\s+type\s+NavActorProjection\s*=\s*\{[\s\S]*?\n\};/,
+  )?.[0];
+  assert.ok(navProjectionBlock, "NavActorProjection declaration must exist");
+  assert.match(navProjectionBlock, /hasAttendanceDepartmentHeadAccess\?:\s*boolean;/);
+  assert.doesNotMatch(navProjectionBlock, /assigned_roles/);
+
+  // All 4 server projection builders derive the boolean via hasActiveDepartmentHeadRole(...)
+  assert.match(
+    resolveNavActor,
+    /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\.actor\)/,
+  );
+  assert.match(
+    adminLayout,
+    /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\.actor\)/,
+  );
+  assert.match(
+    reportApi,
+    /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\)/,
+  );
+  assert.match(
+    matrixApi,
+    /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\)/,
+  );
+});

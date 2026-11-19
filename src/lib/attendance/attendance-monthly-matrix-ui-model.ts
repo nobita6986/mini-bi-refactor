@@ -1,4 +1,8 @@
 import {
+  attendanceFullAdminOrBodNavPredicate,
+  type NavActorProjection,
+} from "../navigation/registry-capability.ts";
+import {
   ATTENDANCE_BUSINESS_TIMEZONE,
   ATTENDANCE_REPORT_DEFAULT_PAGE_SIZE,
   ATTENDANCE_REPORT_MAX_SEARCH_LENGTH,
@@ -70,26 +74,19 @@ export const TEAM_LEADER_ATTENDANCE_WORKSPACE_TABS: readonly AttendanceAdminWork
 
 export function resolveAttendanceAdminWorkspaceMode(
   actor:
+    | Pick<NavActorProjection, "capabilities" | "scopes" | "effective_grants">
     | {
         readonly capabilities: readonly string[];
         readonly scopes: readonly { readonly kind: string }[];
+        readonly effective_grants?: NavActorProjection["effective_grants"];
       }
     | null
     | undefined,
 ): AttendanceAdminWorkspaceMode {
   if (!actor) return "team-leader";
-  const hasAllScope = actor.scopes.some((scope) => scope.kind === "all");
-  const isFullAdmin =
-    hasAllScope &&
-    actor.capabilities.includes("entry_admin") &&
-    actor.capabilities.includes("recruiter_master_manage") &&
-    actor.capabilities.includes("team_master_manage");
-  const isBod =
-    hasAllScope &&
-    (actor.capabilities.includes("entry_privileged_edit") ||
-      (actor.capabilities.includes("report_analytics_view") &&
-        actor.capabilities.includes("report_view")));
-  return isFullAdmin || isBod ? "full" : "team-leader";
+  return attendanceFullAdminOrBodNavPredicate(actor as NavActorProjection)
+    ? "full"
+    : "team-leader";
 }
 
 export function getAllowedAttendanceAdminWorkspaceTabs(
@@ -117,6 +114,7 @@ export function resolveEffectiveAttendanceAdminWorkspaceTab(
 export type MatrixEmployeeFilterMode = "employee" | "search";
 
 export const MATRIX_MISSING_SLOT_LABEL = "Chưa có lượt chấm";
+export const MATRIX_OUT_OF_SCOPE_LABEL = "Ngoài phạm vi / Không áp dụng";
 export const MATRIX_EXPLAINED_APPROVED_LABEL = "Giải trình được duyệt";
 export const MATRIX_EXPLANATION_REJECTED_LABEL = "Giải trình bị từ chối";
 export const MATRIX_EXPLANATION_PENDING_LABEL = "Chờ duyệt giải trình";
@@ -347,6 +345,7 @@ export type MatrixSlotPresentation = {
 
 export type MatrixDayCellPresentation = {
   dayStatus: AttendanceMonthlyMatrixDayStatus;
+  isOutOfScopeOrExempt: boolean;
   statusLabel: string;
   tone: MatrixDayCellTone;
   isRedHighlight: boolean;
@@ -443,6 +442,15 @@ export function getVietnamCurrentYearMonth(now: Date = new Date()): string {
 export function getVietnamTodayIsoDate(now: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: ATTENDANCE_BUSINESS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+}
+
+export function getCurrentVnBusinessDate(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -812,9 +820,8 @@ export function formatEmployeeSlotPolicySummaryLabel(
 
 export function describeMatrixDayCell(
   cell: AttendanceMonthlyMatrixDayCellProjection,
+  options?: { todayBusinessDate?: string },
 ): MatrixDayCellPresentation {
-  const statusLabel = MATRIX_DAY_STATUS_LABELS[cell.day_status];
-
   const leaveBadges: MatrixLeaveBadgeView[] = cell.approved_leaves.map((item) => {
     const leaveTypeLabel = MATRIX_LEAVE_TYPE_LABELS[item.leave_type] ?? item.leave_type;
     const sessionLabel = MATRIX_LEAVE_SESSION_LABELS[item.session_code] ?? item.session_code;
@@ -830,6 +837,20 @@ export function describeMatrixDayCell(
   });
 
   const resolvedSlots = resolveRawDaySlots(cell);
+  const isOutOfScopeOrExempt =
+    typeof options?.todayBusinessDate === "string" &&
+    cell.business_date < options.todayBusinessDate &&
+    cell.day_status === "UPCOMING" &&
+    !cell.has_checkin &&
+    !cell.has_approved_leave &&
+    resolvedSlots.missingSlotCount === 0 &&
+    resolvedSlots.slots.length > 0 &&
+    resolvedSlots.slots.every(
+      (s) => s.slot_status === "UPCOMING" && s.checkins.length === 0 && !s.explanation,
+    );
+  const statusLabel = isOutOfScopeOrExempt
+    ? MATRIX_OUT_OF_SCOPE_LABEL
+    : MATRIX_DAY_STATUS_LABELS[cell.day_status];
 
   const slots: MatrixSlotPresentation[] = resolvedSlots.slots.map((slot) => {
     const rawSlotLabel = typeof slot.slot_label === "string" ? slot.slot_label.trim() : "";
@@ -890,8 +911,8 @@ export function describeMatrixDayCell(
       summaryText = slotStatusLabel;
     } else if (slot.slot_status === "UPCOMING") {
       tone = "sky";
-      slotStatusLabel = "Chưa đến giờ chấm";
-      summaryText = slotStatusLabel;
+      slotStatusLabel = isOutOfScopeOrExempt ? "—" : "Chưa đến giờ chấm";
+      summaryText = isOutOfScopeOrExempt ? MATRIX_OUT_OF_SCOPE_LABEL : slotStatusLabel;
     } else {
       tone = "red";
       slotStatusLabel = MATRIX_MISSING_SLOT_LABEL;
@@ -928,7 +949,7 @@ export function describeMatrixDayCell(
       slotStatus: slot.slot_status,
       statusLabel: slotStatusLabel,
       tone,
-      isMissingHighlight: slot.slot_status === "MISSING",
+      isMissingHighlight: isOutOfScopeOrExempt ? false : slot.slot_status === "MISSING",
       isOutOfGraceHighlight: slot.slot_status === "OUT_OF_GRACE",
       checkins,
       explanation,
@@ -980,9 +1001,10 @@ export function describeMatrixDayCell(
 
   return {
     dayStatus: cell.day_status,
+    isOutOfScopeOrExempt,
     statusLabel,
     tone,
-    isRedHighlight: tone === "red",
+    isRedHighlight: isOutOfScopeOrExempt ? false : tone === "red",
     policyProfileIdUsed: resolvedSlots.policyProfileIdUsed,
     policyProfileCodeUsed: resolvedSlots.policyProfileCodeUsed,
     policyProfileNameUsed: resolvedSlots.policyProfileNameUsed,

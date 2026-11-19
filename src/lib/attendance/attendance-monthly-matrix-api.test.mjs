@@ -85,7 +85,7 @@ const BOD_PRIVILEGED_CAPS = ["entry_privileged_edit"];
 const BOD_WORK_REPORTS_CAPS = ["report_analytics_view", "report_view"];
 const STAFF_CAPS = ["report_view"];
 
-function makeSessionOk(capabilities = FULL_ADMIN_CAPS, scopes = ALL_SCOPE) {
+function makeSessionOk(capabilities = FULL_ADMIN_CAPS, scopes = ALL_SCOPE, overrides = {}) {
   const effective_grants = [];
   for (const cap of capabilities) {
     for (const scope of scopes) {
@@ -130,6 +130,7 @@ function makeSessionOk(capabilities = FULL_ADMIN_CAPS, scopes = ALL_SCOPE) {
           verification: "getUser",
           authenticated_at: "2026-10-25T01:00:00.000Z",
         },
+        ...overrides,
       },
     },
     response_headers: {},
@@ -2861,4 +2862,307 @@ test("Team Leader authority: allowed on monthly-matrix report and XLSX export (i
   );
   assert.equal(tlSlotUnassign.status, 403);
   assert.equal((await tlSlotUnassign.json()).code, "ATTENDANCE_SLOT_POLICY_WRITE_DENIED");
+});
+
+test("WP7B D-WP7B-01: DEPARTMENT_HEAD allowed on monthly-matrix & XLSX export, denied 403 before RPC on all 9 branch & slot-policy admin endpoints; dual-role HR_OPERATOR + TEAM_LEADER denied admin branch/slot-policy GET", async () => {
+  const DEPT_ID = "69000000-0000-4000-8000-0000000000e9";
+  const TEAM_ID = "59000000-0000-4000-8000-0000000000e1";
+  const OWN_SCOPE = [{ kind: "own", reference: APP_USER_ID, valid_from: "2026-01-01", valid_to: null }];
+  const TEAM_SCOPE = [{ kind: "team", reference: TEAM_ID, valid_from: "2026-01-01", valid_to: null }];
+
+  const deptHeadSession = () =>
+    makeSessionOk(["report_view", "report_analytics_view"], OWN_SCOPE, {
+      effective_grants: [
+        {
+          capability: "report_view",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          source_type: "ROLE_BUNDLE",
+          source_id: APP_USER_ID,
+        },
+        {
+          capability: "report_analytics_view",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          source_type: "ROLE_BUNDLE",
+          source_id: APP_USER_ID,
+        },
+      ],
+      assigned_roles: [
+        {
+          role_code: "DEPARTMENT_HEAD",
+          display_name: "Trưởng phòng",
+          assignment_mode: "CONTEXTUAL",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          assignment_id: "69000000-0000-4000-8000-0000000000ea",
+          is_protected: false,
+          can_revoke: true,
+          cannot_revoke_reason: null,
+        },
+      ],
+    });
+
+  const deptScopedPayload = projectAttendanceMonthlyMatrixReport(
+    buildValidMonthlyMatrixReport({
+      viewer: { can_configure_hq: false, can_manage_branches: false },
+      current_hq: null,
+      slot_policy: {
+        current_policy: DEFAULT_ATTENDANCE_SLOT_POLICY,
+        latest_policy: DEFAULT_ATTENDANCE_SLOT_POLICY,
+        month_policies: [DEFAULT_ATTENDANCE_SLOT_POLICY],
+      },
+    }),
+  );
+  assert.notEqual(deptScopedPayload, null);
+
+  // 1. DEPARTMENT_HEAD allowed on GET /api/admin/attendance/monthly-matrix
+  const matrixRes = await getAttendanceMonthlyMatrixReport(
+    new Request("https://bi.example.com/api/admin/attendance/monthly-matrix?year_month=2026-10"),
+    {
+      resolveSession: async () => deptHeadSession(),
+      repository: {
+        getMonthlyMatrixReport: async () => ({ ok: true, report: deptScopedPayload }),
+        listBranchesAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+        upsertBranchAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+        assignEmployeeBranchAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+        unassignEmployeeBranchAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+      },
+    },
+  );
+  assert.equal(matrixRes.status, 200);
+  const matrixBody = await matrixRes.json();
+  assert.equal(matrixBody.ok, true);
+  assert.equal(matrixBody.report.viewer.can_configure_hq, false);
+  assert.equal(matrixBody.report.viewer.can_manage_branches, false);
+
+  // 2. DEPARTMENT_HEAD allowed on GET /api/admin/attendance/monthly-matrix/export
+  const exportRes = await exportAttendanceMonthlyMatrixXlsx(
+    new Request("https://bi.example.com/api/admin/attendance/monthly-matrix/export?year_month=2026-10"),
+    {
+      resolveSession: async () => deptHeadSession(),
+      repository: {
+        getMonthlyMatrixReport: async () => ({ ok: true, report: deptScopedPayload }),
+        listBranchesAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+        upsertBranchAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+        assignEmployeeBranchAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+        unassignEmployeeBranchAdmin: async () => ({ ok: false, code: "ATTENDANCE_REPORT_UNAVAILABLE" }),
+      },
+    },
+  );
+  assert.equal(exportRes.status, 200);
+  const exportBytes = new Uint8Array(await exportRes.arrayBuffer());
+  assert.equal(exportBytes[0], 0x50);
+  assert.equal(exportBytes[1], 0x4b);
+
+  // 3. DEPARTMENT_HEAD denied 403 before RPC on all 9 branch/slot-policy admin endpoints
+  const forbiddenRepo = {
+    getMonthlyMatrixReport: async () => {
+      throw new Error("unexpected RPC");
+    },
+    listBranchesAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach listBranchesAdmin RPC");
+    },
+    upsertBranchAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach upsertBranchAdmin RPC");
+    },
+    assignEmployeeBranchAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach assignEmployeeBranchAdmin RPC");
+    },
+    unassignEmployeeBranchAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach unassignEmployeeBranchAdmin RPC");
+    },
+    getSlotPoliciesAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach getSlotPoliciesAdmin RPC");
+    },
+    createSlotPolicyAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach createSlotPolicyAdmin RPC");
+    },
+    upsertSlotPolicyProfileAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach upsertSlotPolicyProfileAdmin RPC");
+    },
+    assignEmployeeSlotPolicyAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach assignEmployeeSlotPolicyAdmin RPC");
+    },
+    unassignEmployeeSlotPolicyAdmin: async () => {
+      throw new Error("DEPARTMENT_HEAD must not reach unassignEmployeeSlotPolicyAdmin RPC");
+    },
+  };
+
+  const dhEndpoints = [
+    [
+      "GET branches",
+      () =>
+        getAttendanceBranchesAdmin(
+          new Request("https://bi.example.com/api/admin/attendance/branches"),
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_REPORT_ACCESS_DENIED",
+    ],
+    [
+      "POST/PUT branch",
+      () =>
+        postOrPutAttendanceBranchAdmin(
+          makeJsonRequest("https://bi.example.com/api/admin/attendance/branches", "POST", {
+            branch_code: "BN01",
+            display_name: "Chi nhánh Bắc Ninh",
+            address: "TP Bắc Ninh",
+            latitude: 21.186082,
+            longitude: 106.076314,
+            active: true,
+            expected_version: 0,
+            idempotency_key: IDEMPOTENCY_KEY,
+          }),
+          null,
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_BRANCH_WRITE_DENIED",
+    ],
+    [
+      "POST branch assign",
+      () =>
+        postAttendanceBranchAssignmentAdmin(
+          makeJsonRequest("https://bi.example.com/api/admin/attendance/branches/assignments", "POST", {
+            app_user_id: STAFF_USER_ID,
+            branch_id: BRANCH_ID,
+            valid_from: "2026-10-01",
+            expected_version: 1,
+            idempotency_key: IDEMPOTENCY_KEY,
+          }),
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_BRANCH_WRITE_DENIED",
+    ],
+    [
+      "POST branch unassign",
+      () =>
+        postAttendanceBranchUnassignAdmin(
+          makeJsonRequest(
+            `https://bi.example.com/api/admin/attendance/branches/assignments/${ASSIGNMENT_ID}/unassign`,
+            "POST",
+            { valid_to: "2026-10-31", expected_version: 1, idempotency_key: IDEMPOTENCY_KEY },
+          ),
+          ASSIGNMENT_ID,
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_BRANCH_WRITE_DENIED",
+    ],
+    [
+      "GET slot-policies",
+      () =>
+        getAttendanceSlotPoliciesAdmin(
+          new Request("https://bi.example.com/api/admin/attendance/slot-policies"),
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_REPORT_ACCESS_DENIED",
+    ],
+    [
+      "POST slot-policy",
+      () =>
+        postAttendanceSlotPolicyAdmin(
+          makeJsonRequest("https://bi.example.com/api/admin/attendance/slot-policies", "POST", {
+            effective_from_date: "2026-11-01",
+            slots: [
+              { slot_label: "Ca sáng", target_time: "08:00", grace_before_minutes: 15, grace_after_minutes: 15 },
+            ],
+            expected_version: 1,
+            idempotency_key: IDEMPOTENCY_KEY,
+          }),
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_SLOT_POLICY_WRITE_DENIED",
+    ],
+    [
+      "POST/PUT slot-policy profile",
+      () =>
+        postOrPutAttendanceSlotPolicyProfileAdmin(
+          makeJsonRequest("https://bi.example.com/api/admin/attendance/slot-policies", "POST", {
+            profile_code: "HANH_CHINH",
+            display_name: "Hành chính",
+            active: true,
+            effective_from_date: "2026-11-01",
+            slots: [
+              { slot_label: "Ca sáng", target_time: "08:00", grace_before_minutes: 15, grace_after_minutes: 15 },
+            ],
+            idempotency_key: IDEMPOTENCY_KEY,
+          }),
+          null,
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_SLOT_POLICY_WRITE_DENIED",
+    ],
+    [
+      "POST slot-policy assign",
+      () =>
+        postAttendanceSlotPolicyAssignmentAdmin(
+          makeJsonRequest("https://bi.example.com/api/admin/attendance/slot-policies/assignments", "POST", {
+            app_user_id: STAFF_USER_ID,
+            profile_id: DEFAULT_ATTENDANCE_SLOT_POLICY_PROFILE_ID,
+            valid_from: "2026-10-25",
+            expected_version: 1,
+            idempotency_key: IDEMPOTENCY_KEY,
+          }),
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_SLOT_POLICY_WRITE_DENIED",
+    ],
+    [
+      "POST slot-policy unassign",
+      () =>
+        postAttendanceSlotPolicyUnassignAdmin(
+          makeJsonRequest(
+            `https://bi.example.com/api/admin/attendance/slot-policies/assignments/${ASSIGNMENT_ID}/unassign`,
+            "POST",
+            { valid_to: "2026-10-25", expected_version: 1, idempotency_key: IDEMPOTENCY_KEY },
+          ),
+          ASSIGNMENT_ID,
+          { resolveSession: async () => deptHeadSession(), repository: forbiddenRepo },
+        ),
+      "ATTENDANCE_SLOT_POLICY_WRITE_DENIED",
+    ],
+  ];
+
+  for (const [label, invokeEndpoint, expectedCode] of dhEndpoints) {
+    const res = await invokeEndpoint();
+    assert.equal(res.status, 403, label);
+    assert.equal((await res.json()).code, expectedCode, label);
+  }
+
+  // 4. Dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM denied on admin branches & slot-policies GET
+  const dualRoleSession = () =>
+    makeSessionOk(
+      [
+        "recruiter_master_manage",
+        "team_master_manage",
+        "catalog_master_manage",
+        "team_manager_assign",
+        "report_view",
+        "report_analytics_view",
+      ],
+      [...ALL_SCOPE, ...TEAM_SCOPE],
+      {
+        effective_grants: [
+          { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: APP_USER_ID },
+          { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: APP_USER_ID },
+          { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: APP_USER_ID },
+          { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: APP_USER_ID },
+          { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: APP_USER_ID },
+          { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: APP_USER_ID },
+        ],
+      },
+    );
+
+  const dualBranchesRes = await getAttendanceBranchesAdmin(
+    new Request("https://bi.example.com/api/admin/attendance/branches"),
+    { resolveSession: async () => dualRoleSession(), repository: forbiddenRepo },
+  );
+  assert.equal(dualBranchesRes.status, 403);
+  assert.equal((await dualBranchesRes.json()).code, "ATTENDANCE_REPORT_ACCESS_DENIED");
+
+  const dualPoliciesRes = await getAttendanceSlotPoliciesAdmin(
+    new Request("https://bi.example.com/api/admin/attendance/slot-policies"),
+    { resolveSession: async () => dualRoleSession(), repository: forbiddenRepo },
+  );
+  assert.equal(dualPoliciesRes.status, 403);
+  assert.equal((await dualPoliciesRes.json()).code, "ATTENDANCE_REPORT_ACCESS_DENIED");
 });
