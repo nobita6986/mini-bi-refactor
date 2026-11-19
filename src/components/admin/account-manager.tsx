@@ -918,6 +918,7 @@ function PasswordField({ id, label, value, disabled = false, onChange }: {
 
 type AccountOperationPendingRequest = {
   kind: "create" | "edit" | "reset";
+  accountRef?: string;
   url: string;
   idempotencyKey: string;
   body: Record<string, unknown>;
@@ -1038,7 +1039,15 @@ function AccountOperationDialogs({
       if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       const rawJson: unknown = await response.json().catch(() => null);
       if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
-      const outcome = classifyAccountOperationResponse(response.status, rawJson);
+      const outcome = classifyAccountOperationResponse(
+        response.status,
+        rawJson,
+        req.kind === "create"
+          ? { operation: "create_account" }
+          : req.kind === "edit"
+            ? { operation: "edit_display_name", expectedAccountRef: req.accountRef ?? accountRef }
+            : { operation: "reset_password" },
+      );
       if (outcome.kind === "denied") {
         clearSensitiveAndPending();
         onSessionLost();
@@ -1148,6 +1157,7 @@ function AccountOperationDialogs({
 
     const nextRequest: AccountOperationPendingRequest = {
       kind: isCreate ? "create" : isEdit ? "edit" : "reset",
+      accountRef: isCreate ? undefined : accountRef,
       url,
       idempotencyKey: key,
       body: request.body,
@@ -1373,7 +1383,11 @@ function AccountReconcileSurface({
         body: JSON.stringify(request.body),
       });
       if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
-      const outcome = classifyAccountOperationResponse(response.status, await response.json().catch(() => null));
+      const outcome = classifyAccountOperationResponse(
+        response.status,
+        await response.json().catch(() => null),
+        { operation: "reconcile_create_account", expectedIntentId: intentId },
+      );
       if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       if (outcome.kind === "denied") {
         pendingKeyRef.current = null;

@@ -31,6 +31,7 @@ function stubComponent(name) {
 const dialogStub = {
   __esModule: true,
   Root: stubComponent("DialogRoot"),
+  Trigger: stubComponent("DialogTrigger"),
   Portal: stubComponent("DialogPortal"),
   Overlay: stubComponent("DialogOverlay"),
   Content: stubComponent("DialogContent"),
@@ -412,6 +413,7 @@ const PERSON_B_ID = "22222222-2222-4222-8222-222222222222";
 const MEMBERSHIP_A_ID = "33333333-3333-4333-8333-333333333333";
 const HEAD_A_ID = "44444444-4444-4444-8444-444444444444";
 const ACCOUNT_A_REF = "55555555-5555-4555-8555-555555555555";
+const ACCOUNT_B_REF = "55555555-5555-4555-8555-555555555599";
 const RECRUITER_A_ID = "77777777-7777-4777-8777-777777777777";
 
 function makeDept(overrides = {}) {
@@ -614,6 +616,7 @@ const { DepartmentDetailManager } = repoRequire(
   "./src/components/admin/department-detail-manager.tsx",
 );
 const { AccountManager } = repoRequire("./src/components/admin/account-manager.tsx");
+const { PersonnelCatalogManager } = repoRequire("./src/components/admin/personnel-catalog-manager.tsx");
 const { DepartmentSelectPicker, PersonSearchPicker, AccountSearchPicker, RecruiterConfirmPicker } =
   repoRequire("./src/components/admin/org-entity-picker.tsx");
 
@@ -2089,7 +2092,42 @@ test("Hotfix retry [AccountOperationDialogs CREATE]: lost response locks form/pa
   const recReq2 = findLastRequest((r) => r.url.includes(`/intents/${intentId}/reconcile`));
   assert.notEqual(recReq2, recReq1);
   assert.equal(recReq2.options.headers["Idempotency-Key"], recKey1);
-  respond(recReq2, 200, { ok: true, account: { app_user_id: ACCOUNT_A_REF } });
+  // Reconcile rejects malformed 200 (state outside enum / wrong intent_id / empty account) while keeping key
+  respond(recReq2, 200, {
+    ok: true,
+    intent: { intent_id: intentId, intent_token: "88888888-8888-4888-8888-888888888883", kind: "CREATE_ACCOUNT", state: "BANANA", account_ref: null },
+  });
+  await recSurface.flush();
+  await am.flush();
+  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent?.intentId, intentId);
+  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent?.state, "IN_FLIGHT");
+
+  findButton(recSurface, "Đối soát").props.onClick();
+  await recSurface.flush();
+  const recReq3 = findLastRequest((r) => r.url.includes(`/intents/${intentId}/reconcile`));
+  assert.notEqual(recReq3, recReq2);
+  assert.equal(recReq3.options.headers["Idempotency-Key"], recKey1);
+  // Valid PR #13 fallback account (revision_id: null) completes reconcile cleanly
+  respond(recReq3, 200, {
+    ok: true,
+    replayed: true,
+    account: {
+      app_user_id: ACCOUNT_A_REF,
+      auth_subject: null,
+      display_name: "NV InFlight",
+      version: 2,
+      revision_id: null,
+      intent_id: intentId,
+      intent_state: "APPLIED",
+    },
+    intent: {
+      intent_id: intentId,
+      intent_token: "88888888-8888-4888-8888-888888888883",
+      kind: "CREATE_ACCOUNT",
+      state: "APPLIED",
+      account_ref: ACCOUNT_A_REF,
+    },
+  });
   await recSurface.flush();
   await am.flush();
   assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
@@ -2097,6 +2135,260 @@ test("Hotfix retry [AccountOperationDialogs CREATE]: lost response locks form/pa
     requests.filter((r) => r.method === "POST" && r.url === "/api/admin/access/accounts").length,
     createCountBefore,
   );
+});
+
+test("Hotfix retry R1 [AccountOperationDialogs]: malformed 200 on CREATE/EDIT keeps pending key/payload/lock, rejects invalid APPLIED/state, accepts PR #13 fallback & RESET {ok:true}", async () => {
+  const am = mount(AccountManager);
+  await am.flush();
+  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, {
+    ok: true,
+    reclassified: { reclassified: 0, purged: 0, deleted: 0 },
+  });
+  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount({ version: 2 })]));
+  await am.flush();
+
+  // 1) CREATE_ACCOUNT: malformed 200 envelopes must NEVER report success, clear password/key, or route to reconcile
+  findButton(am, "Tạo tài khoản").props.onClick();
+  await am.flush();
+  let opDialog = await syncChildFromTree(am, "AccountOperationDialogs", null);
+  await opDialog.replayStrictEffects();
+
+  const textInputs = () => collectNodes(opDialog.tree).filter((n) => n.type === "input");
+  const pwFields = () => collectNodes(opDialog.tree).filter((n) => typeof n.type === "function" && n.type.name === "PasswordField");
+  textInputs()[0].props.onChange({ target: { value: "nv.r1check" } });
+  textInputs()[1].props.onChange({ target: { value: "Nhân viên R1" } });
+  pwFields()[0].props.onChange("CheckR1#2026");
+  pwFields()[1].props.onChange("CheckR1#2026");
+  await opDialog.flush();
+
+  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await opDialog.flush();
+  const cReq1 = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
+  const cKey = cReq1.options.headers["Idempotency-Key"];
+  const cBody = cReq1.options.body;
+
+  for (const badPayload of [
+    { ok: true, account: {} },
+    { ok: true, intent: { state: "APPLIED", intent_id: "not-uuid" } },
+    { ok: true, intent: { intent_id: "88888888-8888-4888-8888-888888888891", intent_token: "88888888-8888-4888-8888-888888888892", kind: "RESET_PASSWORD", state: "APPLIED", account_ref: ACCOUNT_A_REF } },
+    { ok: true, intent: { intent_id: "88888888-8888-4888-8888-888888888891", intent_token: "88888888-8888-4888-8888-888888888892", kind: "CREATE_ACCOUNT", state: "BANANA", account_ref: null } },
+  ]) {
+    const req = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
+    respond(req, 200, badPayload);
+    await opDialog.flush();
+    await am.flush();
+
+    assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, "create");
+    assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
+    assert.equal(notifications.success.length, 0);
+    assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
+    assert.equal(pwFields()[0].props.disabled, true);
+
+    findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+    await opDialog.flush();
+    const retryReq = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
+    assert.notEqual(retryReq, req);
+    assert.equal(retryReq.options.headers["Idempotency-Key"], cKey);
+    assert.equal(retryReq.options.body, cBody);
+  }
+
+  // PR #13 intent-only APPLIED replay with valid intent_id + intent_token + kind + account_ref succeeds cleanly
+  respond(findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts"), 200, {
+    ok: true,
+    replayed: true,
+    intent: {
+      intent_id: "88888888-8888-4888-8888-888888888891",
+      intent_token: "88888888-8888-4888-8888-888888888892",
+      kind: "CREATE_ACCOUNT",
+      state: "APPLIED",
+      account_ref: ACCOUNT_A_REF,
+    },
+  });
+  await opDialog.flush();
+  await am.flush();
+  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
+  assert.equal(notifications.success.length, 1);
+
+  // 2) EDIT_DISPLAY_NAME: empty account or wrong account_ref keeps key/lock; exact target EditNameEnvelope succeeds
+  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount({ version: 2 })]));
+  await am.flush();
+  findButton(am, "Sửa tên").props.onClick();
+  await am.flush();
+  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
+  await opDialog.replayStrictEffects();
+
+  findNode(opDialog, (n) => n.type === "input").props.onChange({ target: { value: "Tên R1 Chuẩn" } });
+  await opDialog.flush();
+  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await opDialog.flush();
+  const eReq1 = findLastRequest((r) => r.url.endsWith("/display-name"));
+  const eKey = eReq1.options.headers["Idempotency-Key"];
+  const eBody = eReq1.options.body;
+
+  for (const badEditPayload of [
+    { ok: true, account: {} },
+    {
+      ok: true,
+      account: {
+        app_user_id: ACCOUNT_B_REF,
+        version: 3,
+        revision_id: "77777777-7777-4777-8777-777777777791",
+        recruiter_id: null,
+        recruiter_version: null,
+        recruiter_revision_id: null,
+      },
+    },
+  ]) {
+    const req = findLastRequest((r) => r.url.endsWith("/display-name"));
+    respond(req, 200, badEditPayload);
+    await opDialog.flush();
+    await am.flush();
+    assert.notEqual(componentNode(am, "AccountOperationDialogs").props.operation, null);
+    assert.equal(notifications.success.length, 1);
+    assert.equal(findNode(opDialog, (n) => n.type === "input").props.disabled, true);
+    assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
+
+    findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+    await opDialog.flush();
+    const retryReq = findLastRequest((r) => r.url.endsWith("/display-name"));
+    assert.notEqual(retryReq, req);
+    assert.equal(retryReq.options.headers["Idempotency-Key"], eKey);
+    assert.equal(retryReq.options.body, eBody);
+  }
+
+  respond(findLastRequest((r) => r.url.endsWith("/display-name")), 200, {
+    ok: true,
+    account: {
+      app_user_id: ACCOUNT_A_REF,
+      version: 3,
+      revision_id: "77777777-7777-4777-8777-777777777792",
+      recruiter_id: null,
+      recruiter_version: null,
+      recruiter_revision_id: null,
+    },
+  });
+  await opDialog.flush();
+  await am.flush();
+  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
+  assert.equal(notifications.success.length, 2);
+
+  // 3) RESET_PASSWORD: exact { ok: true } (no account required) succeeds cleanly
+  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount({ version: 3 })]));
+  await am.flush();
+  findButton(am, "Đặt lại mật khẩu").props.onClick();
+  await am.flush();
+  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
+  await opDialog.replayStrictEffects();
+
+  pwFields()[0].props.onChange("ResetValid#2026");
+  pwFields()[1].props.onChange("ResetValid#2026");
+  await opDialog.flush();
+  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await opDialog.flush();
+  respond(findLastRequest((r) => r.url.endsWith("/reset-password")), 200, { ok: true });
+  await opDialog.flush();
+  await am.flush();
+  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
+  assert.equal(notifications.success.length, 3);
+});
+
+test("Hotfix retry R1 [PersonnelCatalogManager]: create-from-account rejects malformed 200 with retry intent and succeeds on valid PersonnelFromAccountEnvelope", async () => {
+  const pm = mount(PersonnelCatalogManager);
+  await pm.flush();
+
+  respond(
+    findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/catalog/personnel?")),
+    200,
+    {
+      ok: true,
+      list: {
+        authorization_date: AUTH_DATE,
+        include_inactive: false,
+        search: null,
+        page: 1,
+        page_size: 25,
+        total: 0,
+        personnel: [],
+      },
+    },
+  );
+  await pm.flush();
+  const statusReq = findLastRequest((r) => r.url.includes("/api/admin/catalog/personnel/link-status"));
+  if (statusReq && !statusReq.settled) {
+    respond(statusReq, 200, { ok: true, status: { linked_recruiter_ids: [] } });
+    await pm.flush();
+  }
+
+  findButton(pm, "Tạo nhân sự từ tài khoản").props.onClick();
+  await pm.flush();
+
+  respond(
+    findLastRequest((r) => r.url.includes("/api/admin/catalog/personnel/eligible-accounts?")),
+    200,
+    {
+      ok: true,
+      list: {
+        page: 1,
+        page_size: 25,
+        total: 1,
+        has_more: false,
+        accounts: [{ app_user_id: ACCOUNT_A_REF, display_name: "Nguyễn Văn An", login_id: "annv" }],
+      },
+    },
+  );
+  await pm.flush();
+
+  findNode(pm, (n) => n.type === "select" && n.props?.id === "personnel-account").props.onChange({
+    currentTarget: { value: ACCOUNT_A_REF },
+  });
+  await pm.flush();
+  respond(
+    findLastRequest((r) => r.url.endsWith(`/api/admin/access/accounts/${ACCOUNT_A_REF}`)),
+    200,
+    { ok: true, account: makeAccount({ account_ref: ACCOUNT_A_REF, display_name: "Nguyễn Văn An", login_id: "annv", version: 2 }) },
+  );
+  await pm.flush();
+
+  findNode(pm, (n) => n.type === "select" && n.props?.id === "personnel-position").props.onChange({
+    currentTarget: { value: "STAFF" },
+  });
+  await pm.flush();
+  findNode(pm, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await pm.flush();
+
+  const createPersReq1 = findLastRequest((r) => r.url === "/api/admin/catalog/personnel/from-account");
+  const persKey1 = JSON.parse(createPersReq1.options.body).idempotency_key;
+
+  // Malformed 200 ({ ok: true, personnel: {} }) must NOT succeed and must keep pendingIntent for retry
+  respond(createPersReq1, 200, { ok: true, personnel: {} });
+  await pm.flush();
+  assert.equal(notifications.success.length, 0);
+  assert.ok(findButton(pm, "Thử lại thao tác"));
+
+  // Retry sends exact same idempotency_key; valid PersonnelFromAccountEnvelope succeeds
+  findButton(pm, "Thử lại thao tác").props.onClick();
+  await pm.flush();
+  const createPersReq2 = findLastRequest((r) => r.url === "/api/admin/catalog/personnel/from-account");
+  assert.notEqual(createPersReq2, createPersReq1);
+  assert.equal(JSON.parse(createPersReq2.options.body).idempotency_key, persKey1);
+
+  respond(createPersReq2, 200, {
+    ok: true,
+    personnel: {
+      recruiter_id: RECRUITER_A_ID,
+      display_name: "Nguyễn Văn An",
+      personnel_code: "annv",
+      personnel_position: "STAFF",
+      version: 1,
+      link_id: "66666666-6666-4666-8666-666666666601",
+      membership_id: MEMBERSHIP_A_ID,
+      app_user_version: 2,
+      app_user_revision_id: "77777777-7777-4777-8777-777777777701",
+      personnel_revision_id: "77777777-7777-4777-8777-777777777702",
+    },
+  });
+  await pm.flush();
+  assert.equal(notifications.success.length, 1);
 });
 
 test("Hotfix retry [AccountOperationDialogs EDIT]: deterministic 400 rotates key on edit, malformed 200 freezes key, 409 locks until authoritative reload", async () => {
@@ -2222,7 +2514,7 @@ test("Hotfix retry [AccountOperationDialogs RESET_PASSWORD]: preserves key on ne
   assert.equal(textOf(opDialog.tree).includes("Thử gửi lại cùng yêu cầu"), false);
   assert.equal(JSON.stringify(notifications).includes("ResetSecret#2026"), false);
 
-  // Even if RESET_PASSWORD receives an unexpected intent payload, never route into CREATE_ACCOUNT reconcile
+  // Even if RESET_PASSWORD receives an unexpected intent payload, keep pending/lock & never route into CREATE_ACCOUNT reconcile
   findButton(opDialog, "Hủy").props.onClick();
   await opDialog.flush();
   await am.flush();
@@ -2234,29 +2526,23 @@ test("Hotfix retry [AccountOperationDialogs RESET_PASSWORD]: preserves key on ne
   await opDialog.flush();
   findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await opDialog.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reset-password")), 200, {
+  const unexpectedResetReq = findLastRequest((r) => r.url.endsWith("/reset-password"));
+  const unexpectedResetKey = unexpectedResetReq.options.headers["Idempotency-Key"];
+  respond(unexpectedResetReq, 200, {
     ok: true,
     intent: { intent_id: "88888888-8888-4888-8888-888888888889", kind: "RESET_PASSWORD", state: "INDETERMINATE" },
   });
   await opDialog.flush();
   await am.flush();
   assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
-  assert.equal(findNode(opDialog, (n) => n.type === "button" && n.props?.type === "submit").props.disabled, true);
-
-  // Session loss (403) during in-flight reset aborts and wipes workspace cleanly
-  findButton(opDialog, "Hủy").props.onClick();
-  await opDialog.flush();
-  await am.flush();
-
-  findButton(am, "Đặt lại mật khẩu").props.onClick();
-  await am.flush();
-  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
-  pws()[0].props.onChange("SecondSecret#2026");
-  pws()[1].props.onChange("SecondSecret#2026");
-  await opDialog.flush();
+  assert.equal(pws()[0].props.disabled, true);
+  assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
+  // Retrying after malformed 200 keeps exact key, then 403 session loss clears cleanly
   findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await opDialog.flush();
   const resetReq3 = findLastRequest((r) => r.url.endsWith("/reset-password"));
+  assert.notEqual(resetReq3, unexpectedResetReq);
+  assert.equal(resetReq3.options.headers["Idempotency-Key"], unexpectedResetKey);
   respond(resetReq3, 403, { ok: false, code: "ACCOUNT_OPERATION_DENIED" });
   await opDialog.flush();
   await am.flush();
