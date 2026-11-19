@@ -28,10 +28,18 @@ import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 
 import {
+  canManageProjectMasterFromActor,
+  decideAccountAccessPageAccess,
+  decidePersonnelCatalogPageAccess,
+  decideProjectOperationsPageAccess,
+} from "../src/lib/auth/direct-entry-page-access.ts";
+import { resolveActor } from "../src/lib/auth/direct-entry-v2.ts";
+import {
   computeAssignAccountingMemberFingerprint,
   computeCreateDepartmentFingerprint,
 } from "../src/lib/departments/department-contract.ts";
 import { createServiceDepartmentRepository } from "../src/lib/departments/department-repository.ts";
+import { projectAdminNavPredicate } from "../src/lib/navigation/registry-capability.ts";
 import { createServiceOrganizationRepository } from "../src/lib/organization/person-repository.ts";
 import { classifyVendorFinanceRpcError } from "../src/lib/vendor-finance/vendor-finance-repository.ts";
 import { migrationChecksum } from "./lib/migration-validation.mjs";
@@ -529,7 +537,7 @@ async function seedPostCutoverWorld(db) {
 // =============================================================================
 // TEST 1: Migration #226 Hygiene, Atomic Rollback, ACL & Function Metadata
 // =============================================================================
-test("WP8B-1 [1/4]: Migration #226 hygiene, atomic rollback, exact 336 service_role RPCs, strict internal ACL & pg_get_functiondef", async () => {
+test("WP8B-1 [1/5]: Migration #226 hygiene, atomic rollback, exact 336 service_role RPCs, strict internal ACL & pg_get_functiondef", async () => {
   const migrations = await loadMigrations();
   const idx8a = migrations.findIndex((m) => m.name === WP8A_MIGRATION_NAME);
   const idx8b1 = migrations.findIndex((m) => m.name === WP8B1_MIGRATION_NAME);
@@ -550,14 +558,16 @@ test("WP8B-1 [1/4]: Migration #226 hygiene, atomic rollback, exact 336 service_r
 
   const db = await createDbUpTo(migrations, WP8A_MIGRATION_NAME);
   try {
-    const guards = [
+    const internalFns = [
+      "public.direct_entry_authz__internal_resolve_effective_grants(uuid)",
       "public.direct_entry_assert_actor_app_user_admin(uuid,uuid)",
       "public.direct_entry_assert_catalog_operator(uuid,uuid)",
       "public.direct_entry_assert_project_admin(uuid,uuid)",
     ];
+    const guards = internalFns.slice(1);
 
     const beforeDefs = {};
-    for (const sig of guards) {
+    for (const sig of internalFns) {
       beforeDefs[sig] = (
         await db.query("select pg_get_functiondef($1::regprocedure) as src", [sig])
       ).rows[0].src;
@@ -580,7 +590,7 @@ test("WP8B-1 [1/4]: Migration #226 hygiene, atomic rollback, exact 336 service_r
       (err) => err.code === "22012",
     );
     await db.exec("rollback;");
-    for (const sig of guards) {
+    for (const sig of internalFns) {
       const afterRollback = (
         await db.query("select pg_get_functiondef($1::regprocedure) as src", [sig])
       ).rows[0].src;
@@ -601,7 +611,7 @@ test("WP8B-1 [1/4]: Migration #226 hygiene, atomic rollback, exact 336 service_r
     ).rows[0].cnt;
     assert.equal(serviceCountAfter, 336, "WP8B-1 must preserve exact 336 service_role RPCs (0 new public RPCs)");
 
-    for (const sig of guards) {
+    for (const sig of internalFns) {
       const meta = (
         await db.query(
           `select p.prosecdef,
@@ -627,7 +637,9 @@ test("WP8B-1 [1/4]: Migration #226 hygiene, atomic rollback, exact 336 service_r
       assert.equal(meta.anon_exec, false, `${sig} anon EXECUTE must be revoked`);
       assert.equal(meta.auth_exec, false, `${sig} authenticated EXECUTE must be revoked`);
       assert.equal(meta.service_exec, false, `${sig} service_role EXECUTE must be revoked`);
-      assert.match(meta.src, /direct_entry_authz__internal_has_paired_capability/, `${sig} must use WP5 paired helper`);
+      if (guards.includes(sig)) {
+        assert.match(meta.src, /direct_entry_authz__internal_has_paired_capability/, `${sig} must use WP5 paired helper`);
+      }
     }
 
     // Preserve p3-1-w02a source invariants on direct_entry_assert_project_admin
@@ -644,7 +656,7 @@ test("WP8B-1 [1/4]: Migration #226 hygiene, atomic rollback, exact 336 service_r
 // =============================================================================
 // TEST 2: Explicit BEFORE (#225) vs AFTER (#226) Behavioral Diff Proof
 // =============================================================================
-test("WP8B-1 [2/4]: BEFORE (#225) vs AFTER (#226) proof on real business callers (simulated drift/stale-legacy fixtures)", async () => {
+test("WP8B-1 [2/5]: BEFORE (#225) vs AFTER (#226) proof on real business callers (simulated drift/stale-legacy fixtures)", async () => {
   const migrations = await loadMigrations();
   const dbBefore = await createDbUpTo(migrations, WP8A_MIGRATION_NAME);
   const dbAfter = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
@@ -887,7 +899,7 @@ test("WP8B-1 [2/4]: BEFORE (#225) vs AFTER (#226) proof on real business callers
 // =============================================================================
 // TEST 3: Canonical Post-Cutover Business Caller Matrix Across All Domains
 // =============================================================================
-test("WP8B-1 [3/4]: Canonical post-cutover business callers (Account, Org/Person, Project/Catalog, Attendance, Finance, HR_OPERATOR, Project Admin, TL/PM/PA, Revoke, Disabled, Owner)", async () => {
+test("WP8B-1 [3/5]: Canonical post-cutover business callers (Account, Org/Person, Project/Catalog, Attendance, Finance, HR_OPERATOR, Project Admin, TL/PM/PA, Revoke, Disabled, Owner)", async () => {
   const migrations = await loadMigrations();
   const db = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
 
@@ -1410,7 +1422,7 @@ test("WP8B-1 [3/4]: Canonical post-cutover business callers (Account, Org/Person
 // =============================================================================
 // TEST 4: Pre-Cutover (authz_managed = false) Bootstrap/R1 Compat & Live TS Error Parsers
 // =============================================================================
-test("WP8B-1 [4/4]: Pre-cutover (authz_managed=false) R1 compat, zero cross-source pairing & live TS error parsers", async () => {
+test("WP8B-1 [4/5]: Pre-cutover (authz_managed=false) R1 compat, zero cross-source pairing & live TS error parsers", async () => {
   const migrations = await loadMigrations();
   const db = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
 
@@ -1690,5 +1702,294 @@ test("WP8B-1 [4/4]: Pre-cutover (authz_managed=false) R1 compat, zero cross-sour
     assert.equal(orgDisabled.code, "ACTOR_NOT_AVAILABLE");
   } finally {
     await db.close();
+  }
+});
+
+// =============================================================================
+// TEST 5: End-to-End SQL -> direct_entry_resolve_actor_context -> resolveActor -> TS Guards
+//         (T0 R1/P2 Regression: pre-cutover R1, pre-cutover normal, pre-cutover cross-source,
+//          post-cutover canonical, and post-cutover stale-legacy / cross-scope drift)
+// =============================================================================
+test("WP8B-1 [5/5]: End-to-end SQL -> direct_entry_resolve_actor_context -> resolveActor -> TS guards parity (pre-cutover R1, normal & post-cutover stale-legacy block)", async () => {
+  const migrations = await loadMigrations();
+
+  async function resolveViaRealRpc(db, authSubject) {
+    const raw = await serviceRpc(db, "direct_entry_resolve_actor_context", [authSubject]);
+    const at = new Date().toISOString();
+    return resolveActor({
+      session: { provider: "supabase", auth_subject: authSubject, authenticated_at: at },
+      at,
+      repository: { loadByAuthSubject: async () => raw },
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Part A: Pre-cutover (authz_managed = false) — R1 inert valid_to='2021-01-01',
+  //         normal valid_to=null, and cross-source drift in both directions
+  // -------------------------------------------------------------------------
+  const preDb = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
+  try {
+    const PRE_R1_ADMIN = {
+      auth: "18b30000-0000-4000-8000-000000000001",
+      app: "28b30000-0000-4000-8000-000000000001",
+      email: "pre.r1.admin@hrpartner.vn",
+      name: "Pre-Cutover R1 Full Admin",
+    };
+    const PRE_R1_CATALOG = {
+      auth: "18b30000-0000-4000-8000-000000000002",
+      app: "28b30000-0000-4000-8000-000000000002",
+      email: "pre.r1.catalog@hrpartner.vn",
+      name: "Pre-Cutover R1 Catalog Operator",
+    };
+    const PRE_R1_PRJ_ADMIN = {
+      auth: "18b30000-0000-4000-8000-000000000003",
+      app: "28b30000-0000-4000-8000-000000000003",
+      email: "pre.r1.prjadmin@hrpartner.vn",
+      name: "Pre-Cutover R1 Narrow Project Admin",
+    };
+    const PRE_NORMAL_ADMIN = {
+      auth: "18b30000-0000-4000-8000-000000000004",
+      app: "28b30000-0000-4000-8000-000000000004",
+      email: "pre.normal.admin@hrpartner.vn",
+      name: "Pre-Cutover Normal Full Admin",
+    };
+    const PRE_CROSS_A = {
+      auth: "18b30000-0000-4000-8000-000000000005",
+      app: "28b30000-0000-4000-8000-000000000005",
+      email: "pre.cross.a@hrpartner.vn",
+      name: "Pre-Cutover Cross A",
+    };
+    const PRE_CROSS_B = {
+      auth: "18b30000-0000-4000-8000-000000000006",
+      app: "28b30000-0000-4000-8000-000000000006",
+      email: "pre.cross.b@hrpartner.vn",
+      name: "Pre-Cutover Cross B",
+    };
+
+    for (const u of [PRE_R1_ADMIN, PRE_R1_CATALOG, PRE_R1_PRJ_ADMIN, PRE_NORMAL_ADMIN, PRE_CROSS_A, PRE_CROSS_B]) {
+      await seedAccount(preDb, u);
+    }
+    await preDb.query(
+      "insert into public.teams (team_id, code, display_name, active) values ($1::uuid, 'PRE_BR_T1', 'Pre Bridge Team', true)",
+      [TEAM_1],
+    );
+    await preDb.query(
+      "insert into public.direct_entry_projects (project_id, display_name, active) values ($1, 'Pre Bridge Project', true)",
+      [PRJ_1],
+    );
+
+    // 1. Pre-cutover R1 Full Admin (valid_to='2021-01-01', is_current=true)
+    for (const cap of ["entry_admin", "recruiter_master_manage", "team_master_manage"]) {
+      await preDb.query(
+        `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, valid_to, is_current)
+         values ($1::uuid, $2, '2020-01-01', '2021-01-01', true)`,
+        [PRE_R1_ADMIN.app, cap],
+      );
+    }
+    await preDb.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, valid_to, is_current)
+       values ($1::uuid, 'all', '2020-01-01', '2021-01-01', true)`,
+      [PRE_R1_ADMIN.app],
+    );
+
+    // 2. Pre-cutover R1 Catalog Operator (valid_to='2021-01-01', is_current=true)
+    await preDb.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, valid_to, is_current)
+       values ($1::uuid, 'catalog_master_manage', '2020-01-01', '2021-01-01', true)`,
+      [PRE_R1_CATALOG.app],
+    );
+    await preDb.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, valid_to, is_current)
+       values ($1::uuid, 'all', '2020-01-01', '2021-01-01', true)`,
+      [PRE_R1_CATALOG.app],
+    );
+
+    // 3. Pre-cutover R1 Narrow Project Admin (entry_admin only, valid_to='2021-01-01', is_current=true)
+    await preDb.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, valid_to, is_current)
+       values ($1::uuid, 'entry_admin', '2020-01-01', '2021-01-01', true)`,
+      [PRE_R1_PRJ_ADMIN.app],
+    );
+    await preDb.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, valid_to, is_current)
+       values ($1::uuid, 'all', '2020-01-01', '2021-01-01', true)`,
+      [PRE_R1_PRJ_ADMIN.app],
+    );
+
+    // 4. Pre-cutover Normal Full Admin (valid_to=null, is_current=true)
+    for (const cap of ["entry_admin", "recruiter_master_manage", "team_master_manage"]) {
+      await preDb.query(
+        `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+         values ($1::uuid, $2, '2026-01-01', true)`,
+        [PRE_NORMAL_ADMIN.app, cap],
+      );
+    }
+    await preDb.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, is_current)
+       values ($1::uuid, 'all', '2026-01-01', true)`,
+      [PRE_NORMAL_ADMIN.app],
+    );
+
+    // 5. Pre-cutover Cross-Source A: canonical entry_admin@CONTEXT_TEAM + legacy scope='all' (no legacy entry_admin)
+    await preDb.query(
+      `insert into public.authz_direct_capability_grants
+        (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+       values ($1::uuid, 'entry_admin', 'CONTEXT_TEAM', $2::text, 'EXCEPTION_GRANT', 'Pre cross A', $3::uuid)`,
+      [PRE_CROSS_A.app, TEAM_1, PRE_R1_ADMIN.app],
+    );
+    await preDb.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, is_current)
+       values ($1::uuid, 'all', '2026-01-01', true)`,
+      [PRE_CROSS_A.app],
+    );
+
+    // 6. Pre-cutover Cross-Source B: legacy entry_admin (no legacy 'all') + canonical audit_view@ALL
+    await preDb.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'entry_admin', '2026-01-01', true)`,
+      [PRE_CROSS_B.app],
+    );
+    await preDb.query(
+      `insert into public.authz_direct_capability_grants
+        (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+       values ($1::uuid, 'audit_view', 'ALL', null, 'EXCEPTION_GRANT', 'Pre cross B', $2::uuid)`,
+      [PRE_CROSS_B.app, PRE_R1_ADMIN.app],
+    );
+
+    // Verify Pre-cutover R1 Full Admin: SQL + resolver + ALL TS guards ALLOW
+    assert.ok(await serviceRpc(preDb, "direct_entry_lookup_worker_episodes", [PRE_R1_ADMIN.auth, PRE_R1_ADMIN.app, PRJ_1, "Worker", null]));
+    assert.ok(await serviceRpc(preDb, "direct_entry_list_app_users_admin", [PRE_R1_ADMIN.auth, PRE_R1_ADMIN.app]));
+    const r1AdminActor = await resolveViaRealRpc(preDb, PRE_R1_ADMIN.auth);
+    assert.equal(r1AdminActor.ok, true);
+    assert.ok(
+      r1AdminActor.actor.effective_grants.some((g) => g.capability === "entry_admin" && g.scope_kind === "ALL" && g.source_type === "LEGACY_BRIDGE"),
+      "Pre-cutover R1 Full Admin must emit LEGACY_BRIDGE entry_admin @ ALL in effective_grants",
+    );
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: r1AdminActor }), "ALLOW");
+    assert.equal(projectAdminNavPredicate(r1AdminActor.actor), true);
+    assert.equal(canManageProjectMasterFromActor(r1AdminActor), true);
+    assert.equal(decideAccountAccessPageAccess({ actor: r1AdminActor }), "ALLOW");
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: r1AdminActor }), "ALLOW");
+
+    // Verify Pre-cutover R1 Catalog Operator: SQL catalog + TS catalog/empty-list ALLOW; Project page & Account access DENIED
+    assert.ok(
+      await serviceRpc(preDb, "direct_entry_create_vendor", [
+        PRE_R1_CATALOG.auth,
+        PRE_R1_CATALOG.app,
+        0,
+        "pre_r1_cat_vendor",
+        "Pre R1 Catalog Vendor",
+        "2026-01-01",
+        "Pre R1 catalog bridge",
+        `pre-r1-cat-${nextUuid()}`,
+      ]),
+    );
+    await expectServiceRpcError(preDb, "direct_entry_lookup_worker_episodes", [PRE_R1_CATALOG.auth, PRE_R1_CATALOG.app, PRJ_1, "Worker", null], "42501");
+    const r1CatActor = await resolveViaRealRpc(preDb, PRE_R1_CATALOG.auth);
+    assert.equal(r1CatActor.ok, true);
+    assert.equal(canManageProjectMasterFromActor(r1CatActor), true);
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: r1CatActor }), "ALLOW");
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: r1CatActor }), "ACCESS_DENIED");
+    assert.equal(decideAccountAccessPageAccess({ actor: r1CatActor }), "ACCESS_DENIED");
+
+    // Verify Pre-cutover R1 Narrow Project Admin: SQL + Project page + empty-list ALLOW; Account & Catalog DENIED
+    assert.ok(await serviceRpc(preDb, "direct_entry_lookup_worker_episodes", [PRE_R1_PRJ_ADMIN.auth, PRE_R1_PRJ_ADMIN.app, PRJ_1, "Worker", null]));
+    await expectServiceRpcError(preDb, "direct_entry_list_app_users_admin", [PRE_R1_PRJ_ADMIN.auth, PRE_R1_PRJ_ADMIN.app], "42501");
+    const r1PrjActor = await resolveViaRealRpc(preDb, PRE_R1_PRJ_ADMIN.auth);
+    assert.equal(r1PrjActor.ok, true);
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: r1PrjActor }), "ALLOW");
+    assert.equal(projectAdminNavPredicate(r1PrjActor.actor), true);
+    assert.equal(canManageProjectMasterFromActor(r1PrjActor), true);
+    assert.equal(decideAccountAccessPageAccess({ actor: r1PrjActor }), "ACCESS_DENIED");
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: r1PrjActor }), "ACCESS_DENIED");
+
+    // Verify Pre-cutover Normal Full Admin: SQL + TS ALL ALLOW
+    assert.ok(await serviceRpc(preDb, "direct_entry_lookup_worker_episodes", [PRE_NORMAL_ADMIN.auth, PRE_NORMAL_ADMIN.app, PRJ_1, "Worker", null]));
+    const normalPreActor = await resolveViaRealRpc(preDb, PRE_NORMAL_ADMIN.auth);
+    assert.equal(normalPreActor.ok, true);
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: normalPreActor }), "ALLOW");
+    assert.equal(canManageProjectMasterFromActor(normalPreActor), true);
+    assert.equal(decideAccountAccessPageAccess({ actor: normalPreActor }), "ALLOW");
+
+    // Verify Pre-cutover Cross-Source A & B: SQL DENIED + TS DENIED
+    for (const crossUser of [PRE_CROSS_A, PRE_CROSS_B]) {
+      await expectServiceRpcError(preDb, "direct_entry_lookup_worker_episodes", [crossUser.auth, crossUser.app, PRJ_1, "Worker", null], "42501");
+      const crossActor = await resolveViaRealRpc(preDb, crossUser.auth);
+      assert.equal(crossActor.ok, true);
+      assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: crossActor }), "ACCESS_DENIED");
+      assert.equal(projectAdminNavPredicate(crossActor.actor), false);
+      assert.equal(canManageProjectMasterFromActor(crossActor), false);
+      assert.equal(decideAccountAccessPageAccess({ actor: crossActor }), "ACCESS_DENIED");
+    }
+  } finally {
+    await preDb.close();
+  }
+
+  // -------------------------------------------------------------------------
+  // Part B: Post-cutover (authz_managed = true) — Canonical personas ALLOW/DENY
+  //         + Stale legacy & cross-scope drift fixtures (D1/D2/D3) MUST stay DENIED
+  // -------------------------------------------------------------------------
+  const postDb = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
+  try {
+    await seedPostCutoverWorld(postDb);
+
+    // Canonical OWNER (ADMIN)
+    const ownerActor = await resolveViaRealRpc(postDb, OWNER.auth);
+    assert.equal(ownerActor.ok, true);
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: ownerActor }), "ALLOW");
+    assert.equal(canManageProjectMasterFromActor(ownerActor), true);
+    assert.equal(decideAccountAccessPageAccess({ actor: ownerActor }), "ALLOW");
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: ownerActor }), "ALLOW");
+
+    // Canonical HR_OPERATOR: catalog/empty-list true, Project page & Account access DENIED
+    const hrActor = await resolveViaRealRpc(postDb, HR_OP.auth);
+    assert.equal(hrActor.ok, true);
+    assert.equal(canManageProjectMasterFromActor(hrActor), true);
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: hrActor }), "ALLOW");
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: hrActor }), "ACCESS_DENIED");
+    assert.equal(decideAccountAccessPageAccess({ actor: hrActor }), "ACCESS_DENIED");
+
+    // Canonical narrow PROJECT_ADMIN_ONLY (entry_admin @ ALL)
+    const paActor = await resolveViaRealRpc(postDb, PROJECT_ADMIN_ONLY.auth);
+    assert.equal(paActor.ok, true);
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: paActor }), "ALLOW");
+    assert.equal(canManageProjectMasterFromActor(paActor), true);
+    assert.equal(decideAccountAccessPageAccess({ actor: paActor }), "ACCESS_DENIED");
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: paActor }), "ACCESS_DENIED");
+
+    // Drift D1 (authz_managed=true, HR_OPERATOR + stale legacy entry_admin):
+    // MUST remain blocked on Project page & Account access despite stale legacy entry_admin
+    await expectServiceRpcError(postDb, "direct_entry_lookup_worker_episodes", [DRIFT_D1_HR_STALE.auth, DRIFT_D1_HR_STALE.app, PRJ_1, "Worker", null], "42501");
+    const d1Actor = await resolveViaRealRpc(postDb, DRIFT_D1_HR_STALE.auth);
+    assert.equal(d1Actor.ok, true);
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: d1Actor }), "ACCESS_DENIED");
+    assert.equal(projectAdminNavPredicate(d1Actor.actor), false);
+    assert.equal(decideAccountAccessPageAccess({ actor: d1Actor }), "ACCESS_DENIED");
+    assert.equal(canManageProjectMasterFromActor(d1Actor), true, "HR_OPERATOR keeps catalog_master_manage @ ALL");
+
+    // Drift D2 (authz_managed=true, EMPLOYEE_BASE + stale legacy Full Admin triple + stale 'all' scope):
+    // effective_grants MUST be [] and BOTH SQL & TS guards MUST fail closed!
+    await expectServiceRpcError(postDb, "direct_entry_lookup_worker_episodes", [DRIFT_D2_BASE_STALE.auth, DRIFT_D2_BASE_STALE.app, PRJ_1, "Worker", null], "42501");
+    const d2Actor = await resolveViaRealRpc(postDb, DRIFT_D2_BASE_STALE.auth);
+    assert.equal(d2Actor.ok, true);
+    assert.deepEqual(d2Actor.actor.effective_grants, [], "Managed account with only stale legacy rows must resolve empty effective_grants");
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: d2Actor }), "ACCESS_DENIED");
+    assert.equal(projectAdminNavPredicate(d2Actor.actor), false);
+    assert.equal(canManageProjectMasterFromActor(d2Actor), false);
+    assert.equal(decideAccountAccessPageAccess({ actor: d2Actor }), "ACCESS_DENIED");
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: d2Actor }), "ACCESS_DENIED");
+
+    // Drift D3 (authz_managed=true, cross-scope entry_admin@CONTEXT_TEAM + catalog_master_manage@CONTEXT_TEAM + recruiter/team@ALL):
+    // BOTH SQL & TS guards MUST fail closed!
+    await expectServiceRpcError(postDb, "direct_entry_lookup_worker_episodes", [DRIFT_D3_CROSS_SCOPE.auth, DRIFT_D3_CROSS_SCOPE.app, PRJ_1, "Worker", null], "42501");
+    const d3Actor = await resolveViaRealRpc(postDb, DRIFT_D3_CROSS_SCOPE.auth);
+    assert.equal(d3Actor.ok, true);
+    assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: d3Actor }), "ACCESS_DENIED");
+    assert.equal(projectAdminNavPredicate(d3Actor.actor), false);
+    assert.equal(canManageProjectMasterFromActor(d3Actor), false);
+    assert.equal(decideAccountAccessPageAccess({ actor: d3Actor }), "ACCESS_DENIED");
+    assert.equal(decidePersonnelCatalogPageAccess({ actor: d3Actor }), "ACCESS_DENIED");
+  } finally {
+    await postDb.close();
   }
 });
