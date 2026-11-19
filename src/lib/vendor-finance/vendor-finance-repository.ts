@@ -591,7 +591,11 @@ export function classifyVendorFinanceRpcError(
   if (trimmed.includes("actor mapping denied")) {
     return "ACTOR_NOT_AVAILABLE";
   }
-  if (trimmed.includes("admin capability denied")) {
+  if (
+    trimmed.includes("admin capability denied") ||
+    trimmed.includes("AUTHZ_FORBIDDEN") ||
+    trimmed.includes("actor is not a Full Admin")
+  ) {
     return "VENDOR_FINANCE_ADMIN_DENIED";
   }
 
