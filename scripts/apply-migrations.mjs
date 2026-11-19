@@ -40,6 +40,12 @@ async function main() {
         new pg.Client({ connectionString: databaseUrl, ssl: buildSslOptions() }),
     });
     if (result.mismatches.length > 0) {
+      if (result.postconditionFailures?.length > 0) {
+        const details = result.postconditionFailures
+          .map((item) => `${item.migration}: ${item.reason}`)
+          .join("; ");
+        throw new Error(`Migration security postcondition failed: ${details}`);
+      }
       throw new Error(`Migration checksum mismatch: ${result.mismatches.join(", ")}`);
     }
     return;
@@ -84,6 +90,13 @@ async function main() {
         previous,
         appliedMap,
       );
+      if (check.status === "postcondition_failed") {
+        await client.end();
+        throw new Error(
+          `Migration ${name} khớp checksum trong ledger nhưng kiểm tra hậu điều kiện bảo mật thất bại (postcondition failed: ${check.reason}). ` +
+            "Chạy công cụ căn chỉnh ACL môi trường (scripts/align-routine-acl.mjs) trước khi áp dụng migration mới.",
+        );
+      }
       if (check.status === "mismatch") {
         await client.end();
         throw new Error(
@@ -95,6 +108,8 @@ async function main() {
         console.log(
           `SKIP    ${name} (đã áp dụng — tương thích checksum lịch sử trước PR #92 đã xác minh postconditions)`,
         );
+      } else if (check.postconditionsChecked) {
+        console.log(`SKIP    ${name} (đã áp dụng — khớp checksum và đạt postconditions bảo mật)`);
       } else {
         console.log(`SKIP    ${name} (đã áp dụng)`);
       }

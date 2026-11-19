@@ -24,6 +24,7 @@ const listDependencies = {
 const createDependencies = {
   resolveSession: () => getDirectEntryActor(createDirectEntryActorRepository()),
   repository: createAccountOperationRepository(),
+  accountAccess: createAccountAccessRepository(),
   auth: { createAuthAccount, resetAuthPassword, readAuthUserProvenance, findAuthUserByLoginId },
 };
 
