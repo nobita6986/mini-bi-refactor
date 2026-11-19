@@ -167,6 +167,7 @@ export function leaveHttpStatusForError(code: LeaveErrorCode): number {
     case "LEAVE_INVALID_STATE_TRANSITION":
     case "LEAVE_OPENING_PREVIEW_STALE":
     case "LEAVE_REPORT_EXPORT_INCOMPLETE":
+    case "LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN":
       return 409;
     case "LEAVE_INSUFFICIENT_BALANCE":
     case "LEAVE_TYPE_LIMIT_EXCEEDED":

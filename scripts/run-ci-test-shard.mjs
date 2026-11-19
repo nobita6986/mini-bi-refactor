@@ -29,6 +29,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp3-person-account-org-concurrency.test.mjs",
   "scripts/wp5-role-access-foundation-concurrency.test.mjs",
   "scripts/wp5b2-role-access-cutover-concurrency.test.mjs",
+  "scripts/wp7a-leave-explanations-org-authz-concurrency.test.mjs",
   "scripts/hf-nwc-acl-postcondition-repair.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
@@ -114,6 +115,7 @@ const TEST_WEIGHTS = {
   "test:wp5-role-access-foundation": 14.0,
   "test:wp6-effective-access-ui": 3.0,
   "test:wp5b2-role-access-cutover": 14.0,
+  "test:wp7a-leave-explanations-org-authz": 12.0,
   "test:hf-account-create-replay": 6.0,
 };
 

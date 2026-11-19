@@ -896,6 +896,8 @@ export function leaveErrorMessage(code: string | null | undefined): string {
       return "Không tìm thấy tài khoản nhân sự cần cấu hình.";
     case "LEAVE_PROFILE_INVALID":
       return "Thông tin cấu hình hồ sơ nghỉ phép không hợp lệ.";
+    case "LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN":
+      return "Phòng ban và trạng thái tài khoản dùng chung của tài khoản này đang do Quản trị Tổ chức / Nhân sự quản lý. Vui lòng cập nhật tại mục Quản trị Tổ chức.";
     case "LEAVE_PROFILE_WORK_START_DATE_REQUIRED":
       return "Nhân sự Thử việc hoặc Chính thức bắt buộc phải có Ngày bắt đầu làm việc.";
     case "LEAVE_PROFILE_OFFICIAL_DATE_INVALID":
@@ -906,6 +908,8 @@ export function leaveErrorMessage(code: string | null | undefined): string {
       return "Chỉ Admin hoặc Ban Giám đốc mới được cấu hình người duyệt bộ phận Marketing / IT / Kế toán.";
     case "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN":
       return "Ngày bắt đầu hiệu lực của người duyệt bộ phận không được vượt quá ngày nghiệp vụ hiện tại.";
+    case "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN":
+      return "Ngày bắt đầu hiệu lực của người duyệt bộ phận không được chọn ngày quá khứ.";
     case "LEAVE_UNIT_KIND_INVALID":
       return "Đơn vị / bộ phận không hợp lệ.";
     case "LEAVE_APPROVER_USER_NOT_FOUND":
