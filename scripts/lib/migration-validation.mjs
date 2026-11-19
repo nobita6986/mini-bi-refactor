@@ -450,6 +450,11 @@ export const WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_authz_assign_global_role_admin(uuid, uuid, uuid, text, integer, text, uuid, text)",
   "public.direct_entry_authz_revoke_global_role_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
 ]);
+export const WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME =
+  "20261119180000_wp7b_attendance_org_scope_and_leave_nav_probe.sql";
+export const WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES = Object.freeze([
+  "public.leave_management_get_actor_access(uuid, uuid)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -743,6 +748,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     wp2aEffectiveAccessShadowApplied: has(WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME),
     wp3bPersonAccountOrgApplied: has(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME),
     wp5b1RoleEffectiveAccessApplied: has(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
+    wp7bAttendanceOrgScopeApplied: has(WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME),
   };
 }
 
@@ -811,6 +817,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     wp2aEffectiveAccessShadowApplied = false,
     wp3bPersonAccountOrgApplied = false,
     wp5b1RoleEffectiveAccessApplied = false,
+    wp7bAttendanceOrgScopeApplied = false,
   } = flags ?? {};
 
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -947,6 +954,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(wp5b1RoleEffectiveAccessApplied
       ? WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES
+      : []),
+    ...(wp7bAttendanceOrgScopeApplied
+      ? WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES
       : []),
   ];
 }

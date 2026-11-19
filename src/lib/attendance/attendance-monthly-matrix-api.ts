@@ -8,6 +8,7 @@ import {
   adminAuthorityNavPredicate,
   attendanceFullAdminOrBodNavPredicate,
   attendanceReportNavPredicate,
+  hasActiveDepartmentHeadRole,
   type NavActorProjection,
 } from "../navigation/registry-capability.ts";
 import {
@@ -117,6 +118,7 @@ async function resolveVerifiedActor(
       ...(actor.effective_grants !== undefined
         ? { effective_grants: actor.effective_grants }
         : {}),
+      hasAttendanceDepartmentHeadAccess: hasActiveDepartmentHeadRole(actor),
     },
   };
 }

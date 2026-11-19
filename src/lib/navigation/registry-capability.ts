@@ -22,6 +22,7 @@
 
 import {
   normalizeAllowedWorkerOperationsTabs,
+  type AssignedRoleSummary,
   type Capability,
   type PairedEffectiveGrant,
   type WorkerOperationsTabId,
@@ -41,6 +42,7 @@ export type NavActorProjection = {
   hasLeaveManagementAccess?: boolean;
   hasLeaveAdminAccess?: boolean;
   hasSalaryAdvanceAccess?: boolean;
+  hasAttendanceDepartmentHeadAccess?: boolean;
   allowed_worker_tabs?: readonly WorkerOperationsTabId[];
 };
 
@@ -126,26 +128,90 @@ export const recruitmentLocationCatalogNavPredicate: NavCapabilityPredicate = (a
 
 export const attendanceFullAdminOrBodNavPredicate = recruitmentLocationCatalogNavPredicate;
 
+const ATTENDANCE_TEAM_LEADER_REQUIRED_CAPABILITIES: readonly Capability[] = [
+  "team_manager_assign",
+  "report_view",
+  "report_analytics_view",
+];
+
+/**
+ * Pure check for an active contextual `DEPARTMENT_HEAD` assignment on a non-empty department scope.
+ */
+export function hasActiveDepartmentHeadRole(
+  actor: { assigned_roles?: readonly AssignedRoleSummary[] } | null | undefined,
+): boolean {
+  return (actor?.assigned_roles ?? []).some(
+    (role) =>
+      role.role_code === "DEPARTMENT_HEAD" &&
+      role.scope_kind === "CONTEXT_DEPARTMENT" &&
+      typeof role.scope_id === "string" &&
+      role.scope_id.trim().length > 0,
+  );
+}
+
 /**
  * Canonical Team Leader bundle for viewing team-scoped attendance reports:
- * - `team_manager_assign` + `report_view` + `report_analytics_view`
- * - effective `team` scope
+ * - When `effective_grants` is present: ALL 3 paired grants (`team_manager_assign`, `report_view`,
+ *   `report_analytics_view`) on the SAME non-empty `CONTEXT_TEAM` `scope_id`.
+ * - Legacy fallback (test actors without `effective_grants`): `team` scope + all 3 capabilities.
  * Database remains the final authority via `direct_entry_assert_team_leader_current_team`.
  */
-export const attendanceTeamLeaderReportNavPredicate: NavCapabilityPredicate = (actor) =>
-  actor.scopes.some((scope) => scope.kind === "team") &&
-  actor.capabilities.includes("team_manager_assign") &&
-  actor.capabilities.includes("report_view") &&
-  actor.capabilities.includes("report_analytics_view");
+export const attendanceTeamLeaderReportNavPredicate: NavCapabilityPredicate = (actor) => {
+  if (Array.isArray(actor.effective_grants)) {
+    const capabilitiesByTeamScope = new Map<string, Set<Capability>>();
+    for (const grant of actor.effective_grants) {
+      if (
+        grant.scope_kind !== "CONTEXT_TEAM" ||
+        typeof grant.scope_id !== "string" ||
+        grant.scope_id.trim().length === 0
+      ) {
+        continue;
+      }
+      if (!ATTENDANCE_TEAM_LEADER_REQUIRED_CAPABILITIES.includes(grant.capability)) {
+        continue;
+      }
+      const scopeId = grant.scope_id.trim();
+      let caps = capabilitiesByTeamScope.get(scopeId);
+      if (!caps) {
+        caps = new Set<Capability>();
+        capabilitiesByTeamScope.set(scopeId, caps);
+      }
+      caps.add(grant.capability);
+      if (caps.size === ATTENDANCE_TEAM_LEADER_REQUIRED_CAPABILITIES.length) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return (
+    actor.scopes.some((scope) => scope.kind === "team") &&
+    actor.capabilities.includes("team_manager_assign") &&
+    actor.capabilities.includes("report_view") &&
+    actor.capabilities.includes("report_analytics_view")
+  );
+};
+
+/**
+ * Department Head predicate for viewing department-scoped attendance reports:
+ * accepts either the minimal server-projected boolean (`hasAttendanceDepartmentHeadAccess`)
+ * or a full server actor carrying an active `DEPARTMENT_HEAD @ CONTEXT_DEPARTMENT` assignment.
+ */
+export const attendanceDepartmentHeadReportNavPredicate = (
+  actor: NavActorProjection & { assigned_roles?: readonly AssignedRoleSummary[] },
+): boolean =>
+  actor.hasAttendanceDepartmentHeadAccess === true ||
+  hasActiveDepartmentHeadRole(actor);
 
 /**
  * Attendance report viewer predicate (`/admin/attendance`):
  * - Full Admin or BoD (`recruitmentLocationCatalogNavPredicate`), OR
- * - Canonical Team Leader bundle (`attendanceTeamLeaderReportNavPredicate`).
+ * - Canonical Team Leader bundle (`attendanceTeamLeaderReportNavPredicate`), OR
+ * - Active Department Head (`attendanceDepartmentHeadReportNavPredicate`).
  */
 export const attendanceReportNavPredicate: NavCapabilityPredicate = (actor) =>
   recruitmentLocationCatalogNavPredicate(actor) ||
-  attendanceTeamLeaderReportNavPredicate(actor);
+  attendanceTeamLeaderReportNavPredicate(actor) ||
+  attendanceDepartmentHeadReportNavPredicate(actor);
 
 /** Top-level Admin panel shell admits catalog operators, Full Admin, Attendance Report readers (BoD or Team Leader), or Worker Edit History readers. */
 export const adminPanelNavPredicate: NavCapabilityPredicate = (actor) =>

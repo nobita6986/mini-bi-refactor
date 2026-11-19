@@ -44,6 +44,7 @@ import { createSubmissionRepository } from "@/lib/work-reports/submission-reposi
 import type { ActorResolution } from "@/lib/auth/direct-entry-v2";
 import {
   changeRequestsNavPredicate,
+  hasActiveDepartmentHeadRole,
   leaveManagementNavPredicate,
   type NavActorProjection,
   salaryAdvanceNavPredicate,
@@ -153,27 +154,15 @@ export const resolveLeaveManagementAccessForRequest = cache(
       return null;
     }
     try {
-      const summary = await createLeaveRepository().getMySummary({
+      const access = await createLeaveRepository().getActorAccess({
         auth_subject: actor.actor.auth_subject,
         app_user_id: actor.actor.app_user_id,
-        leave_year: null,
       });
-      if (summary.ok) {
-        const authority = summary.data.authority;
-        const canManageConfig =
-          authority !== null &&
-          typeof authority === "object" &&
-          "can_manage_config" in authority &&
-          authority.can_manage_config === true;
-        const canViewMonthlyReport =
-          authority !== null &&
-          typeof authority === "object" &&
-          "can_view_monthly_report" in authority &&
-          authority.can_view_monthly_report === true;
+      if (access.ok) {
         return {
-          canAccess: true,
-          canManageConfig,
-          canViewMonthlyReport,
+          canAccess: access.data.can_access,
+          canManageConfig: access.data.can_manage_config,
+          canViewMonthlyReport: access.data.can_view_monthly_report,
         };
       }
     } catch {
@@ -236,6 +225,7 @@ export const resolveNavActorForAppShell = cache(
       ...(actor.actor.allowed_worker_tabs !== undefined
         ? { allowed_worker_tabs: actor.actor.allowed_worker_tabs }
         : {}),
+      hasAttendanceDepartmentHeadAccess: hasActiveDepartmentHeadRole(actor.actor),
     };
     if (process.env.WORK_REPORTS_API_ENABLED === "true" && !workReportsNavPredicate(projection)) {
       const obligations = await createSubmissionRepository().listMine({

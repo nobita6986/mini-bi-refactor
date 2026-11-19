@@ -808,3 +808,192 @@ test("Gap2 (asymmetric): filterEntriesForActor voi 1 entry co visibility {deskto
     "registry hien tai co desktop === mobile, nhung code phai doc viewport RIENG",
   );
 });
+
+test("WP7B D-WP7B-01: DEPARTMENT_HEAD sees /admin/attendance only (denied catalog/access), dual-role HR_OPERATOR + TEAM_LEADER cannot escalate to BoD/Admin, and legacy mock without assigned_roles stays denied", () => {
+  const {
+    adminPanelNavPredicate,
+    attendanceDepartmentHeadReportNavPredicate,
+    attendanceFullAdminOrBodNavPredicate,
+    attendanceReportNavPredicate,
+    attendanceTeamLeaderReportNavPredicate,
+    hasActiveDepartmentHeadRole,
+    recruitmentLocationCatalogNavPredicate,
+    workerEditHistoryNavPredicate,
+  } = cap;
+
+  const DEPT_ID = "77000000-0000-4000-8000-000000000001";
+  const TEAM_1 = "77000000-0000-4000-8000-000000000011";
+  const TEAM_2 = "77000000-0000-4000-8000-000000000012";
+
+  // 1. Pure helper hasActiveDepartmentHeadRole
+  assert.equal(
+    hasActiveDepartmentHeadRole({
+      assigned_roles: [
+        {
+          role_code: "DEPARTMENT_HEAD",
+          display_name: "Trưởng phòng",
+          assignment_mode: "CONTEXTUAL",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          assignment_id: "77000000-0000-4000-8000-000000000099",
+          is_protected: false,
+          can_revoke: true,
+          cannot_revoke_reason: null,
+        },
+      ],
+    }),
+    true,
+  );
+  assert.equal(hasActiveDepartmentHeadRole({ assigned_roles: [] }), false);
+  assert.equal(hasActiveDepartmentHeadRole(null), false);
+  assert.equal(
+    hasActiveDepartmentHeadRole({
+      assigned_roles: [
+        {
+          role_code: "DEPARTMENT_HEAD",
+          display_name: "Trưởng phòng",
+          assignment_mode: "CONTEXTUAL",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: "   ",
+          assignment_id: null,
+          is_protected: false,
+          can_revoke: true,
+          cannot_revoke_reason: null,
+        },
+      ],
+    }),
+    false,
+    "blank scope_id must fail closed",
+  );
+  assert.equal(
+    hasActiveDepartmentHeadRole({
+      assigned_roles: [
+        {
+          role_code: "DEPARTMENT_HEAD",
+          display_name: "Trưởng phòng",
+          assignment_mode: "CONTEXTUAL",
+          scope_kind: "CONTEXT_TEAM",
+          scope_id: TEAM_1,
+          assignment_id: null,
+          is_protected: false,
+          can_revoke: true,
+          cannot_revoke_reason: null,
+        },
+      ],
+    }),
+    false,
+    "non-CONTEXT_DEPARTMENT scope_kind must fail closed",
+  );
+
+  // 2. DEPARTMENT_HEAD via minimal server flag OR full actor assigned_roles sees /admin/attendance only
+  const deptHeadProjected = {
+    capabilities: ["report_assign", "report_review", "report_analytics_view", "report_view"],
+    scopes: [{ kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      { capability: "report_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: DEPT_ID, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: DEPT_ID, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+    hasAttendanceDepartmentHeadAccess: true,
+    hasLeaveManagementAccess: true,
+  };
+  const deptHeadFullActor = {
+    capabilities: ["report_assign", "report_review", "report_analytics_view", "report_view"],
+    scopes: [{ kind: "own", reference: "u-dept" }],
+    effective_grants: [
+      { capability: "report_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: DEPT_ID, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: DEPT_ID, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+    assigned_roles: [
+      {
+        role_code: "DEPARTMENT_HEAD",
+        display_name: "Trưởng phòng",
+        assignment_mode: "CONTEXTUAL",
+        scope_kind: "CONTEXT_DEPARTMENT",
+        scope_id: DEPT_ID,
+        assignment_id: "77000000-0000-4000-8000-000000000099",
+        is_protected: false,
+        can_revoke: true,
+        cannot_revoke_reason: null,
+      },
+    ],
+    hasLeaveManagementAccess: true,
+  };
+
+  for (const dhActor of [deptHeadProjected, deptHeadFullActor]) {
+    assert.equal(attendanceDepartmentHeadReportNavPredicate(dhActor), true);
+    assert.equal(attendanceReportNavPredicate(dhActor), true);
+    assert.equal(adminPanelNavPredicate(dhActor), true);
+    assert.equal(resolveNavCapabilityPredicate("attendance_report")(dhActor), true);
+    // Must NEVER gain /admin/catalog/*, /admin/access/*, /admin/organization/*, or Full Admin/BoD attendance admin
+    assert.equal(adminAreaNavPredicate(dhActor), false);
+    assert.equal(adminAuthorityNavPredicate(dhActor), false);
+    assert.equal(adminSecurityNavPredicate(dhActor), false);
+    assert.equal(catalogOperatorNavPredicate(dhActor), false);
+    assert.equal(recruitmentLocationCatalogNavPredicate(dhActor), false);
+    assert.equal(attendanceFullAdminOrBodNavPredicate(dhActor), false);
+    assert.equal(workerEditHistoryNavPredicate(dhActor), false);
+    assert.equal(vendorFinanceNavPredicate(dhActor), false);
+
+    const desktopMenu = filterEntriesForActor({
+      viewport: "desktop",
+      directEntryEnabled: true,
+      actor: dhActor,
+      decide: decideFor(dhActor, "desktop"),
+    });
+    assert.equal(desktopMenu.some((e) => e.id === "attendance-report"), true);
+    assert.equal(desktopMenu.some((e) => e.id === "admin"), false);
+  }
+
+  // 3. Dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM cannot escalate into Full Admin/BoD
+  const dualRoleHrAndTl = {
+    capabilities: [
+      "recruiter_master_manage",
+      "team_master_manage",
+      "catalog_master_manage",
+      "team_manager_assign",
+      "report_view",
+      "report_analytics_view",
+    ],
+    scopes: [
+      { kind: "all", reference: "all" },
+      { kind: "team", reference: TEAM_1 },
+    ],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  };
+  assert.equal(attendanceFullAdminOrBodNavPredicate(dualRoleHrAndTl), false);
+  assert.equal(recruitmentLocationCatalogNavPredicate(dualRoleHrAndTl), false);
+  assert.equal(adminAuthorityNavPredicate(dualRoleHrAndTl), false);
+  assert.equal(attendanceTeamLeaderReportNavPredicate(dualRoleHrAndTl), true);
+  assert.equal(attendanceReportNavPredicate(dualRoleHrAndTl), true);
+
+  // 4. Cross-team split effective_grants must fail closed on attendanceTeamLeaderReportNavPredicate
+  const crossTeamSplit = {
+    capabilities: ["team_manager_assign", "report_view", "report_analytics_view"],
+    scopes: [
+      { kind: "team", reference: TEAM_1 },
+      { kind: "team", reference: TEAM_2 },
+    ],
+    effective_grants: [
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_2, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_2, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  };
+  assert.equal(attendanceTeamLeaderReportNavPredicate(crossTeamSplit), false);
+  assert.equal(attendanceReportNavPredicate(crossTeamSplit), false);
+
+  // 5. Legacy mock without assigned_roles and without hasAttendanceDepartmentHeadAccess stays denied
+  const legacyDeptHeadMock = {
+    capabilities: ["report_assign", "report_review", "report_analytics_view", "report_view"],
+    scopes: [{ kind: "team", reference: TEAM_1 }],
+  };
+  assert.equal(attendanceDepartmentHeadReportNavPredicate(legacyDeptHeadMock), false);
+  assert.equal(attendanceReportNavPredicate(legacyDeptHeadMock), false);
+});

@@ -18,6 +18,46 @@ export type LeaveActorRef = {
   app_user_id: string;
 };
 
+export type LeaveActorAccessProjection = {
+  can_access: boolean;
+  is_shared_non_employee: boolean;
+  can_submit_request: boolean;
+  can_approve_requests: boolean;
+  can_manage_config: boolean;
+  can_view_monthly_report: boolean;
+};
+
+const LEAVE_ACTOR_ACCESS_KEYS = [
+  "can_access",
+  "is_shared_non_employee",
+  "can_submit_request",
+  "can_approve_requests",
+  "can_manage_config",
+  "can_view_monthly_report",
+] as const;
+
+function projectLeaveActorAccess(raw: unknown): LeaveActorAccessProjection | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== LEAVE_ACTOR_ACCESS_KEYS.length ||
+    !LEAVE_ACTOR_ACCESS_KEYS.every((key) => typeof record[key] === "boolean")
+  ) {
+    return null;
+  }
+  return {
+    can_access: record.can_access as boolean,
+    is_shared_non_employee: record.is_shared_non_employee as boolean,
+    can_submit_request: record.can_submit_request as boolean,
+    can_approve_requests: record.can_approve_requests as boolean,
+    can_manage_config: record.can_manage_config as boolean,
+    can_view_monthly_report: record.can_view_monthly_report as boolean,
+  };
+}
+
 export type LeaveRepoResult<T = Record<string, unknown>> =
   | { ok: true; data: T }
   | { ok: false; code: LeaveErrorCode };
@@ -129,6 +169,10 @@ function defaultLeaveRpcCaller(): LeaveRpcCaller {
 }
 
 export type LeaveRepository = {
+  getActorAccess(
+    input: LeaveActorRef,
+  ): Promise<LeaveRepoResult<LeaveActorAccessProjection>>;
+
   getMySummary(
     input: LeaveActorRef & { leave_year: number | null },
   ): Promise<LeaveRepoResult>;
@@ -207,6 +251,21 @@ export function createLeaveRepository(
   }
 
   return {
+    async getActorAccess(input) {
+      const outcome = await invoke("leave_management_get_actor_access", {
+        p_actor_auth_subject: input.auth_subject,
+        p_actor_app_user_id: input.app_user_id,
+      });
+      if (!outcome.ok) {
+        return outcome;
+      }
+      const projected = projectLeaveActorAccess(outcome.data);
+      if (!projected) {
+        return { ok: false, code: "LEAVE_UNAVAILABLE" };
+      }
+      return { ok: true, data: projected };
+    },
+
     getMySummary(input) {
       return invoke("leave_management_get_my_summary", {
         p_actor_auth_subject: input.auth_subject,

@@ -1424,3 +1424,171 @@ test("Contract date, coordinate, and distance formatting helpers respect Asia/Ho
     },
   );
 });
+
+test("WP7B D-WP7B-01: DEPARTMENT_HEAD allowed on report & photo (denied 403 on HQ config & catalog/access); dual-role HR_OPERATOR + TEAM_LEADER denied HQ config", async () => {
+  const DEPT_ID = "69000000-0000-4000-8000-0000000000f1";
+  const deptHeadSession = () =>
+    makeSessionOk(["report_view", "report_analytics_view"], OWN_SCOPE, {
+      effective_grants: [
+        {
+          capability: "report_view",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          source_type: "ROLE_BUNDLE",
+          source_id: APP_USER_ID,
+        },
+        {
+          capability: "report_analytics_view",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          source_type: "ROLE_BUNDLE",
+          source_id: APP_USER_ID,
+        },
+      ],
+      assigned_roles: [
+        {
+          role_code: "DEPARTMENT_HEAD",
+          display_name: "Trưởng phòng",
+          assignment_mode: "CONTEXTUAL",
+          scope_kind: "CONTEXT_DEPARTMENT",
+          scope_id: DEPT_ID,
+          assignment_id: "69000000-0000-4000-8000-0000000000f2",
+          is_protected: false,
+          can_revoke: true,
+          cannot_revoke_reason: null,
+        },
+      ],
+    });
+
+  // Page/nav gate checks for DEPARTMENT_HEAD
+  const dhResolved = deptHeadSession().actor;
+  assert.equal(attendanceReportNavPredicate(dhResolved.actor), true);
+  assert.equal(adminPanelNavPredicate(dhResolved.actor), true);
+  assert.equal(decideAttendanceReportPageAccess({ actor: dhResolved }), "ALLOW");
+  assert.equal(decideAdminAreaAccess({ actor: dhResolved }), "ALLOW");
+  assert.equal(decidePersonnelCatalogPageAccess({ actor: dhResolved }), "ACCESS_DENIED");
+  assert.equal(decideAccountAccessPageAccess({ actor: dhResolved }), "ACCESS_DENIED");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: dhResolved }), "ACCESS_DENIED");
+  assert.deepEqual(visibleAdminSections(dhResolved.actor), [
+    { id: "attendance", label: "Báo cáo chấm công", href: "/admin/attendance" },
+  ]);
+
+  // 1. DEPARTMENT_HEAD allowed on GET /api/admin/attendance/report
+  const rpcCalls = [];
+  const reportRepo = createServiceAttendanceAdminReportRepository(async (name, args) => {
+    rpcCalls.push({ name, args });
+    return {
+      data: buildValidReportRpcPayload({
+        viewer: { can_configure_hq: false },
+        current_hq: null,
+      }),
+      error: null,
+    };
+  });
+  const reportRes = await getAttendanceAdminReport(
+    new Request("https://bi.example.com/api/admin/attendance/report?from_date=2026-10-17&to_date=2026-10-23"),
+    { resolveSession: async () => deptHeadSession(), repository: reportRepo },
+  );
+  assert.equal(reportRes.status, 200);
+  const reportBody = await reportRes.json();
+  assert.equal(reportBody.ok, true);
+  assert.equal(reportBody.report.viewer.can_configure_hq, false);
+  assert.equal(reportBody.report.current_hq, null);
+  assert.equal(rpcCalls.length, 1);
+  assert.equal(rpcCalls[0].name, "attendance_admin_report");
+
+  // 2. DEPARTMENT_HEAD allowed on GET /api/admin/attendance/checkins/:id/photo (and propagates DB 403 on out-of-department check-in)
+  const storageKey = `preview/attendance-checkins/${APP_USER_ID}/${IDEMPOTENCY_KEY}/${CHECKIN_ID}.jpg`;
+  const photoBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const photoStorage = {
+    available: () => true,
+    async readCheckInPhoto() {
+      return photoBytes;
+    },
+  };
+  const photoRes = await getAttendanceCheckInPhoto(
+    new Request(`https://bi.example.com/api/admin/attendance/checkins/${CHECKIN_ID}/photo`),
+    CHECKIN_ID,
+    {
+      resolveSession: async () => deptHeadSession(),
+      repository: createServiceAttendanceAdminReportRepository(async () => ({
+        data: { found: true, photo_storage_key: storageKey },
+        error: null,
+      })),
+      storage: photoStorage,
+    },
+  );
+  assert.equal(photoRes.status, 200);
+  assert.deepEqual(new Uint8Array(await photoRes.arrayBuffer()), photoBytes);
+
+  const photoCrossDeptDenied = await getAttendanceCheckInPhoto(
+    new Request(`https://bi.example.com/api/admin/attendance/checkins/${CHECKIN_ID}/photo`),
+    CHECKIN_ID,
+    {
+      resolveSession: async () => deptHeadSession(),
+      repository: createServiceAttendanceAdminReportRepository(async () => ({
+        data: null,
+        error: { code: "42501", message: "ATTENDANCE_REPORT_ACCESS_DENIED" },
+      })),
+      storage: photoStorage,
+    },
+  );
+  assert.equal(photoCrossDeptDenied.status, 403);
+  assert.deepEqual(await photoCrossDeptDenied.json(), {
+    ok: false,
+    code: "ATTENDANCE_REPORT_ACCESS_DENIED",
+  });
+
+  // 3. DEPARTMENT_HEAD denied 403 on PUT /api/admin/attendance/hq-location before RPC
+  let hqRpcCalled = false;
+  const forbiddenHqRepo = createServiceAttendanceAdminReportRepository(async () => {
+    hqRpcCalled = true;
+    throw new Error("HQ RPC must not be called");
+  });
+  const dhHqRes = await putAttendanceHqLocation(
+    makePutRequest({
+      latitude: 21.028511,
+      longitude: 105.804817,
+      expected_version: 1,
+      idempotency_key: IDEMPOTENCY_KEY,
+    }),
+    { resolveSession: async () => deptHeadSession(), repository: forbiddenHqRepo },
+  );
+  assert.equal(dhHqRes.status, 403);
+  assert.deepEqual(await dhHqRes.json(), { ok: false, code: "ATTENDANCE_HQ_MANAGE_DENIED" });
+  assert.equal(hqRpcCalled, false);
+
+  // 4. Dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM denied 403 on PUT /api/admin/attendance/hq-location before RPC
+  const dualRoleSession = () =>
+    makeSessionOk(
+      [
+        "recruiter_master_manage",
+        "team_master_manage",
+        "catalog_master_manage",
+        ...TEAM_LEADER_CAPS,
+      ],
+      [...ALL_SCOPE, ...TEAM_SCOPE],
+      {
+        effective_grants: [
+          { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: APP_USER_ID },
+          { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: APP_USER_ID },
+          { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: APP_USER_ID },
+          { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: APP_USER_ID },
+          { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: APP_USER_ID },
+          { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: APP_USER_ID },
+        ],
+      },
+    );
+  const dualHqRes = await putAttendanceHqLocation(
+    makePutRequest({
+      latitude: 21.028511,
+      longitude: 105.804817,
+      expected_version: 1,
+      idempotency_key: IDEMPOTENCY_KEY,
+    }),
+    { resolveSession: async () => dualRoleSession(), repository: forbiddenHqRepo },
+  );
+  assert.equal(dualHqRes.status, 403);
+  assert.deepEqual(await dualHqRes.json(), { ok: false, code: "ATTENDANCE_HQ_MANAGE_DENIED" });
+  assert.equal(hqRpcCalled, false);
+});

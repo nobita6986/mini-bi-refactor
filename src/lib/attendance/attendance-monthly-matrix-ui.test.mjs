@@ -22,6 +22,7 @@ import {
   MATRIX_EXPLANATION_PENDING_LABEL,
   MATRIX_EXPLANATION_REJECTED_LABEL,
   MATRIX_LEGEND_ITEMS,
+  MATRIX_OUT_OF_SCOPE_LABEL,
   MIN_TABLE_HORIZONTAL_STEP_PX,
   MIN_TABLE_VERTICAL_STEP_PX,
   TABLE_HORIZONTAL_SCROLL_STEP_SCALE,
@@ -52,6 +53,7 @@ import {
   formatMatrixDistanceStatusLabel,
   formatMatrixWeekdayLabel,
   getAllowedAttendanceAdminWorkspaceTabs,
+  getCurrentVnBusinessDate,
   getVietnamCurrentYearMonth,
   mapAttendanceExplanationMutationError,
   mapBranchAdminMutationError,
@@ -2208,4 +2210,268 @@ test("Compact /admin/attendance header & shared AttendanceVerificationBadge icon
     /<AttendanceVerificationBadge indicator=\{presentation\.verification\} \/>/,
   );
   assert.equal(matrixDayCellBlock.includes("{presentation.verificationLabel}"), false);
+});
+
+test("WP7B D-WP7B-01: resolveAttendanceAdminWorkspaceMode enforces paired @ ALL so DEPARTMENT_HEAD and dual-role HR_OPERATOR + TEAM_LEADER get read-only team-leader mode", () => {
+  const DEPT_ID = "77000000-0000-4000-8000-000000000001";
+  const TEAM_ID = "77000000-0000-4000-8000-000000000002";
+
+  // 1. DEPARTMENT_HEAD -> "team-leader" (tabs ["checkins", "monthly-matrix"] only)
+  const deptHeadMode = resolveAttendanceAdminWorkspaceMode({
+    capabilities: ["report_view", "report_analytics_view"],
+    scopes: [{ kind: "own" }],
+    effective_grants: [
+      { capability: "report_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: DEPT_ID, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: DEPT_ID, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  });
+  assert.equal(deptHeadMode, "team-leader");
+  assert.deepEqual(getAllowedAttendanceAdminWorkspaceTabs(deptHeadMode), ["checkins", "monthly-matrix"]);
+
+  // 2. Dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM -> strictly "team-leader", never "full"
+  const dualRoleMode = resolveAttendanceAdminWorkspaceMode({
+    capabilities: [
+      "recruiter_master_manage",
+      "team_master_manage",
+      "catalog_master_manage",
+      "team_manager_assign",
+      "report_view",
+      "report_analytics_view",
+    ],
+    scopes: [{ kind: "all" }, { kind: "team" }],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_ID, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  });
+  assert.equal(dualRoleMode, "team-leader");
+
+  // 3. Paired Full Admin & Paired BoD @ ALL -> "full"
+  assert.equal(
+    resolveAttendanceAdminWorkspaceMode({
+      capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+      scopes: [{ kind: "all" }],
+      effective_grants: [
+        { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      ],
+    }),
+    "full",
+  );
+  assert.equal(
+    resolveAttendanceAdminWorkspaceMode({
+      capabilities: ["report_view", "report_analytics_view"],
+      scopes: [{ kind: "all" }],
+      effective_grants: [
+        { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      ],
+    }),
+    "full",
+  );
+});
+
+test("WP7B D-WP7B-02: out-of-scope past UPCOMING cell presentation vs true future UPCOMING vs past EXPLAINED_APPROVED across UI model, MatrixDayCell, and XLSX export", async () => {
+  assert.equal(MATRIX_OUT_OF_SCOPE_LABEL, "Ngoài phạm vi / Không áp dụng");
+  assert.equal(getCurrentVnBusinessDate(new Date("2026-10-22T16:59:59.000Z")), "2026-10-22");
+  assert.equal(getCurrentVnBusinessDate(new Date("2026-10-22T17:00:00.000Z")), "2026-10-23");
+
+  const upcomingSlots = evaluateAttendanceDaySlots({
+    policy: DEFAULT_ATTENDANCE_SLOT_POLICY,
+    checkins: [],
+    approved_leaves: [],
+  }).slots.map((slot) => ({ ...slot, slot_status: "UPCOMING" }));
+
+  const makeDayCell = (overrides) => ({
+    business_date: "2026-10-10",
+    day_of_month: 10,
+    policy_version_used: 1,
+    has_checkin: false,
+    checkin_count: 0,
+    first_checkin_id: null,
+    last_checkin_id: null,
+    first_captured_at: null,
+    first_captured_at_local: null,
+    first_time_local: null,
+    last_captured_at: null,
+    last_captured_at_local: null,
+    last_time_local: null,
+    verified_checkin_count: 0,
+    unverified_checkin_count: 0,
+    distance_target_kind: null,
+    branch_id_used: null,
+    branch_code_used: null,
+    branch_name_used: null,
+    branch_version_used: null,
+    hq_version_used: null,
+    distance_status: null,
+    distance_meters: null,
+    min_distance_meters: null,
+    max_distance_meters: null,
+    has_approved_leave: false,
+    approved_leave_units: 0,
+    approved_leaves: [],
+    day_status: "UPCOMING",
+    missing_slot_count: 0,
+    late_or_early_checkin_count: 0,
+    slots: upcomingSlots,
+    ...overrides,
+  });
+
+  const pastOutOfScopeCell = makeDayCell({ business_date: "2026-10-10", day_of_month: 10 });
+  const todayUpcomingCell = makeDayCell({ business_date: "2026-10-15", day_of_month: 15 });
+  const futureUpcomingCell = makeDayCell({ business_date: "2026-10-20", day_of_month: 20 });
+
+  const explainedApprovedEval = evaluateAttendanceDaySlots({
+    policy: DEFAULT_ATTENDANCE_SLOT_POLICY,
+    checkins: [],
+    approved_leaves: [],
+    explanations: [
+      {
+        explanation_id: "88000000-0000-4000-8000-000000000001",
+        slot_code: "SLOT_1",
+        status: "APPROVED",
+        original_slot_status: "MISSING",
+        reason: "Công tác khách hàng",
+        decision_note: "Đã duyệt",
+        submitted_at: "2026-10-11T02:00:00Z",
+        decided_at: "2026-10-11T03:00:00Z",
+      },
+    ],
+  });
+  const pastExplainedApprovedCell = makeDayCell({
+    business_date: "2026-10-11",
+    day_of_month: 11,
+    day_status: "NO_CHECKIN",
+    missing_slot_count: explainedApprovedEval.missing_slot_count,
+    slots: explainedApprovedEval.slots,
+  });
+
+  // 1. Omitted options preserves legacy behavior 100%
+  const legacyPastUpcoming = describeMatrixDayCell(pastOutOfScopeCell);
+  assert.equal(legacyPastUpcoming.isOutOfScopeOrExempt, false);
+  assert.equal(legacyPastUpcoming.statusLabel, "Chưa đến giờ chấm");
+
+  // 2. Past UPCOMING cell with todayBusinessDate="2026-10-15" -> out-of-scope presentation
+  const outOfScopePres = describeMatrixDayCell(pastOutOfScopeCell, { todayBusinessDate: "2026-10-15" });
+  assert.equal(outOfScopePres.isOutOfScopeOrExempt, true);
+  assert.equal(outOfScopePres.statusLabel, MATRIX_OUT_OF_SCOPE_LABEL);
+  assert.equal(outOfScopePres.tone, "sky");
+  assert.equal(outOfScopePres.isRedHighlight, false);
+  assert.ok(outOfScopePres.slots.length === 5);
+  assert.ok(outOfScopePres.slots.every((s) => s.statusLabel === "—"));
+  assert.ok(outOfScopePres.slots.every((s) => s.summaryText === MATRIX_OUT_OF_SCOPE_LABEL));
+  assert.ok(outOfScopePres.slots.every((s) => s.isMissingHighlight === false));
+  assert.equal(
+    formatMatrixDayCellText(pastOutOfScopeCell, { todayBusinessDate: "2026-10-15" }),
+    "— (Ngoài phạm vi)",
+  );
+
+  // 3. Today and true future UPCOMING cells remain "Chưa đến giờ chấm"
+  for (const nonPastCell of [todayUpcomingCell, futureUpcomingCell]) {
+    const pres = describeMatrixDayCell(nonPastCell, { todayBusinessDate: "2026-10-15" });
+    assert.equal(pres.isOutOfScopeOrExempt, false);
+    assert.equal(pres.statusLabel, "Chưa đến giờ chấm");
+    assert.ok(pres.slots.every((s) => s.statusLabel === "Chưa đến giờ chấm"));
+    assert.match(
+      formatMatrixDayCellText(nonPastCell, { todayBusinessDate: "2026-10-15" }),
+      /Chưa đến giờ chấm/,
+    );
+  }
+
+  // 4. Past EXPLAINED_APPROVED cell is NEVER classified as out-of-scope
+  const explainedPres = describeMatrixDayCell(pastExplainedApprovedCell, {
+    todayBusinessDate: "2026-10-15",
+  });
+  assert.equal(explainedPres.isOutOfScopeOrExempt, false);
+  assert.equal(explainedPres.slots[0].slotStatus, "EXPLAINED_APPROVED");
+  assert.equal(explainedPres.slots[0].statusLabel, MATRIX_EXPLAINED_APPROVED_LABEL);
+  assert.match(
+    formatMatrixDayCellText(pastExplainedApprovedCell, { todayBusinessDate: "2026-10-15" }),
+    /Giải trình được duyệt/,
+  );
+
+  // 5. XLSX workbook renders slate fill + "— (Ngoài phạm vi)" on Sheet 1 and statusLabel + "—" slots on Sheet 2
+  const xlsxBytes = await buildAttendanceMonthlyMatrixXlsx(
+    {
+      year_month: "2026-10",
+      from_date: "2026-10-10",
+      to_date: "2026-10-20",
+      calendar_days: [
+        { business_date: "2026-10-10", day_of_month: 10, day_of_week: 6 },
+        { business_date: "2026-10-11", day_of_month: 11, day_of_week: 7 },
+        { business_date: "2026-10-20", day_of_month: 20, day_of_week: 2 },
+      ],
+      items: [
+        {
+          app_user_id: EMPLOYEE_ID,
+          employee_display_name: "Nguyễn Văn A",
+          personnel_code: "NV001",
+          enabled: true,
+          branch: null,
+          summary: {
+            checkin_day_count: 0,
+            total_checkins: 0,
+            approved_leave_day_count: 0,
+            approved_leave_units: 0,
+            checkin_and_leave_day_count: 0,
+            no_checkin_day_count: 1,
+            no_checkin_without_leave_day_count: 1,
+            distance_computed_count: 0,
+            distance_unavailable_count: 0,
+            min_distance_meters: null,
+            max_distance_meters: null,
+          },
+          days: [pastOutOfScopeCell, pastExplainedApprovedCell, futureUpcomingCell],
+        },
+      ],
+    },
+    { todayBusinessDate: "2026-10-15" },
+  );
+
+  const importedExcel = await import("exceljs");
+  const excel = importedExcel.default ?? importedExcel;
+  const wb = new excel.Workbook();
+  await wb.xlsx.load(Buffer.from(xlsxBytes));
+
+  const sheet1 = wb.getWorksheet("Ma trận chấm công");
+  assert.ok(sheet1);
+  // Base headers = 11 columns -> day 1 (2026-10-10) = col 12, day 2 (2026-10-11) = col 13, day 3 (2026-10-20) = col 14
+  const row2 = sheet1.getRow(2);
+  assert.equal(row2.getCell(12).value, "— (Ngoài phạm vi)");
+  assert.equal(row2.getCell(12).fill?.fgColor?.argb, "FFF1F5F9");
+  assert.match(String(row2.getCell(13).value), /Giải trình được duyệt/);
+  assert.match(String(row2.getCell(14).value), /Chưa đến giờ chấm/);
+  assert.equal(row2.getCell(14).fill?.fgColor?.argb, "FFF0F9FF");
+
+  const sheet2 = wb.getWorksheet("Chi tiết theo ngày");
+  assert.ok(sheet2);
+  // Row 2 = 2026-10-10 (out-of-scope), Row 3 = 2026-10-11 (explained), Row 4 = 2026-10-20 (future)
+  const detailOutOfScopeRow = sheet2.getRow(2);
+  assert.equal(detailOutOfScopeRow.getCell(1).value, "2026-10-10");
+  assert.equal(detailOutOfScopeRow.getCell(5).value, MATRIX_OUT_OF_SCOPE_LABEL);
+  for (let slotCol = 8; slotCol <= 12; slotCol += 1) {
+    assert.equal(detailOutOfScopeRow.getCell(slotCol).value, "—", `slot col ${slotCol}`);
+  }
+  const detailExplainedRow = sheet2.getRow(3);
+  assert.equal(detailExplainedRow.getCell(1).value, "2026-10-11");
+  assert.match(String(detailExplainedRow.getCell(8).value), /Giải trình được duyệt/);
+  const detailFutureRow = sheet2.getRow(4);
+  assert.equal(detailFutureRow.getCell(1).value, "2026-10-20");
+  assert.equal(detailFutureRow.getCell(5).value, "Chưa đến giờ chấm");
+  assert.match(String(detailFutureRow.getCell(8).value), /Chưa đến giờ chấm/);
+
+  // 6. MatrixDayCell UI component wires getCurrentVnBusinessDate() and compact muted slate pill
+  const matrixDayCellBlock =
+    matrixPanelSource.match(/function MatrixDayCell[\s\S]*?\n}\n/)?.[0] ?? "";
+  assert.match(matrixDayCellBlock, /todayBusinessDate:\s*getCurrentVnBusinessDate\(\)/);
+  assert.match(matrixDayCellBlock, /if\s*\(presentation\.isOutOfScopeOrExempt\)/);
+  assert.match(matrixDayCellBlock, /border-slate-200 bg-slate-50\/70/);
+  assert.match(matrixDayCellBlock, /— Ngoài phạm vi/);
+  assert.equal(MATRIX_LEGEND_ITEMS.length, 6);
 });

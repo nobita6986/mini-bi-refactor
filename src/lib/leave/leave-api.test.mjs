@@ -928,3 +928,83 @@ test("Opening balance apply contract preserves expected snapshot metadata, maps 
   const staleJson = await staleRes.json();
   assert.equal(staleJson.code, "LEAVE_OPENING_PREVIEW_STALE");
 });
+
+test("WP7B R7: leave repository getActorAccess calls leave_management_get_actor_access and enforces strict 6-key boolean projection", async () => {
+  const capturedCalls = [];
+  const validEmployeePayload = {
+    can_access: true,
+    is_shared_non_employee: false,
+    can_submit_request: true,
+    can_approve_requests: false,
+    can_manage_config: false,
+    can_view_monthly_report: false,
+  };
+  const sharedAccountPayload = {
+    can_access: false,
+    is_shared_non_employee: true,
+    can_submit_request: false,
+    can_approve_requests: false,
+    can_manage_config: false,
+    can_view_monthly_report: false,
+  };
+
+  const repoOk = createLeaveRepository(async (fn, args) => {
+    capturedCalls.push({ fn, args });
+    return { data: validEmployeePayload, error: null };
+  });
+  const empOutcome = await repoOk.getActorAccess({
+    auth_subject: ACTOR_AUTH,
+    app_user_id: ACTOR_APP,
+  });
+  assert.deepEqual(empOutcome, { ok: true, data: validEmployeePayload });
+  assert.deepEqual(capturedCalls, [
+    {
+      fn: "leave_management_get_actor_access",
+      args: {
+        p_actor_auth_subject: ACTOR_AUTH,
+        p_actor_app_user_id: ACTOR_APP,
+      },
+    },
+  ]);
+
+  const repoShared = createLeaveRepository(async () => ({
+    data: sharedAccountPayload,
+    error: null,
+  }));
+  const sharedOutcome = await repoShared.getActorAccess({
+    auth_subject: ACTOR_AUTH,
+    app_user_id: ACTOR_APP,
+  });
+  assert.deepEqual(sharedOutcome, { ok: true, data: sharedAccountPayload });
+
+  // Strict 6-key boolean projection rejects extra keys, missing keys, non-booleans, arrays, and RPC errors
+  for (const malformed of [
+    { ...validEmployeePayload, extra_field: true },
+    { can_access: true, is_shared_non_employee: false },
+    { ...validEmployeePayload, can_access: "true" },
+    [validEmployeePayload],
+    null,
+  ]) {
+    const repoMalformed = createLeaveRepository(async () => ({
+      data: malformed,
+      error: null,
+    }));
+    const outcome = await repoMalformed.getActorAccess({
+      auth_subject: ACTOR_AUTH,
+      app_user_id: ACTOR_APP,
+    });
+    assert.deepEqual(outcome, { ok: false, code: "LEAVE_UNAVAILABLE" });
+  }
+
+  const repoError = createLeaveRepository(async () => ({
+    data: null,
+    error: { code: "42501", message: "permission denied" },
+  }));
+  assert.deepEqual(
+    await repoError.getActorAccess({
+      auth_subject: ACTOR_AUTH,
+      app_user_id: ACTOR_APP,
+    }),
+    { ok: false, code: "ACTOR_NOT_AVAILABLE" },
+  );
+});

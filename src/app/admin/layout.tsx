@@ -9,7 +9,10 @@ import { AppShell } from "@/components/app-shell/app-shell";
 import { decideAdminAreaAccess } from "@/lib/auth/direct-entry-page-access";
 import { visibleAdminSections } from "@/lib/admin/admin-navigation";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
-import type { NavActorProjection } from "@/lib/navigation/registry-capability";
+import {
+  hasActiveDepartmentHeadRole,
+  type NavActorProjection,
+} from "@/lib/navigation/registry-capability";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +27,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
         ...(actor.actor.effective_grants !== undefined
           ? { effective_grants: actor.actor.effective_grants }
           : {}),
+        hasAttendanceDepartmentHeadAccess: hasActiveDepartmentHeadRole(actor.actor),
       }
     : null;
 
