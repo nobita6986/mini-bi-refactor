@@ -39,6 +39,7 @@ const {
   vendorFinanceRecordNavPredicate,
   vendorFinanceReconcileNavPredicate,
   vendorFinanceAdminNavPredicate,
+  salaryAdvanceNavPredicate,
   resolveNavCapabilityPredicate,
 } = cap;
 const { CURRENT_NAV_ENTRIES, filterEntriesForActor, groupNavEntries } = reg;
@@ -996,4 +997,101 @@ test("WP7B D-WP7B-01: DEPARTMENT_HEAD sees /admin/attendance only (denied catalo
   };
   assert.equal(attendanceDepartmentHeadReportNavPredicate(legacyDeptHeadMock), false);
   assert.equal(attendanceReportNavPredicate(legacyDeptHeadMock), false);
+});
+
+test("WP8A: paired finance nav predicates block cross-scope escalation (HR_OPERATOR+TEAM_LEADER, HR_OPERATOR+PROJECT_ACCOUNTANT)", () => {
+  const TEAM_1 = "55000000-0000-4000-8000-000000000001";
+  const PRJ_1 = "prj_wp8a_nav_1";
+
+  // 1. HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM (flat capabilities contain report_view + report_analytics_view,
+  //    flat scopes contain all) MUST NOT escalate to Salary Advance supervisory or Vendor Finance.
+  const hrOperatorPlusTeamLeader = {
+    capabilities: [
+      "recruiter_master_manage",
+      "team_master_manage",
+      "catalog_master_manage",
+      "team_manager_assign",
+      "report_view",
+      "report_analytics_view",
+    ],
+    scopes: [
+      { kind: "all", reference: "all" },
+      { kind: "team", reference: TEAM_1 },
+    ],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  };
+  assert.equal(salaryAdvanceNavPredicate(hrOperatorPlusTeamLeader), false);
+  assert.equal(resolveNavCapabilityPredicate("salary_advances")(hrOperatorPlusTeamLeader), false);
+  assert.equal(vendorFinanceNavPredicate(hrOperatorPlusTeamLeader), false);
+  assert.equal(vendorFinanceRecordNavPredicate(hrOperatorPlusTeamLeader), false);
+  assert.equal(vendorFinanceAdminNavPredicate(hrOperatorPlusTeamLeader), false);
+
+  // 2. HR_OPERATOR @ ALL + stale contextual PROJECT_ACCOUNTANT (vendor_finance_view @ CONTEXT_PROJECT)
+  //    without server-confirmed hasVendorFinanceAccess MUST NOT open /finance via flat scope+capability pairing.
+  const hrOperatorPlusStalePa = {
+    capabilities: [
+      "recruiter_master_manage",
+      "team_master_manage",
+      "catalog_master_manage",
+      "vendor_finance_view",
+    ],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "vendor_finance_view", scope_kind: "CONTEXT_PROJECT", scope_id: PRJ_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+    hasVendorFinanceAccess: false,
+    hasVendorFinanceRecordAccess: false,
+    hasVendorFinanceReconcileAccess: false,
+  };
+  assert.equal(vendorFinanceNavPredicate(hrOperatorPlusStalePa), false);
+  assert.equal(vendorFinanceRecordNavPredicate(hrOperatorPlusStalePa), false);
+  assert.equal(vendorFinanceReconcileNavPredicate(hrOperatorPlusStalePa), false);
+  assert.equal(vendorFinanceAdminNavPredicate(hrOperatorPlusStalePa), false);
+  assert.equal(resolveNavCapabilityPredicate("finance")(hrOperatorPlusStalePa), false);
+  assert.equal(salaryAdvanceNavPredicate(hrOperatorPlusStalePa), false);
+
+  // 3. Cross-scope vendor_finance_record @ CONTEXT_PROJECT + unrelated ALL grant MUST fail closed.
+  const crossScopeRecord = {
+    capabilities: ["catalog_master_manage", "vendor_finance_record"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "vendor_finance_record", scope_kind: "CONTEXT_PROJECT", scope_id: PRJ_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  };
+  assert.equal(vendorFinanceNavPredicate(crossScopeRecord), false);
+  assert.equal(vendorFinanceRecordNavPredicate(crossScopeRecord), false);
+
+  // 4. Positive paired grants: BoD @ ALL opens Salary Advance supervisory; server-probed PM/PA opens Salary Advance.
+  const pairedBod = {
+    capabilities: ["report_view", "report_analytics_view"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(salaryAdvanceNavPredicate(pairedBod), true);
+  assert.equal(resolveNavCapabilityPredicate("salary_advances")(pairedBod), true);
+
+  const serverProbedPm = {
+    capabilities: ["entry_own"],
+    scopes: [{ kind: "own", reference: "u-pm" }],
+    effective_grants: [
+      { capability: "entry_own", scope_kind: "OWN", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+    hasSalaryAdvanceAccess: true,
+  };
+  assert.equal(salaryAdvanceNavPredicate(serverProbedPm), true);
+  assert.equal(vendorFinanceNavPredicate(serverProbedPm), false);
 });

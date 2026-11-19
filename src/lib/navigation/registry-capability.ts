@@ -386,16 +386,14 @@ export const vendorFinanceNavPredicate: NavCapabilityPredicate = (actor) =>
   actor.hasVendorFinanceAccess === true ||
   actor.hasVendorFinanceRecordAccess === true ||
   actor.hasVendorFinanceReconcileAccess === true ||
-  (actor.scopes.some((scope) => scope.kind === "all") &&
-    (actor.capabilities.includes("vendor_finance_view") ||
-      actor.capabilities.includes("vendor_finance_record")));
+  hasNavAllCapability(actor, "vendor_finance_view") ||
+  hasNavAllCapability(actor, "vendor_finance_record");
 
 /** VFIN-01 / VFIN-02: Record/mutation predicate (excludes BoD view-only & narrow reconcilers). */
 export const vendorFinanceRecordNavPredicate: NavCapabilityPredicate = (actor) =>
   adminAuthorityNavPredicate(actor) ||
   actor.hasVendorFinanceRecordAccess === true ||
-  (actor.scopes.some((scope) => scope.kind === "all") &&
-    actor.capabilities.includes("vendor_finance_record"));
+  hasNavAllCapability(actor, "vendor_finance_record");
 
 /** VFIN-02: Narrow reconcile predicate (includes `GLOBAL_RECONCILER` and `CASH_HOLDER` without requiring `can_record`). */
 export const vendorFinanceReconcileNavPredicate: NavCapabilityPredicate = (actor) =>
@@ -426,10 +424,9 @@ export const leaveAdminNavPredicate: NavCapabilityPredicate = (actor) =>
 export const salaryAdvanceNavPredicate: NavCapabilityPredicate = (actor) =>
   adminAuthorityNavPredicate(actor) ||
   actor.hasSalaryAdvanceAccess === true ||
-  (actor.scopes.some((scope) => scope.kind === "all") &&
-    (actor.capabilities.includes("entry_privileged_edit") ||
-      (actor.capabilities.includes("report_analytics_view") &&
-        actor.capabilities.includes("report_view"))));
+  hasNavAllCapability(actor, "entry_privileged_edit") ||
+  (hasNavAllCapability(actor, "report_analytics_view") &&
+    hasNavAllCapability(actor, "report_view"));
 
 /** Bảng ánh xạ `entry.capability` metadata → predicate tương ứng. */
 export const NAV_CAPABILITY_PREDICATES: Readonly<Record<string, NavCapabilityPredicate>> = {
