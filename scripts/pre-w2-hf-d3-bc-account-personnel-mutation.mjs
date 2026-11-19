@@ -31,9 +31,9 @@ const MUTATIONS = [
   {
     label: "2. claim thua van goi Auth lan hai",
     file: API,
-    find: "  if (!claimed.data.claimed) return fail(\"ACCOUNT_OPERATION_CONFLICT\", 409);\n\n" +
+    find: "  if (!claimed.data.claimed) {\n    return replayCreateAccountIntent(actor.value, intent, input.idempotency_key, deps);\n  }\n\n" +
       "  const auth = deps.auth;\n  const created = await auth.createAuthAccount({",
-    replace: "  if (false && !claimed.data.claimed) return fail(\"ACCOUNT_OPERATION_CONFLICT\", 409);\n\n" +
+    replace: "  if (false && !claimed.data.claimed) {\n    return replayCreateAccountIntent(actor.value, intent, input.idempotency_key, deps);\n  }\n\n" +
       "  const auth = deps.auth;\n  const created = await auth.createAuthAccount({",
   },
   {
