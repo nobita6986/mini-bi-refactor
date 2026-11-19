@@ -651,18 +651,120 @@ export function extractS0T1CAllowlistSignatures(migrationSql) {
 }
 
 /**
- * Read-only verification of S0-T1-C security postconditions when a database ledger
- * carries the verified pre-PR #92 checksum (`7382013e...`) for migration #124.
- *
- * Uses a single SELECT statement so it works identically in read-only `--dry-run`
- * and in the apply runner without mutating any table or ledger row.
+ * Build the applied-migration feature flags for S0-T1-C allowlist derivation
+ * from the target database's `public.schema_migrations` map (or Set of names).
  */
-export async function verifyS0T1CHistoricalCompatibility(
-  client,
-  migrationSql,
-  { r1_2Applied = false, f1WorkReportsApplied = false, f1AssignmentOptionsApplied = false,
-    f1AssignmentTrackingApplied = false, f1_5AnalyticsApplied = false,
-    f2ReviewAndDelegationApplied = false, wf01WorkforceSnapshotApplied = false,
+export function buildS0T1CAppliedFlags(appliedMapOrSet) {
+  const has = (name) =>
+    appliedMapOrSet instanceof Map || appliedMapOrSet instanceof Set
+      ? appliedMapOrSet.has(name)
+      : Boolean(appliedMapOrSet && appliedMapOrSet[name]);
+
+  return {
+    r1_2Applied: has(R1_2_MIGRATION_NAME),
+    f1WorkReportsApplied: has(F1_WORK_REPORTS_MIGRATION_NAME),
+    f1AssignmentOptionsApplied: has(F1_WORK_REPORTS_ASSIGNMENT_OPTIONS_MIGRATION_NAME),
+    f1AssignmentTrackingApplied: has(F1_WORK_REPORTS_ASSIGNMENT_TRACKING_MIGRATION_NAME),
+    f1_5AnalyticsApplied: has(F1_5_WORK_REPORTS_ANALYTICS_MIGRATION_NAME),
+    f2ReviewAndDelegationApplied: has(F2_WORK_REPORTS_REVIEW_AND_DELEGATION_MIGRATION_NAME),
+    wf01WorkforceSnapshotApplied:
+      has(WF01_WORKFORCE_SNAPSHOT_MIGRATION_NAME) ||
+      has(WF02_WORKFORCE_BALANCE_WAITING_MIGRATION_NAME) ||
+      has(WF03_WORKFORCE_TENURE_RETENTION_MIGRATION_NAME),
+    projectTeamScopeSearchApplied: has(PROJECT_TEAM_SCOPE_SEARCH_MIGRATION_NAME),
+    duplicateCccdSelfServiceApplied: has(DUPLICATE_CCCD_SELF_SERVICE_MIGRATION_NAME),
+    workReportsReaderContractApplied: has(WORK_REPORTS_READER_CONTRACT_MIGRATION_NAME),
+    attendanceWp1Applied: has(ATTENDANCE_WP1_MIGRATION_NAME),
+    attendanceAdminReportApplied: has(ATTENDANCE_ADMIN_REPORT_MIGRATION_NAME),
+    offboardingReportApplied: has(OFFBOARDING_REPORT_MIGRATION_NAME),
+    asyncDocumentsAttendancePhotoApplied: has(ASYNC_DOCUMENTS_ATTENDANCE_PHOTO_MIGRATION_NAME),
+    hfOffboardingSuppressionAndAttendanceFilterApplied: has(
+      HF_OFFBOARDING_SUPPRESSION_AND_ATTENDANCE_FILTER_MIGRATION_NAME,
+    ),
+    attendanceSelfHistoryApplied: has(ATTENDANCE_SELF_HISTORY_MIGRATION_NAME),
+    orgShell01DepartmentsApplied: has(ORG_SHELL_01_DEPARTMENTS_MIGRATION_NAME),
+    vfin01BackendApplied: has(VFIN_01_BACKEND_MIGRATION_NAME),
+    hfWorkReportsGroupsAndAnalyticsOptionsApplied: has(
+      HF_WORK_REPORTS_GROUPS_AND_ANALYTICS_OPTIONS_MIGRATION_NAME,
+    ),
+    vfin02ProjectLedgersApplied: has(VFIN_02_PROJECT_LEDGERS_MIGRATION_NAME),
+    hfVfin02ImplicitVendorProjectApplied: has(
+      HF_VFIN_02_IMPLICIT_VENDOR_PROJECT_MIGRATION_NAME,
+    ),
+    vfin03ContractTypeLedgersApplied: has(VFIN_03_CONTRACT_TYPE_LEDGERS_MIGRATION_NAME),
+    cccdQrAsyncStage1Applied: has(CCCD_QR_ASYNC_STAGE1_MIGRATION_NAME),
+    preWave2CccdReviewApplied: has(PRE_WAVE2_CCCD_REVIEW_MIGRATION_NAME),
+    cccdReviewManualResolutionApplied: has(CCCD_REVIEW_MANUAL_RESOLUTION_MIGRATION_NAME),
+    workReportsAndroidSyncAndUxApplied: has(WORK_REPORTS_ANDROID_SYNC_AND_UX_MIGRATION_NAME),
+    adminLinkExistingPersonnelAccountApplied: has(
+      ADMIN_LINK_EXISTING_PERSONNEL_ACCOUNT_MIGRATION_NAME,
+    ),
+    leaveManagementWp1Applied: has(LEAVE_MANAGEMENT_WP1_MIGRATION_NAME),
+    leaveAdminAccountStatusFilterApplied: has(LEAVE_ADMIN_ACCOUNT_STATUS_FILTER_MIGRATION_NAME),
+    salaryAdvanceWp1Applied: has(SALARY_ADVANCE_WP1_MIGRATION_NAME),
+    hfSalaryAdvanceActorDisplayNameApplied: has(
+      HF_SALARY_ADVANCE_ACTOR_DISPLAY_NAME_MIGRATION_NAME,
+    ),
+    hfSalaryAdvanceVendorExclusionAndWorkerHistoryApplied: has(
+      HF_SALARY_ADVANCE_VENDOR_EXCLUSION_AND_WORKER_HISTORY_MIGRATION_NAME,
+    ),
+    hfSalaryAdvancePmWorkerHistoryApplied: has(
+      HF_SALARY_ADVANCE_PM_WORKER_HISTORY_MIGRATION_NAME,
+    ),
+    hfDuplicateCccdResignedWithdrawAndWorkerFiltersApplied: has(
+      HF_DUPLICATE_CCCD_RESIGNED_WITHDRAW_AND_WORKER_FILTERS_MIGRATION_NAME,
+    ),
+    dashboardDetailedRecruitmentMatrixCatalogApplied: has(
+      DASHBOARD_DETAILED_RECRUITMENT_MATRIX_CATALOG_MIGRATION_NAME,
+    ),
+    workerEditHistoryAdminApplied: has(WORKER_EDIT_HISTORY_ADMIN_MIGRATION_NAME),
+    attendanceMonthlyMatrixBranchesProjectCoordsApplied: has(
+      ATTENDANCE_MONTHLY_MATRIX_BRANCHES_PROJECT_COORDS_MIGRATION_NAME,
+    ),
+    attendanceSlotPolicyAndFourSlotMatrixApplied: has(
+      ATTENDANCE_SLOT_POLICY_AND_FOUR_SLOT_MATRIX_MIGRATION_NAME,
+    ),
+    attendanceFlexibleSlotPolicyApplied: has(ATTENDANCE_FLEXIBLE_SLOT_POLICY_MIGRATION_NAME),
+    attendanceExplanationsWave2Applied: has(ATTENDANCE_EXPLANATIONS_WAVE2_MIGRATION_NAME),
+    attendanceMultiSlotPolicyProfilesApplied: has(
+      ATTENDANCE_MULTI_SLOT_POLICY_PROFILES_MIGRATION_NAME,
+    ),
+    workerDirectoryLaborTypeFilterApplied: has(WORKER_DIRECTORY_LABOR_TYPE_FILTER_MIGRATION_NAME),
+    vfin04SharedVendorAdvanceApplied: has(VFIN_04_SHARED_VENDOR_ADVANCE_MIGRATION_NAME),
+    vfin05CombinedPaymentOffsetApplied: has(VFIN_05_COMBINED_PAYMENT_OFFSET_MIGRATION_NAME),
+    t1aHotfixWorkerDetailAndSalaryAdvanceAccessApplied: has(
+      T1A_HOTFIX_WORKER_DETAIL_AND_SALARY_ADVANCE_ACCESS_MIGRATION_NAME,
+    ),
+    recruitmentLocationCatalogApplied: has(RECRUITMENT_LOCATION_CATALOG_MIGRATION_NAME),
+    recruitmentPostsApplied: has(RECRUITMENT_POSTS_MIGRATION_NAME),
+    recruitmentPostListMineApplied: has(RECRUITMENT_POST_LIST_MINE_MIGRATION_NAME),
+    recruitmentPostPublicFeedV1Applied: has(RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME),
+    recruitmentPostListWithFacetsApplied: has(RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
+    wp2aEffectiveAccessShadowApplied: has(WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME),
+    wp3bPersonAccountOrgApplied: has(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME),
+    wp5b1RoleEffectiveAccessApplied: has(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
+  };
+}
+
+/**
+ * Derive the canonical `service_role` RPC allowlist dynamically from migration #124 SQL
+ * plus whichever post-S0 migrations are present in `flagsOrAppliedMap`.
+ * Never hardcodes a permanent routine count.
+ */
+export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}) {
+  const flags =
+    flagsOrAppliedMap instanceof Map || flagsOrAppliedMap instanceof Set
+      ? buildS0T1CAppliedFlags(flagsOrAppliedMap)
+      : flagsOrAppliedMap;
+
+  const {
+    r1_2Applied = false,
+    f1WorkReportsApplied = false,
+    f1AssignmentOptionsApplied = false,
+    f1AssignmentTrackingApplied = false,
+    f1_5AnalyticsApplied = false,
+    f2ReviewAndDelegationApplied = false,
+    wf01WorkforceSnapshotApplied = false,
     projectTeamScopeSearchApplied = false,
     duplicateCccdSelfServiceApplied = false,
     workReportsReaderContractApplied = false,
@@ -708,16 +810,15 @@ export async function verifyS0T1CHistoricalCompatibility(
     recruitmentPostListWithFacetsApplied = false,
     wp2aEffectiveAccessShadowApplied = false,
     wp3bPersonAccountOrgApplied = false,
-    wp5b1RoleEffectiveAccessApplied = false } = {},
-) {
+    wp5b1RoleEffectiveAccessApplied = false,
+  } = flags ?? {};
+
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
   if (baseAllowlist.length === 0) {
-    return {
-      ok: false,
-      reason: "S0-T1-C source allowlist could not be parsed",
-    };
+    return [];
   }
-  const expectedAllowlist = [
+
+  return [
     ...baseAllowlist,
     ...(r1_2Applied ? [R1_2_SERVICE_RPC_SIGNATURE] : []),
     ...(f1WorkReportsApplied ? F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES : []),
@@ -848,6 +949,28 @@ export async function verifyS0T1CHistoricalCompatibility(
       ? WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES
       : []),
   ];
+}
+
+/**
+ * Read-only verification of live S0-T1-C security postconditions in the database.
+ * Runs unconditionally for migration #124 BOTH when the ledger checksum matches the
+ * current digest AND when it carries the verified pre-PR #92 historical digest.
+ *
+ * Uses a single SELECT statement so it works identically in read-only `--dry-run`
+ * and in the apply runner without mutating any table, ACL, or ledger row.
+ */
+export async function verifyS0T1CSecurityPostconditions(
+  client,
+  migrationSql,
+  flagsOrAppliedMap = {},
+) {
+  const expectedAllowlist = buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap);
+  if (expectedAllowlist.length === 0) {
+    return {
+      ok: false,
+      reason: "S0-T1-C source allowlist could not be parsed",
+    };
+  }
 
   const { rows } = await client.query(
     `select
@@ -955,65 +1078,104 @@ export async function verifyS0T1CHistoricalCompatibility(
   if (!row) {
     return { ok: false, reason: "S0-T1-C postcondition query returned no row" };
   }
-  if (row.exposed_client_or_public_count !== 0) {
-    return {
-      ok: false,
-      reason: `S0-T1-C postcondition failed: ${row.exposed_client_or_public_count} routine(s) exposed to anon/authenticated/PUBLIC`,
-    };
-  }
-  if (row.missing_allowlist_count !== 0) {
-    return {
-      ok: false,
-      reason: `S0-T1-C postcondition failed: ${row.missing_allowlist_count} allowlisted signature(s) missing`,
-    };
-  }
+
   const actualService = Array.isArray(row.actual_service_signatures)
     ? row.actual_service_signatures
     : [];
   const expectedService = Array.isArray(row.expected_service_signatures)
     ? row.expected_service_signatures
     : [];
-  if (
-    actualService.length !== expectedService.length ||
-    actualService.some((sig, idx) => sig !== expectedService[idx])
-  ) {
+  const actualSet = new Set(actualService);
+  const expectedSet = new Set(expectedService);
+  const extraServiceSignatures = actualService.filter((sig) => !expectedSet.has(sig));
+  const missingServiceSignatures = expectedService.filter((sig) => !actualSet.has(sig));
+
+  const details = {
+    exposedClientOrPublicCount: row.exposed_client_or_public_count,
+    missingAllowlistCount: row.missing_allowlist_count,
+    expectedServiceCount: expectedService.length,
+    actualServiceCount: actualService.length,
+    extraServiceCount: extraServiceSignatures.length,
+    missingServiceCount: missingServiceSignatures.length,
+    extraServiceSignatures,
+    missingServiceSignatures,
+    missingOwnerExecCount: row.missing_owner_exec_count,
+    unsafeSecdefSearchPathCount: row.unsafe_secdef_search_path_count,
+    bootstrapExecutorIntact: row.bootstrap_executor_intact === true,
+  };
+
+  if (row.exposed_client_or_public_count !== 0) {
     return {
       ok: false,
-      reason: "S0-T1-C postcondition failed: service_role EXECUTE set does not match allowlist",
+      reason: `S0-T1-C postcondition failed: ${row.exposed_client_or_public_count} routine(s) exposed to anon/authenticated/PUBLIC`,
+      details,
+    };
+  }
+  if (row.missing_allowlist_count !== 0) {
+    return {
+      ok: false,
+      reason: `S0-T1-C postcondition failed: ${row.missing_allowlist_count} allowlisted signature(s) missing`,
+      details,
+    };
+  }
+  if (extraServiceSignatures.length > 0 || missingServiceSignatures.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `S0-T1-C postcondition failed: service_role EXECUTE set does not match allowlist ` +
+        `(extra=${extraServiceSignatures.length}, missing=${missingServiceSignatures.length})`,
+      details,
     };
   }
   if (row.missing_owner_exec_count !== 0) {
     return {
       ok: false,
       reason: `S0-T1-C postcondition failed: ${row.missing_owner_exec_count} routine(s) missing owner EXECUTE`,
+      details,
     };
   }
   if (row.unsafe_secdef_search_path_count !== 0) {
     return {
       ok: false,
       reason: `S0-T1-C postcondition failed: ${row.unsafe_secdef_search_path_count} SECURITY DEFINER routine(s) missing locked search_path`,
+      details,
     };
   }
   if (row.bootstrap_executor_intact !== true) {
     return {
       ok: false,
       reason: "S0-T1-C postcondition failed: catalog bootstrap executor ownership/ACL/SECURITY DEFINER mismatch",
+      details,
     };
   }
-  return { ok: true };
+  return { ok: true, details };
 }
 
 /**
- * Shared checksum verification used identically by `--dry-run` validation and
- * the migration apply runner.
+ * Backward-compatible alias for `verifyS0T1CSecurityPostconditions`.
+ */
+export async function verifyS0T1CHistoricalCompatibility(
+  client,
+  migrationSql,
+  flags = {},
+) {
+  return verifyS0T1CSecurityPostconditions(client, migrationSql, flags);
+}
+
+/**
+ * Shared checksum & security postcondition verification used identically by
+ * `--dry-run` validation and the migration apply runner.
  *
- * Returns:
- *   - `{ status: "match" }` when `appliedChecksum === migration.checksum`
- *   - `{ status: "compatible_historical" }` ONLY when `migration.name` is `#124`
- *     (`20261020180000_s0_t1_c_rpc_acl_allowlist.sql`), `migration.checksum` is
- *     `S0_T1_C_CURRENT_CHECKSUM`, `appliedChecksum` is `S0_T1_C_PRE_PR92_CHECKSUM`,
- *     and all S0-T1-C security postconditions pass in the database
- *   - `{ status: "mismatch", reason }` for any other mismatch (fail-closed)
+ * Checksum verification and live ACL postcondition verification are kept distinct:
+ *   - `{ status: "match", checksumStatus: "match", postconditionsChecked, postconditionsOk }`
+ *     when `appliedChecksum === migration.checksum` (and, for #124, live ACL postconditions pass)
+ *   - `{ status: "postcondition_failed", checksumStatus: "match", postconditionsChecked: true, postconditionsOk: false, reason, details }`
+ *     when #124's checksum matches the ledger, but live database ACL/hardening postconditions drifted
+ *   - `{ status: "compatible_historical", checksumStatus: "historical_pre_pr92", postconditionsChecked: true, postconditionsOk: true }`
+ *     ONLY when `migration.name` is #124, `migration.checksum` is `S0_T1_C_CURRENT_CHECKSUM`,
+ *     `appliedChecksum` is `S0_T1_C_PRE_PR92_CHECKSUM`, and live security postconditions pass
+ *   - `{ status: "mismatch", checksumStatus, reason }` for any unrecognized checksum or
+ *     historical #124 failing postconditions (fail-closed)
  */
 export async function verifyAppliedMigrationChecksum(
   client,
@@ -1021,132 +1183,72 @@ export async function verifyAppliedMigrationChecksum(
   appliedChecksum,
   appliedMap,
 ) {
+  const isS0T1C = migration.name === S0_T1_C_MIGRATION_NAME;
   if (appliedChecksum === migration.checksum) {
-    return { status: "match" };
+    if (!isS0T1C) {
+      return {
+        status: "match",
+        checksumStatus: "match",
+        postconditionsChecked: false,
+        postconditionsOk: true,
+      };
+    }
+    const postconditions = await verifyS0T1CSecurityPostconditions(
+      client,
+      migration.sql,
+      buildS0T1CAppliedFlags(appliedMap),
+    );
+    if (postconditions.ok) {
+      return {
+        status: "match",
+        checksumStatus: "match",
+        postconditionsChecked: true,
+        postconditionsOk: true,
+        details: postconditions.details,
+      };
+    }
+    return {
+      status: "postcondition_failed",
+      checksumStatus: "match",
+      postconditionsChecked: true,
+      postconditionsOk: false,
+      reason: postconditions.reason,
+      details: postconditions.details,
+    };
   }
   if (
-    migration.name === S0_T1_C_MIGRATION_NAME &&
+    isS0T1C &&
     migration.checksum === S0_T1_C_CURRENT_CHECKSUM &&
     appliedChecksum === S0_T1_C_PRE_PR92_CHECKSUM
   ) {
-    const postconditions = await verifyS0T1CHistoricalCompatibility(
+    const postconditions = await verifyS0T1CSecurityPostconditions(
       client,
       migration.sql,
-      {
-        r1_2Applied: appliedMap.has(R1_2_MIGRATION_NAME),
-        f1WorkReportsApplied: appliedMap.has(F1_WORK_REPORTS_MIGRATION_NAME),
-        f1AssignmentOptionsApplied: appliedMap.has(F1_WORK_REPORTS_ASSIGNMENT_OPTIONS_MIGRATION_NAME),
-        f1AssignmentTrackingApplied: appliedMap.has(F1_WORK_REPORTS_ASSIGNMENT_TRACKING_MIGRATION_NAME),
-        f1_5AnalyticsApplied: appliedMap.has(F1_5_WORK_REPORTS_ANALYTICS_MIGRATION_NAME),
-        f2ReviewAndDelegationApplied: appliedMap.has(F2_WORK_REPORTS_REVIEW_AND_DELEGATION_MIGRATION_NAME),
-        wf01WorkforceSnapshotApplied:
-          appliedMap.has(WF01_WORKFORCE_SNAPSHOT_MIGRATION_NAME) ||
-          appliedMap.has(WF02_WORKFORCE_BALANCE_WAITING_MIGRATION_NAME) ||
-          appliedMap.has(WF03_WORKFORCE_TENURE_RETENTION_MIGRATION_NAME),
-        projectTeamScopeSearchApplied:
-          appliedMap.has(PROJECT_TEAM_SCOPE_SEARCH_MIGRATION_NAME),
-        duplicateCccdSelfServiceApplied:
-          appliedMap.has(DUPLICATE_CCCD_SELF_SERVICE_MIGRATION_NAME),
-        workReportsReaderContractApplied:
-          appliedMap.has(WORK_REPORTS_READER_CONTRACT_MIGRATION_NAME),
-        attendanceWp1Applied:
-          appliedMap.has(ATTENDANCE_WP1_MIGRATION_NAME),
-        attendanceAdminReportApplied:
-          appliedMap.has(ATTENDANCE_ADMIN_REPORT_MIGRATION_NAME),
-        offboardingReportApplied:
-          appliedMap.has(OFFBOARDING_REPORT_MIGRATION_NAME),
-        asyncDocumentsAttendancePhotoApplied:
-          appliedMap.has(ASYNC_DOCUMENTS_ATTENDANCE_PHOTO_MIGRATION_NAME),
-        hfOffboardingSuppressionAndAttendanceFilterApplied:
-          appliedMap.has(HF_OFFBOARDING_SUPPRESSION_AND_ATTENDANCE_FILTER_MIGRATION_NAME),
-        attendanceSelfHistoryApplied:
-          appliedMap.has(ATTENDANCE_SELF_HISTORY_MIGRATION_NAME),
-        orgShell01DepartmentsApplied:
-          appliedMap.has(ORG_SHELL_01_DEPARTMENTS_MIGRATION_NAME),
-        vfin01BackendApplied:
-          appliedMap.has(VFIN_01_BACKEND_MIGRATION_NAME),
-        hfWorkReportsGroupsAndAnalyticsOptionsApplied:
-          appliedMap.has(HF_WORK_REPORTS_GROUPS_AND_ANALYTICS_OPTIONS_MIGRATION_NAME),
-        vfin02ProjectLedgersApplied:
-          appliedMap.has(VFIN_02_PROJECT_LEDGERS_MIGRATION_NAME),
-        hfVfin02ImplicitVendorProjectApplied:
-          appliedMap.has(HF_VFIN_02_IMPLICIT_VENDOR_PROJECT_MIGRATION_NAME),
-        vfin03ContractTypeLedgersApplied:
-          appliedMap.has(VFIN_03_CONTRACT_TYPE_LEDGERS_MIGRATION_NAME),
-        cccdQrAsyncStage1Applied:
-          appliedMap.has(CCCD_QR_ASYNC_STAGE1_MIGRATION_NAME),
-        preWave2CccdReviewApplied:
-          appliedMap.has(PRE_WAVE2_CCCD_REVIEW_MIGRATION_NAME),
-        cccdReviewManualResolutionApplied:
-          appliedMap.has(CCCD_REVIEW_MANUAL_RESOLUTION_MIGRATION_NAME),
-        workReportsAndroidSyncAndUxApplied:
-          appliedMap.has(WORK_REPORTS_ANDROID_SYNC_AND_UX_MIGRATION_NAME),
-        adminLinkExistingPersonnelAccountApplied:
-          appliedMap.has(ADMIN_LINK_EXISTING_PERSONNEL_ACCOUNT_MIGRATION_NAME),
-        leaveManagementWp1Applied:
-          appliedMap.has(LEAVE_MANAGEMENT_WP1_MIGRATION_NAME),
-        leaveAdminAccountStatusFilterApplied:
-          appliedMap.has(LEAVE_ADMIN_ACCOUNT_STATUS_FILTER_MIGRATION_NAME),
-        salaryAdvanceWp1Applied:
-          appliedMap.has(SALARY_ADVANCE_WP1_MIGRATION_NAME),
-        hfSalaryAdvanceActorDisplayNameApplied:
-          appliedMap.has(HF_SALARY_ADVANCE_ACTOR_DISPLAY_NAME_MIGRATION_NAME),
-        hfSalaryAdvanceVendorExclusionAndWorkerHistoryApplied:
-          appliedMap.has(HF_SALARY_ADVANCE_VENDOR_EXCLUSION_AND_WORKER_HISTORY_MIGRATION_NAME),
-        hfSalaryAdvancePmWorkerHistoryApplied:
-          appliedMap.has(HF_SALARY_ADVANCE_PM_WORKER_HISTORY_MIGRATION_NAME),
-        hfDuplicateCccdResignedWithdrawAndWorkerFiltersApplied:
-          appliedMap.has(HF_DUPLICATE_CCCD_RESIGNED_WITHDRAW_AND_WORKER_FILTERS_MIGRATION_NAME),
-        dashboardDetailedRecruitmentMatrixCatalogApplied:
-          appliedMap.has(DASHBOARD_DETAILED_RECRUITMENT_MATRIX_CATALOG_MIGRATION_NAME),
-        workerEditHistoryAdminApplied:
-          appliedMap.has(WORKER_EDIT_HISTORY_ADMIN_MIGRATION_NAME),
-        attendanceMonthlyMatrixBranchesProjectCoordsApplied:
-          appliedMap.has(ATTENDANCE_MONTHLY_MATRIX_BRANCHES_PROJECT_COORDS_MIGRATION_NAME),
-        attendanceSlotPolicyAndFourSlotMatrixApplied:
-          appliedMap.has(ATTENDANCE_SLOT_POLICY_AND_FOUR_SLOT_MATRIX_MIGRATION_NAME),
-        attendanceFlexibleSlotPolicyApplied:
-          appliedMap.has(ATTENDANCE_FLEXIBLE_SLOT_POLICY_MIGRATION_NAME),
-        attendanceExplanationsWave2Applied:
-          appliedMap.has(ATTENDANCE_EXPLANATIONS_WAVE2_MIGRATION_NAME),
-        attendanceMultiSlotPolicyProfilesApplied:
-          appliedMap.has(ATTENDANCE_MULTI_SLOT_POLICY_PROFILES_MIGRATION_NAME),
-        workerDirectoryLaborTypeFilterApplied:
-          appliedMap.has(WORKER_DIRECTORY_LABOR_TYPE_FILTER_MIGRATION_NAME),
-        vfin04SharedVendorAdvanceApplied:
-          appliedMap.has(VFIN_04_SHARED_VENDOR_ADVANCE_MIGRATION_NAME),
-        vfin05CombinedPaymentOffsetApplied:
-          appliedMap.has(VFIN_05_COMBINED_PAYMENT_OFFSET_MIGRATION_NAME),
-        t1aHotfixWorkerDetailAndSalaryAdvanceAccessApplied:
-          appliedMap.has(T1A_HOTFIX_WORKER_DETAIL_AND_SALARY_ADVANCE_ACCESS_MIGRATION_NAME),
-        recruitmentLocationCatalogApplied:
-          appliedMap.has(RECRUITMENT_LOCATION_CATALOG_MIGRATION_NAME),
-        recruitmentPostsApplied:
-          appliedMap.has(RECRUITMENT_POSTS_MIGRATION_NAME),
-        recruitmentPostListMineApplied:
-          appliedMap.has(RECRUITMENT_POST_LIST_MINE_MIGRATION_NAME),
-        recruitmentPostPublicFeedV1Applied:
-          appliedMap.has(RECRUITMENT_POST_PUBLIC_FEED_V1_MIGRATION_NAME),
-        recruitmentPostListWithFacetsApplied:
-          appliedMap.has(RECRUITMENT_POST_LIST_WITH_FACETS_MIGRATION_NAME),
-        wp2aEffectiveAccessShadowApplied:
-          appliedMap.has(WP2A_EFFECTIVE_ACCESS_SHADOW_MIGRATION_NAME),
-        wp3bPersonAccountOrgApplied:
-          appliedMap.has(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME),
-        wp5b1RoleEffectiveAccessApplied:
-          appliedMap.has(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
-      },
+      buildS0T1CAppliedFlags(appliedMap),
     );
     if (postconditions.ok) {
-      return { status: "compatible_historical" };
+      return {
+        status: "compatible_historical",
+        checksumStatus: "historical_pre_pr92",
+        postconditionsChecked: true,
+        postconditionsOk: true,
+        details: postconditions.details,
+      };
     }
     return {
       status: "mismatch",
+      checksumStatus: "historical_pre_pr92",
+      postconditionsChecked: true,
+      postconditionsOk: false,
       reason: postconditions.reason,
+      details: postconditions.details,
     };
   }
   return {
     status: "mismatch",
+    checksumStatus: "mismatch",
+    postconditionsChecked: false,
+    postconditionsOk: false,
     reason: "unrecognized checksum mismatch",
   };
 }
@@ -1163,7 +1265,7 @@ export async function runMigrationValidation({
     log("OFFLINE VALIDATION (applied/pending status was not checked)");
     for (const migration of migrations) log(`VALID  ${migration.name}`);
     log(`\nOffline validation complete: ${migrations.length} migration(s); no database access.`);
-    return { migrations, mismatches: [] };
+    return { migrations, mismatches: [], postconditionFailures: [] };
   }
 
   if (mode !== "dry-run") throw new Error(`Unsupported validation mode: ${mode}`);
@@ -1187,6 +1289,7 @@ export async function runMigrationValidation({
     }
 
     const mismatches = [];
+    const postconditionFailures = [];
     for (const migration of migrations) {
       const previous = applied.get(migration.name);
       if (previous === undefined) {
@@ -1200,11 +1303,25 @@ export async function runMigrationValidation({
         applied,
       );
       if (check.status === "match") {
-        log(`APPLIED ${migration.name} (checksum matches)`);
+        log(
+          check.postconditionsChecked
+            ? `APPLIED ${migration.name} (checksum matches; security postconditions verified)`
+            : `APPLIED ${migration.name} (checksum matches)`,
+        );
       } else if (check.status === "compatible_historical") {
         log(
           `APPLIED ${migration.name} (verified pre-PR #92 historical checksum compatibility)`,
         );
+      } else if (check.status === "postcondition_failed") {
+        log(
+          `POSTCONDITION FAILED ${migration.name} (checksum matches; ${check.reason})`,
+        );
+        mismatches.push(migration.name);
+        postconditionFailures.push({
+          migration: migration.name,
+          reason: check.reason,
+          details: check.details ?? null,
+        });
       } else {
         log(
           `CHECKSUM MISMATCH ${migration.name}${check.reason ? ` (${check.reason})` : ""}`,
@@ -1213,7 +1330,7 @@ export async function runMigrationValidation({
       }
     }
     log(`\nDB-aware dry-run: ${migrations.length} migration(s); read-only.`);
-    return { migrations, mismatches };
+    return { migrations, mismatches, postconditionFailures };
   } finally {
     await client.end();
   }
@@ -1260,6 +1377,13 @@ export async function runMigrationApply({
         previous,
         appliedMap,
       );
+      if (check.status === "postcondition_failed") {
+        await client.end();
+        throw new Error(
+          `Migration ${migration.name} khớp checksum trong ledger nhưng kiểm tra hậu điều kiện bảo mật thất bại (postcondition failed: ${check.reason}). ` +
+            "Chạy công cụ căn chỉnh ACL môi trường (scripts/align-routine-acl.mjs) trước khi áp dụng migration mới.",
+        );
+      }
       if (check.status === "mismatch") {
         await client.end();
         throw new Error(
@@ -1271,6 +1395,8 @@ export async function runMigrationApply({
         log(
           `SKIP    ${migration.name} (đã áp dụng — tương thích checksum lịch sử trước PR #92 đã xác minh postconditions)`,
         );
+      } else if (check.postconditionsChecked) {
+        log(`SKIP    ${migration.name} (đã áp dụng — khớp checksum và đạt postconditions bảo mật)`);
       } else {
         log(`SKIP    ${migration.name} (đã áp dụng)`);
       }

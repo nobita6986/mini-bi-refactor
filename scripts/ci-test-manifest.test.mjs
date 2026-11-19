@@ -51,6 +51,7 @@ test("R2.1 Zero-Orphan Test Manifest: every *.test.mjs file in src/ and scripts/
     "scripts/wp3-person-account-org-concurrency.test.mjs",
     "scripts/wp5-role-access-foundation-concurrency.test.mjs",
     "scripts/wp5b2-role-access-cutover-concurrency.test.mjs",
+    "scripts/hf-nwc-acl-postcondition-repair.test.mjs",
   ]);
 
   const summary = assertZeroOrphanTests({

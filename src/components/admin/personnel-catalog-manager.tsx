@@ -87,7 +87,22 @@ const EMPTY_FORM: PersonnelForm = {
 
 function responseOutcome(status: number, payload: unknown, intent: MutationIntent): PersonnelMutationOutcome {
   if (intent.operation === "create" || intent.operation === "link") {
-    const outcome = classifyAccountOperationResponse(status, payload);
+    const outcome = classifyAccountOperationResponse(
+      status,
+      payload,
+      intent.operation === "create"
+        ? {
+            operation: "personnel_from_account",
+            expectedPersonnelCode:
+              typeof intent.body.personnel_code === "string" ? intent.body.personnel_code : undefined,
+          }
+        : {
+            operation: "link_recruiter_account",
+            expectedRecruiterId: intent.recruiterId ?? "",
+            expectedAccountRef:
+              typeof intent.body.account_ref === "string" ? intent.body.account_ref : "",
+          },
+    );
     if (outcome.kind === "applied") return { kind: "applied" } as unknown as PersonnelMutationOutcome;
     if (intent.operation === "link" && outcome.kind === "conflict") {
       return {

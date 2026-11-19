@@ -405,6 +405,119 @@ test("migration #124 compatibility: accepts verified pre-PR #92 checksum only wh
       });
       assert.deepEqual(dryRun.mismatches, [badVersion]);
     }
+
+    // 4. Current #124 checksum MATCH + failing live ACL postconditions MUST STILL FAIL CLOSED
+    //    (checksum match !== live ACL parity; both dry-run and apply must distinguish postcondition failure from checksum mismatch):
+    for (const [label, brokenOverride] of [
+      ["client exposure", { exposed_client_or_public_count: 558 }],
+      ["extra service_role on helper", { actual_service_signatures: [...allowlist, "public.direct_entry_lock_account_operation(uuid)"].sort() }],
+      ["missing allowlisted RPC service_role", { actual_service_signatures: allowlist.slice(1) }],
+      ["missing owner execute", { missing_owner_exec_count: 1 }],
+      ["unsafe SECURITY DEFINER search_path", { unsafe_secdef_search_path_count: 1 }],
+      ["bootstrap executor tampered", { bootstrap_executor_intact: false }],
+    ]) {
+      const dryRunLogs = [];
+      const dryRun = await runMigrationValidation({
+        mode: "dry-run",
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql) {
+            if (sql.includes("to_regclass")) return { rows: [{ exists: true }] };
+            if (sql === "select version, checksum from public.schema_migrations") {
+              return {
+                rows: [
+                  { version: S0_T1_C_MIGRATION_NAME, checksum: S0_T1_C_CURRENT_CHECKSUM },
+                  { version: R1_2_MIGRATION_NAME, checksum: migrationChecksum("select 2;\n") },
+                ],
+              };
+            }
+            if (sql.includes("exposed_client_or_public_count")) {
+              return { rows: [makePostconditionRow(brokenOverride)] };
+            }
+            return { rows: [] };
+          },
+          async end() {},
+        }),
+        log: (line) => dryRunLogs.push(line),
+      });
+      assert.deepEqual(
+        dryRun.mismatches,
+        [S0_T1_C_MIGRATION_NAME],
+        `dry-run must fail closed when #124 current checksum matches but live ACL drifts (${label})`,
+      );
+      assert.match(
+        dryRunLogs.join("\n"),
+        /POSTCONDITION FAILED 20261020180000_s0_t1_c_rpc_acl_allowlist\.sql/,
+        `dry-run log must separate checksum match from postcondition failure (${label})`,
+      );
+
+      await assert.rejects(
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql) {
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return {
+                  rows: [
+                    { version: S0_T1_C_MIGRATION_NAME, checksum: S0_T1_C_CURRENT_CHECKSUM },
+                    { version: R1_2_MIGRATION_NAME, checksum: migrationChecksum("select 2;\n") },
+                  ],
+                };
+              }
+              if (sql.includes("exposed_client_or_public_count")) {
+                return { rows: [makePostconditionRow(brokenOverride)] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          log() {},
+          errorLog() {},
+        }),
+        /postcondition failed/i,
+        `apply must fail closed when #124 current checksum matches but live ACL drifts (${label})`,
+      );
+    }
+
+    // 5. Current #124 checksum MATCH + passing live ACL postconditions -> dry-run PASS (SELECT-only) & apply skips cleanly:
+    {
+      const statements = [];
+      const dryRunLogs = [];
+      const dryRun = await runMigrationValidation({
+        mode: "dry-run",
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql) {
+            statements.push(sql);
+            if (sql.includes("to_regclass")) return { rows: [{ exists: true }] };
+            if (sql === "select version, checksum from public.schema_migrations") {
+              return {
+                rows: [
+                  { version: S0_T1_C_MIGRATION_NAME, checksum: S0_T1_C_CURRENT_CHECKSUM },
+                  { version: R1_2_MIGRATION_NAME, checksum: migrationChecksum("select 2;\n") },
+                ],
+              };
+            }
+            if (sql.includes("exposed_client_or_public_count")) {
+              return { rows: [makePostconditionRow()] };
+            }
+            throw new Error(`Unexpected query: ${sql}`);
+          },
+          async end() {},
+        }),
+        log: (line) => dryRunLogs.push(line),
+      });
+      assert.deepEqual(dryRun.mismatches, []);
+      assert.ok(statements.some((s) => s.includes("exposed_client_or_public_count")), "dry-run must run live postcondition check even on exact checksum match");
+      assert.ok(statements.every((s) => /^\s*select\b/i.test(s)), "dry-run must stay strictly SELECT-only");
+      assert.match(dryRunLogs.join("\n"), /APPLIED 20261020180000_s0_t1_c_rpc_acl_allowlist\.sql \(checksum matches; security postconditions verified\)/);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

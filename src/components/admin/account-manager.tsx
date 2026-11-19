@@ -136,6 +136,7 @@ export function AccountManager({
     | null
   >(null);
   const [orgDialogLocked, setOrgDialogLocked] = useState(false);
+  const [opDialogLocked, setOpDialogLocked] = useState(false);
   const [reconcileIntent, setReconcileIntent] = useState<{ intentId: string; state: string } | null>(null);
   const [opBusy, setOpBusy] = useState(false);
 
@@ -173,6 +174,7 @@ export function AccountManager({
     setOrgOperation(null);
     setOrgDialogLocked(false);
     setOperation(null);
+    setOpDialogLocked(false);
     setDialog(null);
     setPendingIntent(null);
     setConflictIntent(null);
@@ -208,6 +210,7 @@ export function AccountManager({
           setOrgOperation(null);
           setOrgDialogLocked(false);
           setOperation(null);
+          setOpDialogLocked(false);
           setDialog(null);
           setPendingIntent(null);
           setConflictIntent(null);
@@ -272,6 +275,7 @@ export function AccountManager({
         setOrgOperation(null);
         setOrgDialogLocked(false);
         setOperation(null);
+        setOpDialogLocked(false);
         setDialog(null);
         setPendingIntent(null);
         setConflictIntent(null);
@@ -542,7 +546,8 @@ export function AccountManager({
     ? Math.min(1000, Math.max(1, Math.ceil(list.total / Math.max(1, list.page_size))))
     : 1;
   const locked = busy || pendingIntent !== null || conflictIntent !== null;
-  const rowActionsDisabled = locked || orgDialogLocked || opBusy || listState.kind === "denied";
+  const rowActionsDisabled =
+    locked || orgDialogLocked || opDialogLocked || opBusy || listState.kind === "denied";
 
   return (
     <>
@@ -819,8 +824,10 @@ export function AccountManager({
         operation={operation}
         busy={opBusy}
         onBusyChange={setOpBusy}
+        onLockChange={setOpDialogLocked}
         trackRequest={trackWorkspaceRequest}
         isRequestActive={isWorkspaceRequestActive}
+        onReloadRequested={reloadAccountsAuthoritative}
         onSessionLost={handleOrgSessionLost}
         onClose={() => { setOperation(null); }}
         onApplied={() => { setOperation(null); reloadList(); }}
@@ -848,6 +855,9 @@ export function AccountManager({
         trackRequest={trackWorkspaceRequest}
         isRequestActive={isWorkspaceRequestActive}
         onSessionLost={handleOrgSessionLost}
+        onStateChange={(nextState) => {
+          setReconcileIntent((prev) => (prev ? { ...prev, state: nextState } : null));
+        }}
         onClose={() => { setReconcileIntent(null); }}
         onDone={() => { setReconcileIntent(null); reloadList(); }}
       />
@@ -885,24 +895,44 @@ const opButton = "inline-flex min-h-10 items-center justify-center rounded-md bo
 const opPrimary = "inline-flex min-h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-on-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50";
 const opInput = "min-h-10 w-full rounded-md border border-border bg-surface px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
-function PasswordField({ id, label, value, onChange }: {
-  id: string; label: string; value: string; onChange(value: string): void;
+function PasswordField({ id, label, value, disabled = false, onChange }: {
+  id: string; label: string; value: string; disabled?: boolean; onChange(value: string): void;
 }) {
   return (
     <label htmlFor={id} className="flex flex-col gap-1 text-sm font-medium">
       {label}
-      <input id={id} type="password" value={value} autoComplete="new-password"
-        onChange={(event) => onChange(event.target.value)} className={opInput} />
+      <input
+        id={id}
+        type="password"
+        value={value}
+        disabled={disabled}
+        autoComplete="new-password"
+        onChange={(event) => {
+          if (!disabled) onChange(event.target.value);
+        }}
+        className={`${opInput} disabled:cursor-not-allowed disabled:opacity-50`}
+      />
     </label>
   );
 }
+
+type AccountOperationPendingRequest = {
+  kind: "create" | "edit" | "reset";
+  accountRef?: string;
+  url: string;
+  idempotencyKey: string;
+  body: Record<string, unknown>;
+  uncertain: boolean;
+};
 
 function AccountOperationDialogs({
   operation,
   busy,
   onBusyChange,
+  onLockChange,
   trackRequest,
   isRequestActive,
+  onReloadRequested,
   onSessionLost,
   onClose,
   onApplied,
@@ -911,8 +941,10 @@ function AccountOperationDialogs({
   operation: "create" | { kind: "edit"; account: ExistingAccount } | { kind: "reset"; account: ExistingAccount } | null;
   busy: boolean;
   onBusyChange(v: boolean): void;
+  onLockChange?: (locked: boolean) => void;
   trackRequest(): AccountTrackedRequest;
   isRequestActive(epoch: number, controller?: AbortController): boolean;
+  onReloadRequested(): Promise<boolean>;
   onSessionLost(): void;
   onClose(): void;
   onApplied(): void;
@@ -922,22 +954,193 @@ function AccountOperationDialogs({
   const [snapshotAccount] = useState<ExistingAccount | null>(() =>
     operation !== null && operation !== "create" ? operation.account : null,
   );
+  const mountedRef = useRef(true);
+  const inFlightRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      inFlightRef.current = false;
+    };
+  }, []);
+
   const [loginId, setLoginId] = useState("");
   const [displayName, setDisplayName] = useState(snapshotAccount?.display_name ?? "");
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [reason, setReason] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [reloadNotice, setReloadNotice] = useState<string | null>(null);
+  const [reconciling, setReconciling] = useState(false);
   const [conflictLocked, setConflictLocked] = useState(false);
+  const [manualCheckLocked, setManualCheckLocked] = useState(false);
+  const [pendingRequest, setPendingRequest] = useState<AccountOperationPendingRequest | null>(null);
 
   const isCreate = operation === "create";
   const isEdit = operation !== null && operation !== "create" && operation.kind === "edit";
   const isReset = operation !== null && operation !== "create" && operation.kind === "reset";
   const accountRef = snapshotAccount?.account_ref ?? "";
 
-  async function submit() {
+  const isUncertainLocked = pendingRequest?.uncertain === true;
+  const isDialogLocked = busy || reconciling || isUncertainLocked;
+  const fieldsDisabled = isDialogLocked || conflictLocked || manualCheckLocked;
+
+  useEffect(() => {
+    onLockChange?.(isDialogLocked);
+    return () => {
+      onLockChange?.(false);
+    };
+  }, [isDialogLocked, onLockChange]);
+
+  const clearSensitiveAndPending = () => {
+    setPendingRequest(null);
+    setPassword("");
+    setPasswordConfirm("");
+  };
+
+  const resetAndClose = () => {
+    clearSensitiveAndPending();
+    setConflictLocked(false);
+    setManualCheckLocked(false);
     setFormError(null);
-    if (operation === null || conflictLocked) return;
+    setReloadNotice(null);
+    onClose();
+  };
+
+  async function executeRequest(req: AccountOperationPendingRequest) {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    onBusyChange(true);
+    setReloadNotice(null);
+    const tracked = trackRequest();
+    try {
+      let response: Response;
+      try {
+        response = await fetch(req.url, {
+          method: "POST",
+          cache: "no-store",
+          signal: tracked.controller.signal,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "Idempotency-Key": req.idempotencyKey,
+          },
+          body: JSON.stringify(req.body),
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
+        setPendingRequest({ ...req, uncertain: true });
+        const errMsg = "Không nhận được phản hồi. Biểu mẫu đã khóa; có thể thử lại đúng thao tác với cùng khóa idempotency hoặc tải lại đối chiếu.";
+        notify.error({ title: errMsg });
+        setFormError(errMsg);
+        return;
+      }
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
+      const rawJson: unknown = await response.json().catch(() => null);
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
+      const outcome = classifyAccountOperationResponse(
+        response.status,
+        rawJson,
+        req.kind === "create"
+          ? { operation: "create_account" }
+          : req.kind === "edit"
+            ? { operation: "edit_display_name", expectedAccountRef: req.accountRef ?? accountRef }
+            : { operation: "reset_password" },
+      );
+      if (outcome.kind === "denied") {
+        clearSensitiveAndPending();
+        onSessionLost();
+        return;
+      }
+      if (outcome.kind === "applied") {
+        clearSensitiveAndPending();
+        notify.success({ title: outcome.message });
+        onApplied();
+        return;
+      }
+      if (outcome.kind === "needs-reconcile") {
+        clearSensitiveAndPending();
+        if (req.kind === "create") {
+          notify.warning({ title: outcome.message });
+          onNeedsReconcile(outcome.intentId, outcome.state);
+        } else {
+          const msg = "Chưa xác định được kết quả thao tác. Không dùng đối soát tạo tài khoản và không gửi lại tự động; hãy tải lại dữ liệu để kiểm tra.";
+          setManualCheckLocked(true);
+          notify.warning({ title: msg });
+          setFormError(msg);
+        }
+        return;
+      }
+      if (outcome.kind === "conflict") {
+        clearSensitiveAndPending();
+        setConflictLocked(true);
+        notify.warning({ title: outcome.message });
+        setFormError(outcome.message);
+        return;
+      }
+      if (outcome.kind === "unavailable") {
+        if (outcome.manualCheckRequired || !outcome.preserveIdempotencyKey) {
+          clearSensitiveAndPending();
+          setManualCheckLocked(true);
+        } else {
+          setPendingRequest({ ...req, uncertain: true });
+        }
+        notify.error({ title: outcome.message });
+        setFormError(outcome.message);
+        return;
+      }
+      setPendingRequest(null);
+      notify.error({ title: outcome.message });
+      setFormError(outcome.message);
+    } finally {
+      inFlightRef.current = false;
+      tracked.release();
+      if (isRequestActive(tracked.epoch) && mountedRef.current) {
+        onBusyChange(false);
+      }
+    }
+  }
+
+  async function handleReload() {
+    if (busy || reconciling) return;
+    setReconciling(true);
+    setReloadNotice(null);
+    const tracked = trackRequest();
+    try {
+      const ok = await onReloadRequested();
+      if (!mountedRef.current || !isRequestActive(tracked.epoch, tracked.controller)) return;
+      if (isUncertainLocked) {
+        setReloadNotice(
+          ok
+            ? "Đã tải lại danh sách để đối chiếu. Yêu cầu và khóa idempotency vẫn được giữ nguyên; hãy bấm \"Thử gửi lại cùng yêu cầu\" để xác nhận kết quả."
+            : "Không thể tải dữ liệu đối chiếu lúc này. Yêu cầu và khóa idempotency vẫn được giữ nguyên.",
+        );
+        return;
+      }
+      if (!ok) {
+        setReloadNotice("Không thể tải dữ liệu mới nhất lúc này. Biểu mẫu vẫn đang khóa để tránh ghi đè.");
+        return;
+      }
+      resetAndClose();
+    } finally {
+      tracked.release();
+      if (mountedRef.current && isRequestActive(tracked.epoch)) {
+        setReconciling(false);
+      }
+    }
+  }
+
+  async function submit() {
+    if (operation === null || busy || inFlightRef.current || reconciling || conflictLocked || manualCheckLocked) return;
+    setReloadNotice(null);
+    if (pendingRequest?.uncertain) {
+      setFormError(null);
+      await executeRequest(pendingRequest);
+      return;
+    }
+
+    setFormError(null);
     const key = newAccountOperationKey();
     const request = isCreate
       ? buildCreateAccountRequest({ loginId, displayName, password, passwordConfirm, reason, idempotencyKey: key })
@@ -952,62 +1155,29 @@ function AccountOperationDialogs({
         ? `/api/admin/access/accounts/${encodeURIComponent(accountRef)}/display-name`
         : `/api/admin/access/accounts/${encodeURIComponent(accountRef)}/reset-password`;
 
-    onBusyChange(true);
-    const tracked = trackRequest();
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        cache: "no-store",
-        signal: tracked.controller.signal,
-        headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": key },
-        body: JSON.stringify(request.body),
-      });
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
-      const outcome = classifyAccountOperationResponse(response.status, await response.json().catch(() => null));
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
-      if (outcome.kind === "denied") {
-        onSessionLost();
-        return;
-      }
-      onBusyChange(false);
-      if (outcome.kind === "applied") {
-        notify.success({ title: outcome.message });
-        onApplied();
-      } else if (outcome.kind === "needs-reconcile") {
-        notify.warning({ title: outcome.message });
-        onNeedsReconcile(outcome.intentId, outcome.state);
-      } else if (outcome.kind === "conflict") {
-        setConflictLocked(true);
-        notify.warning({ title: outcome.message });
-        setFormError(outcome.message);
-      } else {
-        notify.error({ title: outcome.message });
-        setFormError(outcome.message);
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
-      onBusyChange(false);
-      const errMsg = "Không nhận được phản hồi. Có thể thử lại đúng thao tác với cùng khóa idempotency.";
-      notify.error({ title: errMsg });
-      setFormError(errMsg);
-    } finally {
-      tracked.release();
-      if (isRequestActive(tracked.epoch)) {
-        onBusyChange(false);
-      }
-    }
+    const nextRequest: AccountOperationPendingRequest = {
+      kind: isCreate ? "create" : isEdit ? "edit" : "reset",
+      accountRef: isCreate ? undefined : accountRef,
+      url,
+      idempotencyKey: key,
+      body: request.body,
+      uncertain: false,
+    };
+    setPendingRequest(nextRequest);
+    await executeRequest(nextRequest);
   }
 
-  const fieldsDisabled = busy || conflictLocked;
+  const submitDisabled =
+    busy || reconciling || conflictLocked || manualCheckLocked;
+  const needsReloadAction = isUncertainLocked || conflictLocked || manualCheckLocked;
 
   return (
-    <Dialog.Root open={operation !== null} onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
+    <Dialog.Root open={operation !== null} onOpenChange={(open) => { if (!open && !isDialogLocked) resetAndClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
         <Dialog.Content
-          onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          onEscapeKeyDown={(event) => { if (isDialogLocked) event.preventDefault(); }}
+          onPointerDownOutside={(event) => { if (isDialogLocked) event.preventDefault(); }}
           className="fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[min(38rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-surface p-5 shadow-xl focus:outline-none sm:p-6"
           aria-describedby="account-op-dialog-description">
           <div className="flex items-start justify-between gap-4">
@@ -1022,7 +1192,7 @@ function AccountOperationDialogs({
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
-              <button type="button" aria-label="Đóng hộp thoại" disabled={busy} className={opButton}>×</button>
+              <button type="button" aria-label="Đóng hộp thoại" disabled={isDialogLocked} className={opButton}>×</button>
             </Dialog.Close>
           </div>
 
@@ -1030,26 +1200,126 @@ function AccountOperationDialogs({
             {isCreate ? (
               <label className="flex flex-col gap-1 text-sm font-medium">
                 Mã đăng nhập
-                <input value={loginId} maxLength={64} disabled={fieldsDisabled} onChange={(event) => setLoginId(event.target.value)} className={opInput} />
+                <input
+                  value={loginId}
+                  maxLength={64}
+                  disabled={fieldsDisabled}
+                  onChange={(event) => {
+                    if (fieldsDisabled) return;
+                    setPendingRequest(null);
+                    setLoginId(event.target.value);
+                  }}
+                  className={`${opInput} disabled:cursor-not-allowed disabled:opacity-50`}
+                />
               </label>
             ) : null}
             {!isReset ? (
               <label className="flex flex-col gap-1 text-sm font-medium">
                 Tên hiển thị
-                <input value={displayName} maxLength={256} disabled={fieldsDisabled} onChange={(event) => setDisplayName(event.target.value)} className={opInput} />
+                <input
+                  value={displayName}
+                  maxLength={256}
+                  disabled={fieldsDisabled}
+                  onChange={(event) => {
+                    if (fieldsDisabled) return;
+                    setPendingRequest(null);
+                    setDisplayName(event.target.value);
+                  }}
+                  className={`${opInput} disabled:cursor-not-allowed disabled:opacity-50`}
+                />
               </label>
             ) : null}
             {!isEdit ? (
               <>
-                <PasswordField id="account-op-password" label="Mật khẩu" value={password} onChange={setPassword} />
-                <PasswordField id="account-op-password-confirm" label="Nhập lại mật khẩu" value={passwordConfirm} onChange={setPasswordConfirm} />
+                <PasswordField
+                  id="account-op-password"
+                  label="Mật khẩu"
+                  value={password}
+                  disabled={fieldsDisabled}
+                  onChange={(value) => {
+                    setPendingRequest(null);
+                    setPassword(value);
+                  }}
+                />
+                <PasswordField
+                  id="account-op-password-confirm"
+                  label="Nhập lại mật khẩu"
+                  value={passwordConfirm}
+                  disabled={fieldsDisabled}
+                  onChange={(value) => {
+                    setPendingRequest(null);
+                    setPasswordConfirm(value);
+                  }}
+                />
               </>
             ) : null}
-            <ReasonField value={reason} disabled={fieldsDisabled} onChange={(value) => { setReason(value); setFormError(null); }} />
+            <ReasonField
+              value={reason}
+              disabled={fieldsDisabled}
+              onChange={(value) => {
+                if (fieldsDisabled) return;
+                setPendingRequest(null);
+                setReason(value);
+                setFormError(null);
+              }}
+            />
             {formError ? <p role="alert" className="text-sm text-red-700">{formError}</p> : null}
-            <button type="submit" disabled={fieldsDisabled} className={opPrimary}>
-              {busy ? "Đang xử lý…" : isCreate ? "Tạo tài khoản" : isReset ? "Đặt lại mật khẩu" : "Lưu tên hiển thị"}
-            </button>
+            {needsReloadAction ? (
+              <Alert
+                tone="warning"
+                title={
+                  isUncertainLocked
+                    ? "Thao tác chưa rõ kết quả"
+                    : manualCheckLocked
+                      ? "Cần kiểm tra thủ công trước khi thao tác tiếp"
+                      : "Cần tải lại dữ liệu mới nhất"
+                }
+              >
+                <p>
+                  {isUncertainLocked
+                    ? "Nội dung và khóa idempotency được giữ nguyên trong bộ nhớ để tránh gửi trùng."
+                    : manualCheckLocked
+                      ? "Không gửi lại tự động yêu cầu đặt lại mật khẩu này. Hãy kiểm tra trạng thái tài khoản trước."
+                      : "Biểu mẫu đang khóa để tránh ghi đè dữ liệu đã thay đổi."}
+                </p>
+                {reloadNotice ? <p role="status" className="mt-1">{reloadNotice}</p> : null}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || reconciling}
+                    onClick={() => void handleReload()}
+                    className={opButton}
+                  >
+                    {reconciling
+                      ? "Đang tải đối chiếu…"
+                      : isUncertainLocked
+                        ? "Tải lại đối chiếu"
+                        : "Tải lại dữ liệu mới nhất"}
+                  </button>
+                </div>
+              </Alert>
+            ) : null}
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                disabled={isDialogLocked}
+                onClick={() => { if (!isDialogLocked) resetAndClose(); }}
+                className={opButton}
+              >
+                Hủy
+              </button>
+              <button type="submit" disabled={submitDisabled} className={opPrimary}>
+                {busy
+                  ? "Đang xử lý…"
+                  : isUncertainLocked
+                    ? "Thử gửi lại cùng yêu cầu"
+                    : isCreate
+                      ? "Tạo tài khoản"
+                      : isReset
+                        ? "Đặt lại mật khẩu"
+                        : "Lưu tên hiển thị"}
+              </button>
+            </div>
           </form>
         </Dialog.Content>
       </Dialog.Portal>
@@ -1064,6 +1334,7 @@ function AccountReconcileSurface({
   trackRequest,
   isRequestActive,
   onSessionLost,
+  onStateChange,
   onClose,
   onDone,
 }: {
@@ -1073,17 +1344,34 @@ function AccountReconcileSurface({
   trackRequest(): AccountTrackedRequest;
   isRequestActive(epoch: number, controller?: AbortController): boolean;
   onSessionLost(): void;
+  onStateChange?(state: string): void;
   onClose(): void;
   onDone(): void;
 }) {
   const notify = useNotify();
+  const mountedRef = useRef(true);
+  const inFlightRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      inFlightRef.current = false;
+    };
+  }, []);
+  const pendingKeyRef = useRef<{ intentId: string; key: string } | null>(null);
+
   if (intent === null) return null;
   const intentId = intent.intentId;
 
   async function reconcile() {
-    const key = newAccountOperationKey();
+    if (busy || inFlightRef.current) return;
+    const key = pendingKeyRef.current?.intentId === intentId
+      ? pendingKeyRef.current.key
+      : newAccountOperationKey();
     const request = buildReconcileRequest(key);
     if (!request.ok) { notify.error({ title: request.message }); return; }
+    pendingKeyRef.current = { intentId, key };
+    inFlightRef.current = true;
     onBusyChange(true);
     const tracked = trackRequest();
     try {
@@ -1094,36 +1382,51 @@ function AccountReconcileSurface({
         headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": key },
         body: JSON.stringify(request.body),
       });
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
-      const outcome = classifyAccountOperationResponse(response.status, await response.json().catch(() => null));
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
+      const outcome = classifyAccountOperationResponse(
+        response.status,
+        await response.json().catch(() => null),
+        { operation: "reconcile_create_account", expectedIntentId: intentId },
+      );
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       if (outcome.kind === "denied") {
+        pendingKeyRef.current = null;
         onSessionLost();
         return;
       }
-      onBusyChange(false);
       if (outcome.kind === "applied") {
+        pendingKeyRef.current = null;
         notify.success({ title: outcome.message });
         onDone();
-      } else if (outcome.kind === "needs-reconcile" || outcome.kind === "conflict") {
+      } else if (outcome.kind === "needs-reconcile") {
+        pendingKeyRef.current = null;
+        onStateChange?.(outcome.state);
         notify.warning({ title: outcome.message });
+      } else if (outcome.kind === "conflict") {
+        pendingKeyRef.current = null;
+        notify.warning({ title: outcome.message });
+      } else if (outcome.kind === "unavailable" && outcome.preserveIdempotencyKey) {
+        notify.error({ title: outcome.message });
       } else {
+        pendingKeyRef.current = null;
         notify.error({ title: outcome.message });
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
-      onBusyChange(false);
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       notify.error({ title: "Dịch vụ hiện không khả dụng." });
     } finally {
+      inFlightRef.current = false;
       tracked.release();
-      if (isRequestActive(tracked.epoch)) {
+      if (isRequestActive(tracked.epoch) && mountedRef.current) {
         onBusyChange(false);
       }
     }
   }
 
   async function reclassify() {
+    if (busy || inFlightRef.current) return;
+    inFlightRef.current = true;
     onBusyChange(true);
     const tracked = trackRequest();
     try {
@@ -1134,13 +1437,14 @@ function AccountReconcileSurface({
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: "{}",
       });
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       if (response.status === 401 || response.status === 403) {
+        pendingKeyRef.current = null;
         onSessionLost();
         return;
       }
       const bodyJson = await response.json().catch(() => null);
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       onBusyChange(false);
       if (response.ok && bodyJson && typeof bodyJson.reclassified === "object") {
         notify.success({
@@ -1154,12 +1458,13 @@ function AccountReconcileSurface({
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
-      if (!isRequestActive(tracked.epoch, tracked.controller)) return;
+      if (!isRequestActive(tracked.epoch, tracked.controller) || !mountedRef.current) return;
       onBusyChange(false);
       notify.error({ title: "Dịch vụ hiện không khả dụng." });
     } finally {
+      inFlightRef.current = false;
       tracked.release();
-      if (isRequestActive(tracked.epoch)) {
+      if (isRequestActive(tracked.epoch) && mountedRef.current) {
         onBusyChange(false);
       }
     }
