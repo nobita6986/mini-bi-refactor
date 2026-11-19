@@ -179,13 +179,21 @@ export type AccountOperationUiOutcome =
   | { kind: "denied"; message: string }
   | { kind: "conflict"; message: string }
   | { kind: "invalid"; message: string }
-  | { kind: "unavailable"; message: string };
+  | {
+      kind: "unavailable";
+      message: string;
+      preserveIdempotencyKey: boolean;
+      manualCheckRequired?: boolean;
+    };
 
 export function accountOperationStateMessage(state: string): string {
   if (state === "BLOCKED") return "Auth user tồn tại nhưng không khớp provenance — cần T0/Admin xử lý thủ công.";
   if (state === "INDETERMINATE") return "Không xác định được kết quả Auth. Không tự thử lại; dùng Đối soát hoặc phát hành thao tác mới.";
+  if (state === "IN_FLIGHT") return "Yêu cầu tạo tài khoản đang được xử lý. Không tự thử lại Auth; dùng Đối soát để kiểm tra kết quả.";
+  if (state === "PENDING") return "Yêu cầu tạo tài khoản đang chờ xử lý. Không tạo yêu cầu mới; dùng Đối soát để kiểm tra kết quả.";
   if (state === "CONFLICT") return "Trùng mã đăng nhập hoặc xung đột. Hãy kiểm tra lại.";
   if (state === "FAILED") return "Thao tác Auth đã thất bại.";
+  if (state === "EXPIRED") return "Yêu cầu tạo tài khoản đã hết hạn.";
   return "Trạng thái: " + state + ".";
 }
 
@@ -193,17 +201,44 @@ export function classifyAccountOperationResponse(
   status: number,
   payload: unknown,
 ): AccountOperationUiOutcome {
-  const record = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : null;
-  if (status === 200 && record && record.ok === true) {
-    const intent = record.intent as Record<string, unknown> | undefined;
-    if (intent && typeof intent.state === "string" && intent.state !== "APPLIED") {
-      const state = intent.state as "BLOCKED" | "INDETERMINATE" | "CONFLICT" | "FAILED";
+  const record = typeof payload === "object" && payload !== null && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : null;
+  if (status === 200) {
+    if (!record || record.ok !== true) {
       return {
-        kind: "needs-reconcile",
-        intentId: typeof intent.intent_id === "string" ? intent.intent_id : "",
-        state,
-        message: accountOperationStateMessage(state),
+        kind: "unavailable",
+        preserveIdempotencyKey: true,
+        message: "Phản hồi không hợp lệ. Giữ nguyên khóa để thử lại đúng yêu cầu hoặc tải lại đối chiếu.",
       };
+    }
+    if ("intent" in record && record.intent !== undefined) {
+      const intent = typeof record.intent === "object" && record.intent !== null && !Array.isArray(record.intent)
+        ? record.intent as Record<string, unknown>
+        : null;
+      if (!intent || typeof intent.state !== "string") {
+        return {
+          kind: "unavailable",
+          preserveIdempotencyKey: true,
+          message: "Phản hồi trạng thái thao tác không hợp lệ. Giữ nguyên khóa để thử lại hoặc đối chiếu.",
+        };
+      }
+      if (intent.state !== "APPLIED") {
+        const intentId = typeof intent.intent_id === "string" ? intent.intent_id : "";
+        if (validateUuid(intentId) !== null) {
+          return {
+            kind: "unavailable",
+            preserveIdempotencyKey: true,
+            message: "Phản hồi thiếu mã đối soát hợp lệ. Giữ nguyên khóa để thử lại hoặc đối chiếu.",
+          };
+        }
+        return {
+          kind: "needs-reconcile",
+          intentId,
+          state: intent.state,
+          message: accountOperationStateMessage(intent.state),
+        };
+      }
     }
     return { kind: "applied", message: "Đã lưu thao tác." };
   }
@@ -211,14 +246,25 @@ export function classifyAccountOperationResponse(
   if (status === 403) return { kind: "denied", message: "Bạn không có quyền thực hiện thao tác này." };
   if (status === 409) return { kind: "conflict", message: "Có xung đột hoặc thao tác đang được xử lý." };
   if (status === 400 || status === 422) return { kind: "invalid", message: "Thông tin gửi lên không hợp lệ." };
+  if (status === 404) return { kind: "invalid", message: "Không tìm thấy tài khoản hoặc chức năng chưa được bật." };
   if (status === 500 && record?.code === "ACCOUNT_OPERATION_AUTH_APPLIED_UNRECORDED") {
-    return { kind: "unavailable", message: "Supabase Auth đã xác nhận đổi mật khẩu nhưng ứng dụng chưa ghi nhận kết quả. Không gửi lại yêu cầu này; hãy thử đăng nhập bằng mật khẩu mới trước." };
+    return {
+      kind: "unavailable",
+      preserveIdempotencyKey: false,
+      manualCheckRequired: true,
+      message: "Supabase Auth đã xác nhận đổi mật khẩu nhưng ứng dụng chưa ghi nhận kết quả. Không gửi lại yêu cầu này; hãy thử đăng nhập bằng mật khẩu mới trước.",
+    };
   }
   if (status === 500 && (record?.code === "ACCOUNT_OPERATION_INDETERMINATE" ||
       record?.code === "ACCOUNT_OPERATION_RESULT_UNRECORDED")) {
-    return { kind: "unavailable", message: "Chưa xác định được kết quả đổi mật khẩu. Không gửi lại ngay; Admin cần kiểm tra trạng thái yêu cầu trước khi tạo yêu cầu mới." };
+    return {
+      kind: "unavailable",
+      preserveIdempotencyKey: false,
+      manualCheckRequired: true,
+      message: "Chưa xác định được kết quả đổi mật khẩu. Không gửi lại ngay; Admin cần kiểm tra trạng thái yêu cầu trước khi tạo yêu cầu mới.",
+    };
   }
-  return { kind: "unavailable", message: "Dịch vụ hiện không khả dụng." };
+  return { kind: "unavailable", preserveIdempotencyKey: true, message: "Dịch vụ hiện không khả dụng." };
 }
 
 export function newAccountOperationKey(): string {

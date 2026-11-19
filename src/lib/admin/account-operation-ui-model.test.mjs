@@ -113,11 +113,64 @@ test("reset errors distinguish confirmed Auth success from unknown outcome witho
   for (const code of ["ACCOUNT_OPERATION_INDETERMINATE", "ACCOUNT_OPERATION_RESULT_UNRECORDED"]) {
     const unknown = classifyAccountOperationResponse(500, { ok: false, code });
     assert.equal(unknown.kind, "unavailable");
+    assert.equal(unknown.preserveIdempotencyKey, false);
+    assert.equal(unknown.manualCheckRequired, true);
     assert.match(unknown.message, /Chưa xác định được kết quả/);
     assert.match(unknown.message, /Không gửi lại ngay/);
     assert.match(unknown.message, /Admin cần kiểm tra/);
     assert.doesNotMatch(unknown.message, /ACCOUNT_OPERATION_/);
   }
+});
+
+test("response classifier distinguishes retryable uncertain errors, IN_FLIGHT/APPLIED intents, malformed 200, and deterministic 4xx", () => {
+  // Replay APPLIED intent envelope or account envelope resolves applied
+  assert.equal(
+    classifyAccountOperationResponse(200, {
+      ok: true,
+      intent: { intent_id: KEY, kind: "CREATE_ACCOUNT", state: "APPLIED" },
+    }).kind,
+    "applied",
+  );
+  // IN_FLIGHT / PENDING replay intents route to reconcile (never re-trigger Auth)
+  const inFlight = classifyAccountOperationResponse(200, {
+    ok: true,
+    intent: { intent_id: KEY, kind: "CREATE_ACCOUNT", state: "IN_FLIGHT" },
+  });
+  assert.equal(inFlight.kind, "needs-reconcile");
+  if (inFlight.kind === "needs-reconcile") {
+    assert.equal(inFlight.intentId, KEY);
+    assert.equal(inFlight.state, "IN_FLIGHT");
+    assert.match(inFlight.message, /Đối soát/);
+  }
+  const pending = classifyAccountOperationResponse(200, {
+    ok: true,
+    intent: { intent_id: KEY, kind: "CREATE_ACCOUNT", state: "PENDING" },
+  });
+  assert.equal(pending.kind, "needs-reconcile");
+  // Malformed 200 (null, ok!==true, invalid/missing intent_id) stays uncertain & preserves key
+  for (const badPayload of [
+    null,
+    { ok: false },
+    { ok: true, intent: "bad" },
+    { ok: true, intent: { state: "INDETERMINATE" } },
+    { ok: true, intent: { intent_id: "not-a-uuid", state: "INDETERMINATE" } },
+  ]) {
+    const malformed = classifyAccountOperationResponse(200, badPayload);
+    assert.equal(malformed.kind, "unavailable");
+    if (malformed.kind === "unavailable") {
+      assert.equal(malformed.preserveIdempotencyKey, true);
+      assert.notEqual(malformed.manualCheckRequired, true);
+    }
+  }
+  // Generic 503 preserves idempotency key; 400/404 are deterministic invalid
+  const s503 = classifyAccountOperationResponse(503, { ok: false, code: "ACCOUNT_OPERATION_UNAVAILABLE" });
+  assert.equal(s503.kind, "unavailable");
+  if (s503.kind === "unavailable") {
+    assert.equal(s503.preserveIdempotencyKey, true);
+    assert.notEqual(s503.manualCheckRequired, true);
+  }
+  assert.equal(classifyAccountOperationResponse(400, { ok: false }).kind, "invalid");
+  assert.equal(classifyAccountOperationResponse(404, { ok: false }).kind, "invalid");
 });
 
 test("UI model builds and projects link-existing-personnel-account payloads strictly", () => {
