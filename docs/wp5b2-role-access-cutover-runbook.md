@@ -51,7 +51,7 @@ Verify from the generated report before proceeding:
 - `action_diff_summary.unexpected_diff_count === 0`
 - `canonical_owner.rejected_local_part_collision_count === 0` (unless an explicit expected collision exists and is verified non-ADMIN)
 - Review every `INTENTIONAL_POLICY_CHANGE` transition (`ADMIN` 21-cap unification, `luanpt` orphan `all` scope closure, `UNPAIRED_ALL_REPORTING_TIGHTENED`, `WORKER_EDIT_HISTORY_ALLOWLIST_TO_CAPABILITY`, `AI_SETTINGS_LOCKED_TO_FULL_ADMIN`).
-- Record and lock the 64-hex `manifest_fingerprint` string for Phase 5.
+- Record and lock a **fresh** 64-hex `manifest_fingerprint` string at deployment time for Phase 5 (never reuse an older day's fingerprint). Notice `manifest_fingerprint` covers account `enabled`, `account_type`, `version`, suspended D10 state, and assignment/delegation sources (`source_snapshot`). Any change to those rows between `--read-only-plan` and `--apply` invalidates the fingerprint (`CUTOVER_FINGERPRINT_MISMATCH`).
 
 If `unexpected_diff_count > 0`, **STOP** immediately and resolve the unexpected capability/scope drift before merging or migrating.
 
@@ -68,7 +68,7 @@ If `unexpected_diff_count > 0`, **STOP** immediately and resolve the unexpected 
 ## Phase 5 — Apply Migration `20261118160000` & Execute Guarded Cutover
 
 1. Apply database migration `supabase/migrations/20261118160000_wp5b2_role_access_cutover.sql` to the target environment and confirm the migration ledger increments cleanly (e.g. `220 -> 221`) with `$check_wp5b2$` passing.
-2. Execute the full-transaction dry-run (`BEGIN ... ROLLBACK`) to validate post-cutover SQL invariants without committing:
+2. Execute the full-transaction dry-run (`BEGIN ... ROLLBACK`) to validate lock acquisition, fingerprint match, and post-cutover SQL invariants without committing:
 
    ```bash
    node scripts/wp5-cutover-role-access.mjs \
@@ -78,7 +78,7 @@ If `unexpected_diff_count > 0`, **STOP** immediately and resolve the unexpected 
      --expected-fingerprint <LOCKED_64_HEX_FINGERPRINT>
    ```
 
-   Confirm `status === "DRY_RUN_VERIFIED"` and `postconditions` pass.
+   Confirm `status === "DRY_RUN_VERIFIED"` and `postconditions` pass. Inside both `--dry-run` and `--apply`, `runWp5Cutover` acquires `authz_system_state FOR UPDATE` (serializing concurrent `direct_entry_account_operation_finalize_create` calls via `FOR SHARE`) and `direct_entry_app_users ORDER BY app_user_id ASC FOR UPDATE` **before** calling `readCutoverInventory()`, building the manifest, or checking `--expected-fingerprint`. If `enabled`, `account_type`, `version`, or assignment/delegation sources changed concurrently after `--read-only-plan`, `--apply` aborts cleanly (`CUTOVER_FINGERPRINT_MISMATCH` / `CUTOVER_SOURCE_STATE_DRIFT`) with full `ROLLBACK` and without overwriting anything; regenerate and re-review a fresh `--read-only-plan` before retrying.
 
 3. Execute the single transactional cutover (`--apply`) with both explicit safety guards:
 
@@ -96,9 +96,10 @@ If `unexpected_diff_count > 0`, **STOP** immediately and resolve the unexpected 
    - `status === "APPLIED"`
    - `public.authz_system_state.cutover_ready = true`
    - `0` accounts with `direct_entry_app_users.authz_managed = false`
+   - Pre-commit postconditions verified zero drift on per-account `enabled`, `account_type`, `version`, open `global_roles`, effective grants, and non-grant contextual/delegation digest (`computeNonGrantInventoryDigest`).
    - Strictly `1` open protected assignment (`role_code = 'ADMIN'`, `is_protected = true`, `protected_reason = 'PROTECTED_OWNER_ADMIN'`) on canonical Owner
-   - Disabled pre-WP5 accounts have `authz_managed = true`, `0` open roles, and `0` effective grants
-   - Re-running `--apply` returns `ALREADY_APPLIED_NOOP` idempotently.
+   - Accounts D10-suspended via WP5B-1 (`suspended_by_account_disable = true`) retain their dormant roles in `authz_account_role_assignments` (`0` effective grants while disabled; restored automatically upon `direct_entry_enable_app_user`), whereas historical pre-WP5 disabled accounts have `authz_managed = true`, `0` open roles, `0` effective grants, and never resurrect.
+   - Re-running `--apply` returns `ALREADY_APPLIED_NOOP` idempotently (including after creating standalone accounts or linking personnel post-cutover).
 
 ---
 
@@ -110,6 +111,7 @@ If `unexpected_diff_count > 0`, **STOP** immediately and resolve the unexpected 
    - **Initial `ADMIN` (`BoD/Admin`) accounts:** All `4` initial admins share the `21`-capability bundle (`worker_edit_history_*`, missing documents `@ ALL`, reporting `@ ALL`, `/api/ai/settings/**`, TL management); `recruitment_post_create` remains PM-only (`42501` if non-PM).
    - **`HR_OPERATOR`:** Can view `/admin/catalog/teams` and call Team Leader designate/revoke (`team_master_manage @ ALL`), denied `/api/ai/settings/**` (`403 AI_FORBIDDEN`) and `entry_admin`.
    - **`RECRUITER` / `EMPLOYEE_BASE`-only:** Accounts without `entry_admin` or `report_analytics_view @ ALL` resolve strictly to their `own` / `team` audience; accounts with zero recruiter links resolve to safe empty `own`.
+   - **Post-cutover account creation & reconcile (`CREATE_ACCOUNT` -> `direct_entry_account_operation_finalize_create`):** Newly finalized accounts enter the new model immediately (`authz_managed = true`, open `EMPLOYEE_BASE` role, `0` entry grants until `create_personnel` / `link_recruiter`), and subsequent `--apply` / verification re-runs remain `ALREADY_APPLIED_NOOP`.
    - **Work Reports `R3` Delegation:** Template-scoped delegates (`haidx.td` on approved template `T1`) retain review access on `T1`, are denied on unrelated `T2`, and have `0` blanket `report_review`/`report_assign` rows in `effective_grants` or `direct_entry_capability_grants`.
    - **AI Settings (`OD-WP5-04`):** `PILOT_ACTOR_REF` is absent; non-Full-Admin / non-UUID callers fail closed with `403 AI_FORBIDDEN`; Full Admin writes store the caller's UUID `app_user_id`.
 

@@ -301,8 +301,198 @@ revoke all on function public.direct_entry_authz__internal_resolve_effective_gra
   from public, anon, authenticated, service_role;
 
 -- -----------------------------------------------------------------------------
--- 2. Post-cutover authz_managed propagation in create_personnel & link_recruiter
+-- 2. Post-cutover authz_managed propagation in finalize_create, create_personnel & link_recruiter
 -- -----------------------------------------------------------------------------
+create or replace function public.direct_entry_account_operation_finalize_create(
+  p_auth_subject uuid,
+  p_actor_app_user_id uuid,
+  p_intent_id uuid,
+  p_intent_token uuid,
+  p_created_auth_subject uuid,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_action text := 'account_created';
+  v_intent public.direct_entry_account_operation_intents;
+  v_payload_hash text;
+  v_prior jsonb;
+  v_reason_id uuid;
+  v_reason_text text;
+  v_auto_reason text;
+  v_app_user public.direct_entry_app_users;
+  v_revision_id uuid;
+  v_assignment_id uuid;
+  v_cutover_ready boolean := false;
+  v_now timestamptz;
+begin
+  if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+  if p_created_auth_subject is null or p_intent_id is null or p_intent_token is null then
+    raise exception 'intent, token and auth subject required' using errcode = '22023';
+  end if;
+
+  perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_actor_app_user_id);
+
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'intent_id', p_intent_id, 'intent_token', p_intent_token,
+    'auth_subject', p_created_auth_subject
+  ));
+  v_prior := public.direct_entry_idempotency_begin(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  v_intent := public.direct_entry_lock_account_operation(p_intent_id);
+  if v_intent.kind <> 'CREATE_ACCOUNT' then
+    raise exception 'account operation kind mismatch' using errcode = '22023';
+  end if;
+
+  -- Terminal first: APPLIED/FAILED/EXPIRED/BLOCKED/CONFLICT are immutable.
+  if v_intent.state in ('APPLIED', 'FAILED', 'EXPIRED', 'BLOCKED', 'CONFLICT') then
+    v_prior := jsonb_build_object(
+      'intent_id', v_intent.intent_id,
+      'intent_state', v_intent.state,
+      'account_ref', v_intent.account_ref
+    );
+    perform public.direct_entry_idempotency_finish(
+      p_actor_app_user_id, v_action, p_idempotency_key, v_prior
+    );
+    return v_prior;
+  end if;
+  if v_intent.state not in ('IN_FLIGHT', 'INDETERMINATE') then
+    raise exception 'account operation is not claimable' using errcode = '22023';
+  end if;
+
+  if v_intent.intent_token <> p_intent_token then
+    update public.direct_entry_account_operation_intents
+       set state = 'BLOCKED', resolved_at = now(), updated_at = now()
+     where intent_id = p_intent_id;
+    insert into public.direct_entry_audit_events (
+      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, denial_code, reason_id
+    ) values (
+      p_auth_subject, p_actor_app_user_id, 'account_operation_finish', 'entry_admin',
+      p_intent_id::text, 'all', 'REJECTED', 'provenance_mismatch', v_intent.reason_id
+    );
+    v_prior := jsonb_build_object(
+      'intent_id', p_intent_id, 'intent_state', 'BLOCKED', 'account_ref', null
+    );
+    perform public.direct_entry_idempotency_finish(
+      p_actor_app_user_id, v_action, p_idempotency_key, v_prior
+    );
+    return v_prior;
+  end if;
+
+  -- Serialize with active cutover so pre/post-cutover account creation matches system state.
+  select coalesce(s.cutover_ready, false)
+    into v_cutover_ready
+    from public.authz_system_state s
+   where s.singleton_id = true
+   for share;
+  v_cutover_ready := coalesce(v_cutover_ready, false);
+
+  v_now := pg_catalog.clock_timestamp();
+  v_reason_id := v_intent.reason_id;
+  insert into public.direct_entry_app_users (auth_subject, enabled, display_name, authz_managed)
+  values (p_created_auth_subject, true, v_intent.display_name, v_cutover_ready)
+  returning * into v_app_user;
+  -- Retired PII/payment capabilities are not provisioned for new accounts.
+
+  if v_cutover_ready then
+    if v_reason_id is not null then
+      select r.reason_text
+        into v_reason_text
+        from public.direct_entry_restricted_reasons r
+       where r.reason_id = v_reason_id;
+    end if;
+
+    v_auto_reason := pg_catalog.btrim(
+      pg_catalog.left(
+        coalesce(nullif(pg_catalog.btrim(v_reason_text), ''), 'Auto-granted EMPLOYEE_BASE upon account creation'),
+        500
+      )
+    );
+    if v_auto_reason is null or pg_catalog.length(v_auto_reason) < 3 then
+      v_auto_reason := 'Auto-granted EMPLOYEE_BASE upon account creation';
+    end if;
+
+    insert into public.authz_account_role_assignments (
+      app_user_id, role_code, scope_kind, scope_ref, source_kind, reason, started_at, assigned_by_app_user_id
+    ) values (
+      v_app_user.app_user_id, 'EMPLOYEE_BASE', 'GLOBAL', null, 'ADMIN_ASSIGNMENT', v_auto_reason, v_now, p_actor_app_user_id
+    )
+    on conflict do nothing
+    returning assignment_id into v_assignment_id;
+
+    if v_assignment_id is not null then
+      insert into public.authz_audit_events (
+        actor_auth_subject, actor_app_user_id, target_app_user_id,
+        operation_name, assignment_id, after_payload, reason, created_at
+      ) values (
+        p_auth_subject, p_actor_app_user_id, v_app_user.app_user_id,
+        'AUTHZ_ACCOUNT_CREATE_BASE_ROLE', v_assignment_id,
+        pg_catalog.jsonb_build_object(
+          'role_code', 'EMPLOYEE_BASE',
+          'source_kind', 'ADMIN_ASSIGNMENT',
+          'authz_managed', true
+        ),
+        v_auto_reason, v_now
+      );
+    end if;
+
+    perform public.direct_entry_authz__internal_sync_legacy_grants(v_app_user.app_user_id);
+  end if;
+
+  insert into public.direct_entry_app_user_revisions (
+    app_user_id, version, actor_user_id, action, before_snapshot, after_snapshot, reason_id
+  ) values (
+    v_app_user.app_user_id, v_app_user.version, p_actor_app_user_id, v_action,
+    null, jsonb_build_object('display_name', v_app_user.display_name, 'enabled', true), v_reason_id
+  ) returning revision_id into v_revision_id;
+
+  insert into public.direct_entry_audit_events (
+    auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id,
+    changed_fields, app_user_revision_id
+  ) values (
+    p_auth_subject, p_actor_app_user_id, v_action, 'entry_admin',
+    v_app_user.app_user_id::text, 'all', 'APPLIED', v_reason_id,
+    array['auth_subject', 'enabled', 'display_name'], v_revision_id
+  );
+
+  update public.direct_entry_account_operation_intents
+     set state = 'APPLIED', resolved_at = now(), updated_at = now(),
+         auth_subject = p_created_auth_subject,
+         account_ref = v_app_user.app_user_id
+   where intent_id = p_intent_id;
+
+  v_prior := jsonb_build_object(
+    'app_user_id', v_app_user.app_user_id,
+    'auth_subject', v_app_user.auth_subject,
+    'display_name', v_app_user.display_name,
+    'version', v_app_user.version,
+    'revision_id', v_revision_id,
+    'intent_id', p_intent_id,
+    'intent_state', 'APPLIED'
+  );
+  perform public.direct_entry_idempotency_finish(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_prior
+  );
+  return v_prior;
+end;
+$function$;
+
+revoke all on function public.direct_entry_account_operation_finalize_create(uuid, uuid, uuid, uuid, uuid, text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.direct_entry_account_operation_finalize_create(uuid, uuid, uuid, uuid, uuid, text)
+  to service_role;
+
 create or replace function public.direct_entry_account_operation_create_personnel(
   p_auth_subject uuid,
   p_actor_app_user_id uuid,
@@ -3519,6 +3709,7 @@ grant execute on function public.ai_provider_config_rejected(text, integer, text
 do $align_wp5b2$
 declare
   v_service_rpcs text[] := array[
+    'public.direct_entry_account_operation_finalize_create(uuid, uuid, uuid, uuid, uuid, text)',
     'public.direct_entry_account_operation_create_personnel(uuid, uuid, uuid, integer, text, text, date, text, text)',
     'public.direct_entry_account_operation_link_recruiter(uuid, uuid, uuid, integer, uuid, integer, text, text)',
     'public.direct_entry_list_missing_document_workers(uuid, uuid, text, text, text, text, integer, integer)',
@@ -3582,6 +3773,7 @@ $align_wp5b2$;
 do $check_wp5b2$
 declare
   v_service_rpcs text[] := array[
+    'public.direct_entry_account_operation_finalize_create(uuid, uuid, uuid, uuid, uuid, text)',
     'public.direct_entry_account_operation_create_personnel(uuid, uuid, uuid, integer, text, text, date, text, text)',
     'public.direct_entry_account_operation_link_recruiter(uuid, uuid, uuid, integer, uuid, integer, text, text)',
     'public.direct_entry_list_missing_document_workers(uuid, uuid, text, text, text, text, integer, integer)',

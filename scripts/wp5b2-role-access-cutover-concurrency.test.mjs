@@ -111,6 +111,26 @@ const TL_R1_C_ITERS = [1, 2, 3].map((iter) => ({
   email: `tl.r1c${iter}.old@hrpartner.vn`,
   name: `TL R1C${iter} Old`,
 }));
+const RACE_D10_REC = {
+  auth: "19600000-0000-4000-8000-000000000041",
+  app: "29600000-0000-4000-8000-000000000041",
+  recruiter: "39600000-0000-4000-8000-000000000041",
+  email: "race.d10.rec@hrpartner.vn",
+  name: "Race D10 Recruiter",
+};
+const RACE_TL_CAND = {
+  auth: "19600000-0000-4000-8000-000000000042",
+  app: "29600000-0000-4000-8000-000000000042",
+  recruiter: "39600000-0000-4000-8000-000000000042",
+  email: "race.tl.cand@hrpartner.vn",
+  name: "Race TL Candidate",
+};
+const ZZZ_LOCK_ANCHOR = {
+  auth: "19600000-0000-4000-8000-0000000000ff",
+  app: "ffffffff-0000-4000-8000-0000000000ff",
+  email: "zzz.lock.anchor@hrpartner.vn",
+  name: "ZZZ Lock Anchor",
+};
 
 const ALL_USERS = [
   OWNER,
@@ -125,6 +145,9 @@ const ALL_USERS = [
   TL_R1_A_NEW,
   TL_R1_B_OLD,
   ...TL_R1_C_ITERS,
+  RACE_D10_REC,
+  RACE_TL_CAND,
+  ZZZ_LOCK_ANCHOR,
 ];
 
 let keySeq = 1;
@@ -226,6 +249,12 @@ const REVOKE_TL_SQL =
   "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, null::date, $4::int, $5, $6) as data";
 const AI_SAVE_SQL =
   "select public.ai_provider_config_save($1, $2::int, $3, $4, $5, $6, $7::jsonb, $8, $9, $10) as data";
+const BEGIN_OP_SQL =
+  "select public.direct_entry_account_operation_begin($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7, $8) as data";
+const CLAIM_OP_SQL =
+  "select public.direct_entry_account_operation_claim($1::uuid, $2::uuid, $3::uuid, $4::uuid) as data";
+const FINALIZE_CREATE_SQL =
+  "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as data";
 
 function buildAiEnvelope(configId, version, profile, url, model) {
   return {
@@ -264,6 +293,8 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
   let blocker;
   let worker1;
   let worker2;
+  let worker3;
+  let worker4;
 
   try {
     run(initdb, [
@@ -377,17 +408,213 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
     blocker = await connect(port, databaseName, "wp5b2-blocker");
     worker1 = await connect(port, databaseName, "wp5b2-w1");
     worker2 = await connect(port, databaseName, "wp5b2-w2");
+    worker3 = await connect(port, databaseName, "wp5b2-w3");
+    worker4 = await connect(port, databaseName, "wp5b2-w4");
+
+    const asSettled = (promise) =>
+      promise.then(
+        (value) => ({ status: "fulfilled", value }),
+        (reason) => ({ status: "rejected", reason }),
+      );
 
     // -------------------------------------------------------------------------
-    // Race 1: Concurrent runWp5Cutover(..., { mode: "apply" }) behind barrier
+    // Pre-cutover R1a/R1b: Drift BEFORE direct_entry_app_users lock must abort
+    // cleanly with CUTOVER_FINGERPRINT_MISMATCH and NEVER clobber restored grants
     // -------------------------------------------------------------------------
+    const TEAM_PRE_RACE = "59600000-0000-4000-8000-000000000009";
+    await observer.query(
+      `insert into public.teams (team_id, code, display_name, active, version)
+       values ($1::uuid, 'WP5B2_PRE_RACE', 'Pre-Cutover Drift Team', true, 1)`,
+      [TEAM_PRE_RACE],
+    );
+    await observer.query(
+      `insert into public.recruiter_team_memberships (recruiter_id, team_id, valid_from, is_current)
+       values ($1::uuid, $2::uuid, '2020-01-01', true)`,
+      [RACE_TL_CAND.recruiter, TEAM_PRE_RACE],
+    );
+
+    // Suspend RACE_D10_REC cleanly via WP5B-1 D10 disable before generating plan
+    await worker2.query("set role service_role");
+    await worker2.query(DISABLE_SQL, [
+      NGATTT.auth,
+      NGATTT.app,
+      RACE_D10_REC.app,
+      1,
+      "Pre-cutover D10 suspend for R1a",
+      `r1a-dis-${keySeq++}`,
+    ]);
+    await worker2.query("reset role");
+
+    // R1a: Stale read-only plan -> cutover starts -> pauses right before locking RACE_D10_REC ->
+    // 2nd connection commits enable_app_user (restoring 7 grants) -> cutover wakes up ->
+    // MUST abort with CUTOVER_FINGERPRINT_MISMATCH and preserve all 7 restored grants!
+    const stalePlanR1a = await runWp5Cutover(setup, { mode: "read-only-plan" });
+    assert.equal(stalePlanR1a.action_diff.unexpected_diff_count, 0);
+
+    await blocker.query("begin");
+    await blocker.query(
+      "select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update",
+      [OWNER.app],
+    );
+    const r1aCutPromise = asSettled(
+      runWp5Cutover(worker1, {
+        mode: "apply",
+        confirmApply: true,
+        expectedFingerprint: stalePlanR1a.manifest_fingerprint,
+      }),
+    );
+    await waitUntilBlocked(observer, "wp5b2-w1");
+
+    await worker2.query("set role service_role");
+    await worker2.query(ENABLE_SQL, [
+      NGATTT.auth,
+      NGATTT.app,
+      RACE_D10_REC.app,
+      2,
+      "R1a concurrent enable right before cutover app_user lock",
+      `r1a-en-${keySeq++}`,
+    ]);
+    await worker2.query("reset role");
+
+    const { rows: [restoredMidRace] } = await observer.query(
+      `select u.enabled,
+              pg_catalog.jsonb_array_length(public.direct_entry_authz__internal_resolve_effective_grants(u.app_user_id)) as grant_cnt
+         from public.direct_entry_app_users u
+        where u.app_user_id = $1::uuid`,
+      [RACE_D10_REC.app],
+    );
+    assert.deepEqual(restoredMidRace, { enabled: true, grant_cnt: 7 });
+
+    await blocker.query("rollback");
+    const r1aCutRes = await r1aCutPromise;
+    assert.equal(r1aCutRes.status, "rejected", "R1a cutover with stale fingerprint must abort");
+    assert.notEqual(r1aCutRes.reason?.code, "40P01");
+    assert.match(String(r1aCutRes.reason?.message), /CUTOVER_FINGERPRINT_MISMATCH/);
+
+    const { rows: [afterR1aUser] } = await observer.query(
+      `select u.enabled,
+              u.authz_managed,
+              pg_catalog.jsonb_array_length(public.direct_entry_authz__internal_resolve_effective_grants(u.app_user_id)) as grant_cnt,
+              (select cutover_ready from public.authz_system_state where singleton_id = true) as cutover_ready
+         from public.direct_entry_app_users u
+        where u.app_user_id = $1::uuid`,
+      [RACE_D10_REC.app],
+    );
+    assert.deepEqual(afterR1aUser, {
+      enabled: true,
+      authz_managed: false,
+      grant_cnt: 7,
+      cutover_ready: false,
+    });
+
+    // R1b-1 (Disable direction): read-only plan sees enabled=true -> 2nd connection commits disable ->
+    // cutover MUST abort with CUTOVER_FINGERPRINT_MISMATCH and keep D10 suspension intact.
+    const stalePlanR1bDisable = await runWp5Cutover(setup, { mode: "read-only-plan" });
+    await blocker.query("begin");
+    await blocker.query(
+      "select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update",
+      [OWNER.app],
+    );
+    const r1bDisableCut = asSettled(
+      runWp5Cutover(worker1, {
+        mode: "apply",
+        confirmApply: true,
+        expectedFingerprint: stalePlanR1bDisable.manifest_fingerprint,
+      }),
+    );
+    await waitUntilBlocked(observer, "wp5b2-w1");
+
+    await worker2.query("set role service_role");
+    await worker2.query(DISABLE_SQL, [
+      NGATTT.auth,
+      NGATTT.app,
+      RACE_D10_REC.app,
+      3,
+      "R1b concurrent disable right before cutover app_user lock",
+      `r1b-dis-${keySeq++}`,
+    ]);
+    await worker2.query("reset role");
+    await blocker.query("rollback");
+
+    const r1bDisableRes = await r1bDisableCut;
+    assert.equal(r1bDisableRes.status, "rejected");
+    assert.notEqual(r1bDisableRes.reason?.code, "40P01");
+    assert.match(String(r1bDisableRes.reason?.message), /CUTOVER_FINGERPRINT_MISMATCH/);
+
+    // R1b-2 (Assignment source direction): read-only plan -> 2nd connection designates TL ->
+    // cutover MUST abort with CUTOVER_FINGERPRINT_MISMATCH and rollback cleanly.
+    const stalePlanR1bTl = await runWp5Cutover(setup, { mode: "read-only-plan" });
+    await blocker.query("begin");
+    await blocker.query(
+      "select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update",
+      [OWNER.app],
+    );
+    const r1bTlCut = asSettled(
+      runWp5Cutover(worker1, {
+        mode: "apply",
+        confirmApply: true,
+        expectedFingerprint: stalePlanR1bTl.manifest_fingerprint,
+      }),
+    );
+    await waitUntilBlocked(observer, "wp5b2-w1");
+
+    await worker2.query("set role service_role");
+    await worker2.query(DESIGNATE_TL_SQL, [
+      NGATTT.auth,
+      NGATTT.app,
+      TEAM_PRE_RACE,
+      RACE_TL_CAND.app,
+      1,
+      "R1b concurrent TL designate before cutover app_user lock",
+      `r1b-tl-${keySeq++}`,
+    ]);
+    await worker2.query("reset role");
+    await blocker.query("rollback");
+
+    const r1bTlRes = await r1bTlCut;
+    assert.equal(r1bTlRes.status, "rejected");
+    assert.notEqual(r1bTlRes.reason?.code, "40P01");
+    assert.match(String(r1bTlRes.reason?.message), /CUTOVER_FINGERPRINT_MISMATCH/);
+
+    // -------------------------------------------------------------------------
+    // Race 1 (Combined Cutover Barrier: concurrent apply + R1c reverse enable + R2 finalize_create)
+    //   - prepare standalone CREATE_ACCOUNT intent before barrier
+    //   - blocker locks ZZZ_LOCK_ANCHOR.app -> worker1 holds authz_system_state FOR UPDATE &
+    //     locks OWNER..RACE_TL_CAND FOR UPDATE, pausing right at ZZZ_LOCK_ANCHOR.app
+    //   - worker2 races runWp5Cutover, worker3 races enable_app_user on RACE_D10_REC,
+    //     worker4 races finalize_create -> ALL serialize cleanly with 0 deadlocks!
+    // -------------------------------------------------------------------------
+    const raceNewAuth = "19600000-0000-4000-8000-0000000000fe";
+    await setup.query("insert into auth.users (id, email) values ($1::uuid, 'race.newacct@hrpartner.vn')", [
+      raceNewAuth,
+    ]);
+    await setup.query("set role service_role");
+    const { rows: [{ data: r2Began }] } = await setup.query(BEGIN_OP_SQL, [
+      OWNER.auth,
+      OWNER.app,
+      "CREATE_ACCOUNT",
+      "race.newacct",
+      "Race Standalone Account",
+      null,
+      "R2 concurrent finalize_create during cutover",
+      `r2-begin-${keySeq++}`,
+    ]);
+    await setup.query(CLAIM_OP_SQL, [OWNER.auth, OWNER.app, r2Began.intent_id, r2Began.intent_token]);
+    await setup.query("reset role");
+
     const roPlan = await runWp5Cutover(setup, { mode: "read-only-plan" });
     assert.equal(roPlan.action_diff.unexpected_diff_count, 0);
     const expectedFingerprint = roPlan.manifest_fingerprint;
 
+    const { rows: [{ version: r1cVer }] } = await observer.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [RACE_D10_REC.app],
+    );
+
     await blocker.query("begin");
     await blocker.query(
-      "select singleton_id from public.authz_system_state where singleton_id = true for update",
+      "select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update",
+      [ZZZ_LOCK_ANCHOR.app],
     );
 
     const cutP1 = runWp5Cutover(worker1, {
@@ -395,24 +622,104 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
       confirmApply: true,
       expectedFingerprint,
     });
+    await waitUntilBlocked(observer, "wp5b2-w1");
+
     const cutP2 = runWp5Cutover(worker2, {
       mode: "apply",
       confirmApply: true,
       expectedFingerprint,
     });
+    await worker3.query("set role service_role");
+    const r1cEnableP = asSettled(
+      worker3.query(ENABLE_SQL, [
+        NGATTT.auth,
+        NGATTT.app,
+        RACE_D10_REC.app,
+        r1cVer,
+        "R1c reverse race enable after cutover locked app_user",
+        `r1c-en-${keySeq++}`,
+      ]),
+    );
+    await worker4.query("set role service_role");
+    const r2FinalizeP = asSettled(
+      worker4.query(FINALIZE_CREATE_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        r2Began.intent_id,
+        r2Began.intent_token,
+        raceNewAuth,
+        `r2-fin-${keySeq++}`,
+      ]),
+    );
 
     await Promise.all([
-      waitUntilBlocked(observer, "wp5b2-w1"),
       waitUntilBlocked(observer, "wp5b2-w2"),
+      waitUntilBlocked(observer, "wp5b2-w3"),
+      waitUntilBlocked(observer, "wp5b2-w4"),
     ]);
     await blocker.query("rollback");
 
-    const [cutR1, cutR2] = await Promise.all([cutP1, cutP2]);
+    const [cutR1, cutR2, r1cEnableRes, r2FinalizeRes] = await Promise.all([
+      cutP1,
+      cutP2,
+      r1cEnableP,
+      r2FinalizeP,
+    ]);
+    await Promise.all([worker3.query("reset role"), worker4.query("reset role")]);
+
     assert.deepEqual(
       [cutR1.status, cutR2.status].sort(),
       ["ALREADY_APPLIED_NOOP", "APPLIED"],
       "Concurrent cutover apply must produce strictly one APPLIED and one ALREADY_APPLIED_NOOP",
     );
+    assert.notEqual(r1cEnableRes.reason?.code, "40P01");
+    assert.equal(r1cEnableRes.status, "fulfilled", `R1c enable failed: ${r1cEnableRes.reason?.message}`);
+    assert.notEqual(r2FinalizeRes.reason?.code, "40P01");
+    assert.equal(r2FinalizeRes.status, "fulfilled", `R2 finalize failed: ${r2FinalizeRes.reason?.message}`);
+
+    const { rows: [postR1c] } = await observer.query(
+      `select u.enabled,
+              u.authz_managed,
+              pg_catalog.jsonb_array_length(public.direct_entry_authz__internal_resolve_effective_grants(u.app_user_id)) as grant_cnt
+         from public.direct_entry_app_users u
+        where u.app_user_id = $1::uuid`,
+      [RACE_D10_REC.app],
+    );
+    assert.deepEqual(
+      postR1c,
+      { enabled: true, authz_managed: true, grant_cnt: 7 },
+      "R1c reverse race must preserve D10 roles and restore all 7 grants",
+    );
+
+    const r2AccountId = r2FinalizeRes.value.rows[0].data.app_user_id;
+    assert.equal(r2FinalizeRes.value.rows[0].data.intent_state, "APPLIED");
+    const { rows: [postR2Acct] } = await observer.query(
+      `select u.enabled,
+              u.authz_managed,
+              u.account_type,
+              pg_catalog.jsonb_array_length(public.direct_entry_authz__internal_resolve_effective_grants(u.app_user_id)) as grant_cnt
+         from public.direct_entry_app_users u
+        where u.app_user_id = $1::uuid`,
+      [r2AccountId],
+    );
+    assert.deepEqual(postR2Acct, {
+      enabled: true,
+      authz_managed: true,
+      account_type: "NORMAL",
+      grant_cnt: 0,
+    });
+    const { rows: postR2Roles } = await observer.query(
+      "select role_code from public.authz_account_role_assignments where app_user_id = $1::uuid and ended_at is null",
+      [r2AccountId],
+    );
+    assert.deepEqual(postR2Roles, [{ role_code: "EMPLOYEE_BASE" }]);
+
+    const postRaceCutoverNoop = await runWp5Cutover(setup, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint,
+    });
+    assert.equal(postRaceCutoverNoop.status, "ALREADY_APPLIED_NOOP");
 
     const { rows: [{ cnt: auditApplies }] } = await observer.query(
       "select count(*)::int as cnt from public.authz_audit_events where operation_name = 'WP5B2_CUTOVER_APPLY'",
@@ -769,7 +1076,7 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
     }
   } finally {
     await Promise.allSettled(
-      [worker1, worker2, blocker, observer, setup, adminClient]
+      [worker1, worker2, worker3, worker4, blocker, observer, setup, adminClient]
         .filter(Boolean)
         .map((client) => client.end()),
     );

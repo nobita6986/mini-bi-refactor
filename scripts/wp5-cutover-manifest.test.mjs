@@ -477,3 +477,166 @@ test("buildWp5FullCutoverManifest and computeWp5CutoverActionDiff cover full coh
   assert.equal(failedHaidx.classification, "UNEXPECTED_DIFF");
   assert.ok(failedHaidx.anomalies.some((a) => a.startsWith("UNEXPECTED_NON_ADMIN_GAINS")));
 });
+
+test("manifest_fingerprint detects account version/enabled/type & source drift and preserves D10-suspended roles", () => {
+  const OWNER_SUBJ = "90000000-0000-4000-8000-000000000001";
+  const D10_REC_ID = "10000000-0000-4000-8000-000000000021";
+  const D10_REC_RID = "30000000-0000-4000-8000-000000000021";
+  const EXTRA_ID = "10000000-0000-4000-8000-000000000022";
+
+  const makeBaseInventory = () => ({
+    authorization_date: "2026-11-19",
+    accounts: [
+      {
+        app_user_id: OWNER_ID,
+        auth_subject: OWNER_SUBJ,
+        email: "nobita6986@gmail.com",
+        display_name: "Owner",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: LUANPT_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000002",
+        email: "luanpt@hrpartner.vn",
+        display_name: "Luan PT",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: LIENVU_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000003",
+        email: "lienvu@hrpartner.vn",
+        display_name: "Lien Vu",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: NGATTT_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000004",
+        email: "ngattt@hrpartner.vn",
+        display_name: "Nga TTT",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+      {
+        app_user_id: DISABLED_HIST_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000005",
+        email: "former.staff@hrpartner.vn",
+        display_name: "Former Staff",
+        enabled: false,
+        account_type: "NORMAL",
+        version: 2,
+      },
+      {
+        app_user_id: D10_REC_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000021",
+        email: "d10.rec@hrpartner.vn",
+        display_name: "D10 Suspended Recruiter",
+        enabled: false,
+        account_type: "NORMAL",
+        version: 2,
+      },
+      {
+        app_user_id: EXTRA_ID,
+        auth_subject: "90000000-0000-4000-8000-000000000022",
+        email: "extra.base@hrpartner.vn",
+        display_name: "Extra Base",
+        enabled: true,
+        account_type: "NORMAL",
+        version: 1,
+      },
+    ],
+    capability_grants: [
+      { app_user_id: OWNER_ID, capability: "entry_admin" },
+      { app_user_id: LIENVU_ID, capability: "entry_admin" },
+      { app_user_id: NGATTT_ID, capability: "entry_admin" },
+    ],
+    scope_grants: [
+      { app_user_id: OWNER_ID, scope_kind: "all", team_id: null },
+      { app_user_id: LUANPT_ID, scope_kind: "all", team_id: null },
+      { app_user_id: LIENVU_ID, scope_kind: "all", team_id: null },
+      { app_user_id: NGATTT_ID, scope_kind: "all", team_id: null },
+    ],
+    recruiter_links: [],
+    team_leader_assignments: [],
+    wr_tl_capability_grants: [],
+    department_heads: [],
+    project_managers: [],
+    project_accountants: [],
+    open_person_links: [],
+    work_report_delegations: [],
+    suspended_capability_grants: WP5_ROLE_CATALOG.RECRUITER.capabilities.map((c) => ({
+      app_user_id: D10_REC_ID,
+      capability: c.capability,
+    })),
+    suspended_scope_grants: [
+      { grant_id: "70000000-0000-4000-8000-000000000021", app_user_id: D10_REC_ID, scope_kind: "own", team_id: null },
+    ],
+    suspended_recruiter_links: [
+      {
+        link_id: "71000000-0000-4000-8000-000000000021",
+        app_user_id: D10_REC_ID,
+        recruiter_id: D10_REC_RID,
+        recruiter_active: true,
+      },
+    ],
+    suspended_team_leader_assignments: [],
+    suspended_wr_tl_capability_grants: [],
+    existing_open_roles: [],
+    existing_open_direct_grants: [],
+  });
+
+  const baseInv = makeBaseInventory();
+  const baseManifest = buildWp5FullCutoverManifest(baseInv);
+  const baseDiff = computeWp5CutoverActionDiff(baseInv, baseManifest);
+  assert.equal(baseDiff.unexpected_diff_count, 0);
+
+  const histPlan = baseManifest.account_plans.find((p) => p.app_user_id === DISABLED_HIST_ID);
+  assert.equal(histPlan.d10_suspended, false);
+  assert.deepEqual(histPlan.global_roles, []);
+  assert.deepEqual(histPlan.post_cutover_effective_grants, []);
+
+  const d10Plan = baseManifest.account_plans.find((p) => p.app_user_id === D10_REC_ID);
+  assert.equal(d10Plan.enabled, false);
+  assert.equal(d10Plan.d10_suspended, true);
+  assert.deepEqual(d10Plan.global_roles, ["EMPLOYEE_BASE", "RECRUITER"]);
+  assert.deepEqual(d10Plan.post_cutover_effective_grants, []);
+
+  // Mutating version, enabled, account_type, or delegation sources MUST change manifest_fingerprint
+  const invVer = makeBaseInventory();
+  invVer.accounts.find((a) => a.app_user_id === EXTRA_ID).version = 2;
+  assert.notEqual(
+    buildWp5FullCutoverManifest(invVer).manifest_fingerprint,
+    baseManifest.manifest_fingerprint,
+  );
+
+  const invDisabled = makeBaseInventory();
+  invDisabled.accounts.find((a) => a.app_user_id === EXTRA_ID).enabled = false;
+  assert.notEqual(
+    buildWp5FullCutoverManifest(invDisabled).manifest_fingerprint,
+    baseManifest.manifest_fingerprint,
+  );
+
+  const invType = makeBaseInventory();
+  invType.accounts.find((a) => a.app_user_id === EXTRA_ID).account_type = "SHARED";
+  assert.notEqual(
+    buildWp5FullCutoverManifest(invType).manifest_fingerprint,
+    baseManifest.manifest_fingerprint,
+  );
+
+  const invDeleg = makeBaseInventory();
+  invDeleg.work_report_delegations.push({
+    delegation_id: "60000000-0000-4000-8000-000000000099",
+    template_id: "0922819d-6957-4b1d-8e50-b749f5cd35c5",
+    grantee_app_user_id: EXTRA_ID,
+  });
+  assert.notEqual(
+    buildWp5FullCutoverManifest(invDeleg).manifest_fingerprint,
+    baseManifest.manifest_fingerprint,
+  );
+});

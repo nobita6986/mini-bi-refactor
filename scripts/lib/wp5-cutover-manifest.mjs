@@ -744,6 +744,92 @@ function resolveAccountPreCutoverLegacyPairedGrants(account, inventory) {
   return dedupeSortedGrants(paired);
 }
 
+function sortNormalizedRows(rows) {
+  return [...rows].sort((a, b) =>
+    JSON.stringify(canonicalSortJson(a)).localeCompare(JSON.stringify(canonicalSortJson(b))),
+  );
+}
+
+function buildRoleAssignmentsAndExceptions({
+  uid,
+  loginId,
+  rolesForAccount,
+  contextualRoles,
+  pairedGrants,
+  wrTls,
+  existingDirectGrants = [],
+  canonicalOwnerId,
+}) {
+  const coveredGrants = [];
+  for (const roleCode of rolesForAccount) {
+    for (const cap of WP5_ROLE_CATALOG[roleCode].capabilities) {
+      coveredGrants.push({
+        capability: cap.capability,
+        scope_kind: cap.scope_template,
+        scope_id: null,
+      });
+    }
+  }
+  for (const ctxRole of contextualRoles) {
+    for (const cap of WP5_ROLE_CATALOG[ctxRole.role_code].capabilities) {
+      coveredGrants.push({
+        capability: cap.capability,
+        scope_kind: ctxRole.scope_kind,
+        scope_id: ctxRole.scope_id,
+      });
+    }
+  }
+  for (const wr of wrTls) {
+    coveredGrants.push({
+      capability: "report_review",
+      scope_kind: "CONTEXT_TEAM",
+      scope_id: wr.team_id,
+    });
+  }
+
+  const coveredKeySet = new Set(coveredGrants.map(grantKey));
+  const exceptions = [];
+  for (const grant of [...pairedGrants, ...existingDirectGrants]) {
+    const key = grantKey(grant);
+    if (coveredKeySet.has(key)) continue;
+    coveredKeySet.add(key);
+    exceptions.push({
+      app_user_id: uid,
+      capability: grant.capability,
+      scope_kind: grant.scope_kind,
+      scope_id: grant.scope_id ?? null,
+      source_kind: "BACKFILL_EXCEPTION",
+      reason: `WP5_PR2_CUTOVER_PRESERVE_INDEPENDENT_${grant.capability}`.slice(0, 500),
+    });
+  }
+
+  const postGrants = dedupeSortedGrants([
+    ...coveredGrants,
+    ...exceptions.map((e) => ({
+      capability: e.capability,
+      scope_kind: e.scope_kind,
+      scope_id: e.scope_id,
+    })),
+  ]);
+
+  const roleRows = rolesForAccount.map((roleCode) => {
+    const isProtected = roleCode === "ADMIN" && uid === canonicalOwnerId;
+    return {
+      app_user_id: uid,
+      login_id: loginId,
+      role_code: roleCode,
+      source_kind: "BACKFILL_SNAPSHOT",
+      is_protected: isProtected,
+      protected_reason: isProtected ? PROTECTED_OWNER_REASON : null,
+      reason: isProtected
+        ? "WP5_PR2_CUTOVER_CANONICAL_OWNER_PROTECTED_ADMIN"
+        : `WP5_PR2_CUTOVER_BACKFILL_${roleCode}`,
+    };
+  });
+
+  return { roleRows, exceptions, postGrants };
+}
+
 /**
  * Builds the full deterministic WP5B-2 cutover manifest from a read-only DB inventory
  * snapshot (without mutating DB or synthesizing missing Person/Recruiter records).
@@ -889,6 +975,87 @@ export function buildWp5FullCutoverManifest(inventory) {
     });
   }
 
+  const suspendedCapsByUser = new Map();
+  for (const cg of inventory.suspended_capability_grants ?? []) {
+    const uid = normalizeUuid(cg.app_user_id);
+    if (!uid || typeof cg.capability !== "string") continue;
+    if (!suspendedCapsByUser.has(uid)) suspendedCapsByUser.set(uid, new Set());
+    suspendedCapsByUser.get(uid).add(cg.capability);
+  }
+
+  const suspendedScopesByUser = new Map();
+  for (const sg of inventory.suspended_scope_grants ?? []) {
+    const uid = normalizeUuid(sg.app_user_id);
+    if (!uid) continue;
+    if (!suspendedScopesByUser.has(uid)) suspendedScopesByUser.set(uid, []);
+    suspendedScopesByUser.get(uid).push({
+      grant_id: normalizeUuid(sg.grant_id),
+      scope_kind: sg.scope_kind,
+      team_id: normalizeUuid(sg.team_id),
+    });
+  }
+
+  const suspendedRecruiterLinksByUser = new Map();
+  for (const rl of inventory.suspended_recruiter_links ?? []) {
+    const uid = normalizeUuid(rl.app_user_id);
+    const rid = normalizeUuid(rl.recruiter_id);
+    if (!uid || !rid) continue;
+    if (!suspendedRecruiterLinksByUser.has(uid)) suspendedRecruiterLinksByUser.set(uid, []);
+    suspendedRecruiterLinksByUser.get(uid).push({
+      link_id: normalizeUuid(rl.link_id),
+      recruiter_id: rid,
+      recruiter_active: rl.recruiter_active !== false,
+    });
+  }
+
+  const suspendedTlByUser = new Map();
+  for (const tl of inventory.suspended_team_leader_assignments ?? []) {
+    const uid = normalizeUuid(tl.leader_app_user_id);
+    const tid = normalizeUuid(tl.team_id);
+    if (!uid || !tid) continue;
+    if (!suspendedTlByUser.has(uid)) suspendedTlByUser.set(uid, []);
+    suspendedTlByUser.get(uid).push({
+      assignment_id: normalizeUuid(tl.assignment_id),
+      team_id: tid,
+    });
+  }
+
+  const suspendedWrTlByUser = new Map();
+  for (const wr of inventory.suspended_wr_tl_capability_grants ?? []) {
+    const uid = normalizeUuid(wr.app_user_id);
+    const tid = normalizeUuid(wr.team_id);
+    if (!uid || !tid || wr.capability !== "report_review") continue;
+    if (!suspendedWrTlByUser.has(uid)) suspendedWrTlByUser.set(uid, []);
+    suspendedWrTlByUser.get(uid).push({
+      leader_assignment_id: normalizeUuid(wr.leader_assignment_id),
+      team_id: tid,
+      grant_id: normalizeUuid(wr.grant_id),
+    });
+  }
+
+  const existingOpenRolesByUser = new Map();
+  for (const r of inventory.existing_open_roles ?? []) {
+    const uid = normalizeUuid(r.app_user_id);
+    if (!uid || typeof r.role_code !== "string") continue;
+    if (!existingOpenRolesByUser.has(uid)) existingOpenRolesByUser.set(uid, []);
+    existingOpenRolesByUser.get(uid).push({
+      role_code: r.role_code,
+      is_protected: r.is_protected === true,
+    });
+  }
+
+  const existingOpenDirectByUser = new Map();
+  for (const dg of inventory.existing_open_direct_grants ?? []) {
+    const uid = normalizeUuid(dg.app_user_id);
+    if (!uid || typeof dg.capability !== "string" || typeof dg.scope_kind !== "string") continue;
+    if (!existingOpenDirectByUser.has(uid)) existingOpenDirectByUser.set(uid, []);
+    existingOpenDirectByUser.get(uid).push({
+      capability: dg.capability,
+      scope_kind: dg.scope_kind,
+      scope_id: dg.scope_id ?? null,
+    });
+  }
+
   // Normalize inventory view keyed by lowercase UUID for helper reuse
   const normalizedInventory = {
     ...inventory,
@@ -917,6 +1084,29 @@ export function buildWp5FullCutoverManifest(inventory) {
     })),
   };
 
+  const normalizedSuspendedInventory = {
+    capability_grants: (inventory.suspended_capability_grants ?? []).map((g) => ({
+      ...g,
+      app_user_id: normalizeUuid(g.app_user_id),
+    })),
+    scope_grants: (inventory.suspended_scope_grants ?? []).map((g) => ({
+      ...g,
+      app_user_id: normalizeUuid(g.app_user_id),
+      team_id: normalizeUuid(g.team_id),
+    })),
+    team_leader_assignments: (inventory.suspended_team_leader_assignments ?? []).map((t) => ({
+      ...t,
+      leader_app_user_id: normalizeUuid(t.leader_app_user_id),
+      team_id: normalizeUuid(t.team_id),
+    })),
+    wr_tl_capability_grants: (inventory.suspended_wr_tl_capability_grants ?? []).map((w) => ({
+      ...w,
+      app_user_id: normalizeUuid(w.app_user_id),
+      team_id: normalizeUuid(w.team_id),
+    })),
+    project_accountants: normalizedInventory.project_accountants,
+  };
+
   const accountPlans = [];
   const globalRoleAssignments = [];
   const directGrantExceptions = [];
@@ -932,9 +1122,27 @@ export function buildWp5FullCutoverManifest(inventory) {
     const personLinks = personLinksByUser.get(uid) ?? [];
     const legacyCaps = capGrantsByUser.get(uid) ?? new Set();
     const legacyScopes = scopeGrantsByUser.get(uid) ?? [];
+    const suspendedCaps = suspendedCapsByUser.get(uid) ?? new Set();
+    const suspendedScopes = suspendedScopesByUser.get(uid) ?? [];
+    const suspendedLinks = suspendedRecruiterLinksByUser.get(uid) ?? [];
+    const suspendedTls = suspendedTlByUser.get(uid) ?? [];
+    const suspendedWrTls = suspendedWrTlByUser.get(uid) ?? [];
+    const existingOpenRoles = existingOpenRolesByUser.get(uid) ?? [];
+    const existingOpenDirect = existingOpenDirectByUser.get(uid) ?? [];
 
     if (account.account_type !== "NORMAL") {
-      if (links.length > 0 || tls.length > 0 || dhs.length > 0 || pms.length > 0 || pas.length > 0 || personLinks.length > 0) {
+      if (
+        links.length > 0 ||
+        tls.length > 0 ||
+        dhs.length > 0 ||
+        pms.length > 0 ||
+        pas.length > 0 ||
+        personLinks.length > 0 ||
+        suspendedLinks.length > 0 ||
+        suspendedTls.length > 0 ||
+        existingOpenRoles.length > 0 ||
+        existingOpenDirect.length > 0
+      ) {
         throw new Error(
           `NON_NORMAL_ACCOUNT_PERSONAL_ASSIGNMENT_VIOLATION: ${uid} (${account.account_type}) holds personal links or assignments`,
         );
@@ -944,6 +1152,8 @@ export function buildWp5FullCutoverManifest(inventory) {
         login_id: account.login_id,
         enabled: account.enabled,
         account_type: account.account_type,
+        account_version: account.version,
+        d10_suspended: false,
         is_canonical_owner: uid === canonicalOwnerId,
         is_quarantined_no_person: false,
         set_authz_managed: true,
@@ -957,18 +1167,115 @@ export function buildWp5FullCutoverManifest(inventory) {
     }
 
     if (!account.enabled) {
-      // Pre-WP5 disabled account: zero roles, zero exceptions, authz_managed = true so legacy never resurrects on future enable.
+      const hasD10SuspendedState =
+        suspendedCaps.size > 0 ||
+        suspendedScopes.length > 0 ||
+        suspendedLinks.length > 0 ||
+        suspendedTls.length > 0 ||
+        existingOpenRoles.length > 0 ||
+        existingOpenDirect.length > 0;
+
+      if (!hasD10SuspendedState) {
+        // Pre-WP5 disabled account: zero roles, zero exceptions, authz_managed = true so legacy never resurrects on future enable.
+        accountPlans.push({
+          app_user_id: uid,
+          login_id: account.login_id,
+          enabled: false,
+          account_type: account.account_type,
+          account_version: account.version,
+          d10_suspended: false,
+          is_canonical_owner: false,
+          is_quarantined_no_person: personLinks.length === 0,
+          set_authz_managed: true,
+          global_roles: [],
+          contextual_roles: [],
+          direct_grant_exceptions: [],
+          legacy_pre_cutover_grants: [],
+          post_cutover_effective_grants: [],
+        });
+        continue;
+      }
+
+      // WP5B-1 D10-suspended account: preserve dormant roles & exceptions (0 effective grants while disabled).
+      const dormantPairedGrants = resolveAccountPreCutoverLegacyPairedGrants(
+        { ...account, enabled: true },
+        normalizedSuspendedInventory,
+      );
+      const hasSuspendedAllScope = suspendedScopes.some((s) => s.scope_kind === "all");
+      const hasSuspendedOwnScope = suspendedScopes.some((s) => s.scope_kind === "own");
+      const hasActiveSuspendedRecruiterLink = suspendedLinks.some((l) => l.recruiter_active);
+      const holdsFullSuspendedRecruiterBundle =
+        hasSuspendedOwnScope &&
+        RECRUITER_REQUIRED_CAPABILITIES.every((cap) => suspendedCaps.has(cap));
+      const holdsFullSuspendedHrOpBundle =
+        hasSuspendedAllScope &&
+        HR_OPERATOR_REQUIRED_CAPABILITIES.every((cap) => suspendedCaps.has(cap));
+
+      const dormantRoleSet = new Set(["EMPLOYEE_BASE"]);
+      if (existingOpenRoles.some((r) => r.role_code === "ADMIN")) dormantRoleSet.add("ADMIN");
+      if (hasActiveSuspendedRecruiterLink || holdsFullSuspendedRecruiterBundle || existingOpenRoles.some((r) => r.role_code === "RECRUITER")) {
+        dormantRoleSet.add("RECRUITER");
+      }
+      if (holdsFullSuspendedHrOpBundle || existingOpenRoles.some((r) => r.role_code === "HR_OPERATOR")) {
+        dormantRoleSet.add("HR_OPERATOR");
+      }
+      const rolesForAccount = [...dormantRoleSet];
+      const contextualRoles = [
+        ...suspendedTls.map((tl) => ({
+          role_code: "TEAM_LEADER",
+          scope_kind: "CONTEXT_TEAM",
+          scope_id: tl.team_id,
+          source_assignment_id: tl.assignment_id,
+        })),
+        ...dhs
+          .filter((dh) => dh.person_active)
+          .map((dh) => ({
+            role_code: "DEPARTMENT_HEAD",
+            scope_kind: "CONTEXT_DEPARTMENT",
+            scope_id: dh.department_id,
+            source_assignment_id: dh.head_id,
+          })),
+        ...pms.map((pm) => ({
+          role_code: "PROJECT_MANAGER",
+          scope_kind: "CONTEXT_PROJECT",
+          scope_id: pm.project_id,
+          source_assignment_id: pm.assignment_id,
+        })),
+        ...pas.map((pa) => ({
+          role_code: "PROJECT_ACCOUNTANT",
+          scope_kind: "CONTEXT_PROJECT",
+          scope_id: pa.project_id,
+          source_assignment_id: pa.assignment_id,
+        })),
+      ];
+
+      const { roleRows, exceptions } = buildRoleAssignmentsAndExceptions({
+        uid,
+        loginId: account.login_id,
+        rolesForAccount,
+        contextualRoles,
+        pairedGrants: dormantPairedGrants,
+        wrTls: suspendedWrTls,
+        existingDirectGrants: existingOpenDirect,
+        canonicalOwnerId,
+      });
+
+      globalRoleAssignments.push(...roleRows);
+      directGrantExceptions.push(...exceptions);
+
       accountPlans.push({
         app_user_id: uid,
         login_id: account.login_id,
         enabled: false,
         account_type: account.account_type,
+        account_version: account.version,
+        d10_suspended: true,
         is_canonical_owner: false,
         is_quarantined_no_person: personLinks.length === 0,
         set_authz_managed: true,
-        global_roles: [],
-        contextual_roles: [],
-        direct_grant_exceptions: [],
+        global_roles: rolesForAccount,
+        contextual_roles: contextualRoles,
+        direct_grant_exceptions: exceptions,
         legacy_pre_cutover_grants: [],
         post_cutover_effective_grants: [],
       });
@@ -981,9 +1288,9 @@ export function buildWp5FullCutoverManifest(inventory) {
 
     const rolesForAccount = ["EMPLOYEE_BASE"];
     const isInitialAdmin = initialAdminIds.has(uid);
-    if (isInitialAdmin) {
+    if (isInitialAdmin || existingOpenRoles.some((r) => r.role_code === "ADMIN")) {
       rolesForAccount.push("ADMIN");
-      if (hasAllScope && legacyCaps.size === 0) {
+      if (isInitialAdmin && hasAllScope && legacyCaps.size === 0) {
         orphanAllScopeRemediations.push({
           app_user_id: uid,
           login_id: account.login_id,
@@ -996,13 +1303,20 @@ export function buildWp5FullCutoverManifest(inventory) {
     const hasActiveRecruiterLink = links.some((l) => l.recruiter_active);
     const holdsFullRecruiterBundle =
       hasOwnScope && RECRUITER_REQUIRED_CAPABILITIES.every((cap) => legacyCaps.has(cap));
-    if (hasActiveRecruiterLink || (!isInitialAdmin && holdsFullRecruiterBundle)) {
+    if (
+      hasActiveRecruiterLink ||
+      (!isInitialAdmin && holdsFullRecruiterBundle) ||
+      existingOpenRoles.some((r) => r.role_code === "RECRUITER")
+    ) {
       rolesForAccount.push("RECRUITER");
     }
 
     const holdsFullHrOperatorBundle =
       hasAllScope && HR_OPERATOR_REQUIRED_CAPABILITIES.every((cap) => legacyCaps.has(cap));
-    if (!isInitialAdmin && holdsFullHrOperatorBundle) {
+    if (
+      (!isInitialAdmin && holdsFullHrOperatorBundle) ||
+      existingOpenRoles.some((r) => r.role_code === "HR_OPERATOR")
+    ) {
       rolesForAccount.push("HR_OPERATOR");
     }
 
@@ -1035,73 +1349,18 @@ export function buildWp5FullCutoverManifest(inventory) {
       })),
     ];
 
-    const coveredGrants = [];
-    for (const roleCode of rolesForAccount) {
-      for (const cap of WP5_ROLE_CATALOG[roleCode].capabilities) {
-        coveredGrants.push({
-          capability: cap.capability,
-          scope_kind: cap.scope_template,
-          scope_id: null,
-        });
-      }
-    }
-    for (const ctxRole of contextualRoles) {
-      for (const cap of WP5_ROLE_CATALOG[ctxRole.role_code].capabilities) {
-        coveredGrants.push({
-          capability: cap.capability,
-          scope_kind: ctxRole.scope_kind,
-          scope_id: ctxRole.scope_id,
-        });
-      }
-    }
-    for (const wr of wrTlByUser.get(uid) ?? []) {
-      coveredGrants.push({
-        capability: "report_review",
-        scope_kind: "CONTEXT_TEAM",
-        scope_id: wr.team_id,
-      });
-    }
+    const { roleRows, exceptions, postGrants } = buildRoleAssignmentsAndExceptions({
+      uid,
+      loginId: account.login_id,
+      rolesForAccount,
+      contextualRoles,
+      pairedGrants: legacyPreGrants,
+      wrTls: wrTlByUser.get(uid) ?? [],
+      existingDirectGrants: existingOpenDirect,
+      canonicalOwnerId,
+    });
 
-    const coveredKeySet = new Set(coveredGrants.map(grantKey));
-    const exceptions = [];
-    for (const grant of legacyPreGrants) {
-      const key = grantKey(grant);
-      if (coveredKeySet.has(key)) continue;
-      // Only preserve explicit non-bundle capabilities outside TL contextual bridge
-      coveredKeySet.add(key);
-      exceptions.push({
-        app_user_id: uid,
-        capability: grant.capability,
-        scope_kind: grant.scope_kind,
-        scope_id: grant.scope_id,
-        source_kind: "BACKFILL_EXCEPTION",
-        reason: `WP5_PR2_CUTOVER_PRESERVE_INDEPENDENT_${grant.capability}`.slice(0, 500),
-      });
-    }
-
-    const postGrants = dedupeSortedGrants([
-      ...coveredGrants,
-      ...exceptions.map((e) => ({
-        capability: e.capability,
-        scope_kind: e.scope_kind,
-        scope_id: e.scope_id,
-      })),
-    ]);
-
-    for (const roleCode of rolesForAccount) {
-      const isProtected = roleCode === "ADMIN" && uid === canonicalOwnerId;
-      globalRoleAssignments.push({
-        app_user_id: uid,
-        login_id: account.login_id,
-        role_code: roleCode,
-        source_kind: "BACKFILL_SNAPSHOT",
-        is_protected: isProtected,
-        protected_reason: isProtected ? PROTECTED_OWNER_REASON : null,
-        reason: isProtected
-          ? "WP5_PR2_CUTOVER_CANONICAL_OWNER_PROTECTED_ADMIN"
-          : `WP5_PR2_CUTOVER_BACKFILL_${roleCode}`,
-      });
-    }
+    globalRoleAssignments.push(...roleRows);
     directGrantExceptions.push(...exceptions);
 
     accountPlans.push({
@@ -1109,6 +1368,8 @@ export function buildWp5FullCutoverManifest(inventory) {
       login_id: account.login_id,
       enabled: true,
       account_type: account.account_type,
+      account_version: account.version,
+      d10_suspended: false,
       is_canonical_owner: uid === canonicalOwnerId,
       is_quarantined_no_person: personLinks.length === 0 && !isInitialAdmin,
       set_authz_managed: true,
@@ -1129,6 +1390,93 @@ export function buildWp5FullCutoverManifest(inventory) {
     throw new Error("CUTOVER_PROTECTED_OWNER_INVARIANT_FAILED");
   }
 
+  const sourceSnapshot = {
+    recruiter_links: sortNormalizedRows(
+      (inventory.recruiter_links ?? []).map((r) => ({
+        link_id: normalizeUuid(r.link_id),
+        app_user_id: normalizeUuid(r.app_user_id),
+        recruiter_id: normalizeUuid(r.recruiter_id),
+        recruiter_active: r.recruiter_active !== false,
+      })),
+    ),
+    suspended_recruiter_links: sortNormalizedRows(
+      (inventory.suspended_recruiter_links ?? []).map((r) => ({
+        link_id: normalizeUuid(r.link_id),
+        app_user_id: normalizeUuid(r.app_user_id),
+        recruiter_id: normalizeUuid(r.recruiter_id),
+        recruiter_active: r.recruiter_active !== false,
+      })),
+    ),
+    team_leader_assignments: sortNormalizedRows(
+      (inventory.team_leader_assignments ?? []).map((t) => ({
+        assignment_id: normalizeUuid(t.assignment_id),
+        leader_app_user_id: normalizeUuid(t.leader_app_user_id),
+        team_id: normalizeUuid(t.team_id),
+      })),
+    ),
+    suspended_team_leader_assignments: sortNormalizedRows(
+      (inventory.suspended_team_leader_assignments ?? []).map((t) => ({
+        assignment_id: normalizeUuid(t.assignment_id),
+        leader_app_user_id: normalizeUuid(t.leader_app_user_id),
+        team_id: normalizeUuid(t.team_id),
+      })),
+    ),
+    wr_tl_capability_grants: sortNormalizedRows(
+      (inventory.wr_tl_capability_grants ?? []).map((w) => ({
+        leader_assignment_id: normalizeUuid(w.leader_assignment_id),
+        app_user_id: normalizeUuid(w.app_user_id),
+        team_id: normalizeUuid(w.team_id),
+        capability: w.capability,
+        grant_id: normalizeUuid(w.grant_id),
+      })),
+    ),
+    suspended_wr_tl_capability_grants: sortNormalizedRows(
+      (inventory.suspended_wr_tl_capability_grants ?? []).map((w) => ({
+        leader_assignment_id: normalizeUuid(w.leader_assignment_id),
+        app_user_id: normalizeUuid(w.app_user_id),
+        team_id: normalizeUuid(w.team_id),
+        capability: w.capability,
+        grant_id: normalizeUuid(w.grant_id),
+      })),
+    ),
+    department_heads: sortNormalizedRows(
+      (inventory.department_heads ?? []).map((d) => ({
+        head_id: normalizeUuid(d.head_id),
+        app_user_id: normalizeUuid(d.app_user_id),
+        department_id: normalizeUuid(d.department_id),
+        person_active: d.person_active === true,
+      })),
+    ),
+    project_managers: sortNormalizedRows(
+      (inventory.project_managers ?? []).map((p) => ({
+        assignment_id: normalizeUuid(p.assignment_id),
+        app_user_id: normalizeUuid(p.app_user_id),
+        project_id: p.project_id ?? null,
+      })),
+    ),
+    project_accountants: sortNormalizedRows(
+      (inventory.project_accountants ?? []).map((p) => ({
+        assignment_id: normalizeUuid(p.assignment_id),
+        accountant_user_id: normalizeUuid(p.accountant_user_id),
+        project_id: p.project_id ?? null,
+      })),
+    ),
+    open_person_links: sortNormalizedRows(
+      (inventory.open_person_links ?? []).map((l) => ({
+        app_user_id: normalizeUuid(l.app_user_id),
+        person_id: normalizeUuid(l.person_id),
+        person_status: l.person_status ?? "ACTIVE",
+      })),
+    ),
+    work_report_delegations: sortNormalizedRows(
+      (inventory.work_report_delegations ?? []).map((w) => ({
+        delegation_id: normalizeUuid(w.delegation_id),
+        template_id: normalizeUuid(w.template_id),
+        grantee_app_user_id: normalizeUuid(w.grantee_app_user_id),
+      })),
+    ),
+  };
+
   const manifestBody = {
     schema_version: "wp5b2-full-cutover-manifest-v1",
     authorization_date: inventory.authorization_date ?? null,
@@ -1142,6 +1490,7 @@ export function buildWp5FullCutoverManifest(inventory) {
       total_accounts: accountPlans.length,
       enabled_accounts: accountPlans.filter((a) => a.enabled).length,
       disabled_accounts: accountPlans.filter((a) => !a.enabled).length,
+      d10_suspended_accounts: accountPlans.filter((a) => a.d10_suspended).length,
       admin_count: globalRoleAssignments.filter((r) => r.role_code === "ADMIN").length,
       recruiter_count: globalRoleAssignments.filter((r) => r.role_code === "RECRUITER").length,
       hr_operator_count: globalRoleAssignments.filter((r) => r.role_code === "HR_OPERATOR").length,
@@ -1154,6 +1503,7 @@ export function buildWp5FullCutoverManifest(inventory) {
       protected_assignment_count: protectedAssignments.length,
       work_report_delegation_count: (inventory.work_report_delegations ?? []).length,
     },
+    source_snapshot: sourceSnapshot,
     account_plans: accountPlans,
     global_role_assignments: globalRoleAssignments,
     direct_grant_exceptions: directGrantExceptions,

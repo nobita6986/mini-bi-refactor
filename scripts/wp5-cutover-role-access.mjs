@@ -339,6 +339,112 @@ export async function readCutoverInventory(queryable) {
      where public.work_report__internal_is_delegation_effective(d.delegation_id, statement_timestamp())
      order by d.delegation_id asc`,
   );
+  const suspCapRes = await queryable.query(
+    `select
+       g.app_user_id::text as app_user_id,
+       g.capability as capability
+     from public.direct_entry_capability_grants g
+     join public.direct_entry_app_users u on u.app_user_id = g.app_user_id
+     where not u.enabled
+       and g.suspended_by_account_disable = true
+       and g.valid_from <= public.direct_entry_authorization_date()
+       and (g.valid_to is null or (g.valid_to > g.valid_from and public.direct_entry_authorization_date() < g.valid_to))
+     order by g.app_user_id asc, g.capability asc, g.grant_id asc`,
+  );
+  const suspScopeRes = await queryable.query(
+    `select
+       s.grant_id::text as grant_id,
+       s.app_user_id::text as app_user_id,
+       s.scope_kind as scope_kind,
+       s.team_id::text as team_id
+     from public.direct_entry_scope_grants s
+     join public.direct_entry_app_users u on u.app_user_id = s.app_user_id
+     left join public.teams t on t.team_id = s.team_id
+     where not u.enabled
+       and s.suspended_by_account_disable = true
+       and s.valid_from <= public.direct_entry_authorization_date()
+       and (s.valid_to is null or (s.valid_to > s.valid_from and public.direct_entry_authorization_date() < s.valid_to))
+       and (
+         s.scope_kind in ('own', 'all')
+         or (s.scope_kind = 'team' and t.team_id is not null and t.active = true and t.code <> '__system_vendor__')
+       )
+     order by s.app_user_id asc, s.scope_kind asc, s.team_id asc nulls first, s.grant_id asc`,
+  );
+  const suspLinksRes = await queryable.query(
+    `select
+       rl.link_id::text as link_id,
+       rl.app_user_id::text as app_user_id,
+       rl.recruiter_id::text as recruiter_id,
+       r.active as recruiter_active
+     from public.direct_entry_app_user_recruiter_links rl
+     join public.direct_entry_app_users u on u.app_user_id = rl.app_user_id
+     join public.recruiters r on r.recruiter_id = rl.recruiter_id
+     where not u.enabled
+       and rl.verified = true
+       and rl.suspended_by_account_disable = true
+       and rl.valid_from <= public.direct_entry_authorization_date()
+       and (rl.valid_to is null or (rl.valid_to > rl.valid_from and public.direct_entry_authorization_date() < rl.valid_to))
+     order by rl.app_user_id asc, rl.recruiter_id asc, rl.link_id asc`,
+  );
+  const suspTlRes = await queryable.query(
+    `select
+       tla.assignment_id::text as assignment_id,
+       tla.leader_app_user_id::text as leader_app_user_id,
+       tla.team_id::text as team_id
+     from public.direct_entry_team_leader_assignments tla
+     join public.direct_entry_app_users u on u.app_user_id = tla.leader_app_user_id
+     join public.teams t on t.team_id = tla.team_id
+       and t.active = true
+       and t.code <> '__system_vendor__'
+     where not u.enabled
+       and tla.suspended_by_account_disable = true
+       and tla.valid_from <= public.direct_entry_authorization_date()
+       and (tla.valid_to is null or (tla.valid_to > tla.valid_from and public.direct_entry_authorization_date() < tla.valid_to))
+     order by tla.leader_app_user_id asc, tla.team_id asc, tla.assignment_id asc`,
+  );
+  const suspWrTlRes = await queryable.query(
+    `select
+       wr.leader_assignment_id::text as leader_assignment_id,
+       tla.leader_app_user_id::text as app_user_id,
+       tla.team_id::text as team_id,
+       wr.capability as capability,
+       wr.capability_grant_id::text as grant_id
+     from public.work_report_team_leader_capability_grants wr
+     join public.direct_entry_team_leader_assignments tla on tla.assignment_id = wr.leader_assignment_id
+     join public.direct_entry_app_users u on u.app_user_id = tla.leader_app_user_id
+     join public.teams t on t.team_id = tla.team_id
+       and t.active = true
+       and t.code <> '__system_vendor__'
+     join public.direct_entry_capability_grants g on g.grant_id = wr.capability_grant_id
+     where not u.enabled
+       and wr.capability = 'report_review'
+       and tla.suspended_by_account_disable = true
+       and g.suspended_by_account_disable = true
+       and tla.valid_from <= public.direct_entry_authorization_date()
+       and (tla.valid_to is null or (tla.valid_to > tla.valid_from and public.direct_entry_authorization_date() < tla.valid_to))
+       and g.valid_from <= public.direct_entry_authorization_date()
+       and (g.valid_to is null or (g.valid_to > g.valid_from and public.direct_entry_authorization_date() < g.valid_to))
+     order by tla.leader_app_user_id asc, tla.team_id asc`,
+  );
+  const existingRolesRes = await queryable.query(
+    `select
+       app_user_id::text as app_user_id,
+       role_code,
+       is_protected
+     from public.authz_account_role_assignments
+     where ended_at is null
+     order by app_user_id asc, role_code asc`,
+  );
+  const existingDirectRes = await queryable.query(
+    `select
+       app_user_id::text as app_user_id,
+       capability,
+       scope_kind,
+       scope_id
+     from public.authz_direct_capability_grants
+     where ended_at is null
+     order by app_user_id asc, capability asc, scope_kind asc, scope_id asc nulls first`,
+  );
 
   return {
     authorization_date: authDateRes.rows[0]?.authorization_date ?? null,
@@ -353,13 +459,71 @@ export async function readCutoverInventory(queryable) {
     project_accountants: paRes.rows,
     open_person_links: personLinksRes.rows,
     work_report_delegations: wrDelegRes.rows,
+    suspended_capability_grants: suspCapRes.rows,
+    suspended_scope_grants: suspScopeRes.rows,
+    suspended_recruiter_links: suspLinksRes.rows,
+    suspended_team_leader_assignments: suspTlRes.rows,
+    suspended_wr_tl_capability_grants: suspWrTlRes.rows,
+    existing_open_roles: existingRolesRes.rows,
+    existing_open_direct_grants: existingDirectRes.rows,
   };
+}
+
+function canonicalSortValue(value) {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalSortValue);
+  }
+  const sorted = {};
+  for (const key of Object.keys(value).sort()) {
+    sorted[key] = canonicalSortValue(value[key]);
+  }
+  return sorted;
+}
+
+function sortCanonicalRows(rows) {
+  return [...(rows ?? [])]
+    .map(canonicalSortValue)
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+}
+
+/**
+ * Computes a deterministic digest over non-grant source links and contextual/org assignments
+ * so postcondition verification detects any concurrent source mutation before commit.
+ */
+export function computeNonGrantInventoryDigest(inventory) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        canonicalSortValue({
+          authorization_date: inventory.authorization_date ?? null,
+          recruiter_links: sortCanonicalRows(inventory.recruiter_links),
+          suspended_recruiter_links: sortCanonicalRows(inventory.suspended_recruiter_links),
+          team_leader_assignments: sortCanonicalRows(inventory.team_leader_assignments),
+          suspended_team_leader_assignments: sortCanonicalRows(
+            inventory.suspended_team_leader_assignments,
+          ),
+          department_heads: sortCanonicalRows(inventory.department_heads),
+          project_managers: sortCanonicalRows(inventory.project_managers),
+          project_accountants: sortCanonicalRows(inventory.project_accountants),
+          open_person_links: sortCanonicalRows(inventory.open_person_links),
+          work_report_delegations: sortCanonicalRows(inventory.work_report_delegations),
+        }),
+      ),
+    )
+    .digest("hex");
 }
 
 /**
  * Verifies post-cutover SQL invariants inside the active connection/transaction.
  */
-export async function verifyPostCutoverInvariants(queryable, manifest = null) {
+export async function verifyPostCutoverInvariants(
+  queryable,
+  manifest = null,
+  preSyncInventory = null,
+) {
   const sysRes = await queryable.query(
     `select cutover_ready, cutover_at::text as cutover_at
        from public.authz_system_state
@@ -397,14 +561,31 @@ export async function verifyPostCutoverInvariants(queryable, manifest = null) {
        u.app_user_id::text as app_user_id,
        u.enabled as enabled,
        u.account_type as account_type,
+       u.version as version,
        public.direct_entry_authz__internal_resolve_effective_grants(u.app_user_id) as grants
      from public.direct_entry_app_users u
      order by u.app_user_id asc`,
   );
 
+  const openRolesRes = await queryable.query(
+    `select app_user_id::text as app_user_id, role_code
+       from public.authz_account_role_assignments
+      where ended_at is null
+      order by app_user_id asc, role_code asc`,
+  );
+  const openRolesByUser = new Map();
+  for (const row of openRolesRes.rows) {
+    if (!openRolesByUser.has(row.app_user_id)) {
+      openRolesByUser.set(row.app_user_id, []);
+    }
+    openRolesByUser.get(row.app_user_id).push(row.role_code);
+  }
+
+  const rowByUser = new Map();
   const grantsByUser = new Map();
   for (const row of resolvedRes.rows) {
     const grants = Array.isArray(row.grants) ? row.grants : [];
+    rowByUser.set(row.app_user_id, row);
     grantsByUser.set(row.app_user_id, grants);
 
     if (!row.enabled && grants.length > 0) {
@@ -449,7 +630,32 @@ export async function verifyPostCutoverInvariants(queryable, manifest = null) {
   }
 
   if (manifest) {
+    if (resolvedRes.rows.length !== manifest.account_plans.length) {
+      throw new Error(
+        `POSTCONDITION_FAILED: account count drifted during cutover (actual=${resolvedRes.rows.length} expected=${manifest.account_plans.length})`,
+      );
+    }
     for (const plan of manifest.account_plans) {
+      const accountRow = rowByUser.get(plan.app_user_id);
+      if (
+        !accountRow ||
+        accountRow.enabled !== plan.enabled ||
+        accountRow.account_type !== plan.account_type ||
+        (plan.account_version !== undefined && accountRow.version !== plan.account_version)
+      ) {
+        throw new Error(
+          `POSTCONDITION_FAILED: account state/version drifted for ${plan.login_id} (${plan.app_user_id})`,
+        );
+      }
+
+      const actualRoles = [...(openRolesByUser.get(plan.app_user_id) ?? [])].sort();
+      const expectedRoles = [...(plan.global_roles ?? [])].sort();
+      if (JSON.stringify(actualRoles) !== JSON.stringify(expectedRoles)) {
+        throw new Error(
+          `POSTCONDITION_FAILED: open global roles mismatch for ${plan.login_id} (${plan.app_user_id}): actual=${JSON.stringify(actualRoles)} expected=${JSON.stringify(expectedRoles)}`,
+        );
+      }
+
       const actualKeys = uniqueSortedGrantKeys(grantsByUser.get(plan.app_user_id));
       const expectedKeys = uniqueSortedGrantKeys(plan.post_cutover_effective_grants);
       if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
@@ -457,6 +663,18 @@ export async function verifyPostCutoverInvariants(queryable, manifest = null) {
           `POSTCONDITION_FAILED: effective grants mismatch for ${plan.login_id} (${plan.app_user_id}): actual=${JSON.stringify(actualKeys)} expected=${JSON.stringify(expectedKeys)}`,
         );
       }
+    }
+  }
+
+  if (preSyncInventory) {
+    const postInventory = await readCutoverInventory(queryable);
+    if (
+      computeNonGrantInventoryDigest(postInventory) !==
+      computeNonGrantInventoryDigest(preSyncInventory)
+    ) {
+      throw new Error(
+        "CUTOVER_SOURCE_STATE_DRIFT: concurrent assignment or organization source changed during cutover",
+      );
     }
   }
 
@@ -652,6 +870,11 @@ export async function runWp5Cutover(queryable, options = {}) {
       };
     }
 
+    // Lock all app_users deterministically (Tier 1 ascending) BEFORE reading inventory or validating fingerprint.
+    await queryable.query(
+      `select app_user_id from public.direct_entry_app_users order by app_user_id asc for update`,
+    );
+
     const inventory = await readCutoverInventory(queryable);
     const manifest = buildWp5FullCutoverManifest(inventory);
     const actionDiff = computeWp5CutoverActionDiff(inventory, manifest);
@@ -666,11 +889,6 @@ export async function runWp5Cutover(queryable, options = {}) {
         `CUTOVER_FINGERPRINT_MISMATCH: expected=${expectedFingerprint} actual=${manifest.manifest_fingerprint}`,
       );
     }
-
-    // Lock all app_users deterministically (Tier 1 ascending)
-    await queryable.query(
-      `select app_user_id from public.direct_entry_app_users order by app_user_id asc for update`,
-    );
 
     const ownerId = manifest.canonical_owner.app_user_id;
     const ownerAuthSubject = manifest.canonical_owner.auth_subject;
@@ -807,8 +1025,8 @@ export async function runWp5Cutover(queryable, options = {}) {
       ],
     );
 
-    // 7) Run strict SQL postconditions inside the transaction before COMMIT/ROLLBACK
-    const postconditions = await verifyPostCutoverInvariants(queryable, manifest);
+    // 7) Run strict SQL postconditions & source drift verification inside the transaction before COMMIT/ROLLBACK
+    const postconditions = await verifyPostCutoverInvariants(queryable, manifest, inventory);
     const postStateRes = await queryable.query(
       `select singleton_id, cutover_ready, cutover_at::text as cutover_at, updated_at::text as updated_at,
               updated_by_app_user_id::text as updated_by_app_user_id

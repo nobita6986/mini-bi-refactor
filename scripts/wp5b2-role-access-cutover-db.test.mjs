@@ -96,6 +96,13 @@ const HIST_DISABLED = {
   email: "hist.disabled@hrpartner.vn",
   name: "Historical Pre-WP5 Disabled",
 };
+const D10_SUSPENDED_REC = {
+  auth: "10000000-0000-4000-8000-000000000116",
+  app: "20000000-0000-4000-8000-000000000116",
+  recruiter: "30000000-0000-4000-8000-000000000116",
+  email: "d10.suspended@hrpartner.vn",
+  name: "D10 Suspended Recruiter",
+};
 const TL_CANDIDATE = {
   auth: "10000000-0000-4000-8000-000000000111",
   app: "20000000-0000-4000-8000-000000000111",
@@ -400,6 +407,16 @@ async function setupDatabase() {
     [HIST_DISABLED.app],
   );
 
+  // WP5B-1 D10-suspended Recruiter before cutover (suspended_by_account_disable = true; must retain dormant roles & restore 7 grants on post-cutover enable)
+  await seedAccount(db, D10_SUSPENDED_REC, {
+    caps: legacyRecruiterCaps,
+    scopes: ["own"],
+  });
+  await db.query(
+    "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, 1, 'Suspend D10 recruiter before cutover', $4)",
+    [OWNER.auth, OWNER.app, D10_SUSPENDED_REC.app, `seed-d10-dis-${seq++}`],
+  );
+
   // Team Leader candidate member
   await seedAccount(db, TL_CANDIDATE, {
     caps: legacyRecruiterCaps,
@@ -476,6 +493,35 @@ test("1. Pre-cutover upgrade (220->221): cutover_ready=false, legacy allowlist d
     [NGATTT.auth, NGATTT.app],
   );
   assert.equal(ngaAud.audience, "all");
+
+  // Pre-cutover account creation (cutover_ready=false) preserves legacy compatibility (authz_managed=false, 0 authz roles)
+  const { rows: [{ res: preBegan }] } = await db.query(
+    "select public.direct_entry_account_operation_begin($1::uuid, $2::uuid, 'CREATE_ACCOUNT', 'pre.cutover', 'Pre Cutover User', null, 'Pre cutover standalone create', $3) as res",
+    [OWNER.auth, OWNER.app, `pre-begin-${seq++}`],
+  );
+  await db.query(
+    "select public.direct_entry_account_operation_claim($1::uuid, $2::uuid, $3::uuid, $4::uuid)",
+    [OWNER.auth, OWNER.app, preBegan.intent_id, preBegan.intent_token],
+  );
+  const preAuthSubject = "10000000-0000-4000-8000-000000000190";
+  await db.query("insert into auth.users (id, email) values ($1::uuid, 'pre.cutover@hrpartner.vn')", [
+    preAuthSubject,
+  ]);
+  const { rows: [{ res: preFin }] } = await db.query(
+    "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as res",
+    [OWNER.auth, OWNER.app, preBegan.intent_id, preBegan.intent_token, preAuthSubject, `pre-fin-${seq++}`],
+  );
+  assert.equal(preFin.intent_state, "APPLIED");
+  const { rows: [preAcct] } = await db.query(
+    "select authz_managed, enabled from public.direct_entry_app_users where app_user_id = $1::uuid",
+    [preFin.app_user_id],
+  );
+  assert.equal(preAcct.authz_managed, false, "Pre-cutover finalize_create keeps authz_managed=false");
+  const { rows: [{ cnt: preRoleCnt }] } = await db.query(
+    "select count(*)::int as cnt from public.authz_account_role_assignments where app_user_id = $1::uuid",
+    [preFin.app_user_id],
+  );
+  assert.equal(preRoleCnt, 0, "Pre-cutover finalize_create assigns 0 authz roles until cutover");
 });
 
 let lockedFingerprint = null;
@@ -812,6 +858,32 @@ test("5. Owner disable/re-enable + pre-WP5 disabled non-resurrection + idempoten
     [HIST_DISABLED.app],
   );
   assert.equal(histLegacy.cnt, 0);
+
+  // Re-enable WP5B-1 D10-suspended Recruiter post-cutover -> restores EMPLOYEE_BASE + RECRUITER + active recruiter link + all 7 OWN grants
+  const { rows: [d10PreEnable] } = await db.query(
+    "select version, authz_managed, enabled from public.direct_entry_app_users where app_user_id = $1::uuid",
+    [D10_SUSPENDED_REC.app],
+  );
+  assert.equal(d10PreEnable.enabled, false);
+  assert.equal(d10PreEnable.authz_managed, true);
+  await db.query(
+    "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Re-enable D10 suspended recruiter', $5)",
+    [OWNER.auth, OWNER.app, D10_SUSPENDED_REC.app, d10PreEnable.version, `en-d10-${seq++}`],
+  );
+  const { rows: [{ payload: d10Ctx }] } = await db.query(
+    "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
+    [D10_SUSPENDED_REC.auth],
+  );
+  assert.equal(d10Ctx.effective_grants.length, 7);
+  assert.equal(
+    d10Ctx.effective_grants.every((g) => g.scope_kind === "OWN" && g.source_type === "ROLE_BUNDLE"),
+    true,
+  );
+  const { rows: [d10Link] } = await db.query(
+    "select is_current, suspended_by_account_disable from public.direct_entry_app_user_recruiter_links where app_user_id = $1::uuid",
+    [D10_SUSPENDED_REC.app],
+  );
+  assert.deepEqual(d10Link, { is_current: true, suspended_by_account_disable: false });
 });
 
 test("6. Cross-grant attack blocked, HR_OPERATOR manages TL cleanly, EMPLOYEE_BASE-only gets empty 'own'", async () => {
@@ -1251,4 +1323,172 @@ test("9. Post-cutover create_personnel & link_recruiter set authz_managed=true +
   // Confirm readCutoverInventory works cleanly post-cutover too
   const inv = await readCutoverInventory(db);
   assert.ok(inv.accounts.length >= 14);
+});
+
+test("10. Post-cutover finalize_create: standalone begin->claim->finalize, idempotency replay, INDETERMINATE reconcile, and cutover noop", async () => {
+  // 1) Standalone CREATE_ACCOUNT flow: begin -> claim -> Auth user -> finalize_create
+  const { rows: [{ res: postBegan }] } = await db.query(
+    "select public.direct_entry_account_operation_begin($1::uuid, $2::uuid, 'CREATE_ACCOUNT', 'post.standalone', 'Post Standalone Staff', null, 'Post cutover standalone account create', $3) as res",
+    [OWNER.auth, OWNER.app, `post-begin-${seq++}`],
+  );
+  const { rows: [{ res: postClaimed }] } = await db.query(
+    "select public.direct_entry_account_operation_claim($1::uuid, $2::uuid, $3::uuid, $4::uuid) as res",
+    [OWNER.auth, OWNER.app, postBegan.intent_id, postBegan.intent_token],
+  );
+  assert.equal(postClaimed.claimed, true);
+
+  const postAuthSubject = "10000000-0000-4000-8000-000000000191";
+  await db.query("insert into auth.users (id, email) values ($1::uuid, 'post.standalone@hrpartner.vn')", [
+    postAuthSubject,
+  ]);
+  const finalizeIdemKey = `post-fin-${seq++}`;
+  const { rows: [{ res: finRes }] } = await db.query(
+    "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as res",
+    [OWNER.auth, OWNER.app, postBegan.intent_id, postBegan.intent_token, postAuthSubject, finalizeIdemKey],
+  );
+  assert.equal(finRes.intent_state, "APPLIED");
+  assert.equal(finRes.version, 1);
+
+  const { rows: [createdAcct] } = await db.query(
+    "select enabled, account_type, authz_managed, version from public.direct_entry_app_users where app_user_id = $1::uuid",
+    [finRes.app_user_id],
+  );
+  assert.deepEqual(createdAcct, {
+    enabled: true,
+    account_type: "NORMAL",
+    authz_managed: true,
+    version: 1,
+  });
+
+  const { rows: openPersonLinks } = await db.query(
+    "select count(*)::int as cnt from public.organization_account_person_links where app_user_id = $1::uuid and ended_at is null",
+    [finRes.app_user_id],
+  );
+  assert.equal(openPersonLinks[0].cnt, 0, "finalize_create must not auto-create Person links");
+
+  const { rows: baseRoles } = await db.query(
+    `select role_code, source_kind, is_protected
+       from public.authz_account_role_assignments
+      where app_user_id = $1::uuid and ended_at is null`,
+    [finRes.app_user_id],
+  );
+  assert.deepEqual(baseRoles, [
+    { role_code: "EMPLOYEE_BASE", source_kind: "ADMIN_ASSIGNMENT", is_protected: false },
+  ]);
+
+  const { rows: [capCount] } = await db.query(
+    "select count(*)::int as cnt from public.direct_entry_capability_grants where app_user_id = $1::uuid and is_current = true",
+    [finRes.app_user_id],
+  );
+  const { rows: [scopeCount] } = await db.query(
+    "select count(*)::int as cnt from public.direct_entry_scope_grants where app_user_id = $1::uuid and is_current = true",
+    [finRes.app_user_id],
+  );
+  assert.equal(capCount.cnt, 0);
+  assert.equal(scopeCount.cnt, 0);
+
+  const { rows: [{ payload: standaloneCtx }] } = await db.query(
+    "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
+    [postAuthSubject],
+  );
+  assertNoEmailOrAt(standaloneCtx, "standalone_post_cutover_ctx");
+  assert.deepEqual(standaloneCtx.effective_grants, []);
+
+  const { rows: [{ payload: standaloneAud }] } = await db.query(
+    "select public.direct_entry_reporting_resolve_audience($1::uuid, $2::uuid) as payload",
+    [postAuthSubject, finRes.app_user_id],
+  );
+  assert.deepEqual(standaloneAud, { audience: "own", label: "Cá nhân", team_ids: [], recruiter_id: null });
+
+  // 2) Same-key idempotency replay -> identical payload & zero duplicate roles/audits
+  const { rows: [{ res: finReplay }] } = await db.query(
+    "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as res",
+    [OWNER.auth, OWNER.app, postBegan.intent_id, postBegan.intent_token, postAuthSubject, finalizeIdemKey],
+  );
+  assert.deepEqual(finReplay, finRes);
+  const { rows: [{ cnt: baseAuditCnt }] } = await db.query(
+    `select count(*)::int as cnt
+       from public.authz_audit_events
+      where target_app_user_id = $1::uuid and operation_name = 'AUTHZ_ACCOUNT_CREATE_BASE_ROLE'`,
+    [finRes.app_user_id],
+  );
+  assert.equal(baseAuditCnt, 1);
+
+  // 3) INDETERMINATE reconcile path -> same finalize_create writer & terminal idempotency guard
+  const { rows: [{ res: recBegan }] } = await db.query(
+    "select public.direct_entry_account_operation_begin($1::uuid, $2::uuid, 'CREATE_ACCOUNT', 'post.reconcile', 'Post Reconcile Staff', null, 'Reconcile unknown auth outcome', $3) as res",
+    [OWNER.auth, OWNER.app, `rec-begin-${seq++}`],
+  );
+  await db.query(
+    "select public.direct_entry_account_operation_claim($1::uuid, $2::uuid, $3::uuid, $4::uuid)",
+    [OWNER.auth, OWNER.app, recBegan.intent_id, recBegan.intent_token],
+  );
+  await db.query(
+    "select public.direct_entry_account_operation_finish($1::uuid, $2::uuid, $3::uuid, 'INDETERMINATE', 'auth_unknown')",
+    [OWNER.auth, OWNER.app, recBegan.intent_id],
+  );
+  const recAuthSubject = "10000000-0000-4000-8000-000000000192";
+  await db.query("insert into auth.users (id, email) values ($1::uuid, 'post.reconcile@hrpartner.vn')", [
+    recAuthSubject,
+  ]);
+  const { rows: [{ res: recFin }] } = await db.query(
+    "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as res",
+    [OWNER.auth, OWNER.app, recBegan.intent_id, recBegan.intent_token, recAuthSubject, `rec-fin-${seq++}`],
+  );
+  assert.equal(recFin.intent_state, "APPLIED");
+  const { rows: [recAcct] } = await db.query(
+    "select authz_managed, version from public.direct_entry_app_users where app_user_id = $1::uuid",
+    [recFin.app_user_id],
+  );
+  assert.deepEqual(recAcct, { authz_managed: true, version: 1 });
+  const { rows: recRoles } = await db.query(
+    "select role_code from public.authz_account_role_assignments where app_user_id = $1::uuid and ended_at is null",
+    [recFin.app_user_id],
+  );
+  assert.deepEqual(recRoles, [{ role_code: "EMPLOYEE_BASE" }]);
+
+  // Terminal-state reconcile retry with a new idempotency key stays immutable and clean
+  const { rows: [{ res: recTerminalReplay }] } = await db.query(
+    "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as res",
+    [OWNER.auth, OWNER.app, recBegan.intent_id, recBegan.intent_token, recAuthSubject, `rec-fin-term-${seq++}`],
+  );
+  assert.deepEqual(recTerminalReplay, {
+    intent_id: recBegan.intent_id,
+    intent_state: "APPLIED",
+    account_ref: recFin.app_user_id,
+  });
+
+  // 4) Re-running cutover apply MUST succeed with ALREADY_APPLIED_NOOP immediately after standalone account creation
+  const postCreateNoop = await runWp5Cutover(db, {
+    mode: "apply",
+    confirmApply: true,
+    expectedFingerprint: lockedFingerprint,
+  });
+  assert.equal(postCreateNoop.status, "ALREADY_APPLIED_NOOP");
+
+  // 5) Creating personnel on the standalone account adds RECRUITER + 7 OWN grants & keeps cutover noop clean
+  await db.query(
+    "select public.direct_entry_account_operation_create_personnel($1::uuid, $2::uuid, $3::uuid, 1, 'post.standalone', 'STAFF', null, 'Link personnel to standalone post-cutover account', $4)",
+    [OWNER.auth, OWNER.app, finRes.app_user_id, `post-pers-${seq++}`],
+  );
+  const { rows: upgradedRoles } = await db.query(
+    "select role_code from public.authz_account_role_assignments where app_user_id = $1::uuid and ended_at is null order by role_code asc",
+    [finRes.app_user_id],
+  );
+  assert.deepEqual(
+    upgradedRoles.map((r) => r.role_code),
+    ["EMPLOYEE_BASE", "RECRUITER"],
+  );
+  const { rows: [{ payload: upgradedCtx }] } = await db.query(
+    "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
+    [postAuthSubject],
+  );
+  assert.equal(upgradedCtx.effective_grants.length, 7);
+
+  const postPersonnelNoop = await runWp5Cutover(db, {
+    mode: "apply",
+    confirmApply: true,
+    expectedFingerprint: lockedFingerprint,
+  });
+  assert.equal(postPersonnelNoop.status, "ALREADY_APPLIED_NOOP");
 });
