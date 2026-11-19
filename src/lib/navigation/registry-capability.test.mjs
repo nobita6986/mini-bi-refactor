@@ -1095,3 +1095,77 @@ test("WP8A: paired finance nav predicates block cross-scope escalation (HR_OPERA
   assert.equal(salaryAdvanceNavPredicate(serverProbedPm), true);
   assert.equal(vendorFinanceNavPredicate(serverProbedPm), false);
 });
+
+test("WP8B-1: projectAdminNavPredicate, catalogOperatorNavPredicate, adminSecurityNavPredicate enforce paired @ ALL when effective_grants is present", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  // 1. Canonical Full Admin (ADMIN bundle): passes all three shared decisions.
+  const canonicalAdmin = {
+    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(adminSecurityNavPredicate(canonicalAdmin), true);
+  assert.equal(adminAreaNavPredicate(canonicalAdmin), true);
+  assert.equal(projectAdminNavPredicate(canonicalAdmin), true);
+
+  // 2. Canonical HR_OPERATOR (5 caps @ ALL, no entry_admin): passes catalog/adminArea, denied adminSecurity & projectAdmin.
+  const canonicalHrOperator = {
+    capabilities: ["recruiter_master_manage", "team_master_manage", "catalog_master_manage", "audit_view", "document_view"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "document_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(catalogOperatorNavPredicate(canonicalHrOperator), true);
+  assert.equal(adminAreaNavPredicate(canonicalHrOperator), true);
+  assert.equal(adminSecurityNavPredicate(canonicalHrOperator), false);
+  assert.equal(projectAdminNavPredicate(canonicalHrOperator), false);
+
+  // 3. Narrow Project Admin (entry_admin @ ALL only): passes projectAdmin, denied adminSecurity & catalog/adminArea.
+  const projectAdminOnly = {
+    capabilities: ["entry_admin"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  };
+  assert.equal(projectAdminNavPredicate(projectAdminOnly), true);
+  assert.equal(adminSecurityNavPredicate(projectAdminOnly), false);
+  assert.equal(catalogOperatorNavPredicate(projectAdminOnly), false);
+  assert.equal(adminAreaNavPredicate(projectAdminOnly), false);
+
+  // 4. Simulated cross-scope drift fixture: entry_admin @ CONTEXT_TEAM + unrelated ALL grant
+  //    MUST fail closed on projectAdminNavPredicate and adminSecurityNavPredicate even when legacy arrays list both.
+  const crossScopeProjectAdminDrift = {
+    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage", "audit_view"],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(projectAdminNavPredicate(crossScopeProjectAdminDrift), false);
+  assert.equal(adminSecurityNavPredicate(crossScopeProjectAdminDrift), false);
+
+  // 5. Simulated stale legacy array fixture (effective_grants = []): all three ALL-scoped decisions fail closed.
+  const staleLegacyOnly = {
+    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage", "catalog_master_manage"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [],
+  };
+  assert.equal(projectAdminNavPredicate(staleLegacyOnly), false);
+  assert.equal(adminSecurityNavPredicate(staleLegacyOnly), false);
+  assert.equal(catalogOperatorNavPredicate(staleLegacyOnly), false);
+  assert.equal(adminAreaNavPredicate(staleLegacyOnly), false);
+});

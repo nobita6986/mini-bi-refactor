@@ -218,15 +218,15 @@ export const adminPanelNavPredicate: NavCapabilityPredicate = (actor) =>
   adminAreaNavPredicate(actor) || attendanceReportNavPredicate(actor) || workerEditHistoryNavPredicate(actor);
 
 /**
- * P2.5-W06A-R1: Project Operations authority chinh xac theo DB W02
- * (direct_entry_assert_project_admin) = entry_admin + effective all scope.
+ * P2.5-W06A-R1 / WP8B-1: Project Operations authority chinh xac theo DB W02
+ * (direct_entry_assert_project_admin) = entry_admin paired @ ALL (khi co effective_grants)
+ * hoac Team Leader contextual (`team_manager_assign`).
  * KHONG yeu cau recruiter_master_manage/team_master_manage (RPC W02 khong yeu cau).
  * Dung CHUNG cho nav visibility va page decision.
  */
 export const projectAdminNavPredicate: NavCapabilityPredicate = (actor) =>
   actor.capabilities.includes("team_manager_assign") ||
-  (actor.capabilities.includes("entry_admin") &&
-    actor.scopes.some((scope) => scope.kind === "all"));
+  hasNavAllCapability(actor, "entry_admin");
 
 /**
  * P2.5-W06-R1: Worker Operations audience.

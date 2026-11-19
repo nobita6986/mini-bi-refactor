@@ -33,6 +33,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp7b-attendance-org-scope-concurrency.test.mjs",
   "scripts/hf-nwc-acl-postcondition-repair.test.mjs",
   "scripts/wp8a-finance-org-authz-concurrency.test.mjs",
+  "scripts/wp8b1-shared-admin-guards-concurrency.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -121,6 +122,7 @@ const TEST_WEIGHTS = {
   "test:wp7b-attendance-org-scope": 14.0,
   "test:hf-account-create-replay": 6.0,
   "test:wp8a-finance-org-authz": 12.0,
+  "test:wp8b1-shared-admin-guards": 12.0,
 };
 
 const target = process.argv[2];
