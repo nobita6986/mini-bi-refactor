@@ -10,6 +10,7 @@
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
+import type { AccountAccessRepository } from "../direct-entry/app-user-access-repository.ts";
 import { readBoundedJson } from "../direct-entry/write-api.ts";
 import type { AccountOperationRepository } from "./account-operation-repository.ts";
 import type { AccountOperationAuth } from "./account-operation-auth.ts";
@@ -23,17 +24,34 @@ import {
   type CreateAccountRequest,
   type CreatePersonnelFromAccountRequest,
   type EditDisplayNameRequest,
+  type IntentEnvelope,
   type LinkRecruiterToAccountRequest,
+  type ReadIntentEnvelope,
   type ResetPasswordRequest,
 } from "./account-operation-contract.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MISMATCH_TOKEN = "00000000-0000-4000-8000-000000000000";
+const REPLAYABLE_NON_APPLIED_STATES = new Set([
+  "IN_FLIGHT",
+  "INDETERMINATE",
+  "BLOCKED",
+  "CONFLICT",
+  "FAILED",
+  "EXPIRED",
+]);
+const TERMINAL_NON_APPLIED_STATES = new Set([
+  "BLOCKED",
+  "CONFLICT",
+  "FAILED",
+  "EXPIRED",
+]);
 
 export type AccountOperationDependencies = {
   resolveSession(): Promise<DirectEntrySessionResult>;
   repository: AccountOperationRepository;
   auth: AccountOperationAuth;
+  accountAccess?: Pick<AccountAccessRepository, "getAccount">;
 };
 
 type TrustedActor = { auth_subject: string; app_user_id: string };
@@ -109,8 +127,133 @@ function errorResponse(kind: string): Response {
   return fail("ACCOUNT_OPERATION_UNAVAILABLE", 500);
 }
 
-function intentResponse(intentId: string, intentToken: string, kind: string, state: string): Response {
-  return respond({ ok: true, intent: { intent_id: intentId, intent_token: intentToken, kind, state } }, 200);
+function intentResponse(
+  intentId: string,
+  intentToken: string,
+  kind: string,
+  state: string,
+  accountRef: string | null = null,
+  replayed?: boolean,
+): Response {
+  const intent = {
+    intent_id: intentId,
+    intent_token: intentToken,
+    kind,
+    state,
+    account_ref: accountRef,
+  };
+  return respond(replayed ? { ok: true, replayed: true, intent } : { ok: true, intent }, 200);
+}
+
+async function resolveAppliedCreateAccount(
+  actor: TrustedActor,
+  intent: ReadIntentEnvelope,
+  idempotencyKey: string,
+  deps: AccountOperationDependencies,
+  skipFinalizeCache = false,
+): Promise<Response> {
+  if (intent.account_ref === null) {
+    return fail("ACCOUNT_OPERATION_UNAVAILABLE", 500);
+  }
+  const intentSummary = {
+    intent_id: intent.intent_id,
+    intent_token: intent.intent_token,
+    kind: "CREATE_ACCOUNT",
+    state: "APPLIED",
+    account_ref: intent.account_ref,
+  };
+
+  if (!skipFinalizeCache && intent.auth_subject !== null) {
+    const finalize = await deps.repository.finalizeCreate({
+      ...actor,
+      intent_id: intent.intent_id,
+      intent_token: intent.intent_token,
+      created_auth_subject: intent.auth_subject,
+      idempotency_key: idempotencyKey,
+    });
+    if (!finalize.ok && finalize.kind === "denied") {
+      return errorResponse("denied");
+    }
+    if (
+      finalize.ok &&
+      "app_user_id" in finalize.data &&
+      finalize.data.app_user_id === intent.account_ref &&
+      finalize.data.intent_id === intent.intent_id
+    ) {
+      return respond({
+        ok: true,
+        replayed: true,
+        account: finalize.data,
+        intent: intentSummary,
+      }, 200);
+    }
+  }
+
+  if (deps.accountAccess) {
+    const acct = await deps.accountAccess.getAccount({
+      ...actor,
+      target_app_user_id: intent.account_ref,
+    });
+    if (!acct.ok && acct.kind === "denied") {
+      return errorResponse("denied");
+    }
+    if (acct.ok && acct.data.account_ref === intent.account_ref) {
+      return respond({
+        ok: true,
+        replayed: true,
+        account: {
+          app_user_id: acct.data.account_ref,
+          auth_subject: intent.auth_subject,
+          display_name: acct.data.display_name,
+          version: acct.data.version,
+          revision_id: null,
+          intent_id: intent.intent_id,
+          intent_state: "APPLIED",
+        },
+        intent: intentSummary,
+      }, 200);
+    }
+  }
+
+  return intentResponse(
+    intent.intent_id,
+    intent.intent_token,
+    "CREATE_ACCOUNT",
+    "APPLIED",
+    intent.account_ref,
+    true,
+  );
+}
+
+async function replayCreateAccountIntent(
+  actor: TrustedActor,
+  intent: IntentEnvelope,
+  idempotencyKey: string,
+  deps: AccountOperationDependencies,
+): Promise<Response> {
+  const read = await deps.repository.readIntent({ ...actor, intent_id: intent.intent_id });
+  if (!read.ok) return errorResponse(read.kind);
+  if (
+    read.data.intent_id !== intent.intent_id ||
+    read.data.kind !== "CREATE_ACCOUNT" ||
+    read.data.intent_token !== intent.intent_token
+  ) {
+    return fail("ACCOUNT_OPERATION_CONFLICT", 409);
+  }
+  if (read.data.state === "APPLIED") {
+    return resolveAppliedCreateAccount(actor, read.data, idempotencyKey, deps);
+  }
+  if (REPLAYABLE_NON_APPLIED_STATES.has(read.data.state)) {
+    return intentResponse(
+      read.data.intent_id,
+      read.data.intent_token,
+      "CREATE_ACCOUNT",
+      read.data.state,
+      read.data.account_ref,
+      true,
+    );
+  }
+  return fail("ACCOUNT_OPERATION_CONFLICT", 409);
 }
 
 function logResetStage(stage: "begin" | "claim" | "read" | "auth" | "finish", outcome: string): void {
@@ -150,7 +293,9 @@ async function runCreateAccount(
     ...actor.value, intent_id: intent.intent_id, intent_token: intent.intent_token,
   });
   if (!claimed.ok) return errorResponse(claimed.kind);
-  if (!claimed.data.claimed) return fail("ACCOUNT_OPERATION_CONFLICT", 409);
+  if (!claimed.data.claimed) {
+    return replayCreateAccountIntent(actor.value, intent, input.idempotency_key, deps);
+  }
 
   const auth = deps.auth;
   const created = await auth.createAuthAccount({
@@ -174,6 +319,13 @@ async function runCreateAccount(
   const provenance = await auth.readAuthUserProvenance({
     auth_subject: created.auth_subject, intent_token: intent.intent_token,
   });
+  if (provenance.kind === "unknown") {
+    const finished = await deps.repository.finish({
+      ...actor.value, intent_id: intent.intent_id, outcome: "INDETERMINATE", failure_code: "provenance_unknown",
+    });
+    if (!finished.ok) return fail("ACCOUNT_OPERATION_UNAVAILABLE", 500);
+    return intentResponse(intent.intent_id, intent.intent_token, "CREATE_ACCOUNT", "INDETERMINATE", null);
+  }
   const finalize = await deps.repository.finalizeCreate({
     ...actor.value, intent_id: intent.intent_id,
     intent_token: provenance.kind === "match" ? intent.intent_token : MISMATCH_TOKEN,
@@ -315,6 +467,23 @@ async function runReconcileIntent(
   if (!read.ok) return errorResponse(read.kind);
   if (read.data.kind !== "CREATE_ACCOUNT") return fail("ACCOUNT_OPERATION_INVALID", 400);
 
+  if (read.data.state === "APPLIED") {
+    return resolveAppliedCreateAccount(actor.value, read.data, idempotencyKey, deps);
+  }
+  if (TERMINAL_NON_APPLIED_STATES.has(read.data.state)) {
+    return intentResponse(
+      read.data.intent_id,
+      read.data.intent_token,
+      "CREATE_ACCOUNT",
+      read.data.state,
+      read.data.account_ref,
+      true,
+    );
+  }
+  if (read.data.state !== "IN_FLIGHT" && read.data.state !== "INDETERMINATE") {
+    return fail("ACCOUNT_OPERATION_CONFLICT", 409);
+  }
+
   const auth = deps.auth;
   const provenance = read.data.login_id === null
     ? { kind: "missing" as const }
@@ -333,7 +502,27 @@ async function runReconcileIntent(
   if ("app_user_id" in finalize.data) {
     return respond({ ok: true, account: finalize.data }, 200);
   }
-  return intentResponse(intentRef, read.data.intent_token, "CREATE_ACCOUNT", finalize.data.intent_state);
+  if (finalize.data.intent_state === "APPLIED") {
+    return resolveAppliedCreateAccount(
+      actor.value,
+      {
+        ...read.data,
+        state: "APPLIED",
+        account_ref: finalize.data.account_ref,
+        auth_subject: read.data.auth_subject ?? (provenance.kind === "match" ? provenance.auth_subject : null),
+      },
+      idempotencyKey,
+      deps,
+      true,
+    );
+  }
+  return intentResponse(
+    intentRef,
+    read.data.intent_token,
+    "CREATE_ACCOUNT",
+    finalize.data.intent_state,
+    finalize.data.account_ref,
+  );
 }
 
 /* ---------------- personnel from account ---------------- */

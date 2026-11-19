@@ -114,6 +114,7 @@ const TEST_WEIGHTS = {
   "test:wp5-role-access-foundation": 14.0,
   "test:wp6-effective-access-ui": 3.0,
   "test:wp5b2-role-access-cutover": 14.0,
+  "test:hf-account-create-replay": 6.0,
 };
 
 const target = process.argv[2];
