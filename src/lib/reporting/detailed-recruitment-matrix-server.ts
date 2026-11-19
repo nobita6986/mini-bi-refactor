@@ -1,6 +1,9 @@
 import "server-only";
 
-import type { DirectEntryActor } from "../auth/direct-entry-v2.ts";
+import {
+  hasPairedAllReportingAccess,
+  type DirectEntryActor,
+} from "../auth/direct-entry-v2.ts";
 import { createServiceSupabaseClient } from "../supabase/server.ts";
 
 import {
@@ -154,11 +157,9 @@ export async function fetchDetailedRecruitmentMatrixReport(
     referenceDate?: Date;
   },
 ): Promise<DetailedMatrixFetchResult> {
-  // 1. Server-side scope guard: only `scope = "all"` (Admin/BoD) is allowed.
-  const hasAllScope =
-    Array.isArray(actor.scopes) &&
-    actor.scopes.some((scope) => scope.kind === "all");
-  if (!hasAllScope) {
+  // 1. Server-side paired capability+scope guard (WP5B-2 Group A):
+  //    only `(entry_admin | report_analytics_view) @ ALL` is allowed.
+  if (!hasPairedAllReportingAccess(actor)) {
     return {
       ok: false,
       code: FORBIDDEN_DETAILED_MATRIX_REPORT_CODE,

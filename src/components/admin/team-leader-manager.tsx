@@ -107,6 +107,7 @@ async function readLeaderList(
 
 export function TeamLeaderManager({
   team,
+  canManageLeaders = true,
   teamOperationLocked,
   onClose,
   onTeamReloaded,
@@ -114,6 +115,7 @@ export function TeamLeaderManager({
   onLockChange,
 }: {
   team: AdminTeam | null;
+  canManageLeaders?: boolean;
   teamOperationLocked: boolean;
   onClose(): void;
   onTeamReloaded(team: AdminTeam): void;
@@ -347,7 +349,7 @@ export function TeamLeaderManager({
   }, [notify, onLockChange, reloadAuthoritative, updateWorkflow]);
 
   const startDesignation = () => {
-    if (!team?.active || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
+    if (!canManageLeaders || !team?.active || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
     setForm({
       kind: currentLeaders.length ? "replace" : "designate",
       appUserId: "",
@@ -362,14 +364,14 @@ export function TeamLeaderManager({
   };
 
   const startRevocation = () => {
-    if (hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
+    if (!canManageLeaders || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
     setForm({ kind: "revoke", effectiveDate: "", reason: "" });
     setFormError(null);
   };
 
   const submitMutation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!team || !form || workflow.phase !== "idle" || teamOperationLocked) return;
+    if (!canManageLeaders || !team || !form || workflow.phase !== "idle" || teamOperationLocked) return;
     setFormError(null);
     const idempotencyKey = newTeamLeaderIntentKey();
     const request = form.kind === "revoke"
@@ -466,11 +468,13 @@ export function TeamLeaderManager({
                 <p className="text-sm text-muted">
                   {team.active ? "Nhóm đang hoạt động" : "Nhóm ngừng hoạt động"}
                 </p>
-                <button type="button" onClick={startDesignation}
-                  disabled={!team.active || !readReady || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}
-                  className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50">
-                  {currentLeaders.length ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
-                </button>
+                {canManageLeaders ? (
+                  <button type="button" onClick={startDesignation}
+                    disabled={!team.active || !readReady || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}
+                    className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50">
+                    {currentLeaders.length ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
+                  </button>
+                ) : null}
               </div>
 
               {hasScheduledLeaders ? (
@@ -524,7 +528,7 @@ export function TeamLeaderManager({
                           <th scope="row" data-card-header="true" className="px-3.5 py-2.5 font-medium">{leader.leader_display_name}</th>
                           <td data-label="Từ ngày" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{formatDate(leader.valid_from)}</td>
                           <td data-label="Đến ngày" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{formatDate(leader.valid_to)}</td>
-                          {activeState === "CURRENT" ? (
+                          {activeState === "CURRENT" && canManageLeaders ? (
                             <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
                               <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
                                 <button type="button" disabled={hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}

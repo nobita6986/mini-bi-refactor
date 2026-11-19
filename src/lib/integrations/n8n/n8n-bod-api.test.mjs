@@ -156,6 +156,7 @@ test("resolveN8nBodServiceActor requires explicit N8N_BOD_READONLY_AUTH_SUBJECT 
         enabled: true,
         capabilities: ["entry_admin"],
         all_scope_grants: [{ valid_from: "2026-01-01", valid_to: null }],
+        effective_grants: [{ capability: "entry_admin", scope_kind: "ALL", scope_id: null }],
       },
       error: null,
     }),
@@ -163,7 +164,26 @@ test("resolveN8nBodServiceActor requires explicit N8N_BOD_READONLY_AUTH_SUBJECT 
   assert.equal(mismatchedAppUser.ok, false);
   assert.equal(mismatchedAppUser.code, "SERVICE_PRINCIPAL_ACTOR_UNAVAILABLE");
 
-  // 4. Explicit authSubject verified with enabled=true and active all_scope_grants succeeds,
+  // 3b. Orphan all_scope_grants without paired reporting capability @ ALL must be rejected (WP5B-2 Group A)
+  clearN8nServiceActorCache();
+  const unpairedAll = await resolveN8nBodServiceActor({
+    env: TEST_ENV,
+    resolveActorContextRpc: async (authSubject) => ({
+      data: {
+        auth_subject: authSubject,
+        app_user_id: TEST_ENV.appUserId,
+        enabled: true,
+        capabilities: ["catalog_master_manage"],
+        all_scope_grants: [{ valid_from: "2026-01-01", valid_to: null }],
+        effective_grants: [{ capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null }],
+      },
+      error: null,
+    }),
+  });
+  assert.equal(unpairedAll.ok, false);
+  assert.equal(unpairedAll.code, "SERVICE_PRINCIPAL_ACTOR_UNAVAILABLE");
+
+  // 4. Explicit authSubject verified with enabled=true and active all_scope_grants + paired ALL reporting grant succeeds,
   // and re-verifies on EVERY subsequent request (no 5-minute cache window when all scope is revoked)
   let rpcCallCount = 0;
   let allScopeRevoked = false;
@@ -178,6 +198,12 @@ test("resolveN8nBodServiceActor requires explicit N8N_BOD_READONLY_AUTH_SUBJECT 
         all_scope_grants: allScopeRevoked
           ? []
           : [{ valid_from: "2026-01-01", valid_to: null }],
+        effective_grants: allScopeRevoked
+          ? []
+          : [
+              { capability: "entry_admin", scope_kind: "ALL", scope_id: null },
+              { capability: "report_view", scope_kind: "ALL", scope_id: null },
+            ],
       },
       error: null,
     };

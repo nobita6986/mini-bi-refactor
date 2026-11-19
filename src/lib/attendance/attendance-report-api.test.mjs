@@ -65,6 +65,20 @@ const TEAM_LEADER_CAPS = [
 ];
 
 function makeSessionOk(capabilities, scopes = ALL_SCOPE, overrides = {}) {
+  const effective_grants = [];
+  for (const s of scopes) {
+    const scope_kind = s.kind === "all" ? "ALL" : s.kind === "team" ? "CONTEXT_TEAM" : "OWN";
+    const scope_id = s.kind === "team" ? (s.reference ?? null) : null;
+    for (const cap of capabilities) {
+      effective_grants.push({
+        capability: cap,
+        scope_kind,
+        scope_id,
+        source_type: "LEGACY_BRIDGE",
+        source_id: APP_USER_ID,
+      });
+    }
+  }
   return {
     actor: {
       ok: true,
@@ -75,6 +89,7 @@ function makeSessionOk(capabilities, scopes = ALL_SCOPE, overrides = {}) {
         enabled: true,
         capabilities,
         scopes,
+        effective_grants,
         self_recruiter_suggestion: null,
         session: {
           provider: "supabase",

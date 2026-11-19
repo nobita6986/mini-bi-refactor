@@ -119,7 +119,7 @@ async function seed(client) {
   );
   await client.query(
     "insert into public.direct_entry_capability_grants(app_user_id,capability,valid_from,is_current)"
-      + " values ($1,'catalog_master_manage',$2,true),($1,'recruiter_master_manage',$2,true),"
+      + " values ($1,'catalog_master_manage',$2,true),($1,'recruiter_master_manage',$2,true),($1,'team_master_manage',$2,true),"
       + "($3,'team_manager_assign',$2,true)",
     [ADMIN_APP, PAST, LEADER_APP],
   );

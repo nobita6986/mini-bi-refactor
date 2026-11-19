@@ -102,6 +102,9 @@ async function resolveVerifiedFullAdminActor(
   const navActor: NavActorProjection = {
     capabilities: actor.capabilities,
     scopes: actor.scopes.map((scope) => ({ kind: scope.kind })),
+    ...(actor.effective_grants !== undefined
+      ? { effective_grants: actor.effective_grants }
+      : {}),
   };
 
   if (!adminAuthorityNavPredicate(navActor)) {

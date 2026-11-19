@@ -7,7 +7,7 @@ import "server-only";
  * KHÔNG đọc NEXT_PUBLIC_*, KHÔNG log secret, KHÔNG trả envelope/ciphertext ra ngoài server.
  */
 
-import { PILOT_ACTOR_REF, isAiSettingsEnabled } from "../settings-flag.ts";
+import { isAiSettingsEnabled } from "../settings-flag.ts";
 import {
   activateProviderConfig,
   disableProviderConfig,
@@ -21,6 +21,8 @@ import { tryKeyringFromEnvironment } from "../crypto-envelope.ts";
 import { DEFAULT_PROVIDER_PROFILE_ID } from "../provider-profiles.ts";
 
 import { createSupabaseProviderConfigStore } from "./store.mjs";
+
+const ACTOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Môi trường triển khai: Vercel env trước, sau đó NODE_ENV (preview/production KHÔNG nhận dev override). */
 export function environmentOf(env = process.env) {
@@ -58,9 +60,16 @@ export function createServerAiSettingsService(options = {}) {
   if (!keyring.ok) {
     return { ok: false, code: keyring.code, message: keyring.message };
   }
+  const actorRef = typeof options.actor_ref === "string" ? options.actor_ref.trim() : "";
+  if (!ACTOR_UUID_RE.test(actorRef)) {
+    return {
+      ok: false,
+      code: "AI_FORBIDDEN",
+      message: "Bạn không có quyền quản trị cấu hình AI",
+    };
+  }
   const store = options.store ?? createSupabaseProviderConfigStore({ env });
   const urlPolicy = options.url_policy ?? urlPolicyFromEnv(env);
-  const actorRef = options.actor_ref ?? PILOT_ACTOR_REF;
   const configId = options.config_id ?? PILOT_CONFIG_ID;
   const outbound = options.outbound;
 

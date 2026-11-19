@@ -187,14 +187,17 @@ test("W04A-P7: route settings — fail-closed TRƯỚC mọi truy cập DB và K
     for (const forbidden of ["decryptSecret", "encrypted_secret", "credential_secret", "ciphertext", "authentication_tag", "fingerprintSecret"]) {
       assert.equal(file.source.includes(forbidden), false, name + " không được chạm " + forbidden);
     }
-    // Guard phải chạy TRƯỚC khi wiring store/keyring.
+    // Guard phải chạy TRƯỚC khi wiring store/keyring; actor Full Admin check chạy sau guardApiSession().
     const guardIndex = file.source.indexOf("guardSettingsRequest(request");
+    const adminGuardIndex = file.source.indexOf("guardAiSettingsAdminActor(");
     const wiringIndex = Math.max(
-      file.source.indexOf("createSettingsWiring()"),
-      file.source.indexOf("createServerAiSettingsService()")
+      file.source.indexOf("createSettingsWiring("),
+      file.source.indexOf("createServerAiSettingsService(")
     );
     assert.equal(guardIndex >= 0, true, name + " phải gọi guardSettingsRequest");
-    assert.equal(wiringIndex > guardIndex, true, name + " phải guard TRƯỚC khi wiring");
+    assert.equal(adminGuardIndex > guardIndex, true, name + " phải kiểm tra Full Admin sau guardSettingsRequest");
+    assert.equal(wiringIndex > adminGuardIndex, true, name + " phải wiring SAU guardAiSettingsAdminActor");
+    assert.equal(file.source.includes("PILOT_ACTOR_REF"), false, name + " không được dùng PILOT_ACTOR_REF (OD-WP5-04)");
     assert.equal(file.source.includes("isAiSettingsEnabled"), false, name + " không tự đọc flag (dùng guard)");
   }
 

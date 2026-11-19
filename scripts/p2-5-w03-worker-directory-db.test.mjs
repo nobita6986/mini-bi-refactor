@@ -458,6 +458,7 @@ test("W03-R1: the all audience accepts entry_admin or change_review, always with
     //    audience for the same actor resolves to all. Reporting is not a directory
     //    grant, and this actor is also the uploader of both rows.
     await grantScope(db, UPLOADER_APP, "all");
+    await grantCapability(db, UPLOADER_APP, "report_analytics_view");
     const reporting = await reportingAudience(db, UPLOADER_AUTH, UPLOADER_APP);
     assert.equal(reporting.audience, "all",
       "the reporting audience really is all for this actor");

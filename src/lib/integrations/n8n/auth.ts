@@ -222,10 +222,29 @@ type ActorContextResolutionPayload = {
   enabled?: unknown;
   capabilities?: unknown;
   all_scope_grants?: unknown;
+  effective_grants?: unknown;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const N8N_ALL_REPORTING_CAPABILITIES = new Set([
+  "entry_admin",
+  "report_analytics_view",
+]);
+
+function hasVerifiedPairedAllReportingGrant(effectiveGrants: unknown): boolean {
+  if (!Array.isArray(effectiveGrants)) return false;
+  return effectiveGrants.some((grant) => {
+    if (!isRecord(grant)) return false;
+    return (
+      typeof grant.capability === "string" &&
+      N8N_ALL_REPORTING_CAPABILITIES.has(grant.capability) &&
+      grant.scope_kind === "ALL" &&
+      (grant.scope_id === null || grant.scope_id === undefined)
+    );
+  });
 }
 
 function isVerifiedAllScopeActor(
@@ -238,6 +257,7 @@ function isVerifiedAllScopeActor(
   enabled: true;
   capabilities?: unknown;
   all_scope_grants: unknown[];
+  effective_grants: unknown[];
 } {
   if (payload.enabled !== true) return false;
   if (
@@ -263,6 +283,9 @@ function isVerifiedAllScopeActor(
     ? payload.all_scope_grants
     : [];
   if (allScopeGrants.length === 0) return false;
+  if (!hasVerifiedPairedAllReportingGrant(payload.effective_grants)) {
+    return false;
+  }
   return true;
 }
 

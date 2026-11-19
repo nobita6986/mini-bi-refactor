@@ -1,6 +1,9 @@
 import "server-only";
 
-import type { DirectEntryActor } from "@/lib/auth/direct-entry-v2";
+import {
+  hasPairedAllReportingAccess,
+  type DirectEntryActor,
+} from "@/lib/auth/direct-entry-v2";
 import { createServiceSupabaseClient } from "@/lib/supabase/server";
 
 import { applyDashboardDefaultDateParams } from "./p1-date-presets";
@@ -47,10 +50,9 @@ export async function fetchWorkforceDeepReport(
     callWorkforceRpc?: (args: WorkforceScopedRpcArgs) => PromiseLike<WorkforceScopedRpcResult>;
   },
 ): Promise<WorkforceDeepReportFetchResult> {
-  // 1. Server-side scope guard: chỉ actor có scope = "all" (Admin/BoD) được phép truy cập.
-  const hasAllScope =
-    Array.isArray(actor.scopes) && actor.scopes.some((scope) => scope.kind === "all");
-  if (!hasAllScope) {
+  // 1. Server-side paired capability+scope guard (WP5B-2 Group A):
+  //    chi actor co (entry_admin | report_analytics_view) @ ALL duoc phep truy cap.
+  if (!hasPairedAllReportingAccess(actor)) {
     return { ok: false, code: FORBIDDEN_DEEP_WORKFORCE_REPORT_CODE, status: 403 };
   }
 
