@@ -1982,3 +1982,204 @@ test("T1A-9: n8n workers_directory (scope=all) succeeds with entry_admin/change_
   assert.equal(rpcDeniedBody.error.code, "WORKER_DIRECTORY_DENIED");
 });
 
+test("WP8C-2: resolveN8nBodServiceActor derives capabilities strictly from paired ALL effective_grants without requiring legacy all_scope_grants", async () => {
+  const WORKER_ID = "11111111-2222-4333-8444-555555555555";
+  const RECRUITER_ID = "22222222-3333-4444-8555-666666666666";
+  const TEAM_ID = "33333333-3333-4333-8333-333333333333";
+
+  // 1. Mirror-cleared managed service actor (all_scope_grants: [], capabilities: [],
+  // effective_grants: [entry_admin @ ALL]) resolves ok with ["entry_admin"] and succeeds on workers_directory
+  clearN8nServiceActorCache();
+  const resolveMirrorCleared = () =>
+    resolveN8nBodServiceActor({
+      env: TEST_ENV,
+      resolveActorContextRpc: async (authSubject) => ({
+        data: {
+          auth_subject: authSubject,
+          app_user_id: TEST_ENV.appUserId,
+          enabled: true,
+          capabilities: [],
+          all_scope_grants: [],
+          effective_grants: [
+            {
+              capability: "entry_admin",
+              scope_kind: "ALL",
+              scope_id: null,
+              source_type: "ROLE_BUNDLE",
+              source_id: null,
+            },
+          ],
+        },
+        error: null,
+      }),
+    });
+
+  const resolvedMirrorCleared = await resolveMirrorCleared();
+  assert.equal(resolvedMirrorCleared.ok, true);
+  assert.deepEqual(resolvedMirrorCleared.actor, TEST_ACTOR);
+  assert.deepEqual(resolvedMirrorCleared.capabilities, ["entry_admin"]);
+
+  let listWorkersCalls = 0;
+  const mirrorClearedDirRes = await handleN8nBodQueryPost(
+    makeQueryRequest({ dataset: "workers_directory", page_size: 25 }),
+    {
+      env: TEST_ENV,
+      dispatcherDeps: {
+        resolveActor: resolveMirrorCleared,
+        workerDirectoryRepo: {
+          listWorkers: async (query) => {
+            listWorkersCalls += 1;
+            assert.equal(query.scope, "all");
+            return {
+              ok: true,
+              data: {
+                items: [
+                  {
+                    entry_id: WORKER_ID,
+                    entry_version: 1,
+                    submission_state: "SUBMITTED",
+                    employee_code: "hrp-2026-000101",
+                    display_name: "Nguyễn Văn A",
+                    project_id: "proj_1",
+                    project_display: "Dự án 1",
+                    first_work_date: "2026-10-01",
+                    labor_type: "TEMPORARY",
+                    labor_type_display: "Thời vụ",
+                    employment_status: "ON",
+                    recruiter_id: RECRUITER_ID,
+                    recruiter_display: "Trần Thị B",
+                    payment: null,
+                    pending_request: null,
+                    last_decision: null,
+                    is_project_manager: false,
+                    allowed_actions: {
+                      view: true,
+                      view_pii: false,
+                      view_payment: false,
+                      propose_change: false,
+                      propose_change_code: "NOT_PROJECT_MANAGER",
+                      direct_edit: false,
+                    },
+                  },
+                ],
+                page_size: 25,
+                has_more: false,
+                next_cursor: null,
+                authorization_date: "2026-10-25",
+                summary: {
+                  total_workers: 1,
+                  project_count: 1,
+                  recruiter_count: 1,
+                },
+              },
+            };
+          },
+        },
+      },
+    },
+  );
+  assert.equal(mirrorClearedDirRes.status, 200);
+  const mirrorClearedDirBody = await mirrorClearedDirRes.json();
+  assert.equal(mirrorClearedDirBody.ok, true);
+  assert.equal(mirrorClearedDirBody.rows.length, 1);
+  assert.equal(listWorkersCalls, 1);
+
+  // 2. Managed service actor with paired report_analytics_view @ ALL + stale legacy capabilities
+  // ["entry_admin", "report_analytics_view"] -> returns ONLY ["report_analytics_view"]
+  // and workers_directory returns 403 WORKER_DIRECTORY_DENIED without invoking RPC
+  clearN8nServiceActorCache();
+  const resolveAnalyticsOnly = () =>
+    resolveN8nBodServiceActor({
+      env: TEST_ENV,
+      resolveActorContextRpc: async (authSubject) => ({
+        data: {
+          auth_subject: authSubject,
+          app_user_id: TEST_ENV.appUserId,
+          enabled: true,
+          capabilities: ["entry_admin", "report_analytics_view"],
+          all_scope_grants: [{ valid_from: "2026-01-01", valid_to: null }],
+          effective_grants: [
+            {
+              capability: "report_analytics_view",
+              scope_kind: "ALL",
+              scope_id: null,
+              source_type: "ROLE_BUNDLE",
+              source_id: null,
+            },
+          ],
+        },
+        error: null,
+      }),
+    });
+
+  const resolvedAnalyticsOnly = await resolveAnalyticsOnly();
+  assert.equal(resolvedAnalyticsOnly.ok, true);
+  assert.deepEqual(resolvedAnalyticsOnly.capabilities, ["report_analytics_view"]);
+
+  let staleDirRepoCalled = false;
+  const staleDirRes = await handleN8nBodQueryPost(
+    makeQueryRequest({ dataset: "workers_directory", page_size: 25 }),
+    {
+      env: TEST_ENV,
+      dispatcherDeps: {
+        resolveActor: resolveAnalyticsOnly,
+        workerDirectoryRepo: {
+          listWorkers: async () => {
+            staleDirRepoCalled = true;
+            return { ok: false, kind: "denied" };
+          },
+        },
+      },
+    },
+  );
+  assert.equal(staleDirRes.status, 403);
+  const staleDirBody = await staleDirRes.json();
+  assert.equal(staleDirBody.ok, false);
+  assert.equal(staleDirBody.error.code, "WORKER_DIRECTORY_DENIED");
+  assert.equal(staleDirRepoCalled, false);
+
+  // 3. Non-ALL grants (entry_admin @ OWN, report_analytics_view @ CONTEXT_TEAM) are rejected
+  // even when legacy all_scope_grants and capabilities are populated
+  for (const grant of [
+    {
+      capability: "entry_admin",
+      scope_kind: "OWN",
+      scope_id: null,
+      source_type: "DIRECT_GRANT",
+      source_id: null,
+    },
+    {
+      capability: "report_analytics_view",
+      scope_kind: "CONTEXT_TEAM",
+      scope_id: TEAM_ID,
+      source_type: "CONTEXTUAL_ASSIGNMENT",
+      source_id: null,
+    },
+    {
+      capability: "entry_admin",
+      scope_kind: "ALL",
+      scope_id: TEAM_ID,
+      source_type: "DIRECT_GRANT",
+      source_id: null,
+    },
+  ]) {
+    clearN8nServiceActorCache();
+    const rejected = await resolveN8nBodServiceActor({
+      env: TEST_ENV,
+      resolveActorContextRpc: async (authSubject) => ({
+        data: {
+          auth_subject: authSubject,
+          app_user_id: TEST_ENV.appUserId,
+          enabled: true,
+          capabilities: [grant.capability],
+          all_scope_grants: [{ valid_from: "2026-01-01", valid_to: null }],
+          effective_grants: [grant],
+        },
+        error: null,
+      }),
+    });
+    assert.equal(rejected.ok, false, `expected rejection for ${grant.capability}@${grant.scope_kind}`);
+    assert.equal(rejected.code, "SERVICE_PRINCIPAL_ACTOR_UNAVAILABLE");
+  }
+});
+

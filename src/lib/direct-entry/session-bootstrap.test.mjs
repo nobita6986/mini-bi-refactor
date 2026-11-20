@@ -76,3 +76,123 @@ test("session and RPC failures return sanitized errors", async () => {
   assert.equal(body.includes("database_url"), false);
   assert.equal(body.includes("secret"), false);
 });
+
+test("WP8C-2: session bootstrap projects paired effective_grants without leaking grant metadata and drops stale legacy mirrors or invalid scope pairings", async () => {
+  const teamId = "33333333-3333-4333-8333-333333333333";
+  const sourceIdA = "44444444-4444-4444-8444-444444444444";
+  const sourceIdB = "55555555-5555-4555-8555-555555555555";
+  const sourceIdC = "66666666-6666-4666-8666-666666666666";
+
+  // 1. Mirror-cleared canonical managed actor gets paired capabilities & derived own/team/all scopes,
+  // and never exposes effective_grants, source_type, or source_id
+  const canonicalRes = await createDirectEntrySessionResponse("true", async () =>
+    sessionResult({
+      ok: true,
+      actor: {
+        ...safeActor,
+        capabilities: [],
+        scopes: [{ kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null }],
+        effective_grants: [
+          {
+            capability: "entry_admin",
+            scope_kind: "ALL",
+            scope_id: null,
+            source_type: "ROLE_BUNDLE",
+            source_id: sourceIdA,
+          },
+          {
+            capability: "document_upload",
+            scope_kind: "ALL",
+            scope_id: null,
+            source_type: "DIRECT_GRANT",
+            source_id: sourceIdB,
+          },
+          {
+            capability: "team_manager_assign",
+            scope_kind: "CONTEXT_TEAM",
+            scope_id: teamId,
+            source_type: "CONTEXTUAL_ASSIGNMENT",
+            source_id: sourceIdC,
+          },
+        ],
+      },
+    }));
+  assert.equal(canonicalRes.status, 200);
+  const canonicalBody = await canonicalRes.json();
+  assert.deepEqual(Object.keys(canonicalBody.actor).sort(), [
+    "app_user_id", "capabilities", "scopes", "self_recruiter_suggestion",
+  ]);
+  assert.deepEqual(canonicalBody.actor.capabilities, [
+    "entry_admin",
+    "document_upload",
+    "team_manager_assign",
+  ]);
+  assert.deepEqual(canonicalBody.actor.scopes, [
+    { kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+    { kind: "team", reference: teamId, valid_from: "0001-01-01", valid_to: null },
+    { kind: "all", reference: "all", valid_from: "0001-01-01", valid_to: null },
+  ]);
+  const canonicalText = JSON.stringify(canonicalBody);
+  assert.equal(canonicalText.includes("effective_grants"), false);
+  assert.equal(canonicalText.includes("source_type"), false);
+  assert.equal(canonicalText.includes("source_id"), false);
+  assert.equal(canonicalText.includes("ROLE_BUNDLE"), false);
+  assert.equal(canonicalText.includes(sourceIdA), false);
+
+  // 2. Stale legacy mirror on managed EMPLOYEE_BASE (effective_grants: []) projects empty capabilities and own-only scope
+  const staleRes = await createDirectEntrySessionResponse("true", async () =>
+    sessionResult({
+      ok: true,
+      actor: {
+        ...safeActor,
+        capabilities: ["entry_admin"],
+        scopes: [
+          { kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+          { kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null },
+        ],
+        effective_grants: [],
+      },
+    }));
+  assert.equal(staleRes.status, 200);
+  const staleBody = await staleRes.json();
+  assert.deepEqual(staleBody.actor.capabilities, []);
+  assert.deepEqual(staleBody.actor.scopes, [
+    { kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+  ]);
+
+  // 3. Invalid scope pairings in effective_grants are dropped from both capabilities and scopes
+  const invalidPairRes = await createDirectEntrySessionResponse("true", async () =>
+    sessionResult({
+      ok: true,
+      actor: {
+        ...safeActor,
+        capabilities: ["entry_admin", "team_manager_assign"],
+        scopes: [
+          { kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+          { kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null },
+        ],
+        effective_grants: [
+          {
+            capability: "entry_admin",
+            scope_kind: "OWN",
+            scope_id: null,
+            source_type: "DIRECT_GRANT",
+            source_id: null,
+          },
+          {
+            capability: "team_manager_assign",
+            scope_kind: "ALL",
+            scope_id: null,
+            source_type: "DIRECT_GRANT",
+            source_id: null,
+          },
+        ],
+      },
+    }));
+  assert.equal(invalidPairRes.status, 200);
+  const invalidPairBody = await invalidPairRes.json();
+  assert.deepEqual(invalidPairBody.actor.capabilities, []);
+  assert.deepEqual(invalidPairBody.actor.scopes, [
+    { kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+  ]);
+});

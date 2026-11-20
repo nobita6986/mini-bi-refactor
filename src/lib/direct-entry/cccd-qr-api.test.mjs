@@ -136,6 +136,7 @@ test("finalizeDirectEntryDocument triggers non-blocking background QR extraction
         actor: {
           auth_subject: AUTH_SUB,
           app_user_id: APP_USER_ID,
+          enabled: true,
           capabilities: ["document_upload", "document_view"],
         },
       },
@@ -231,6 +232,7 @@ test("getDirectEntryCccdQr performs self-healing lazy completion when an eligibl
         actor: {
           auth_subject: AUTH_SUB,
           app_user_id: APP_USER_ID,
+          enabled: true,
           capabilities: ["document_upload", "document_view"],
         },
       },
@@ -397,6 +399,7 @@ test("getDirectEntryCccdQr and processDirectEntryCccdQr enforce feature gate, CS
           actor: {
             auth_subject: AUTH_SUB,
             app_user_id: APP_USER_ID,
+            enabled: true,
             capabilities: ["document_upload", "document_view"],
           },
         },
@@ -465,6 +468,7 @@ test("getDirectEntryCccdQr and processDirectEntryCccdQr enforce feature gate, CS
         actor: {
           auth_subject: AUTH_SUB,
           app_user_id: APP_USER_ID,
+          enabled: true,
           capabilities: ["draft_create"],
         },
       },
@@ -514,6 +518,7 @@ test("processDirectEntryCccdQr handles FAILED_RETRYABLE on transient R2 read fai
         actor: {
           auth_subject: AUTH_SUB,
           app_user_id: APP_USER_ID,
+          enabled: true,
           capabilities: ["document_upload", "document_view"],
         },
       },
@@ -763,4 +768,142 @@ test("CCCD QR route and finalize route preserve feature gate and background extr
   );
   assert.match(finalizeRouteSource, /triggerBackgroundCccdQrExtraction/);
   assert.match(finalizeRouteSource, /onCccdImageFinalized/);
+});
+
+test("WP8C-2: CCCD QR preflight enforces paired effective_grants and contextual PROJECT_MANAGER while denying stale legacy mirrors", async () => {
+  const makeSpyDeps = (actorOverrides) => {
+    let getCalls = 0;
+    let prepareCalls = 0;
+    return {
+      getCalls: () => getCalls,
+      prepareCalls: () => prepareCalls,
+      deps: {
+        resolveSession: async () => ({
+          actor: {
+            ok: true,
+            actor: {
+              auth_subject: AUTH_SUB,
+              app_user_id: APP_USER_ID,
+              display_name: "Synthetic QR Actor",
+              enabled: true,
+              capabilities: [],
+              scopes: [{ kind: "own", reference: APP_USER_ID, valid_from: "2020-01-01", valid_to: null }],
+              self_recruiter_suggestion: null,
+              session: { provider: "supabase", verification: "getUser", authenticated_at: null },
+              ...actorOverrides,
+            },
+          },
+          response_headers: {},
+        }),
+        storage: {
+          available: () => true,
+          async readFinal() {
+            throw new Error("should not be called");
+          },
+        },
+        qrRepository: {
+          async getExtractions() {
+            getCalls += 1;
+            return { ok: false, kind: "denied" };
+          },
+          async prepareExtraction() {
+            prepareCalls += 1;
+            return { ok: false, kind: "denied" };
+          },
+          async completeExtraction() {
+            throw new Error("should not be called");
+          },
+        },
+      },
+    };
+  };
+
+  // 1. Mirror-cleared actor with paired document_upload @ OWN passes both read and write preflight
+  const uploader = makeSpyDeps({
+    capabilities: [],
+    effective_grants: [
+      {
+        capability: "document_upload",
+        scope_kind: "OWN",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: null,
+      },
+    ],
+  });
+  const uploaderRead = await getDirectEntryCccdQr(makeGetRequest(), ENTRY_ID, "true", uploader.deps);
+  assert.equal(uploaderRead.status, 404);
+  assert.equal((await uploaderRead.json()).code, "ENTRY_NOT_FOUND");
+  assert.equal(uploader.getCalls(), 1);
+
+  const uploaderWrite = await processDirectEntryCccdQr(makePostRequest(), ENTRY_ID, "true", uploader.deps);
+  assert.equal(uploaderWrite.status, 404);
+  assert.equal((await uploaderWrite.json()).code, "ENTRY_NOT_FOUND");
+  assert.equal(uploader.prepareCalls(), 1);
+
+  // 2. Mirror-cleared contextual PROJECT_MANAGER passes both read and write preflight
+  const contextualPm = makeSpyDeps({
+    capabilities: [],
+    effective_grants: [],
+    assigned_roles: [
+      {
+        role_code: "PROJECT_MANAGER",
+        display_name: "QLDA",
+        assignment_mode: "CONTEXTUAL",
+        scope_kind: "CONTEXT_PROJECT",
+        scope_id: "proj_a",
+        assignment_id: null,
+        is_protected: false,
+        can_revoke: true,
+        cannot_revoke_reason: null,
+      },
+    ],
+  });
+  const pmRead = await getDirectEntryCccdQr(makeGetRequest(), ENTRY_ID, "true", contextualPm.deps);
+  assert.equal(pmRead.status, 404);
+  assert.equal((await pmRead.json()).code, "ENTRY_NOT_FOUND");
+  assert.equal(contextualPm.getCalls(), 1);
+
+  const pmWrite = await processDirectEntryCccdQr(makePostRequest(), ENTRY_ID, "true", contextualPm.deps);
+  assert.equal(pmWrite.status, 404);
+  assert.equal((await pmWrite.json()).code, "ENTRY_NOT_FOUND");
+  assert.equal(contextualPm.prepareCalls(), 1);
+
+  // 3. Mirror-cleared HR_OPERATOR with paired document_view @ ALL passes read and is denied (403 DOCUMENT_DENIED) on write
+  const hrOperator = makeSpyDeps({
+    capabilities: [],
+    effective_grants: [
+      {
+        capability: "document_view",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: null,
+      },
+    ],
+  });
+  const hrRead = await getDirectEntryCccdQr(makeGetRequest(), ENTRY_ID, "true", hrOperator.deps);
+  assert.equal(hrRead.status, 404);
+  assert.equal((await hrRead.json()).code, "ENTRY_NOT_FOUND");
+  assert.equal(hrOperator.getCalls(), 1);
+
+  const hrWrite = await processDirectEntryCccdQr(makePostRequest(), ENTRY_ID, "true", hrOperator.deps);
+  assert.equal(hrWrite.status, 403);
+  assert.deepEqual(await hrWrite.json(), { ok: false, code: "DOCUMENT_DENIED" });
+  assert.equal(hrOperator.prepareCalls(), 0);
+
+  // 4. Managed actor with stale legacy capabilities and empty effective_grants is denied on both read and write
+  const staleLegacy = makeSpyDeps({
+    capabilities: ["document_upload", "document_view"],
+    effective_grants: [],
+  });
+  const staleRead = await getDirectEntryCccdQr(makeGetRequest(), ENTRY_ID, "true", staleLegacy.deps);
+  assert.equal(staleRead.status, 403);
+  assert.deepEqual(await staleRead.json(), { ok: false, code: "DOCUMENT_DENIED" });
+  assert.equal(staleLegacy.getCalls(), 0);
+
+  const staleWrite = await processDirectEntryCccdQr(makePostRequest(), ENTRY_ID, "true", staleLegacy.deps);
+  assert.equal(staleWrite.status, 403);
+  assert.deepEqual(await staleWrite.json(), { ok: false, code: "DOCUMENT_DENIED" });
+  assert.equal(staleLegacy.prepareCalls(), 0);
 });
