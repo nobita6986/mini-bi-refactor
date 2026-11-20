@@ -33,7 +33,9 @@ import {
   workReportViewPredicate,
   workReportsNavPredicate,
 } from "../src/lib/navigation/registry-capability.ts";
+import { createAnalyticsRepository } from "../src/lib/work-reports/analytics-repository.ts";
 import { createAssignmentRepository } from "../src/lib/work-reports/assignment-repository.ts";
+import { createReportReaderRepository } from "../src/lib/work-reports/report-reader-repository.ts";
 import {
   decideWorkReportReview,
   getWorkReportReviewSubmission,
@@ -41,8 +43,11 @@ import {
 } from "../src/lib/work-reports/review-api.ts";
 import { createReviewRepository } from "../src/lib/work-reports/review-repository.ts";
 import { createSubmissionRepository } from "../src/lib/work-reports/submission-repository.ts";
+import { createWorkReportTemplateRepository } from "../src/lib/work-reports/template-repository.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
+import { resolveN8nBodServiceActor } from "../src/lib/integrations/n8n/auth.ts";
+import { dispatchN8nBodQuery } from "../src/lib/integrations/n8n/dispatcher.ts";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
 const WP8D2_MIGRATION_NAME = "20261120170000_wp8d2_work_report_access.sql";
@@ -290,7 +295,14 @@ test("WP8D-2 [1/5]: Migration #231 hygiene, atomic rollback zero drift, exact 23
 
     const { rows: [{ n: rollbackNewFn }] } = await db.query(
       `select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname = 'public' and p.proname in ('work_report__internal_is_full_admin', 'work_report__internal_direct_team_ids')`,
+        where n.nspname = 'public' and p.proname in (
+          'work_report__internal_is_full_admin',
+          'work_report__internal_direct_team_ids',
+          'work_report__internal_has_read_capability',
+          'work_report__internal_has_read_scope',
+          'work_report__internal_read_team_ids',
+          'work_report__internal_assert_read_actor'
+        )`,
     );
     assert.equal(rollbackNewFn, 0, "Rolled-back migration leaves zero new helpers");
     const { rows: [{ n: rollbackLedger }] } = await db.query(
@@ -332,7 +344,7 @@ test("WP8D-2 [1/5]: Migration #231 hygiene, atomic rollback zero drift, exact 23
     `);
     assert.deepEqual(legacyPublicRefs, [], "Zero public work_report RPCs may read legacy capability/scope helpers directly");
 
-    // Verify all 12 touched/new internal helpers are STABLE and revoked from service_role/client/PUBLIC
+    // Verify all 16 touched/new internal helpers are STABLE and revoked from service_role/client/PUBLIC
     const internalSigs = [
       "public.direct_entry_authz__internal_resolve_effective_grants(uuid)",
       "public.work_report__internal_is_full_admin(uuid)",
@@ -341,6 +353,10 @@ test("WP8D-2 [1/5]: Migration #231 hygiene, atomic rollback zero drift, exact 23
       "public.work_report__internal_direct_team_ids(uuid,text)",
       "public.work_report_assert_actor(uuid,uuid,text)",
       "public.work_report_assert_scope(uuid,text,uuid,boolean)",
+      "public.work_report__internal_has_read_capability(uuid,text)",
+      "public.work_report__internal_has_read_scope(uuid,text,text,uuid)",
+      "public.work_report__internal_read_team_ids(uuid,text)",
+      "public.work_report__internal_assert_read_actor(uuid,uuid,text)",
       "public.work_report__internal_is_delegation_effective(uuid,timestamptz)",
       "public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)",
       "public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)",
@@ -2343,6 +2359,870 @@ test("WP8D-2 [7/7] R2/P1 F-WD-DRIFT-01 E2E: Real SQL -> createReviewRepository -
     const afterObsCount = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
     assert.equal(afterObsCount, beforeObsCount, "Review reads never materialize or write obligations");
     assert.ok(readOnlyReviewCalls >= 10, "All review read probes executed inside BEGIN TRANSACTION READ ONLY");
+  } finally {
+    await db.close();
+  }
+});
+
+test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIRECT_GRANT fixture) read strictly paired Work Reports via REAL SQL + N8N resolver/dispatcher (READ ONLY, 0 writes) while denied on ALL writes, personal ops, Full Admin override, wrong scope/cap & SHARED", async () => {
+  const { db } = await createDb();
+  const SVC_READ_VA = { auth: "18d20000-0000-4000-8000-000000000101", app: "28d20000-0000-4000-8000-000000000101", email: "svc.va@hrpartner.vn", name: "Service View+Analytics" };
+  const SVC_READ_ALL5 = { auth: "18d20000-0000-4000-8000-000000000102", app: "28d20000-0000-4000-8000-000000000102", email: "svc.all5@hrpartner.vn", name: "Service All 5 Read" };
+  const SVC_ANALYTICS_ONLY = { auth: "18d20000-0000-4000-8000-000000000103", app: "28d20000-0000-4000-8000-000000000103", email: "svc.anonly@hrpartner.vn", name: "Service Analytics Only" };
+  const SVC_TEAM_A = { auth: "18d20000-0000-4000-8000-000000000104", app: "28d20000-0000-4000-8000-000000000104", email: "svc.teama@hrpartner.vn", name: "Service Team A Scoped" };
+  const SVC_ADMIN_TRIPLE = { auth: "18d20000-0000-4000-8000-000000000105", app: "28d20000-0000-4000-8000-000000000105", email: "svc.admintriple@hrpartner.vn", name: "Service Admin Triple No Override" };
+  const SVC_OVERGRANTED = { auth: "18d20000-0000-4000-8000-000000000106", app: "28d20000-0000-4000-8000-000000000106", email: "svc.overgranted@hrpartner.vn", name: "Service Overgranted Deny Write" };
+  const SHARED_DIRECT = { auth: "18d20000-0000-4000-8000-000000000107", app: "28d20000-0000-4000-8000-000000000107", email: "shared.direct@hrpartner.vn", name: "Shared Direct Grants Denied" };
+
+  try {
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active)
+       values ($1::uuid, 'SVC_TA', 'Service Team Alpha', true),
+              ($2::uuid, 'SVC_TB', 'Service Team Beta', true),
+              ($3::uuid, 'SVC_TI', 'Service Team Inactive', false)`,
+      [TEAM_A, TEAM_B, TEAM_INACTIVE],
+    );
+
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LUANPT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LIENVU, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, NGATTT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_B1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, NO_TEAM_USER, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }] });
+
+    for (const svc of [SVC_READ_VA, SVC_READ_ALL5, SVC_ANALYTICS_ONLY, SVC_TEAM_A, SVC_ADMIN_TRIPLE, SVC_OVERGRANTED]) {
+      await seedBaseUser(db, svc, { accountType: "SERVICE" });
+    }
+    await seedBaseUser(db, SHARED_DIRECT, { accountType: "SHARED" });
+
+    // Apply WP5 cutover so OWNER is managed ADMIN and all accounts are authz_managed = true
+    const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+    const cutover = await runWp5Cutover(db, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint: plan.manifest_fingerprint,
+    });
+    assert.equal(cutover.status, "APPLIED");
+    await db.query(
+      "update public.direct_entry_app_users set authz_managed = true where app_user_id = any($1::uuid[])",
+      [[
+        SVC_READ_VA.app,
+        SVC_READ_ALL5.app,
+        SVC_ANALYTICS_ONLY.app,
+        SVC_TEAM_A.app,
+        SVC_ADMIN_TRIPLE.app,
+        SVC_OVERGRANTED.app,
+        SHARED_DIRECT.app,
+      ]],
+    );
+
+    const seedGrant = async (user, capability, scopeKind, scopeId = null) => {
+      await db.query(
+        `insert into public.authz_direct_capability_grants
+           (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+         values ($1::uuid, $2, $3, $4, 'EXCEPTION_GRANT', 'DB_SEEDED_DIRECT_GRANT fixture', $5::uuid)`,
+        [user.app, capability, scopeKind, scopeId, OWNER.app],
+      );
+    };
+
+    // 1. Seed DB_SEEDED_DIRECT_GRANT fixtures (explicit paired direct grants, zero legacy mirrors)
+    await seedGrant(SVC_READ_VA, "report_view", "ALL");
+    await seedGrant(SVC_READ_VA, "report_analytics_view", "ALL");
+
+    for (const cap of ["report_view", "report_analytics_view", "report_form_manage", "report_assign"]) {
+      await seedGrant(SVC_READ_ALL5, cap, "ALL");
+      await seedGrant(SHARED_DIRECT, cap, "ALL");
+    }
+
+    await seedGrant(SVC_ANALYTICS_ONLY, "report_analytics_view", "ALL");
+
+    await seedGrant(SVC_TEAM_A, "report_view", "CONTEXT_TEAM", TEAM_A);
+    await seedGrant(SVC_TEAM_A, "report_analytics_view", "CONTEXT_TEAM", TEAM_A);
+    await seedGrant(SVC_TEAM_A, "report_assign", "CONTEXT_TEAM", TEAM_A);
+    await seedGrant(SVC_TEAM_A, "report_form_manage", "CONTEXT_TEAM", TEAM_A);
+
+    for (const cap of ["entry_admin", "recruiter_master_manage", "team_master_manage"]) {
+      await seedGrant(SVC_ADMIN_TRIPLE, cap, "ALL");
+    }
+
+    for (const cap of [
+      "report_form_manage",
+      "report_assign",
+      "report_view",
+      "report_analytics_view",
+      "report_review",
+      "report_delegate",
+    ]) {
+      await seedGrant(SVC_OVERGRANTED, cap, "ALL");
+    }
+
+    await clearLegacyMirrors(db, [
+      OWNER.app,
+      SVC_READ_VA.app,
+      SVC_READ_ALL5.app,
+      SVC_ANALYTICS_ONLY.app,
+      SVC_TEAM_A.app,
+      SVC_ADMIN_TRIPLE.app,
+      SVC_OVERGRANTED.app,
+      SHARED_DIRECT.app,
+    ]);
+
+    // 2. Seed real Work Reports domain data via OWNER (NORMAL)
+    const today = (await db.query("select (now() at time zone 'Asia/Ho_Chi_Minh')::date::text as d")).rows[0].d;
+    const t1 = await createPublishedTemplate(db, OWNER, "SVC_RPT_T1", { requiresReview: true });
+    const t2 = await createPublishedTemplate(db, OWNER, "SVC_RPT_T2", { requiresReview: false });
+    const { rows: [t1VerRow] } = await db.query(
+      "select current_published_version_id as version_id from public.work_report_templates where template_id = $1::uuid",
+      [t1.template_id],
+    );
+
+    const groupA = (await db.query(
+      "select public.work_report_create_group($1::uuid, $2::uuid, 'SVC Group A', 'Team A only', $3::uuid[], $4) as res",
+      [OWNER.auth, OWNER.app, [STAFF_A1.app], nextKey("svc_grp_a")],
+    )).rows[0].res;
+
+    const asgTeamA = (await db.query(
+      `select public.work_report_create_assignment(
+         $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
+         'DAILY', true, 1, '18:00:00'::time, false, $5::date, null, $6
+       ) as res`,
+      [OWNER.auth, OWNER.app, t1.template_id, TEAM_A, today, nextKey("svc_asg_ta")],
+    )).rows[0].res;
+
+    const asgTeamB = (await db.query(
+      `select public.work_report_create_assignment(
+         $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
+         'DAILY', true, 1, '18:00:00'::time, false, $5::date, null, $6
+       ) as res`,
+      [OWNER.auth, OWNER.app, t1.template_id, TEAM_B, today, nextKey("svc_asg_tb")],
+    )).rows[0].res;
+
+    const asgGroupA = (await db.query(
+      `select public.work_report_create_group_assignment(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+         'DAILY', true, 1, '18:00:00'::time, false, $5::date, null, $6
+       ) as res`,
+      [OWNER.auth, OWNER.app, t2.template_id, groupA.group_id, today, nextKey("svc_asg_ga")],
+    )).rows[0].res;
+
+    // Mixed USER_SET with STAFF_A1 (TEAM_A) + NO_TEAM_USER (NULL current team) — tests SQL 3-valued logic fail-closed!
+    const asgUserSetMix = (await db.query(
+      `select public.work_report_create_assignment(
+         $1::uuid, $2::uuid, $3::uuid, 'USER_SET', null, null, $4::uuid[],
+         'DAILY', true, 1, '18:00:00'::time, false, $5::date, null, $6
+       ) as res`,
+      [OWNER.auth, OWNER.app, t2.template_id, [STAFF_A1.app, NO_TEAM_USER.app], today, nextKey("svc_asg_mix")],
+    )).rows[0].res;
+
+    // Also create a delegation by OWNER so revoke_delegation negative test has a real target delegation_id
+    const ownerDeleg = (await db.query(
+      `select public.work_report_create_delegation(
+         $1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6
+       ) as res`,
+      [OWNER.auth, OWNER.app, STAFF_A1.app, t1.template_id, TEAM_A, nextKey("svc_del_target")],
+    )).rows[0].res;
+
+    const obA1List = (await db.query(
+      "select public.work_report_list_my_obligations($1::uuid, $2::uuid, 'ACTIVE') as res",
+      [STAFF_A1.auth, STAFF_A1.app],
+    )).rows[0].res.items;
+    const obB1List = (await db.query(
+      "select public.work_report_list_my_obligations($1::uuid, $2::uuid, 'ACTIVE') as res",
+      [STAFF_B1.auth, STAFF_B1.app],
+    )).rows[0].res.items;
+
+    const obA1T1 = obA1List.find((o) => o.template_id === t1.template_id);
+    const obA1T2 = obA1List.find((o) => o.template_id === t2.template_id);
+    const obB1T1 = obB1List.find((o) => o.template_id === t1.template_id);
+    assert.ok(obA1T1 && obA1T2 && obB1T1);
+
+    const payloadJson = (calls, notes) => JSON.stringify({
+      calls_made: calls,
+      interested_candidates: 4,
+      workers_started: 1,
+      notes,
+    });
+
+    await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [STAFF_A1.auth, STAFF_A1.app, obA1T1.obligation_id, payloadJson(25, "TEAM_A_T1_NOTE"), nextKey("svc_sub_a1_t1")],
+    );
+    await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [STAFF_A1.auth, STAFF_A1.app, obA1T2.obligation_id, payloadJson(14, "TEAM_A_T2_NOTE"), nextKey("svc_sub_a1_t2")],
+    );
+    await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [STAFF_B1.auth, STAFF_B1.app, obB1T1.obligation_id, payloadJson(99, "TEAM_B_T1_NOTE"), nextKey("svc_sub_b1_t1")],
+    );
+
+    // Seed synthetic obligations pointing assignee_app_user_id at SVC_ANALYTICS_ONLY & SVC_TEAM_A (on TEAM_B),
+    // plus a NO_TEAM_USER obligation with NULL snapshot_team_id to verify ALL vs CONTEXT_TEAM handling.
+    const synthObNoCap = nextUuid();
+    const synthObOtherTeam = nextUuid();
+    const synthObNullTeam = nextUuid();
+    await db.query(
+      `insert into public.work_report_obligations
+         (obligation_id, template_id, template_version_id, assignment_id, assignee_app_user_id,
+          snapshot_team_id, snapshot_team_code, snapshot_team_display_name,
+          period_type, period_key, period_start_date, period_end_date, due_at, is_mandatory, obligation_status)
+       values
+         ($1::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
+          $10::uuid, 'SVC_TB', 'Service Team Beta',
+          'DAILY', '2026-11-18', '2026-11-18', '2026-11-18', now() + interval '1 day', true, 'ACTIVE'),
+         ($2::uuid, $4::uuid, $5::uuid, $6::uuid, $8::uuid,
+          $10::uuid, 'SVC_TB', 'Service Team Beta',
+          'DAILY', '2026-11-18', '2026-11-18', '2026-11-18', now() + interval '1 day', true, 'ACTIVE'),
+         ($3::uuid, $4::uuid, $5::uuid, $6::uuid, $9::uuid,
+          null, null, null,
+          'DAILY', '2026-11-18', '2026-11-18', '2026-11-18', now() + interval '1 day', true, 'ACTIVE')`,
+      [synthObNoCap, synthObOtherTeam, synthObNullTeam, t1.template_id, t1VerRow.version_id, asgTeamB.assignment_id, SVC_ANALYTICS_ONLY.app, SVC_TEAM_A.app, NO_TEAM_USER.app, TEAM_B],
+    );
+
+    // Snapshot row counts across all core tables before SERVICE read + deny-write battery
+    const snapshotCounts = async () => {
+      const { rows: [c] } = await db.query(
+        `select
+           (select count(*)::int from public.work_report_obligations) as obligations,
+           (select count(*)::int from public.work_report_submissions) as submissions,
+           (select count(*)::int from public.work_report_templates) as templates,
+           (select count(*)::int from public.work_report_assignments) as assignments,
+           (select count(*)::int from public.work_report_groups) as groups,
+           (select count(*)::int from public.work_report_delegations) as delegations,
+           (select count(*)::int from public.work_report_audit_events) as audits`,
+      );
+      return c;
+    };
+    const beforeCounts = await snapshotCounts();
+
+    // 3. Build STRICT BEGIN TRANSACTION READ ONLY + SET LOCAL ROLE service_role invoker for ALL read RPCs
+    let readOnlyRpcCalls = 0;
+    const readOnlyRpc = async (name, args) => {
+      readOnlyRpcCalls++;
+      await db.exec("begin transaction read only; set local role service_role");
+      try {
+        let res;
+        if (name === "direct_entry_resolve_actor_context") {
+          res = (await db.query(
+            "select public.direct_entry_resolve_actor_context($1::uuid) as res",
+            [args.p_auth_subject],
+          )).rows[0]?.res;
+        } else if (name === "work_report_list_readable_submissions") {
+          res = (await db.query(
+            `select public.work_report_list_readable_submissions(
+               $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date,
+               $7::uuid, $8::uuid, $9::text, $10::text, $11::integer
+             ) as res`,
+            [
+              args.p_auth_subject, args.p_app_user_id,
+              args.p_template_id ?? null, args.p_version_id ?? null,
+              args.p_from ?? null, args.p_to ?? null,
+              args.p_team_id ?? null, args.p_assignee_id ?? null,
+              args.p_state ?? null, args.p_cursor ?? null, args.p_limit ?? 50,
+            ],
+          )).rows[0]?.res;
+        } else if (name === "work_report_get_submission") {
+          res = (await db.query(
+            "select public.work_report_get_submission($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_obligation_id],
+          )).rows[0]?.res;
+        } else if (name === "work_report_list_templates") {
+          res = (await db.query(
+            "select public.work_report_list_templates($1::uuid, $2::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id],
+          )).rows[0]?.res;
+        } else if (name === "work_report_get_template") {
+          res = (await db.query(
+            "select public.work_report_get_template($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_template_id],
+          )).rows[0]?.res;
+        } else if (name === "work_report_list_assignments") {
+          res = (await db.query(
+            "select public.work_report_list_assignments($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_team_id ?? null],
+          )).rows[0]?.res;
+        } else if (name === "work_report_get_assignment_detail") {
+          res = (await db.query(
+            "select public.work_report_get_assignment_detail($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_assignment_id],
+          )).rows[0]?.res;
+        } else if (name === "work_report_analytics_overview") {
+          res = (await db.query(
+            `select public.work_report_analytics_overview(
+               $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date, $7::uuid, $8::uuid, $9::text
+             ) as res`,
+            [
+              args.p_auth_subject, args.p_app_user_id,
+              args.p_template_id ?? null, args.p_version_id ?? null,
+              args.p_from ?? null, args.p_to ?? null,
+              args.p_team_id ?? null, args.p_assignee_id ?? null, args.p_finality ?? "final",
+            ],
+          )).rows[0]?.res;
+        } else if (name === "work_report_analytics_breakdown") {
+          res = (await db.query(
+            `select public.work_report_analytics_breakdown(
+               $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date,
+               $7::uuid, $8::uuid, $9::text, $10::text, $11::integer, $12::integer
+             ) as res`,
+            [
+              args.p_auth_subject, args.p_app_user_id,
+              args.p_template_id ?? null, args.p_version_id ?? null,
+              args.p_from ?? null, args.p_to ?? null,
+              args.p_team_id ?? null, args.p_assignee_id ?? null,
+              args.p_finality ?? "final", args.p_group_by ?? "team",
+              args.p_page ?? 1, args.p_page_size ?? 50,
+            ],
+          )).rows[0]?.res;
+        } else if (name === "work_report_analytics_contributions") {
+          res = (await db.query(
+            `select public.work_report_analytics_contributions(
+               $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date,
+               $7::uuid, $8::uuid, $9::text, $10::text, $11::text,
+               $12::uuid, $13::uuid, $14::text, $15::text, $16::integer
+             ) as res`,
+            [
+              args.p_auth_subject, args.p_app_user_id,
+              args.p_template_id ?? null, args.p_version_id ?? null,
+              args.p_from ?? null, args.p_to ?? null,
+              args.p_team_id ?? null, args.p_assignee_id ?? null,
+              args.p_finality ?? "final", args.p_metric_key ?? null, args.p_compatible_group ?? null,
+              args.p_target_team_id ?? null, args.p_target_assignee_id ?? null,
+              args.p_target_period_key ?? null, args.p_cursor ?? null, args.p_limit ?? 20,
+            ],
+          )).rows[0]?.res;
+        } else if (name === "work_report_analytics_filter_options") {
+          res = (await db.query(
+            "select public.work_report_analytics_filter_options($1::uuid, $2::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id],
+          )).rows[0]?.res;
+        } else if (name === "work_report_reconcile_metric_projection") {
+          res = (await db.query(
+            "select public.work_report_reconcile_metric_projection($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_template_id ?? null],
+          )).rows[0]?.res;
+        } else if (name === "work_report_has_active_obligations") {
+          res = (await db.query(
+            "select public.work_report_has_active_obligations($1::uuid, $2::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id],
+          )).rows[0]?.res;
+        } else {
+          throw new Error(`Unexpected readOnlyRpc call: ${name}`);
+        }
+        await db.exec("commit");
+        return { data: res ?? null, error: null };
+      } catch (err) {
+        await db.exec("rollback");
+        return { data: null, error: { code: err.code, message: err.message } };
+      }
+    };
+
+    const makeN8nDepsFor = (svcUser) => ({
+      resolveActor: () => resolveN8nBodServiceActor({
+        env: { authSubject: svcUser.auth, appUserId: svcUser.app },
+        resolveActorContextRpc: (authSubject) =>
+          readOnlyRpc("direct_entry_resolve_actor_context", { p_auth_subject: authSubject }),
+      }),
+      workReportTemplateRepo: createWorkReportTemplateRepository(readOnlyRpc),
+      workReportAssignmentRepo: createAssignmentRepository(readOnlyRpc),
+      workReportReaderRepo: createReportReaderRepository(readOnlyRpc),
+      workReportSubmissionRepo: createSubmissionRepository(readOnlyRpc),
+      workReportAnalyticsRepo: createAnalyticsRepository(readOnlyRpc),
+    });
+
+    // 4. T0 exact reproduction: SVC_READ_VA (report_view + report_analytics_view @ ALL) via REAL N8N resolver + dispatcher!
+    const vaActorRes = await resolveN8nBodServiceActor({
+      env: { authSubject: SVC_READ_VA.auth, appUserId: SVC_READ_VA.app },
+      resolveActorContextRpc: (authSubject) =>
+        readOnlyRpc("direct_entry_resolve_actor_context", { p_auth_subject: authSubject }),
+    });
+    assert.equal(vaActorRes.ok, true, "Production resolveN8nBodServiceActor accepts DB_SEEDED_DIRECT_GRANT SERVICE actor");
+    assert.deepEqual(vaActorRes.capabilities, ["report_analytics_view", "report_view"]);
+
+    const vaSubmissions = await dispatchN8nBodQuery(
+      { dataset: "work_reports_submissions", mode: "detail", page_size: 20 },
+      makeN8nDepsFor(SVC_READ_VA),
+    );
+    assert.equal(vaSubmissions.status, 200, "REAL N8N dispatcher work_reports_submissions succeeds for SERVICE with report_view @ ALL");
+    assert.equal(vaSubmissions.body.ok, true);
+    assert.equal(vaSubmissions.body.rows.length, 3, "Reads all 3 submitted reports across TEAM_A and TEAM_B");
+
+    const vaDetail = await dispatchN8nBodQuery(
+      {
+        dataset: "work_reports_submission_detail",
+        mode: "detail",
+        filters: [{ field: "obligation_id", op: "eq", value: obA1T1.obligation_id }],
+      },
+      makeN8nDepsFor(SVC_READ_VA),
+    );
+    assert.equal(vaDetail.status, 200, "REAL N8N dispatcher work_reports_submission_detail succeeds for SERVICE with report_view @ ALL");
+    assert.equal(vaDetail.body.ok, true);
+    assert.equal(vaDetail.body.rows.length, 1);
+
+    const vaAnalytics = await dispatchN8nBodQuery(
+      {
+        dataset: "work_reports_analytics",
+        mode: "both",
+        date_range: { from: today, to: today },
+        filters: [
+          { field: "template_id", op: "eq", value: t1.template_id },
+          { field: "group_by", op: "eq", value: "team" },
+        ],
+      },
+      makeN8nDepsFor(SVC_READ_VA),
+    );
+    assert.equal(vaAnalytics.status, 200, "REAL N8N dispatcher work_reports_analytics succeeds for SERVICE with report_analytics_view @ ALL");
+    assert.equal(vaAnalytics.body.ok, true);
+    assert.ok(vaAnalytics.body.rows.length >= 2, "Analytics breakdown returns both TEAM_A and TEAM_B");
+
+    // SVC_READ_VA does NOT have report_form_manage or report_assign -> MUST fail closed with *_FORBIDDEN on templates & assignments!
+    const vaTemplatesDenied = await dispatchN8nBodQuery(
+      { dataset: "work_reports_templates", mode: "detail" },
+      makeN8nDepsFor(SVC_READ_VA),
+    );
+    assert.equal(vaTemplatesDenied.body.ok, false, "SERVICE with only report_view+report_analytics_view denied work_reports_templates");
+    assert.equal(vaTemplatesDenied.body.error.code, "WORK_REPORT_TEMPLATES_DENIED");
+
+    const vaAssignmentsDenied = await dispatchN8nBodQuery(
+      { dataset: "work_reports_assignments", mode: "detail" },
+      makeN8nDepsFor(SVC_READ_VA),
+    );
+    assert.equal(vaAssignmentsDenied.body.ok, false, "SERVICE with only report_view+report_analytics_view denied work_reports_assignments");
+    assert.equal(vaAssignmentsDenied.body.error.code, "WORK_REPORT_ASSIGNMENTS_DENIED");
+
+    // 5. Full 5-dataset REAL N8N dispatcher read via SVC_READ_ALL5 (report_view + report_analytics_view + report_form_manage + report_assign @ ALL)
+    const all5Templates = await dispatchN8nBodQuery(
+      { dataset: "work_reports_templates", mode: "detail" },
+      makeN8nDepsFor(SVC_READ_ALL5),
+    );
+    assert.equal(all5Templates.status, 200);
+    assert.ok(all5Templates.body.rows.length >= 2);
+
+    const all5TplDetail = await readOnlyRpc("work_report_get_template", {
+      p_auth_subject: SVC_READ_ALL5.auth,
+      p_app_user_id: SVC_READ_ALL5.app,
+      p_template_id: t1.template_id,
+    });
+    assert.equal(all5TplDetail.error, null);
+    assert.equal(all5TplDetail.data.template_id, t1.template_id);
+
+    const all5Assignments = await dispatchN8nBodQuery(
+      { dataset: "work_reports_assignments", mode: "detail" },
+      makeN8nDepsFor(SVC_READ_ALL5),
+    );
+    assert.equal(all5Assignments.status, 200);
+    assert.equal(all5Assignments.body.rows.length, 4);
+
+    // Assignment detail drill-down invokes work_report_get_assignment_detail (STABLE, inside READ ONLY tx!)
+    const all5AssignmentDetail = await dispatchN8nBodQuery(
+      {
+        dataset: "work_reports_assignments",
+        mode: "detail",
+        filters: [{ field: "assignment_id", op: "eq", value: asgTeamA.assignment_id }],
+      },
+      makeN8nDepsFor(SVC_READ_ALL5),
+    );
+    assert.equal(all5AssignmentDetail.status, 200);
+    assert.equal(all5AssignmentDetail.body.rows.length, 1);
+
+    // 6. Strict per-capability isolation: SVC_ANALYTICS_ONLY can read analytics ONLY — denied submissions, detail, contributions, templates, assignments
+    const anOnlyDispatcher = await dispatchN8nBodQuery(
+      {
+        dataset: "work_reports_analytics",
+        mode: "both",
+        date_range: { from: today, to: today },
+        filters: [
+          { field: "template_id", op: "eq", value: t1.template_id },
+          { field: "group_by", op: "eq", value: "team" },
+        ],
+      },
+      makeN8nDepsFor(SVC_ANALYTICS_ONLY),
+    );
+    assert.equal(anOnlyDispatcher.status, 200);
+    assert.equal((await readOnlyRpc("work_report_analytics_filter_options", {
+      p_auth_subject: SVC_ANALYTICS_ONLY.auth,
+      p_app_user_id: SVC_ANALYTICS_ONLY.app,
+    })).error, null);
+    assert.equal((await readOnlyRpc("work_report_reconcile_metric_projection", {
+      p_auth_subject: SVC_ANALYTICS_ONLY.auth,
+      p_app_user_id: SVC_ANALYTICS_ONLY.app,
+      p_template_id: t1.template_id,
+    })).error, null);
+
+    for (const [fnName, args] of [
+      ["work_report_list_readable_submissions", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app }],
+      ["work_report_get_submission", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app, p_obligation_id: obA1T1.obligation_id }],
+      // Personal assignee bypass attempt on synthetic obligation assigned to SVC_ANALYTICS_ONLY
+      ["work_report_get_submission", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app, p_obligation_id: synthObNoCap }],
+      ["work_report_analytics_contributions", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app, p_template_id: t1.template_id, p_metric_key: "calls_made" }],
+      ["work_report_list_templates", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app }],
+      ["work_report_get_template", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app, p_template_id: t1.template_id }],
+      ["work_report_list_assignments", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app }],
+      ["work_report_get_assignment_detail", { p_auth_subject: SVC_ANALYTICS_ONLY.auth, p_app_user_id: SVC_ANALYTICS_ONLY.app, p_assignment_id: asgTeamA.assignment_id }],
+    ]) {
+      const denied = await readOnlyRpc(fnName, args);
+      assert.equal(denied.error?.code, "42501", `SVC_ANALYTICS_ONLY must be denied ${fnName}`);
+    }
+
+    // 7. Strict CONTEXT_TEAM isolation (SVC_TEAM_A): reads TEAM_A only; denied TEAM_B, mixed USER_SET with NULL team, and template ALL-only readers
+    const teamASubs = await readOnlyRpc("work_report_list_readable_submissions", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+    });
+    assert.equal(teamASubs.error, null);
+    assert.equal(teamASubs.data.effective_scope.kind, "team");
+    assert.equal(teamASubs.data.items.length, 2, "SVC_TEAM_A sees only TEAM_A submissions");
+    assert.ok(teamASubs.data.items.every((i) => i.team_id === TEAM_A));
+
+    assert.equal((await readOnlyRpc("work_report_get_submission", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+      p_obligation_id: synthObNullTeam,
+    })).error, null, "SVC_READ_VA @ ALL can read NULL snapshot_team_id obligation");
+    assert.equal((await readOnlyRpc("work_report_analytics_contributions", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+      p_template_id: t1.template_id,
+      p_from: today,
+      p_to: today,
+      p_finality: "provisional_included",
+      p_metric_key: "calls_made",
+    })).error, null, "SVC_READ_VA with report_analytics_view + report_view @ ALL reads analytics_contributions");
+
+    assert.equal((await readOnlyRpc("work_report_get_submission", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_obligation_id: obA1T1.obligation_id,
+    })).error, null);
+    assert.equal((await readOnlyRpc("work_report_get_submission", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_obligation_id: synthObNullTeam,
+    })).error?.code, "42501", "SVC_TEAM_A denied NULL snapshot_team_id obligation");
+    assert.equal((await readOnlyRpc("work_report_analytics_contributions", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_template_id: t1.template_id,
+      p_from: today,
+      p_to: today,
+      p_team_id: TEAM_A,
+      p_finality: "provisional_included",
+      p_metric_key: "calls_made",
+    })).error, null, "SVC_TEAM_A reads TEAM_A analytics_contributions");
+    assert.equal((await readOnlyRpc("work_report_analytics_contributions", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_template_id: t1.template_id,
+      p_from: today,
+      p_to: today,
+      p_team_id: TEAM_B,
+      p_finality: "provisional_included",
+      p_metric_key: "calls_made",
+    })).error?.code, "42501", "SVC_TEAM_A denied TEAM_B analytics_contributions");
+    assert.equal((await readOnlyRpc("work_report_get_submission", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_obligation_id: obB1T1.obligation_id,
+    })).error?.code, "42501", "SVC_TEAM_A denied TEAM_B submission");
+    assert.equal((await readOnlyRpc("work_report_get_submission", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_obligation_id: synthObOtherTeam,
+    })).error?.code, "42501", "SVC_TEAM_A denied synthetic personal-assignee bypass on TEAM_B");
+    assert.equal((await readOnlyRpc("work_report_list_readable_submissions", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_team_id: TEAM_B,
+    })).error?.code, "42501", "SVC_TEAM_A denied TEAM_B filter on submissions");
+    assert.equal((await readOnlyRpc("work_report_analytics_overview", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_team_id: TEAM_B,
+    })).error?.code, "42501", "SVC_TEAM_A denied TEAM_B filter on analytics");
+
+    const teamAAsgs = await readOnlyRpc("work_report_list_assignments", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+    });
+    assert.equal(teamAAsgs.error, null);
+    const teamAAsgIds = teamAAsgs.data.items.map((a) => a.assignment_id).sort();
+    assert.deepEqual(
+      teamAAsgIds,
+      [asgTeamA.assignment_id, asgGroupA.assignment_id].sort(),
+      "SVC_TEAM_A sees only TEAM_A & Group-A assignments — excludes TEAM_B AND mixed USER_SET with teamless user",
+    );
+    assert.equal((await readOnlyRpc("work_report_get_assignment_detail", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_assignment_id: asgTeamA.assignment_id,
+    })).error, null);
+    assert.equal((await readOnlyRpc("work_report_get_assignment_detail", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_assignment_id: asgTeamB.assignment_id,
+    })).error?.code, "42501", "SVC_TEAM_A denied TEAM_B assignment detail");
+    assert.equal((await readOnlyRpc("work_report_get_assignment_detail", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_assignment_id: asgUserSetMix.assignment_id,
+    })).error?.code, "42501", "SVC_TEAM_A denied mixed USER_SET with teamless user");
+
+    // report_form_manage @ CONTEXT_TEAM must still fail with WORK_REPORT_ALL_SCOPE_REQUIRED
+    const teamATplDenied = await readOnlyRpc("work_report_list_templates", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+    });
+    assert.equal(teamATplDenied.error?.code, "42501");
+    assert.match(teamATplDenied.error?.message ?? "", /WORK_REPORT_ALL_SCOPE_REQUIRED/);
+    const teamAGetTplDenied = await readOnlyRpc("work_report_get_template", {
+      p_auth_subject: SVC_TEAM_A.auth,
+      p_app_user_id: SVC_TEAM_A.app,
+      p_template_id: t1.template_id,
+    });
+    assert.equal(teamAGetTplDenied.error?.code, "42501");
+    assert.match(teamAGetTplDenied.error?.message ?? "", /WORK_REPORT_ALL_SCOPE_REQUIRED/);
+
+    // 8. ZERO Full Admin override for SERVICE (SVC_ADMIN_TRIPLE has entry_admin + recruiter_master_manage + team_master_manage @ ALL, no report_*)
+    for (const [fnName, args] of [
+      ["work_report_list_readable_submissions", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app }],
+      ["work_report_get_submission", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app, p_obligation_id: obA1T1.obligation_id }],
+      ["work_report_analytics_overview", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app }],
+      ["work_report_list_templates", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app }],
+      ["work_report_get_template", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app, p_template_id: t1.template_id }],
+      ["work_report_list_assignments", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app }],
+      ["work_report_get_assignment_detail", { p_auth_subject: SVC_ADMIN_TRIPLE.auth, p_app_user_id: SVC_ADMIN_TRIPLE.app, p_assignment_id: asgTeamA.assignment_id }],
+    ]) {
+      const denied = await readOnlyRpc(fnName, args);
+      assert.equal(denied.error?.code, "42501", `SVC_ADMIN_TRIPLE must NEVER receive Full Admin override on ${fnName}`);
+    }
+
+    // 9. SHARED account with ALL 4 direct read grants @ ALL & wrong auth_subject mapping MUST fail closed (42501 WORK_REPORT_ACTOR_DENIED)
+    for (const [fnName, args] of [
+      ["work_report_list_readable_submissions", { p_auth_subject: SHARED_DIRECT.auth, p_app_user_id: SHARED_DIRECT.app }],
+      ["work_report_get_submission", { p_auth_subject: SHARED_DIRECT.auth, p_app_user_id: SHARED_DIRECT.app, p_obligation_id: obA1T1.obligation_id }],
+      ["work_report_analytics_overview", { p_auth_subject: SHARED_DIRECT.auth, p_app_user_id: SHARED_DIRECT.app }],
+      ["work_report_list_templates", { p_auth_subject: SHARED_DIRECT.auth, p_app_user_id: SHARED_DIRECT.app }],
+      ["work_report_list_assignments", { p_auth_subject: SHARED_DIRECT.auth, p_app_user_id: SHARED_DIRECT.app }],
+      // Wrong auth_subject mapping
+      ["work_report_list_readable_submissions", { p_auth_subject: OWNER.auth, p_app_user_id: SVC_READ_ALL5.app }],
+      ["work_report_analytics_overview", { p_auth_subject: OWNER.auth, p_app_user_id: SVC_READ_ALL5.app }],
+    ]) {
+      const denied = await readOnlyRpc(fnName, args);
+      assert.equal(denied.error?.code, "42501", `SHARED / mismatched auth_subject must be denied on ${fnName}`);
+      assert.match(denied.error?.message ?? "", /WORK_REPORT_ACTOR_DENIED/);
+    }
+
+    // 10. EXHAUSTIVE DENY-WRITE & DENY-PERSONAL MATRIX:
+    //     SVC_OVERGRANTED holds ALL 6 report_* @ ALL direct grants, yet MUST be DENIED (42501) on ALL 19 mutating/personal RPCs
+    //     AND all 5 interactive human-only UI queue/picker RPCs!
+    const svcContext = (await readOnlyRpc("direct_entry_resolve_actor_context", {
+      p_auth_subject: SVC_OVERGRANTED.auth,
+    })).data;
+    assert.equal("effective_report_review_scopes" in svcContext, false, "SERVICE never receives effective_report_review_scopes");
+
+    const svcProbe = await readOnlyRpc("work_report_has_active_obligations", {
+      p_auth_subject: SVC_OVERGRANTED.auth,
+      p_app_user_id: SVC_OVERGRANTED.app,
+    });
+    assert.equal(svcProbe.error, null);
+    assert.deepEqual(svcProbe.data, { has_active_obligations: false });
+
+    const assertServiceRoleDenied42501 = async (label, sql, params) => {
+      await db.exec("begin; set local role service_role");
+      let caught = null;
+      try {
+        await db.query(sql, params);
+        await db.exec("commit");
+      } catch (err) {
+        caught = err;
+        await db.exec("rollback");
+      }
+      assert.ok(caught, `SVC_OVERGRANTED MUST be denied on ${label}`);
+      assert.equal(caught.code, "42501", `SVC_OVERGRANTED on ${label} must raise 42501 (got ${caught.code}: ${caught.message})`);
+    };
+
+    const schemaJson = JSON.stringify(RECRUITMENT_DAILY_TEMPLATE_SCHEMA);
+    const metricsJson = JSON.stringify(buildWorkReportMetricContract(RECRUITMENT_DAILY_TEMPLATE_SCHEMA));
+
+    // All 5 template writers
+    await assertServiceRoleDenied42501(
+      "work_report_create_template",
+      "select public.work_report_create_template($1::uuid, $2::uuid, 'SVC_TPL', 'SVC', 'desc', 'DAILY', $3::jsonb, $4::jsonb, $5)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, schemaJson, metricsJson, nextKey("deny_ctpl")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_update_template_draft",
+      "select public.work_report_update_template_draft($1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 'SVC', 'desc', 'DAILY', $5::jsonb, $6::jsonb, $7)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, t1.template_id, t1VerRow.version_id, schemaJson, metricsJson, nextKey("deny_utpl")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_publish_template",
+      "select public.work_report_publish_template($1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, $5)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, t1.template_id, t1VerRow.version_id, nextKey("deny_ptpl")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_archive_template",
+      "select public.work_report_archive_template($1::uuid, $2::uuid, $3::uuid, 1, $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, t1.template_id, nextKey("deny_atpl")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_clone_template_draft",
+      "select public.work_report_clone_template_draft($1::uuid, $2::uuid, $3::uuid, 1, $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, t1.template_id, nextKey("deny_cltpl")],
+    );
+
+    // All 3 group writers
+    await assertServiceRoleDenied42501(
+      "work_report_create_group",
+      "select public.work_report_create_group($1::uuid, $2::uuid, 'SVC Bad Group', null, $3::uuid[], $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, [STAFF_A1.app], nextKey("deny_cgrp")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_update_group",
+      "select public.work_report_update_group($1::uuid, $2::uuid, $3::uuid, 1, 'SVC Renamed', null, $4::uuid[], $5)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, groupA.group_id, [STAFF_A1.app], nextKey("deny_ugrp")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_set_group_active",
+      "select public.work_report_set_group_active($1::uuid, $2::uuid, $3::uuid, 1, false, $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, groupA.group_id, nextKey("deny_agrp")],
+    );
+
+    // All 5 assignment & obligation writers
+    await assertServiceRoleDenied42501(
+      "work_report_create_assignment",
+      `select public.work_report_create_assignment(
+         $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
+         'DAILY', true, 1, '18:00:00'::time, false, $5::date, null, $6
+       )`,
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, t1.template_id, TEAM_A, today, nextKey("deny_casg")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_create_group_assignment",
+      `select public.work_report_create_group_assignment(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+         'DAILY', true, 1, '18:00:00'::time, false, $5::date, null, $6
+       )`,
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, t1.template_id, groupA.group_id, today, nextKey("deny_cgasg")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_set_assignment_state",
+      "select public.work_report_set_assignment_state($1::uuid, $2::uuid, $3::uuid, 1, 'PAUSED', $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, asgTeamA.assignment_id, nextKey("deny_sasg")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_change_obligation_status",
+      "select public.work_report_change_obligation_status($1::uuid, $2::uuid, $3::uuid, 1, 'EXEMPT', 'denied', null, $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, obA1T1.obligation_id, nextKey("deny_cobs")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_ensure_obligations_for_window",
+      "select public.work_report_ensure_obligations_for_window($1::uuid, $2::uuid, $3::date)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, today],
+    );
+
+    // All 3 review & delegation writers
+    await assertServiceRoleDenied42501(
+      "work_report_decide_review",
+      "select public.work_report_decide_review($1::uuid, $2::uuid, $3::uuid, 'APPROVE', null, 1, $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, obA1T1.obligation_id, nextKey("deny_rev")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_create_delegation",
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'all', null, null, null, $5)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, STAFF_A1.app, t1.template_id, nextKey("deny_cdel")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_revoke_delegation",
+      "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, 1, $4)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, ownerDeleg.delegation_id, nextKey("deny_rdel")],
+    );
+
+    // All 3 personal obligation/submission mutators (including list_my_obligations materializer!)
+    await assertServiceRoleDenied42501(
+      "work_report_list_my_obligations",
+      "select public.work_report_list_my_obligations($1::uuid, $2::uuid, 'ACTIVE')",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_save_draft",
+      "select public.work_report_save_draft($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, obA1T1.obligation_id, payloadJson(1, "NO"), nextKey("deny_draft")],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_submit",
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, obA1T1.obligation_id, payloadJson(1, "NO"), nextKey("deny_sub")],
+    );
+
+    // All 5 interactive human-only UI queue/picker RPCs
+    await assertServiceRoleDenied42501(
+      "work_report_list_groups",
+      "select public.work_report_list_groups($1::uuid, $2::uuid)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_list_assignment_options",
+      "select public.work_report_list_assignment_options($1::uuid, $2::uuid, null)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_list_delegations",
+      "select public.work_report_list_delegations($1::uuid, $2::uuid)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_list_pending_reviews",
+      "select public.work_report_list_pending_reviews($1::uuid, $2::uuid, null, null, 50)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app],
+    );
+    await assertServiceRoleDenied42501(
+      "work_report_get_review_submission",
+      "select public.work_report_get_review_submission($1::uuid, $2::uuid, $3::uuid)",
+      [SVC_OVERGRANTED.auth, SVC_OVERGRANTED.app, obA1T1.obligation_id],
+    );
+
+    // Verify ZERO writes occurred across all 7 tables during entire SERVICE read + deny-write battery!
+    const afterCounts = await snapshotCounts();
+    assert.deepEqual(afterCounts, beforeCounts, "SERVICE reads & denied writes must produce ZERO DB side-effects");
+    assert.ok(readOnlyRpcCalls >= 25, "All SERVICE reads executed strictly inside BEGIN TRANSACTION READ ONLY");
+
+    // 11. Immediate revocation & disable enforcement for SERVICE
+    await db.query(
+      `update public.authz_direct_capability_grants
+          set ended_at = greatest(started_at, clock_timestamp()),
+              ended_by_app_user_id = $2::uuid,
+              ended_reason = 'Revoke report_view in fixture'
+        where app_user_id = $1::uuid
+          and capability = 'report_view'`,
+      [SVC_READ_VA.app, OWNER.app],
+    );
+    const afterRevokeSub = await readOnlyRpc("work_report_list_readable_submissions", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+    });
+    assert.equal(afterRevokeSub.error?.code, "42501", "Revoking report_view immediately denies SERVICE reader");
+
+    await db.query(
+      "update public.direct_entry_app_users set enabled = false where app_user_id = $1::uuid",
+      [SVC_READ_ALL5.app],
+    );
+    const disabledN8nRes = await resolveN8nBodServiceActor({
+      env: { authSubject: SVC_READ_ALL5.auth, appUserId: SVC_READ_ALL5.app },
+      resolveActorContextRpc: (authSubject) =>
+        readOnlyRpc("direct_entry_resolve_actor_context", { p_auth_subject: authSubject }),
+    });
+    assert.equal(disabledN8nRes.ok, false, "Disabled SERVICE actor rejected by resolveN8nBodServiceActor");
+    for (const [fnName, args] of [
+      ["work_report_list_readable_submissions", { p_auth_subject: SVC_READ_ALL5.auth, p_app_user_id: SVC_READ_ALL5.app }],
+      ["work_report_analytics_overview", { p_auth_subject: SVC_READ_ALL5.auth, p_app_user_id: SVC_READ_ALL5.app }],
+      ["work_report_list_templates", { p_auth_subject: SVC_READ_ALL5.auth, p_app_user_id: SVC_READ_ALL5.app }],
+      ["work_report_list_assignments", { p_auth_subject: SVC_READ_ALL5.auth, p_app_user_id: SVC_READ_ALL5.app }],
+    ]) {
+      const denied = await readOnlyRpc(fnName, args);
+      assert.equal(denied.error?.code, "42501", `Disabled SERVICE actor denied on ${fnName}`);
+      assert.match(denied.error?.message ?? "", /WORK_REPORT_ACTOR_DENIED/);
+    }
   } finally {
     await db.close();
   }

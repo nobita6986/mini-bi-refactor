@@ -6,7 +6,10 @@ import {
   CAPABILITIES,
   DIRECT_ENTRY_AUTH_CONTRACT_VERSION,
   authorizeDirectEntry,
+  hasAnyValidPairedGrant,
   hasPairedCapability,
+  projectClientCapabilities,
+  projectClientScopes,
   resolveActor,
   resolveSelfRecruiterSuggestion,
   validateClientBusinessPayload,
@@ -1155,4 +1158,120 @@ test("WP5B-1 authorizeDirectEntry uses paired effective_grants when present and 
     timestamp,
   });
   assert.equal(pairedOwnAllowed.allowed, true);
+});
+
+test("WP8D-2 D2-SCOPE-MATRIX-02: report_* paired scope matrix accepts only ALL/CONTEXT_TEAM (report_form_manage ALL only) and rejects OWN/CONTEXT_DEPARTMENT", async () => {
+  const adminBase = await actorFor(fixture.admin);
+  const teamA = "00000000-0000-4000-8000-00000000d20a";
+  const deptA = "00000000-0000-4000-8000-00000000d20d";
+
+  const withGrants = (effective_grants) => ({
+    ...adminBase,
+    capabilities: [
+      "report_form_manage",
+      "report_assign",
+      "report_view",
+      "report_analytics_view",
+      "report_review",
+      "report_delegate",
+    ],
+    scopes: [
+      { kind: "own", reference: adminBase.app_user_id, valid_from: "0001-01-01", valid_to: null },
+      { kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null },
+    ],
+    effective_grants,
+  });
+
+  // 1. Disallowed report_* scope pairings (OWN on report_view, CONTEXT_DEPARTMENT on all 5, CONTEXT_TEAM on report_form_manage)
+  const disallowedActor = withGrants([
+    { capability: "report_form_manage", scope_kind: "CONTEXT_TEAM", scope_id: teamA, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_form_manage", scope_kind: "CONTEXT_DEPARTMENT", scope_id: deptA, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_view", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: deptA, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_assign", scope_kind: "CONTEXT_DEPARTMENT", scope_id: deptA, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_analytics_view", scope_kind: "CONTEXT_DEPARTMENT", scope_id: deptA, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_review", scope_kind: "CONTEXT_DEPARTMENT", scope_id: deptA, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_delegate", scope_kind: "CONTEXT_DEPARTMENT", scope_id: deptA, source_type: "DIRECT_GRANT", source_id: null },
+  ]);
+
+  for (const cap of [
+    "report_form_manage",
+    "report_assign",
+    "report_view",
+    "report_analytics_view",
+    "report_review",
+    "report_delegate",
+  ]) {
+    assert.equal(
+      hasAnyValidPairedGrant(disallowedActor, cap),
+      false,
+      `${cap} must reject OWN/CONTEXT_DEPARTMENT (and CONTEXT_TEAM for report_form_manage)`,
+    );
+  }
+  assert.deepEqual(projectClientCapabilities(disallowedActor), []);
+  assert.deepEqual(
+    projectClientScopes(disallowedActor).map((s) => s.kind),
+    ["own"],
+  );
+
+  // 2. Valid CONTEXT_TEAM grants on the 5 team-capable report_* capabilities
+  const teamScopedActor = withGrants([
+    { capability: "report_assign", scope_kind: "CONTEXT_TEAM", scope_id: teamA, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: teamA, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: teamA, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    { capability: "report_review", scope_kind: "CONTEXT_TEAM", scope_id: teamA, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    { capability: "report_delegate", scope_kind: "CONTEXT_TEAM", scope_id: teamA, source_type: "DIRECT_GRANT", source_id: null },
+  ]);
+  assert.equal(hasAnyValidPairedGrant(teamScopedActor, "report_form_manage"), false);
+  for (const cap of [
+    "report_assign",
+    "report_view",
+    "report_analytics_view",
+    "report_review",
+    "report_delegate",
+  ]) {
+    assert.equal(hasAnyValidPairedGrant(teamScopedActor, cap), true, `${cap} @ CONTEXT_TEAM must be valid`);
+  }
+  assert.deepEqual(projectClientCapabilities(teamScopedActor), [
+    "report_assign",
+    "report_view",
+    "report_analytics_view",
+    "report_review",
+    "report_delegate",
+  ]);
+  assert.deepEqual(
+    projectClientScopes(teamScopedActor).map((s) => ({ kind: s.kind, reference: s.reference })),
+    [
+      { kind: "own", reference: adminBase.app_user_id },
+      { kind: "team", reference: teamA },
+    ],
+  );
+
+  // 3. Valid ALL grants on all 6 report_* capabilities (including report_form_manage)
+  const allScopedActor = withGrants([
+    { capability: "report_form_manage", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_assign", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_review", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "report_delegate", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+  ]);
+  for (const cap of [
+    "report_form_manage",
+    "report_assign",
+    "report_view",
+    "report_analytics_view",
+    "report_review",
+    "report_delegate",
+  ]) {
+    assert.equal(hasAnyValidPairedGrant(allScopedActor, cap), true, `${cap} @ ALL must be valid`);
+  }
+  assert.deepEqual(projectClientCapabilities(allScopedActor), [
+    "report_form_manage",
+    "report_assign",
+    "report_view",
+    "report_analytics_view",
+    "report_review",
+    "report_delegate",
+  ]);
 });

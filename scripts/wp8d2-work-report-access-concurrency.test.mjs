@@ -20,7 +20,7 @@
  *   Race 4 — Concurrent READ ONLY Burst + Navbar Probe Zero-Write + Live PG18 Catalog Invariants:
  *     - 4A: MVCC non-blocking barrier during uncommitted `disable_app_user(TL_A)` with `lock_timeout = '500ms'` and 0 materialized obligations.
  *     - 4B: 40 concurrent `READ ONLY` RPCs across 4 sessions racing 2 disable/enable cycles -> 0 `40P01`/`25006`/`0A000`/`55P03`.
- *     - 4C: Live PG18 catalog: exact `337` `service_role` RPCs, `0` client/PUBLIC EXECUTE, `provolatile = 's'` & `prosecdef = true` on all 12 internal helpers + 7 STABLE RPCs + probe chain, `ADMIN=21`/`TEAM_LEADER=5`.
+ *     - 4C: Live PG18 catalog: exact `337` `service_role` RPCs, `0` client/PUBLIC EXECUTE, `provolatile = 's'` & `prosecdef = true` on all 16 internal helpers + 13 STABLE RPCs (incl. probe) + probe chain, `ADMIN=21`/`TEAM_LEADER=5`.
  *   Guard 5 — Fail-closed `55000` check when applying #231 against a `NOBYPASSRLS` table owner.
  */
 import assert from "node:assert/strict";
@@ -134,6 +134,10 @@ const WP8D2_STABLE_INTERNAL_HELPERS = [
   "public.work_report__internal_has_direct_scope(uuid,text,text,uuid)",
   "public.work_report_assert_actor(uuid,uuid,text)",
   "public.work_report_assert_scope(uuid,text,uuid,boolean)",
+  "public.work_report__internal_has_read_capability(uuid,text)",
+  "public.work_report__internal_has_read_scope(uuid,text,text,uuid)",
+  "public.work_report__internal_read_team_ids(uuid,text)",
+  "public.work_report__internal_assert_read_actor(uuid,uuid,text)",
   "public.work_report__internal_is_delegation_effective(uuid,timestamp with time zone)",
   "public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamp with time zone)",
   "public.work_report__internal_has_any_capability_authority(uuid,text,timestamp with time zone)",
@@ -146,9 +150,12 @@ const WP8D2_SERVICE_RPCS = [
   { sig: "public.work_report_has_active_obligations(uuid,uuid)", expectStable: true },
   { sig: "public.work_report_get_submission(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_readable_submissions(uuid,uuid,uuid,uuid,date,date,uuid,uuid,text,text,integer)", expectStable: true },
+  { sig: "public.work_report_list_templates(uuid,uuid)", expectStable: true },
+  { sig: "public.work_report_get_template(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_groups(uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_assignment_options(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_assignments(uuid,uuid,uuid)", expectStable: true },
+  { sig: "public.work_report_get_assignment_detail(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_delegations(uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_pending_reviews(uuid,uuid,uuid,text,integer)", expectStable: true },
   { sig: "public.work_report_get_review_submission(uuid,uuid,uuid)", expectStable: true },

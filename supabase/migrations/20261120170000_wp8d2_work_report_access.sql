@@ -662,6 +662,7 @@ begin
      where u.app_user_id = p_app_user_id
        and u.auth_subject = p_auth_subject
        and u.enabled
+       and (not coalesce(u.authz_managed, false) or u.account_type = 'NORMAL')
   ) then
     raise exception 'WORK_REPORT_ACTOR_DENIED' using errcode = '42501';
   end if;
@@ -706,6 +707,236 @@ end;
 $function$;
 
 revoke all on function public.work_report_assert_scope(uuid, text, uuid, boolean)
+  from public, anon, authenticated, service_role;
+
+-- -----------------------------------------------------------------------------
+-- 2B. Dedicated Read-Only Authorization Helpers (D2-SERVICE-READ-01)
+--     Separated strictly from writer/delegation/personal helpers above:
+--     - NORMAL / pre-cutover accounts delegate identically to direct helpers.
+--     - Managed SERVICE accounts may read ONLY via explicit paired grants
+--       (ALL or active non-vendor CONTEXT_TEAM), with NO Full Admin override,
+--       NO delegation, and NO write/personal authority.
+--     - Managed SHARED accounts remain denied everywhere.
+-- -----------------------------------------------------------------------------
+create or replace function public.work_report__internal_has_read_capability(
+  p_app_user_id uuid,
+  p_capability text
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_user public.direct_entry_app_users%rowtype;
+begin
+  if p_app_user_id is null or p_capability is null then
+    return false;
+  end if;
+
+  select u.*
+    into v_user
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_app_user_id;
+
+  if not found or not v_user.enabled then
+    return false;
+  end if;
+
+  if coalesce(v_user.authz_managed, false) then
+    if v_user.account_type = 'NORMAL' then
+      return public.work_report__internal_has_direct_capability(p_app_user_id, p_capability);
+    end if;
+
+    if v_user.account_type = 'SERVICE' then
+      return exists (
+        select 1
+          from pg_catalog.jsonb_to_recordset(
+            public.direct_entry_authz__internal_resolve_effective_grants(p_app_user_id)
+          ) as g(capability text)
+         where g.capability = p_capability
+      );
+    end if;
+
+    return false;
+  end if;
+
+  return public.work_report__internal_has_direct_capability(p_app_user_id, p_capability);
+end;
+$function$;
+
+revoke all on function public.work_report__internal_has_read_capability(uuid, text)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.work_report__internal_has_read_scope(
+  p_app_user_id uuid,
+  p_capability text,
+  p_scope_kind text,
+  p_team_id uuid default null
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_user public.direct_entry_app_users%rowtype;
+  v_has_all boolean := false;
+begin
+  if p_app_user_id is null or p_capability is null or p_scope_kind is null then
+    return false;
+  end if;
+
+  select u.*
+    into v_user
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_app_user_id;
+
+  if not found or not v_user.enabled then
+    return false;
+  end if;
+
+  if coalesce(v_user.authz_managed, false) then
+    if v_user.account_type = 'NORMAL' then
+      return public.work_report__internal_has_direct_scope(p_app_user_id, p_capability, p_scope_kind, p_team_id);
+    end if;
+
+    if v_user.account_type = 'SERVICE' then
+      v_has_all := public.direct_entry_authz__internal_has_paired_capability(
+        p_app_user_id, p_capability, 'ALL', null
+      );
+
+      if p_scope_kind = 'all' then
+        return v_has_all and p_team_id is null;
+      end if;
+
+      if p_scope_kind = 'team' and p_team_id is not null then
+        if not exists (
+          select 1
+            from public.teams t
+           where t.team_id = p_team_id
+             and t.active
+             and t.code <> '__system_vendor__'
+        ) then
+          return false;
+        end if;
+
+        if v_has_all then
+          return true;
+        end if;
+
+        return public.direct_entry_authz__internal_has_paired_capability(
+          p_app_user_id, p_capability, 'CONTEXT_TEAM', p_team_id::text
+        );
+      end if;
+
+      return false;
+    end if;
+
+    return false;
+  end if;
+
+  return public.work_report__internal_has_direct_scope(p_app_user_id, p_capability, p_scope_kind, p_team_id);
+end;
+$function$;
+
+revoke all on function public.work_report__internal_has_read_scope(uuid, text, text, uuid)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.work_report__internal_read_team_ids(
+  p_app_user_id uuid,
+  p_capability text
+)
+returns uuid[]
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_user public.direct_entry_app_users%rowtype;
+  v_team_ids uuid[];
+begin
+  if p_app_user_id is null or p_capability is null then
+    return array[]::uuid[];
+  end if;
+
+  select u.*
+    into v_user
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_app_user_id;
+
+  if not found or not v_user.enabled then
+    return array[]::uuid[];
+  end if;
+
+  if coalesce(v_user.authz_managed, false) then
+    if v_user.account_type = 'NORMAL' then
+      return public.work_report__internal_direct_team_ids(p_app_user_id, p_capability);
+    end if;
+
+    if v_user.account_type = 'SERVICE' then
+      select coalesce(pg_catalog.array_agg(distinct t.team_id order by t.team_id), array[]::uuid[])
+        into v_team_ids
+        from pg_catalog.jsonb_to_recordset(
+          public.direct_entry_authz__internal_resolve_effective_grants(p_app_user_id)
+        ) as g(capability text, scope_kind text, scope_id text)
+        join public.teams t
+          on t.team_id::text = g.scope_id
+         and t.active
+         and t.code <> '__system_vendor__'
+       where g.capability = p_capability
+         and g.scope_kind = 'CONTEXT_TEAM'
+         and g.scope_id is not null
+         and pg_catalog.btrim(g.scope_id) <> '';
+
+      return coalesce(v_team_ids, array[]::uuid[]);
+    end if;
+
+    return array[]::uuid[];
+  end if;
+
+  return public.work_report__internal_direct_team_ids(p_app_user_id, p_capability);
+end;
+$function$;
+
+revoke all on function public.work_report__internal_read_team_ids(uuid, text)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.work_report__internal_assert_read_actor(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_capability text default null
+)
+returns void
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+begin
+  if not exists (
+    select 1 from public.direct_entry_app_users u
+     where u.app_user_id = p_app_user_id
+       and u.auth_subject = p_auth_subject
+       and u.enabled
+       and (
+         not coalesce(u.authz_managed, false)
+         or u.account_type in ('NORMAL', 'SERVICE')
+       )
+  ) then
+    raise exception 'WORK_REPORT_ACTOR_DENIED' using errcode = '42501';
+  end if;
+  if p_capability is not null
+     and not public.work_report__internal_has_read_capability(p_app_user_id, p_capability) then
+    raise exception 'WORK_REPORT_CAPABILITY_DENIED' using errcode = '42501';
+  end if;
+end;
+$function$;
+
+revoke all on function public.work_report__internal_assert_read_actor(uuid, uuid, text)
   from public, anon, authenticated, service_role;
 
 create or replace function public.work_report__internal_is_delegation_effective(
@@ -1025,14 +1256,14 @@ declare
   v_team_ids uuid[];
   v_label text;
 begin
-  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, 'report_analytics_view');
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, 'report_analytics_view');
   if p_require_report_view then
-    perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, 'report_view');
+    perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, 'report_view');
   end if;
 
-  v_analytics_all := public.work_report__internal_has_direct_scope(p_app_user_id, 'report_analytics_view', 'all', null);
+  v_analytics_all := public.work_report__internal_has_read_scope(p_app_user_id, 'report_analytics_view', 'all', null);
   v_view_all := case
-    when p_require_report_view then public.work_report__internal_has_direct_scope(p_app_user_id, 'report_view', 'all', null)
+    when p_require_report_view then public.work_report__internal_has_read_scope(p_app_user_id, 'report_view', 'all', null)
     else true
   end;
   v_all_scope := v_analytics_all and v_view_all;
@@ -1063,10 +1294,10 @@ begin
   end if;
 
   if not v_analytics_all then
-    v_analytics_teams := public.work_report__internal_direct_team_ids(p_app_user_id, 'report_analytics_view');
+    v_analytics_teams := public.work_report__internal_read_team_ids(p_app_user_id, 'report_analytics_view');
   end if;
   if p_require_report_view and not v_view_all then
-    v_view_teams := public.work_report__internal_direct_team_ids(p_app_user_id, 'report_view');
+    v_view_teams := public.work_report__internal_read_team_ids(p_app_user_id, 'report_view');
   end if;
 
   select pg_catalog.array_agg(t.team_id order by t.code),
@@ -1580,9 +1811,10 @@ set search_path = pg_catalog, public
 as $function$
 declare
   v_obligation public.work_report_obligations%rowtype;
+  v_is_non_normal_managed boolean := false;
   v_result jsonb;
 begin
-  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, null);
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, null);
   select o.* into v_obligation
     from public.work_report_obligations o
    where o.obligation_id = p_obligation_id
@@ -1595,14 +1827,24 @@ begin
   if not found then
     raise exception 'WORK_REPORT_OBLIGATION_NOT_FOUND' using errcode = 'P0002';
   end if;
-  if v_obligation.assignee_app_user_id <> p_app_user_id then
+  select exists (
+    select 1
+      from public.direct_entry_app_users u
+     where u.app_user_id = p_app_user_id
+       and coalesce(u.authz_managed, false)
+       and u.account_type is distinct from 'NORMAL'
+  ) into v_is_non_normal_managed;
+  if coalesce(v_is_non_normal_managed, false) or v_obligation.assignee_app_user_id <> p_app_user_id then
     begin
-      perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, 'report_view');
+      perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, 'report_view');
     exception when insufficient_privilege then
       raise exception 'WORK_REPORT_ACCESS_DENIED' using errcode = '42501';
     end;
-    if not public.work_report__internal_has_direct_scope(p_app_user_id, 'report_view', 'all', null) then
-      perform public.work_report_assert_scope(p_app_user_id, 'report_view', v_obligation.snapshot_team_id, false);
+    if not public.work_report__internal_has_read_scope(p_app_user_id, 'report_view', 'all', null) then
+      if v_obligation.snapshot_team_id is null
+         or not public.work_report__internal_has_read_scope(p_app_user_id, 'report_view', 'team', v_obligation.snapshot_team_id) then
+        raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
+      end if;
     end if;
   end if;
   select jsonb_build_object(
@@ -1711,7 +1953,7 @@ declare
   v_cursor_submission_id uuid;
   v_result jsonb;
 begin
-  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, 'report_view');
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, 'report_view');
 
   if p_from is not null and p_to is not null and p_from > p_to then
     raise exception 'WORK_REPORT_DATE_RANGE_INVALID' using errcode = '22023';
@@ -1740,7 +1982,7 @@ begin
     end;
   end if;
 
-  v_all_scope := public.work_report__internal_has_direct_scope(p_app_user_id, 'report_view', 'all', null);
+  v_all_scope := public.work_report__internal_has_read_scope(p_app_user_id, 'report_view', 'all', null);
 
   if v_all_scope then
     v_scope_kind := 'all';
@@ -1772,7 +2014,7 @@ begin
       from public.teams t
      where t.active
        and t.code <> '__system_vendor__'
-       and t.team_id = any(public.work_report__internal_direct_team_ids(p_app_user_id, 'report_view'));
+       and t.team_id = any(public.work_report__internal_read_team_ids(p_app_user_id, 'report_view'));
 
     if coalesce(pg_catalog.cardinality(v_authorized_team_ids), 0) = 0 then
       raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
@@ -1781,8 +2023,8 @@ begin
     v_scope_kind := 'team';
 
     if p_team_id is not null then
-      perform public.work_report_assert_scope(p_app_user_id, 'report_view', p_team_id, false);
-      if not (p_team_id = any(v_authorized_team_ids)) then
+      if not public.work_report__internal_has_read_scope(p_app_user_id, 'report_view', 'team', p_team_id)
+         or not (p_team_id = any(v_authorized_team_ids)) then
         raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
       end if;
       v_filter_team_ids := array[p_team_id];
@@ -2028,6 +2270,100 @@ $function$;
 revoke all on function public.work_report_list_readable_submissions(uuid, uuid, uuid, uuid, date, date, uuid, uuid, text, text, integer)
   from public, anon, authenticated, service_role;
 grant execute on function public.work_report_list_readable_submissions(uuid, uuid, uuid, uuid, date, date, uuid, uuid, text, text, integer)
+  to service_role;
+
+create or replace function public.work_report_list_templates(
+  p_auth_subject uuid,
+  p_app_user_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+begin
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, 'report_form_manage');
+  if not public.work_report__internal_has_read_scope(p_app_user_id, 'report_form_manage', 'all', null) then
+    raise exception 'WORK_REPORT_ALL_SCOPE_REQUIRED' using errcode = '42501';
+  end if;
+  return jsonb_build_object('items', coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'template_id', t.template_id,
+      'template_code', t.template_code,
+      'display_name', t.display_name,
+      'description', t.description,
+      'default_frequency', t.default_frequency,
+      'status', t.status,
+      'current_published_version_id', t.current_published_version_id,
+      'draft_version_id', d.version_id,
+      'version', t.version,
+      'updated_at', t.updated_at
+    ) order by t.template_code)
+      from public.work_report_templates t
+      left join public.work_report_template_versions d
+        on d.template_id = t.template_id and d.status = 'DRAFT'
+  ), '[]'::jsonb));
+end;
+$function$;
+
+revoke all on function public.work_report_list_templates(uuid, uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function public.work_report_list_templates(uuid, uuid)
+  to service_role;
+
+create or replace function public.work_report_get_template(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_template_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_result jsonb;
+begin
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, 'report_form_manage');
+  if not public.work_report__internal_has_read_scope(p_app_user_id, 'report_form_manage', 'all', null) then
+    raise exception 'WORK_REPORT_ALL_SCOPE_REQUIRED' using errcode = '42501';
+  end if;
+  select jsonb_build_object(
+    'template_id', t.template_id,
+    'template_code', t.template_code,
+    'display_name', t.display_name,
+    'description', t.description,
+    'default_frequency', t.default_frequency,
+    'status', t.status,
+    'current_published_version_id', t.current_published_version_id,
+    'version', t.version,
+    'versions', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'version_id', v.version_id,
+        'version_no', v.version_no,
+        'status', v.status,
+        'requires_review', v.requires_review,
+        'schema_json', v.schema_json,
+        'metric_contract_json', v.metric_contract_json,
+        'schema_checksum', v.schema_checksum,
+        'published_at', v.published_at
+      ) order by v.version_no desc)
+      from public.work_report_template_versions v where v.template_id = t.template_id
+    ), '[]'::jsonb)
+  ) into v_result
+    from public.work_report_templates t where t.template_id = p_template_id;
+  if v_result is null then
+    raise exception 'WORK_REPORT_TEMPLATE_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  return v_result;
+end;
+$function$;
+
+revoke all on function public.work_report_get_template(uuid, uuid, uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function public.work_report_get_template(uuid, uuid, uuid)
   to service_role;
 
 create or replace function public.work_report_list_groups(
@@ -2309,13 +2645,16 @@ declare
   v_direct_team_ids uuid[];
   v_delegated_all boolean;
 begin
-  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, null);
-  if not public.work_report__internal_has_any_capability_authority(p_app_user_id, 'report_assign') then
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, null);
+  v_direct_all := public.work_report__internal_has_read_scope(p_app_user_id, 'report_assign', 'all', null);
+  v_direct_team_ids := public.work_report__internal_read_team_ids(p_app_user_id, 'report_assign');
+
+  if not v_direct_all
+     and coalesce(pg_catalog.cardinality(v_direct_team_ids), 0) = 0
+     and not public.work_report__internal_has_any_capability_authority(p_app_user_id, 'report_assign') then
     raise exception 'WORK_REPORT_CAPABILITY_DENIED' using errcode = '42501';
   end if;
 
-  v_direct_all := public.work_report__internal_has_direct_scope(p_app_user_id, 'report_assign', 'all', null);
-  v_direct_team_ids := public.work_report__internal_direct_team_ids(p_app_user_id, 'report_assign');
   v_delegated_all := exists (
     select 1
       from public.work_report_delegations d
@@ -2472,17 +2811,28 @@ begin
           left join public.work_report_obligations o on o.assignment_id = a.assignment_id
           left join public.work_report_submissions s on s.obligation_id = o.obligation_id
          where (
-           (a.target_kind = 'TEAM' and exists (
-             select 1
-               from public.work_report__internal_resolve_capability_authority(
-                 p_app_user_id, 'report_assign', a.template_id, a.target_team_id
-               )
+           (a.target_kind = 'TEAM' and (
+             v_direct_all
+             or (a.target_team_id is not null and a.target_team_id = any(v_direct_team_ids))
+             or exists (
+               select 1
+                 from public.work_report__internal_resolve_capability_authority(
+                   p_app_user_id, 'report_assign', a.template_id, a.target_team_id
+                 )
+             )
            )) or
-           (a.target_kind = 'USER' and exists (
-             select 1
-               from public.work_report__internal_resolve_capability_authority(
-                 p_app_user_id, 'report_assign', a.template_id, public.work_report_current_team(a.target_user_id)
-               )
+           (a.target_kind = 'USER' and (
+             v_direct_all
+             or (
+               public.work_report_current_team(a.target_user_id) is not null
+               and public.work_report_current_team(a.target_user_id) = any(v_direct_team_ids)
+             )
+             or exists (
+               select 1
+                 from public.work_report__internal_resolve_capability_authority(
+                   p_app_user_id, 'report_assign', a.template_id, public.work_report_current_team(a.target_user_id)
+                 )
+             )
            )) or
            (a.target_kind = 'USER_SET'
              and exists (select 1 from public.work_report_assignment_targets x where x.assignment_id = a.assignment_id)
@@ -2490,11 +2840,19 @@ begin
                select 1
                  from public.work_report_assignment_targets x
                 where x.assignment_id = a.assignment_id
-                  and not exists (
-                    select 1
-                      from public.work_report__internal_resolve_capability_authority(
-                        p_app_user_id, 'report_assign', a.template_id, public.work_report_current_team(x.target_user_id)
-                      )
+                  and not coalesce(
+                    v_direct_all
+                    or (
+                      public.work_report_current_team(x.target_user_id) is not null
+                      and public.work_report_current_team(x.target_user_id) = any(v_direct_team_ids)
+                    )
+                    or exists (
+                      select 1
+                        from public.work_report__internal_resolve_capability_authority(
+                          p_app_user_id, 'report_assign', a.template_id, public.work_report_current_team(x.target_user_id)
+                        )
+                    ),
+                    false
                   )
              )
            ) or
@@ -2504,10 +2862,18 @@ begin
                select 1
                  from public.work_report_group_members gm
                 where gm.group_id = a.target_group_id
-                  and not public.work_report__internal_actor_can_assign_member(
-                    p_app_user_id,
-                    gm.member_user_id,
-                    a.template_id
+                  and not coalesce(
+                    v_direct_all
+                    or (
+                      public.work_report_current_team(gm.member_user_id) is not null
+                      and public.work_report_current_team(gm.member_user_id) = any(v_direct_team_ids)
+                    )
+                    or public.work_report__internal_actor_can_assign_member(
+                      p_app_user_id,
+                      gm.member_user_id,
+                      a.template_id
+                    ),
+                    false
                   )
              )
            )
@@ -2540,6 +2906,214 @@ $function$;
 revoke all on function public.work_report_list_assignments(uuid, uuid, uuid)
   from public, anon, authenticated, service_role;
 grant execute on function public.work_report_list_assignments(uuid, uuid, uuid)
+  to service_role;
+
+create or replace function public.work_report_get_assignment_detail(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_assignment_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_assignment public.work_report_assignments%rowtype;
+  v_direct_all boolean;
+  v_direct_team_ids uuid[];
+  v_authorized boolean := false;
+begin
+  perform public.work_report__internal_assert_read_actor(p_auth_subject, p_app_user_id, null);
+
+  if p_assignment_id is null then
+    raise exception 'WORK_REPORT_ASSIGNMENT_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  select *
+    into v_assignment
+    from public.work_report_assignments a
+   where a.assignment_id = p_assignment_id;
+
+  if not found then
+    raise exception 'WORK_REPORT_ASSIGNMENT_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  v_direct_all := public.work_report__internal_has_read_scope(p_app_user_id, 'report_assign', 'all', null);
+  v_direct_team_ids := public.work_report__internal_read_team_ids(p_app_user_id, 'report_assign');
+
+  v_authorized := (
+    (v_assignment.target_kind = 'TEAM' and (
+      v_direct_all
+      or (v_assignment.target_team_id is not null and v_assignment.target_team_id = any(v_direct_team_ids))
+      or exists (
+        select 1
+          from public.work_report__internal_resolve_capability_authority(
+            p_app_user_id, 'report_assign', v_assignment.template_id, v_assignment.target_team_id
+          )
+      )
+    )) or
+    (v_assignment.target_kind = 'USER' and (
+      v_direct_all
+      or (
+        public.work_report_current_team(v_assignment.target_user_id) is not null
+        and public.work_report_current_team(v_assignment.target_user_id) = any(v_direct_team_ids)
+      )
+      or exists (
+        select 1
+          from public.work_report__internal_resolve_capability_authority(
+            p_app_user_id, 'report_assign', v_assignment.template_id, public.work_report_current_team(v_assignment.target_user_id)
+          )
+      )
+    )) or
+    (v_assignment.target_kind = 'USER_SET'
+      and exists (select 1 from public.work_report_assignment_targets x where x.assignment_id = v_assignment.assignment_id)
+      and not exists (
+        select 1
+          from public.work_report_assignment_targets x
+         where x.assignment_id = v_assignment.assignment_id
+           and not coalesce(
+             v_direct_all
+             or (
+               public.work_report_current_team(x.target_user_id) is not null
+               and public.work_report_current_team(x.target_user_id) = any(v_direct_team_ids)
+             )
+             or exists (
+               select 1
+                 from public.work_report__internal_resolve_capability_authority(
+                   p_app_user_id, 'report_assign', v_assignment.template_id, public.work_report_current_team(x.target_user_id)
+                 )
+             ),
+             false
+           )
+      )
+    ) or
+    (v_assignment.target_kind = 'GROUP'
+      and exists (select 1 from public.work_report_group_members gm where gm.group_id = v_assignment.target_group_id)
+      and not exists (
+        select 1
+          from public.work_report_group_members gm
+         where gm.group_id = v_assignment.target_group_id
+           and not coalesce(
+             v_direct_all
+             or (
+               public.work_report_current_team(gm.member_user_id) is not null
+               and public.work_report_current_team(gm.member_user_id) = any(v_direct_team_ids)
+             )
+             or public.work_report__internal_actor_can_assign_member(
+               p_app_user_id,
+               gm.member_user_id,
+               v_assignment.template_id
+             ),
+             false
+           )
+      )
+    )
+  );
+
+  if not coalesce(v_authorized, false) then
+    raise exception 'WORK_REPORT_SCOPE_DENIED' using errcode = '42501';
+  end if;
+
+  return jsonb_build_object(
+    'assignment_id', v_assignment.assignment_id,
+    'assignee_progress', coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'obligation_id', latest_o.obligation_id,
+          'assignee_app_user_id', latest_o.assignee_app_user_id,
+          'assignee_display_name', latest_o.assignee_display_name,
+          'period_key', latest_o.period_key,
+          'period_start_date', latest_o.period_start_date,
+          'period_end_date', latest_o.period_end_date,
+          'due_at', latest_o.due_at,
+          'reopened_until', latest_o.reopened_until,
+          'obligation_status', latest_o.obligation_status,
+          'submission_state', latest_o.submission_state,
+          'is_overdue', latest_o.is_overdue,
+          'submitted_at', latest_o.submitted_at,
+          'version', latest_o.version
+        )
+        order by latest_o.assignee_display_name asc, latest_o.period_start_date desc, latest_o.obligation_id desc
+      )
+        from (
+          select distinct on (o_row.assignee_app_user_id)
+                 o_row.obligation_id,
+                 o_row.assignee_app_user_id,
+                 coalesce(
+                   public.work_report__internal_user_display_name(o_row.assignee_app_user_id),
+                   u_row.display_name,
+                   o_row.assignee_app_user_id::text
+                 ) as assignee_display_name,
+                 o_row.period_key,
+                 o_row.period_start_date,
+                 o_row.period_end_date,
+                 o_row.due_at,
+                 o_row.reopened_until,
+                 o_row.obligation_status,
+                 coalesce(s_row.state, 'NOT_STARTED') as submission_state,
+                 (
+                   o_row.obligation_status = 'ACTIVE'
+                   and coalesce(s_row.state, 'NOT_STARTED') in ('NOT_STARTED', 'DRAFT')
+                   and now() > o_row.due_at
+                   and coalesce(o_row.reopened_until < now(), true)
+                 ) as is_overdue,
+                 s_row.latest_submitted_at as submitted_at,
+                 o_row.version
+            from public.work_report_obligations o_row
+            left join public.direct_entry_app_users u_row
+              on u_row.app_user_id = o_row.assignee_app_user_id
+            left join public.work_report_submissions s_row
+              on s_row.obligation_id = o_row.obligation_id
+           where o_row.assignment_id = v_assignment.assignment_id
+           order by o_row.assignee_app_user_id, o_row.period_start_date desc, o_row.obligation_id desc
+           limit 200
+        ) latest_o
+    ), '[]'::jsonb),
+    'audit_history', coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'event_id', recent_ae.audit_event_id,
+          'action', recent_ae.action,
+          'state', recent_ae.state,
+          'actor_user_id', recent_ae.actor_user_id,
+          'actor_display_name', recent_ae.actor_display_name,
+          'created_at', recent_ae.created_at
+        )
+        order by recent_ae.created_at desc, recent_ae.audit_event_id desc
+      )
+        from (
+          select ae.audit_event_id,
+                 ae.action,
+                 case
+                   when ae.action = 'ASSIGNMENT_CREATE' then 'ACTIVE'
+                   else coalesce(ae.metadata_json ->> 'state', v_assignment.state)
+                 end as state,
+                 ae.actor_user_id,
+                 coalesce(
+                   public.work_report__internal_user_display_name(ae.actor_user_id),
+                   au.display_name,
+                   ae.actor_user_id::text
+                 ) as actor_display_name,
+                 ae.created_at
+            from public.work_report_audit_events ae
+            left join public.direct_entry_app_users au
+              on au.app_user_id = ae.actor_user_id
+           where ae.template_id = v_assignment.template_id
+             and ae.action in ('ASSIGNMENT_CREATE', 'ASSIGNMENT_STATE')
+             and (ae.metadata_json ->> 'assignment_id') = v_assignment.assignment_id::text
+           order by ae.created_at desc, ae.audit_event_id desc
+           limit 25
+        ) recent_ae
+    ), '[]'::jsonb)
+  );
+end;
+$function$;
+
+revoke all on function public.work_report_get_assignment_detail(uuid, uuid, uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function public.work_report_get_assignment_detail(uuid, uuid, uuid)
   to service_role;
 
 create or replace function public.work_report_list_delegations(
@@ -5789,6 +6363,10 @@ declare
     'public.work_report__internal_direct_team_ids(uuid,text)',
     'public.work_report_assert_actor(uuid,uuid,text)',
     'public.work_report_assert_scope(uuid,text,uuid,boolean)',
+    'public.work_report__internal_has_read_capability(uuid,text)',
+    'public.work_report__internal_has_read_scope(uuid,text,text,uuid)',
+    'public.work_report__internal_read_team_ids(uuid,text)',
+    'public.work_report__internal_assert_read_actor(uuid,uuid,text)',
     'public.work_report__internal_is_delegation_effective(uuid,timestamptz)',
     'public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)',
     'public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)',
@@ -5797,9 +6375,12 @@ declare
     'public.direct_entry_resolve_actor_context(uuid)',
     'public.work_report_get_submission(uuid,uuid,uuid)',
     'public.work_report_list_readable_submissions(uuid,uuid,uuid,uuid,date,date,uuid,uuid,text,text,integer)',
+    'public.work_report_list_templates(uuid,uuid)',
+    'public.work_report_get_template(uuid,uuid,uuid)',
     'public.work_report_list_groups(uuid,uuid)',
     'public.work_report_list_assignment_options(uuid,uuid,uuid)',
     'public.work_report_list_assignments(uuid,uuid,uuid)',
+    'public.work_report_get_assignment_detail(uuid,uuid,uuid)',
     'public.work_report_list_delegations(uuid,uuid)',
     'public.work_report_list_pending_reviews(uuid,uuid,uuid,text,integer)',
     'public.work_report_get_review_submission(uuid,uuid,uuid)',
@@ -5880,6 +6461,10 @@ declare
     'public.work_report__internal_direct_team_ids(uuid,text)',
     'public.work_report_assert_actor(uuid,uuid,text)',
     'public.work_report_assert_scope(uuid,text,uuid,boolean)',
+    'public.work_report__internal_has_read_capability(uuid,text)',
+    'public.work_report__internal_has_read_scope(uuid,text,text,uuid)',
+    'public.work_report__internal_read_team_ids(uuid,text)',
+    'public.work_report__internal_assert_read_actor(uuid,uuid,text)',
     'public.work_report__internal_is_delegation_effective(uuid,timestamptz)',
     'public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)',
     'public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)',
@@ -5890,9 +6475,12 @@ declare
     'public.direct_entry_resolve_actor_context(uuid)',
     'public.work_report_get_submission(uuid,uuid,uuid)',
     'public.work_report_list_readable_submissions(uuid,uuid,uuid,uuid,date,date,uuid,uuid,text,text,integer)',
+    'public.work_report_list_templates(uuid,uuid)',
+    'public.work_report_get_template(uuid,uuid,uuid)',
     'public.work_report_list_groups(uuid,uuid)',
     'public.work_report_list_assignment_options(uuid,uuid,uuid)',
     'public.work_report_list_assignments(uuid,uuid,uuid)',
+    'public.work_report_get_assignment_detail(uuid,uuid,uuid)',
     'public.work_report_list_delegations(uuid,uuid)',
     'public.work_report_list_pending_reviews(uuid,uuid,uuid,text,integer)',
     'public.work_report_get_review_submission(uuid,uuid,uuid)'
@@ -5923,6 +6511,10 @@ declare
     'work_report__internal_direct_team_ids',
     'work_report_assert_actor',
     'work_report_assert_scope',
+    'work_report__internal_has_read_capability',
+    'work_report__internal_has_read_scope',
+    'work_report__internal_read_team_ids',
+    'work_report__internal_assert_read_actor',
     'work_report__internal_is_delegation_effective',
     'work_report__internal_resolve_capability_authority',
     'work_report__internal_has_any_capability_authority',
@@ -5931,9 +6523,12 @@ declare
     'direct_entry_resolve_actor_context',
     'work_report_get_submission',
     'work_report_list_readable_submissions',
+    'work_report_list_templates',
+    'work_report_get_template',
     'work_report_list_groups',
     'work_report_list_assignment_options',
     'work_report_list_assignments',
+    'work_report_get_assignment_detail',
     'work_report_list_delegations',
     'work_report_list_pending_reviews',
     'work_report_get_review_submission',
@@ -5981,6 +6576,10 @@ declare
     'public.work_report__internal_direct_team_ids(uuid,text)',
     'public.work_report_assert_actor(uuid,uuid,text)',
     'public.work_report_assert_scope(uuid,text,uuid,boolean)',
+    'public.work_report__internal_has_read_capability(uuid,text)',
+    'public.work_report__internal_has_read_scope(uuid,text,text,uuid)',
+    'public.work_report__internal_read_team_ids(uuid,text)',
+    'public.work_report__internal_assert_read_actor(uuid,uuid,text)',
     'public.work_report__internal_is_delegation_effective(uuid,timestamptz)',
     'public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)',
     'public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)',
