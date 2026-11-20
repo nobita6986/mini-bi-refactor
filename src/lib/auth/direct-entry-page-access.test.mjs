@@ -334,3 +334,66 @@ test("WP4 Organization Persons page decision mirrors Full Admin triple and rejec
   assert.equal(decideOrganizationPersonsPageAccess({ actor: { ok: false, reason: "ACTOR_DISABLED" } }), "ACCOUNT_UNAVAILABLE");
   assert.equal(decideOrganizationPersonsPageAccess({ actor: { ok: false, reason: "ACTOR_MAPPING_MISSING" } }), "ACCOUNT_UNAVAILABLE");
 });
+
+test("WP8B-1: canManageProjectMasterFromActor and decideProjectOperationsPageAccess enforce paired @ ALL when effective_grants is present", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+  const all = [{ kind: "all", reference: "all", valid_from: "2026-01-01", valid_to: null }];
+  const withPaired = (capabilities, effective_grants, scopes = all) => ({
+    ...actor(capabilities),
+    actor: {
+      ...actor(capabilities).actor,
+      scopes,
+      effective_grants,
+    },
+  });
+
+  // Canonical ADMIN (entry_admin @ ALL): allowed on both page and empty-list project master fallback.
+  const pairedAdmin = withPaired(
+    ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+    [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  );
+  assert.equal(canManageProjectMasterFromActor(pairedAdmin), true);
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: pairedAdmin }), "ALLOW");
+
+  // Canonical HR_OPERATOR (catalog_master_manage @ ALL, no entry_admin): project-master fallback true,
+  // while projectAdminNavPredicate / decideProjectOperationsPageAccess stays false (matching #72/W06A boundary).
+  const pairedHrOperator = withPaired(
+    ["catalog_master_manage", "recruiter_master_manage", "team_master_manage"],
+    [
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  );
+  assert.equal(canManageProjectMasterFromActor(pairedHrOperator), true);
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: pairedHrOperator }), "ACCESS_DENIED");
+
+  // Narrow Project Admin (entry_admin @ ALL only): allowed on both without needing Full Admin triple.
+  const pairedProjectAdmin = withPaired(
+    ["entry_admin"],
+    [{ capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null }],
+  );
+  assert.equal(canManageProjectMasterFromActor(pairedProjectAdmin), true);
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: pairedProjectAdmin }), "ALLOW");
+
+  // Simulated cross-scope drift fixture: entry_admin / catalog_master_manage @ CONTEXT_TEAM + unrelated ALL grant -> DENIED.
+  const crossScopeDrift = withPaired(
+    ["entry_admin", "catalog_master_manage", "audit_view"],
+    [
+      { capability: "entry_admin", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  );
+  assert.equal(canManageProjectMasterFromActor(crossScopeDrift), false);
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: crossScopeDrift }), "ACCESS_DENIED");
+
+  // Simulated stale legacy array fixture (effective_grants = []): fails closed.
+  const staleLegacy = withPaired(["entry_admin", "catalog_master_manage"], []);
+  assert.equal(canManageProjectMasterFromActor(staleLegacy), false);
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: staleLegacy }), "ACCESS_DENIED");
+});
