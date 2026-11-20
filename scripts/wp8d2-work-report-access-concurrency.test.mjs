@@ -150,6 +150,8 @@ const WP8D2_SERVICE_RPCS = [
   { sig: "public.work_report_list_assignment_options(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_assignments(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_list_delegations(uuid,uuid)", expectStable: true },
+  { sig: "public.work_report_list_pending_reviews(uuid,uuid,uuid,text,integer)", expectStable: true },
+  { sig: "public.work_report_get_review_submission(uuid,uuid,uuid)", expectStable: true },
   { sig: "public.work_report_create_group(uuid,uuid,text,text,uuid[],text)", expectStable: false },
   { sig: "public.work_report_update_group(uuid,uuid,uuid,integer,text,text,uuid[],text)", expectStable: false },
   { sig: "public.work_report_set_group_active(uuid,uuid,uuid,integer,boolean,text)", expectStable: false },

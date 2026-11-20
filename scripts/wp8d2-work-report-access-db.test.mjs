@@ -34,6 +34,12 @@ import {
   workReportsNavPredicate,
 } from "../src/lib/navigation/registry-capability.ts";
 import { createAssignmentRepository } from "../src/lib/work-reports/assignment-repository.ts";
+import {
+  decideWorkReportReview,
+  getWorkReportReviewSubmission,
+  listPendingWorkReportReviews,
+} from "../src/lib/work-reports/review-api.ts";
+import { createReviewRepository } from "../src/lib/work-reports/review-repository.ts";
 import { createSubmissionRepository } from "../src/lib/work-reports/submission-repository.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
@@ -1703,6 +1709,630 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
     else process.env.WORK_REPORTS_API_ENABLED = prevWorkReportsEnabled;
     if (prevDirectEntryApiEnabled === undefined) delete process.env.DIRECT_ENTRY_API_ENABLED;
     else process.env.DIRECT_ENTRY_API_ENABLED = prevDirectEntryApiEnabled;
+    await db.close();
+  }
+});
+
+test("WP8D-2 [7/7] R2/P1 F-WD-DRIFT-01 E2E: Real SQL -> createReviewRepository -> review-api handlers (non-empty queue, pagination, filters, scope isolation, detail -> reject/resubmit/approve/OCC/self-review, revoke/disable, draft privacy)", async () => {
+  const { db } = await createDb();
+  try {
+    // 1. Seed teams, managed accounts, WP5 cutover, designate TL_A, clear ALL legacy mirrors
+    await db.query(
+      "insert into public.teams (team_id, code, display_name, active) values ($1::uuid, 'R2_A', 'R2 Team Alpha', true), ($2::uuid, 'R2_B', 'R2 Team Beta', true)",
+      [TEAM_A, TEAM_B],
+    );
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LUANPT, { caps: [], scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LIENVU, { caps: ADMIN_SEED_CAPS.filter((c) => c !== "duplicate_cccd_withdraw"), scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, NGATTT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, TL_A, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A2, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_B1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, ADMIN_AND_TL, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+
+    const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+    const cutover = await runWp5Cutover(db, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint: plan.manifest_fingerprint,
+    });
+    assert.equal(cutover.status, "APPLIED");
+
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'R2 TL A', $5)",
+      [OWNER.auth, OWNER.app, TEAM_A, TL_A.app, nextKey("r2_tla")],
+    );
+    await clearLegacyMirrors(db, [
+      OWNER.app, LUANPT.app, LIENVU.app, NGATTT.app, TL_A.app, STAFF_A1.app, STAFF_A2.app, STAFF_B1.app, ADMIN_AND_TL.app,
+    ]);
+
+    // 2. Seed 3 published templates (requires_review = true): T1 (multi-team + null-team snapshot), T2 (late + draft), T3 (empty)
+    const t1 = await createPublishedTemplate(db, OWNER, "R2_REV_T1", { requiresReview: true });
+    const t2 = await createPublishedTemplate(db, OWNER, "R2_REV_T2", { requiresReview: true });
+    const t3Empty = await createPublishedTemplate(db, OWNER, "R2_REV_T3_EMPTY", { requiresReview: true });
+
+    const { rows: [{ d: today, y: yesterday }] } = await db.query(
+      "select public.direct_entry_authorization_date()::text as d, (public.direct_entry_authorization_date() - 1)::text as y",
+    );
+
+    // T1 on-time assignments (due_offset_days=1 guarantees on-time regardless of UTC/ICT clock): TEAM_A, TEAM_B
+    await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 1, '23:59:59'::time, false, $5::date, null, $6)",
+      [OWNER.auth, OWNER.app, t1.template_id, TEAM_A, today, nextKey("r2_asg_t1_a")],
+    );
+    await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 1, '23:59:59'::time, false, $5::date, null, $6)",
+      [OWNER.auth, OWNER.app, t1.template_id, TEAM_B, today, nextKey("r2_asg_t1_b")],
+    );
+    // T2 overdue assignment (yesterday 00:01, p_exclude_sundays=false; reopened via RPC below) so SQL genuinely computes is_late=true & post-deadline amendment
+    await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null, 'DAILY', true, 0, '00:01:00'::time, false, $5::date, $5::date, $6)",
+      [OWNER.auth, OWNER.app, t2.template_id, STAFF_A1.app, yesterday, nextKey("r2_asg_t2_late")],
+    );
+    await db.query(
+      "select public.work_report_ensure_obligations_for_window($1::uuid, $2::uuid, $3::date)",
+      [OWNER.auth, OWNER.app, today],
+    );
+    await db.query(
+      "select public.work_report_ensure_obligations_for_window($1::uuid, $2::uuid, $3::date)",
+      [OWNER.auth, OWNER.app, yesterday],
+    );
+
+    const { rows: obs } = await db.query(
+      "select obligation_id, template_id, assignee_app_user_id, period_key, period_start_date::text as period_start_date, period_end_date::text as period_end_date from public.work_report_obligations",
+    );
+    const findOb = (tplId, userId) => {
+      const hit = obs.find((o) => o.template_id === tplId && o.assignee_app_user_id === userId);
+      assert.ok(hit, `expected obligation for tpl=${tplId}, user=${userId}`);
+      return hit;
+    };
+    const obA1T1 = findOb(t1.template_id, STAFF_A1.app);
+    const obTlAT1 = findOb(t1.template_id, TL_A.app);
+    const obA2T1Draft = findOb(t1.template_id, STAFF_A2.app);
+    const obB1T1 = findOb(t1.template_id, STAFF_B1.app);
+    const obNoTeamT1 = findOb(t1.template_id, ADMIN_AND_TL.app);
+    const obA1T2Late = findOb(t2.template_id, STAFF_A1.app);
+
+    const submitPayload = (calls, notes = null) =>
+      JSON.stringify({ calls_made: calls, interested_candidates: 2, workers_started: 1, notes });
+
+    // Submit 5 reports into PENDING_REVIEW and leave 1 as unsubmitted DRAFT with private draft_payload_json
+    await db.query(
+      "select public.work_report_save_draft($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [STAFF_A2.auth, STAFF_A2.app, obA2T1Draft.obligation_id, submitPayload(777, "SECRET_DRAFT_ONLY"), nextKey("r2_draft")],
+    );
+    const subA1T1 = (await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5) as res",
+      [STAFF_A1.auth, STAFF_A1.app, obA1T1.obligation_id, submitPayload(10, "T1_A1"), nextKey("r2_sub_a1_t1")],
+    )).rows[0].res;
+    const subTlAT1 = (await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5) as res",
+      [TL_A.auth, TL_A.app, obTlAT1.obligation_id, submitPayload(20, "T1_TLA"), nextKey("r2_sub_tla_t1")],
+    )).rows[0].res;
+    await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [STAFF_B1.auth, STAFF_B1.app, obB1T1.obligation_id, submitPayload(30, "T1_B1"), nextKey("r2_sub_b1_t1")],
+    );
+    await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [ADMIN_AND_TL.auth, ADMIN_AND_TL.app, obNoTeamT1.obligation_id, submitPayload(40, "T1_NT"), nextKey("r2_sub_nt_t1")],
+    );
+    // Simulate historical obligation with null snapshot_team_id to verify nullable team DTO fields
+    await db.query(
+      "update public.work_report_obligations set snapshot_team_id = null, snapshot_team_code = null, snapshot_team_display_name = null where obligation_id = $1::uuid",
+      [obNoTeamT1.obligation_id],
+    );
+    // Reopen overdue T2 obligation so SQL genuinely allows late submission and sets is_late=true
+    await db.query(
+      "select public.work_report_change_obligation_status($1::uuid, $2::uuid, $3::uuid, 1, 'REOPEN', 'Mở lại nộp bổ sung', statement_timestamp() + interval '1 day', $4)",
+      [OWNER.auth, OWNER.app, obA1T2Late.obligation_id, nextKey("r2_reopen_t2")],
+    );
+    const subA1T2Late = (await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5) as res",
+      [STAFF_A1.auth, STAFF_A1.app, obA1T2Late.obligation_id, submitPayload(11, "T2_LATE_V1"), nextKey("r2_sub_a1_t2")],
+    )).rows[0].res;
+    assert.equal(subA1T1.state, "PENDING_REVIEW");
+    assert.equal(subTlAT1.state, "PENDING_REVIEW");
+    assert.equal(subA1T2Late.state, "PENDING_REVIEW");
+
+    // 3. Build REAL SQL -> service_role (READ ONLY for reads) -> createReviewRepository -> review-api deps
+    let readOnlyReviewCalls = 0;
+    const realReviewRpc = async (name, args) => {
+      if (name === "work_report_list_pending_reviews") {
+        readOnlyReviewCalls++;
+        await db.exec("begin transaction read only; set local role service_role");
+        try {
+          const { rows } = await db.query(
+            "select public.work_report_list_pending_reviews($1::uuid, $2::uuid, $3::uuid, $4::text, $5::integer) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_template_id ?? null, args.p_cursor ?? null, args.p_page_size ?? 50],
+          );
+          await db.exec("commit");
+          return { data: rows[0]?.res ?? null, error: null };
+        } catch (err) {
+          await db.exec("rollback");
+          return { data: null, error: { code: err.code, message: err.message } };
+        }
+      }
+      if (name === "work_report_get_review_submission") {
+        readOnlyReviewCalls++;
+        await db.exec("begin transaction read only; set local role service_role");
+        try {
+          const { rows } = await db.query(
+            "select public.work_report_get_review_submission($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_obligation_id],
+          );
+          await db.exec("commit");
+          return { data: rows[0]?.res ?? null, error: null };
+        } catch (err) {
+          await db.exec("rollback");
+          return { data: null, error: { code: err.code, message: err.message } };
+        }
+      }
+      if (name === "work_report_decide_review") {
+        await db.exec("begin; set local role service_role");
+        try {
+          const { rows } = await db.query(
+            "select public.work_report_decide_review($1::uuid, $2::uuid, $3::uuid, $4::text, $5::text, $6::integer, $7::text) as res",
+            [
+              args.p_auth_subject,
+              args.p_app_user_id,
+              args.p_obligation_id,
+              args.p_decision,
+              args.p_reason ?? null,
+              args.p_expected_version,
+              args.p_idempotency_key,
+            ],
+          );
+          await db.exec("commit");
+          return { data: rows[0]?.res ?? null, error: null };
+        } catch (err) {
+          await db.exec("rollback");
+          return { data: null, error: { code: err.code, message: err.message } };
+        }
+      }
+      throw new Error(`Unexpected review RPC: ${name}`);
+    };
+
+    const realReviewRepo = createReviewRepository(realReviewRpc);
+    const depsFor = (user, repo = realReviewRepo) => ({
+      resolveSession: async () => ({ actor: (await resolveViaRealRpc(db, user.auth)).resolution }),
+      repository: repo,
+    });
+    const postDecision = (user, obligationId, body, headerKey = body.idempotency_key) =>
+      decideWorkReportReview(
+        new Request(`http://localhost/api/work-reports/reviews/${obligationId}/decision`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "http://localhost",
+            Host: "localhost",
+            ...(headerKey ? { "Idempotency-Key": headerKey } : {}),
+          },
+          body: JSON.stringify(body),
+        }),
+        obligationId,
+        "true",
+        depsFor(user),
+      );
+
+    // 4. Positive control: non-empty queue (>= 2 items) via REAL SQL -> REAL repository -> REAL API handler returns 200
+    const beforeObsCount = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
+    const ownerListRes = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews?page_size=50"),
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(ownerListRes.status, 200, "Non-empty pending queue MUST return 200 (not 503 F-WD-DRIFT-01)");
+    const ownerListBody = await ownerListRes.json();
+    assert.equal(ownerListBody.ok, true);
+    assert.equal(ownerListBody.items.length, 5, "OWNER sees all 5 PENDING_REVIEW items and excludes DRAFT");
+    assert.equal(ownerListBody.has_more, false);
+    assert.equal(ownerListBody.next_cursor, null);
+    assert.equal(
+      ownerListBody.items.some((i) => i.obligation_id === obA2T1Draft.obligation_id),
+      false,
+      "Unsubmitted DRAFT never appears in pending review queue",
+    );
+    assert.ok(!JSON.stringify(ownerListBody).includes("SECRET_DRAFT_ONLY"), "Private draft payload never leaks");
+    assert.ok(!JSON.stringify(ownerListBody).includes("T1_A1"), "Submitted payload_json never leaks in pending list");
+
+    // Verify full runtime DTO AND SQL-before-Web legacy aliases on every item
+    for (const item of ownerListBody.items) {
+      assert.equal("payload_json" in item, false);
+      assert.equal("draft_payload_json" in item, false);
+      assert.equal(typeof item.assignee_display_name, "string");
+      assert.equal(item.assignee_label, item.assignee_display_name, "Legacy assignee_label matches assignee_display_name");
+      assert.equal(item.team_id, item.snapshot_team_id, "Legacy team_id matches snapshot_team_id");
+      assert.equal(item.version, item.submission_version, "Legacy version matches submission_version");
+      assert.equal(item.state, "PENDING_REVIEW", "Legacy state alias preserved for ReviewInbox UI");
+      assert.equal(Number.isInteger(item.template_version) && item.template_version >= 1, true);
+      assert.match(item.period_start_date, /^\d{4}-\d{2}-\d{2}$/);
+      assert.match(item.period_end_date, /^\d{4}-\d{2}-\d{2}$/);
+      assert.equal(typeof item.is_late, "boolean");
+      assert.equal(typeof item.has_post_deadline_amendment, "boolean");
+    }
+
+    const lateItem = ownerListBody.items.find((i) => i.obligation_id === obA1T2Late.obligation_id);
+    assert.ok(lateItem);
+    assert.equal(lateItem.period_start_date, yesterday);
+    assert.equal(lateItem.period_end_date, yesterday);
+    assert.equal(lateItem.is_late, true, "Real DB is_late=true propagated faithfully");
+    assert.equal(lateItem.has_post_deadline_amendment, false);
+    assert.equal(lateItem.submission_version, subA1T2Late.version);
+
+    const noTeamItem = ownerListBody.items.find((i) => i.obligation_id === obNoTeamT1.obligation_id);
+    assert.ok(noTeamItem);
+    assert.equal(noTeamItem.snapshot_team_id, null);
+    assert.equal(noTeamItem.team_id, null);
+    assert.equal(noTeamItem.team_display_name, null);
+    assert.equal(noTeamItem.team_label, "Chưa phân nhóm");
+
+    // 5. Empty queue returns 200 with empty items
+    const emptyRes = await listPendingWorkReportReviews(
+      new Request(`http://localhost/api/work-reports/reviews?template_id=${t3Empty.template_id}`),
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(emptyRes.status, 200);
+    const emptyBody = await emptyRes.json();
+    assert.deepEqual(emptyBody.items, []);
+    assert.equal(emptyBody.has_more, false);
+    assert.equal(emptyBody.next_cursor, null);
+
+    // 6. 2+ page cursor pagination (page_size=2) and template_id filter
+    const p1Res = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews?page_size=2"),
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(p1Res.status, 200);
+    const p1 = await p1Res.json();
+    assert.equal(p1.items.length, 2);
+    assert.equal(p1.has_more, true);
+    assert.ok(typeof p1.next_cursor === "string" && p1.next_cursor.includes("|"));
+
+    const p2Res = await listPendingWorkReportReviews(
+      new Request(`http://localhost/api/work-reports/reviews?page_size=2&cursor=${encodeURIComponent(p1.next_cursor)}`),
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(p2Res.status, 200);
+    const p2 = await p2Res.json();
+    assert.equal(p2.items.length, 2);
+    assert.equal(p2.has_more, true);
+    assert.ok(typeof p2.next_cursor === "string");
+
+    const p3Res = await listPendingWorkReportReviews(
+      new Request(`http://localhost/api/work-reports/reviews?page_size=2&cursor=${encodeURIComponent(p2.next_cursor)}`),
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(p3Res.status, 200);
+    const p3 = await p3Res.json();
+    assert.equal(p3.items.length, 1);
+    assert.equal(p3.has_more, false);
+    assert.equal(p3.next_cursor, null);
+    assert.deepEqual(
+      [...p1.items, ...p2.items, ...p3.items].map((i) => i.obligation_id),
+      ownerListBody.items.map((i) => i.obligation_id),
+      "Keyset pagination traverses all 5 pending items with exact order and zero duplicates",
+    );
+
+    const t2FilterRes = await listPendingWorkReportReviews(
+      new Request(`http://localhost/api/work-reports/reviews?template_id=${t2.template_id}`),
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(t2FilterRes.status, 200);
+    const t2FilterBody = await t2FilterRes.json();
+    assert.deepEqual(t2FilterBody.items.map((i) => i.obligation_id), [obA1T2Late.obligation_id]);
+
+    // 7. Scope isolation: mirror-cleared TL_A, delegated STAFF_A2 (T1, TEAM_A), unauthorized STAFF_B1
+    const tlListRes = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews"),
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(tlListRes.status, 200);
+    const tlListBody = await tlListRes.json();
+    assert.deepEqual(
+      tlListBody.items.map((i) => i.obligation_id).sort(),
+      [obA1T1.obligation_id, obTlAT1.obligation_id, obA1T2Late.obligation_id].sort(),
+      "TL_A sees ONLY TEAM_A pending items (never TEAM_B or null-team)",
+    );
+    const tlCrossTeamDetail = await getWorkReportReviewSubmission(
+      new Request(`http://localhost/api/work-reports/reviews/${obB1T1.obligation_id}`),
+      obB1T1.obligation_id,
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(tlCrossTeamDetail.status, 403, "TL_A denied detail outside TEAM_A");
+
+    const { rows: [{ res: delRev }] } = await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6) as res",
+      [OWNER.auth, OWNER.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("r2_del_rev")],
+    );
+    const delListRes = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews"),
+      "true",
+      depsFor(STAFF_A2),
+    );
+    assert.equal(delListRes.status, 200);
+    const delListBody = await delListRes.json();
+    assert.deepEqual(
+      delListBody.items.map((i) => i.obligation_id).sort(),
+      [obA1T1.obligation_id, obTlAT1.obligation_id].sort(),
+      "Delegate STAFF_A2 sees ONLY delegated (T1, TEAM_A) items (never T2, TEAM_B, or null-team)",
+    );
+    assert.equal(
+      (await getWorkReportReviewSubmission(
+        new Request(`http://localhost/api/work-reports/reviews/${obA1T2Late.obligation_id}`),
+        obA1T2Late.obligation_id,
+        "true",
+        depsFor(STAFF_A2),
+      )).status,
+      403,
+      "Delegate denied wrong template T2",
+    );
+    assert.equal(
+      (await getWorkReportReviewSubmission(
+        new Request(`http://localhost/api/work-reports/reviews/${obB1T1.obligation_id}`),
+        obB1T1.obligation_id,
+        "true",
+        depsFor(STAFF_A2),
+      )).status,
+      403,
+      "Delegate denied wrong team TEAM_B",
+    );
+    assert.equal(
+      (await listPendingWorkReportReviews(
+        new Request("http://localhost/api/work-reports/reviews"),
+        "true",
+        depsFor(STAFF_B1),
+      )).status,
+      403,
+      "Unauthorized STAFF_B1 denied pending list",
+    );
+
+    // 8. Real detail -> REJECT -> resubmit (with private draft + post-deadline amendment) -> detail -> APPROVE -> replay -> stale OCC -> self-review
+    const lateDetailRes = await getWorkReportReviewSubmission(
+      new Request(`http://localhost/api/work-reports/reviews/${obA1T2Late.obligation_id}`),
+      obA1T2Late.obligation_id,
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(lateDetailRes.status, 200, "Real SQL detail passes createReviewRepository().getSubmission -> 200");
+    const lateDetail = (await lateDetailRes.json()).detail;
+    assert.equal(lateDetail.obligation.obligation_id, obA1T2Late.obligation_id);
+    assert.equal(lateDetail.submission.version, lateItem.submission_version);
+    assert.equal("draft_payload_json" in lateDetail.submission, false, "Detail never exposes draft_payload_json");
+    assert.equal(lateDetail.revisions.length, 1);
+    assert.equal(lateDetail.revisions[0].payload_json.calls_made, 11);
+    assert.equal(lateDetail.current_revision.revision_no, 1);
+    assert.equal(lateDetail.current_revision.payload_json.calls_made, 11);
+    assert.equal(typeof lateDetail.assignee_display_name, "string");
+    assert.equal(lateDetail.team_display_name, "R2 Team Alpha");
+    assert.deepEqual(lateDetail.review_events, []);
+
+    const rejectRes = await postDecision(TL_A, obA1T2Late.obligation_id, {
+      decision: "REJECT",
+      reason: "Cần bổ sung số liệu xác minh",
+      expected_version: lateItem.submission_version,
+      idempotency_key: nextKey("r2_rej_t2"),
+    });
+    assert.equal(rejectRes.status, 200);
+    const rejectBody = await rejectRes.json();
+    assert.equal(rejectBody.state, "REJECTED");
+    assert.equal(rejectBody.version, lateItem.submission_version + 1);
+
+    // Unsubmitted DRAFT obligation returns clean 404 WORK_REPORT_NOT_FOUND (never 503 or draft leak)
+    const draftDetailRes = await getWorkReportReviewSubmission(
+      new Request(`http://localhost/api/work-reports/reviews/${obA2T1Draft.obligation_id}`),
+      obA2T1Draft.obligation_id,
+      "true",
+      depsFor(OWNER),
+    );
+    assert.equal(draftDetailRes.status, 404, "Unsubmitted DRAFT detail returns clean 404 (not 503 or draft leak)");
+    assert.equal((await draftDetailRes.json()).code, "WORK_REPORT_NOT_FOUND");
+
+    // Assignee saves an unsubmitted draft and BEFORE resubmit, reviewer detail MUST NOT leak UNSUBMITTED_DRAFT_888
+    await db.query(
+      "select public.work_report_save_draft($1::uuid, $2::uuid, $3::uuid, $4::jsonb, $5, $6)",
+      [STAFF_A1.auth, STAFF_A1.app, obA1T2Late.obligation_id, submitPayload(888, "UNSUBMITTED_DRAFT_888"), rejectBody.version, nextKey("r2_resub_draft")],
+    );
+    const midDraftDetailRes = await getWorkReportReviewSubmission(
+      new Request(`http://localhost/api/work-reports/reviews/${obA1T2Late.obligation_id}`),
+      obA1T2Late.obligation_id,
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(midDraftDetailRes.status, 200);
+    const midDraftDetail = (await midDraftDetailRes.json()).detail;
+    assert.equal("draft_payload_json" in midDraftDetail.submission, false, "Submission omits draft_payload_json while draft is live in DB");
+    assert.equal(midDraftDetail.current_revision.payload_json.calls_made, 11);
+    assert.ok(!JSON.stringify(midDraftDetail).includes("UNSUBMITTED_DRAFT_888"), "Live unsubmitted draft_payload_json in DB never leaks to reviewer");
+
+    const { rows: [{ version: afterDraftVer }] } = await db.query(
+      "select version from public.work_report_submissions where obligation_id = $1::uuid",
+      [obA1T2Late.obligation_id],
+    );
+    const resubmittedLate = (await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, $5, $6) as res",
+      [STAFF_A1.auth, STAFF_A1.app, obA1T2Late.obligation_id, submitPayload(15, "T2_LATE_V2"), afterDraftVer, nextKey("r2_resub_t2")],
+    )).rows[0].res;
+    assert.equal(resubmittedLate.state, "PENDING_REVIEW");
+
+    const amendedListRes = await listPendingWorkReportReviews(
+      new Request(`http://localhost/api/work-reports/reviews?template_id=${t2.template_id}`),
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(amendedListRes.status, 200);
+    const amendedItem = (await amendedListRes.json()).items[0];
+    assert.equal(amendedItem.is_late, true);
+    assert.equal(amendedItem.has_post_deadline_amendment, true, "Real DB has_post_deadline_amendment=true propagated faithfully");
+    assert.equal(amendedItem.submission_version, resubmittedLate.version);
+
+    const amendedDetailRes = await getWorkReportReviewSubmission(
+      new Request(`http://localhost/api/work-reports/reviews/${obA1T2Late.obligation_id}`),
+      obA1T2Late.obligation_id,
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(amendedDetailRes.status, 200);
+    const amendedDetail = (await amendedDetailRes.json()).detail;
+    assert.equal(amendedDetail.revisions.length, 2);
+    assert.deepEqual(amendedDetail.revisions.map((r) => r.revision_no), [2, 1]);
+    assert.equal(amendedDetail.current_revision.payload_json.calls_made, 15);
+    assert.equal("draft_payload_json" in amendedDetail.submission, false);
+    assert.equal(amendedDetail.review_events.length, 1);
+    const ev0 = amendedDetail.review_events[0];
+    assert.equal(ev0.decision, "REJECTED");
+    assert.equal(ev0.reason, "Cần bổ sung số liệu xác minh");
+    assert.equal(ev0.reviewer_user_id, TL_A.app);
+    assert.equal(ev0.acting_scope_kind, "team");
+    assert.equal(ev0.acting_team_id, TEAM_A);
+    assert.equal(ev0.delegation_id, null);
+    assert.equal(ev0.revision_no, 1);
+    assert.equal(typeof ev0.reviewed_at, "string");
+    assert.equal(ev0.created_at, ev0.reviewed_at);
+    assert.equal(typeof ev0.reviewer_display_name, "string");
+    assert.ok(Array.isArray(amendedDetail.template.schema_json.sections), "Matches ReviewInbox UI isReviewDetail shape");
+
+    // Delegate STAFF_A2 opens detail & approves STAFF_A1/T1 using real submission_version, replays idempotently, and stale OCC returns 409
+    const delT1Item = delListBody.items.find((i) => i.obligation_id === obA1T1.obligation_id);
+    assert.ok(delT1Item);
+    const delDetailRes = await getWorkReportReviewSubmission(
+      new Request(`http://localhost/api/work-reports/reviews/${obA1T1.obligation_id}`),
+      obA1T1.obligation_id,
+      "true",
+      depsFor(STAFF_A2),
+    );
+    assert.equal(delDetailRes.status, 200);
+    const approveIdemKey = nextKey("r2_del_approve");
+    const approveRes = await postDecision(STAFF_A2, obA1T1.obligation_id, {
+      decision: "APPROVE",
+      reason: null,
+      expected_version: delT1Item.submission_version,
+      idempotency_key: approveIdemKey,
+    });
+    assert.equal(approveRes.status, 200);
+    const approveBody = await approveRes.json();
+    assert.equal(approveBody.state, "APPROVED");
+    assert.equal(approveBody.version, delT1Item.submission_version + 1);
+    assert.equal(approveBody.delegation_id, delRev.delegation_id);
+
+    // Idempotent replay with same key & payload returns identical 200 result
+    const replayRes = await postDecision(STAFF_A2, obA1T1.obligation_id, {
+      decision: "APPROVE",
+      reason: null,
+      expected_version: delT1Item.submission_version,
+      idempotency_key: approveIdemKey,
+    });
+    assert.equal(replayRes.status, 200);
+    assert.deepEqual((await replayRes.json()).data, approveBody.data);
+
+    // Stale OCC with old submission_version & new idempotency key returns 409 WORK_REPORT_VERSION_CONFLICT
+    const staleRes = await postDecision(STAFF_A2, obA1T1.obligation_id, {
+      decision: "APPROVE",
+      reason: null,
+      expected_version: delT1Item.submission_version,
+      idempotency_key: nextKey("r2_stale_occ"),
+    });
+    assert.equal(staleRes.status, 409);
+    assert.equal((await staleRes.json()).code, "WORK_REPORT_VERSION_CONFLICT");
+
+    // Self-review denied with 403 WORK_REPORT_SELF_REVIEW_FORBIDDEN
+    const tlSelfItem = tlListBody.items.find((i) => i.obligation_id === obTlAT1.obligation_id);
+    assert.ok(tlSelfItem);
+    const selfRevRes = await postDecision(TL_A, obTlAT1.obligation_id, {
+      decision: "APPROVE",
+      reason: null,
+      expected_version: tlSelfItem.submission_version,
+      idempotency_key: nextKey("r2_self_rev"),
+    });
+    assert.equal(selfRevRes.status, 403);
+    assert.equal((await selfRevRes.json()).code, "WORK_REPORT_SELF_REVIEW_FORBIDDEN");
+
+    // 9. Revoked delegate & disabled reviewer lose access immediately
+    await db.query(
+      "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, $4, $5)",
+      [OWNER.auth, OWNER.app, delRev.delegation_id, delRev.version, nextKey("r2_rev_del")],
+    );
+    assert.equal(
+      (await listPendingWorkReportReviews(
+        new Request("http://localhost/api/work-reports/reviews"),
+        "true",
+        depsFor(STAFF_A2),
+      )).status,
+      403,
+      "Revoked delegate immediately loses pending review list",
+    );
+    assert.equal(
+      (await getWorkReportReviewSubmission(
+        new Request(`http://localhost/api/work-reports/reviews/${obTlAT1.obligation_id}`),
+        obTlAT1.obligation_id,
+        "true",
+        depsFor(STAFF_A2),
+      )).status,
+      403,
+      "Revoked delegate immediately loses review detail",
+    );
+
+    const { rows: [{ version: tlVer }] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [TL_A.app],
+    );
+    await db.query(
+      "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Disable TL A R2', $5)",
+      [OWNER.auth, OWNER.app, TL_A.app, tlVer, nextKey("r2_dis_tla")],
+    );
+    const disTlList = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews"),
+      "true",
+      depsFor(TL_A),
+    );
+    assert.equal(disTlList.status, 403);
+    assert.equal((await disTlList.json()).code, "ACTOR_NOT_AVAILABLE");
+
+    // 10. Negative control: parser remains strict (missing required field or leaked payload -> 503 WORK_REPORT_UNAVAILABLE)
+    const strippedRepo = createReviewRepository(async (name, args) => {
+      const res = await realReviewRpc(name, args);
+      if (name === "work_report_list_pending_reviews" && res.data?.items?.length > 0) {
+        const broken = { ...res.data.items[0] };
+        delete broken.submission_version;
+        return { data: { ...res.data, items: [broken] }, error: null };
+      }
+      return res;
+    });
+    const strippedRes = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews"),
+      "true",
+      depsFor(OWNER, strippedRepo),
+    );
+    assert.equal(strippedRes.status, 503);
+    assert.equal((await strippedRes.json()).code, "WORK_REPORT_UNAVAILABLE");
+
+    const leakyDraftRepo = createReviewRepository(async (name, args) => {
+      const res = await realReviewRpc(name, args);
+      if (name === "work_report_list_pending_reviews" && res.data?.items?.length > 0) {
+        return { data: { ...res.data, items: [{ ...res.data.items[0], draft_payload_json: { secret: true } }] }, error: null };
+      }
+      return res;
+    });
+    const leakyDraftRes = await listPendingWorkReportReviews(
+      new Request("http://localhost/api/work-reports/reviews"),
+      "true",
+      depsFor(OWNER, leakyDraftRepo),
+    );
+    assert.equal(leakyDraftRes.status, 503);
+    assert.equal((await leakyDraftRes.json()).code, "WORK_REPORT_UNAVAILABLE");
+
+    const afterObsCount = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
+    assert.equal(afterObsCount, beforeObsCount, "Review reads never materialize or write obligations");
+    assert.ok(readOnlyReviewCalls >= 10, "All review read probes executed inside BEGIN TRANSACTION READ ONLY");
+  } finally {
     await db.close();
   }
 });

@@ -20,6 +20,11 @@
 --      open-ended delegation semantics, no-self-review, no delegation chaining, READ ONLY
 --      STABLE navbar probe chain (#18), idempotency before OCC, +0 new service_role RPCs,
 --      and strict ascending lock order (direct_entry_app_users ASC -> WR entities).
+--   6. Aligns public.work_report_list_pending_reviews and
+--      public.work_report_get_review_submission JSON output with the runtime TypeScript
+--      review-repository DTO (F-WD-DRIFT-01) using real obligation/submission/revision
+--      columns while preserving legacy aliases for SQL-before-Web compatibility and
+--      strictly excluding payload_json/draft_payload_json from pending-list items.
 -- =============================================================================
 
 begin;
@@ -2671,6 +2676,311 @@ $function$;
 revoke all on function public.work_report_list_delegations(uuid, uuid)
   from public, anon, authenticated, service_role;
 grant execute on function public.work_report_list_delegations(uuid, uuid)
+  to service_role;
+
+create or replace function public.work_report_list_pending_reviews(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_template_id uuid default null,
+  p_cursor text default null,
+  p_page_size integer default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_as_of timestamptz := statement_timestamp();
+  v_limit integer := coalesce(p_page_size, 50);
+  v_cursor_parts text[];
+  v_has_cursor boolean := false;
+  v_cursor_submitted_at timestamptz;
+  v_cursor_obligation_id uuid;
+  v_items jsonb;
+  v_next_cursor text;
+  v_has_more boolean := false;
+begin
+  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, null);
+  if not public.work_report__internal_has_any_capability_authority(p_app_user_id, 'report_review', v_as_of) then
+    raise exception 'WORK_REPORT_CAPABILITY_DENIED' using errcode = '42501';
+  end if;
+
+  if v_limit not between 1 and 100 then
+    raise exception 'WORK_REPORT_PAGINATION_INVALID' using errcode = '22023';
+  end if;
+
+  if p_template_id is not null and not exists (
+    select 1 from public.work_report_templates t where t.template_id = p_template_id
+  ) then
+    raise exception 'WORK_REPORT_TEMPLATE_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  if p_cursor is not null and btrim(p_cursor) <> '' then
+    v_cursor_parts := string_to_array(p_cursor, '|');
+    if coalesce(array_length(v_cursor_parts, 1), 0) <> 2 then
+      raise exception 'WORK_REPORT_CURSOR_INVALID' using errcode = '22023';
+    end if;
+    begin
+      if v_cursor_parts[1] !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$' then
+        raise exception 'WORK_REPORT_CURSOR_INVALID' using errcode = '22023';
+      end if;
+      v_cursor_submitted_at := v_cursor_parts[1]::timestamptz;
+      v_cursor_obligation_id := v_cursor_parts[2]::uuid;
+      v_has_cursor := true;
+    exception when others then
+      raise exception 'WORK_REPORT_CURSOR_INVALID' using errcode = '22023';
+    end;
+  end if;
+
+  with candidate_rows as (
+    select o.obligation_id,
+           s.submission_id,
+           o.template_id,
+           t.template_code,
+           t.display_name as template_name,
+           v.version_no as template_version,
+           o.assignee_app_user_id,
+           coalesce(public.work_report__internal_user_display_name(u.app_user_id), u.display_name) as assignee_display_name,
+           o.snapshot_team_id,
+           coalesce(o.snapshot_team_display_name, tm.display_name, o.snapshot_team_code, tm.code) as team_display_name,
+           o.period_key,
+           o.period_start_date,
+           o.period_end_date,
+           o.due_at,
+           coalesce(s.latest_submitted_at, s.updated_at, s.created_at) as submitted_at,
+           s.is_late,
+           s.has_post_deadline_amendment,
+           s.state,
+           s.version as submission_version
+      from public.work_report_obligations o
+      join public.work_report_submissions s on s.obligation_id = o.obligation_id
+      join public.work_report_templates t on t.template_id = o.template_id
+      join public.work_report_template_versions v on v.version_id = o.template_version_id
+      join public.direct_entry_app_users u on u.app_user_id = o.assignee_app_user_id
+      left join public.teams tm on tm.team_id = o.snapshot_team_id
+     where o.obligation_status = 'ACTIVE'
+       and s.state = 'PENDING_REVIEW'
+       and (p_template_id is null or o.template_id = p_template_id)
+       and exists (
+         select 1
+           from public.work_report__internal_resolve_capability_authority(
+             p_app_user_id, 'report_review', o.template_id, o.snapshot_team_id, v_as_of
+           ) auth
+       )
+  ),
+  window_rows as (
+    select c.*
+      from candidate_rows c
+     where not v_has_cursor
+        or c.submitted_at < v_cursor_submitted_at
+        or (c.submitted_at = v_cursor_submitted_at and c.obligation_id < v_cursor_obligation_id)
+     order by c.submitted_at desc, c.obligation_id desc
+     limit (v_limit + 1)
+  ),
+  page_rows as (
+    select *
+      from window_rows
+     order by submitted_at desc, obligation_id desc
+     limit v_limit
+  )
+  select coalesce((
+           select jsonb_agg(jsonb_build_object(
+             'obligation_id', pr.obligation_id,
+             'submission_id', pr.submission_id,
+             'template_id', pr.template_id,
+             'template_code', pr.template_code,
+             'template_name', pr.template_name,
+             'template_version', pr.template_version,
+             'period_key', pr.period_key,
+             'period_start_date', pr.period_start_date,
+             'period_end_date', pr.period_end_date,
+             'due_at', pr.due_at,
+             'assignee_app_user_id', pr.assignee_app_user_id,
+             'assignee_display_name', pr.assignee_display_name,
+             'assignee_label', pr.assignee_display_name,
+             'snapshot_team_id', pr.snapshot_team_id,
+             'team_id', pr.snapshot_team_id,
+             'team_display_name', pr.team_display_name,
+             'team_label', coalesce(pr.team_display_name, 'Chưa phân nhóm'),
+             'submitted_at', pr.submitted_at,
+             'is_late', pr.is_late,
+             'has_post_deadline_amendment', pr.has_post_deadline_amendment,
+             'state', pr.state,
+             'submission_version', pr.submission_version,
+             'version', pr.submission_version
+           ) order by pr.submitted_at desc, pr.obligation_id desc)
+           from page_rows pr
+         ), '[]'::jsonb),
+         (select count(*) > v_limit from window_rows),
+         case
+           when (select count(*) > v_limit from window_rows) then (
+             select to_char(pr.submitted_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || '|' || pr.obligation_id::text
+               from page_rows pr
+              order by pr.submitted_at asc, pr.obligation_id asc
+              limit 1
+           )
+           else null
+         end
+    into v_items, v_has_more, v_next_cursor;
+
+  return jsonb_build_object(
+    'items', v_items,
+    'next_cursor', v_next_cursor,
+    'has_more', v_has_more
+  );
+end;
+$function$;
+
+revoke all on function public.work_report_list_pending_reviews(uuid, uuid, uuid, text, integer)
+  from public, anon, authenticated, service_role;
+grant execute on function public.work_report_list_pending_reviews(uuid, uuid, uuid, text, integer)
+  to service_role;
+
+create or replace function public.work_report_get_review_submission(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_obligation_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_as_of timestamptz := statement_timestamp();
+  v_obligation public.work_report_obligations%rowtype;
+  v_scope text;
+  v_result jsonb;
+begin
+  perform public.work_report_assert_actor(p_auth_subject, p_app_user_id, null);
+  select o.* into v_obligation
+    from public.work_report_obligations o
+   where o.obligation_id = p_obligation_id
+      or exists (
+        select 1 from public.work_report_submissions s
+         where s.submission_id = p_obligation_id
+           and s.obligation_id = o.obligation_id
+      );
+  if not found then
+    raise exception 'WORK_REPORT_OBLIGATION_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  select a.acting_scope_kind into v_scope
+    from public.work_report__internal_resolve_capability_authority(
+      p_app_user_id, 'report_review', v_obligation.template_id, v_obligation.snapshot_team_id, v_as_of
+    ) a;
+  if v_scope is null then
+    raise exception 'WORK_REPORT_ACCESS_DENIED' using errcode = '42501';
+  end if;
+
+  if not exists (
+    select 1
+      from public.work_report_submissions s
+     where s.obligation_id = v_obligation.obligation_id
+       and s.current_revision_id is not null
+  ) then
+    raise exception 'WORK_REPORT_SUBMISSION_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  select jsonb_build_object(
+    'obligation', jsonb_build_object(
+      'obligation_id', o.obligation_id,
+      'assignment_id', o.assignment_id,
+      'template_id', o.template_id,
+      'template_version_id', o.template_version_id,
+      'assignee_app_user_id', o.assignee_app_user_id,
+      'assignee_display_name', coalesce(public.work_report__internal_user_display_name(u.app_user_id), u.display_name),
+      'snapshot_team_id', o.snapshot_team_id,
+      'snapshot_team_code', o.snapshot_team_code,
+      'snapshot_team_display_name', o.snapshot_team_display_name,
+      'team_display_name', coalesce(o.snapshot_team_display_name, tm.display_name, o.snapshot_team_code, tm.code),
+      'period_type', o.period_type,
+      'period_key', o.period_key,
+      'period_start_date', o.period_start_date,
+      'period_end_date', o.period_end_date,
+      'due_at', o.due_at,
+      'is_mandatory', o.is_mandatory,
+      'obligation_status', o.obligation_status,
+      'reopened_until', o.reopened_until,
+      'version', o.version
+    ),
+    'template', jsonb_build_object(
+      'template_id', t.template_id,
+      'template_code', t.template_code,
+      'display_name', t.display_name,
+      'version_id', v.version_id,
+      'version_no', v.version_no,
+      'requires_review', v.requires_review,
+      'schema_json', v.schema_json
+    ),
+    'submission', case when s.submission_id is null then null else jsonb_build_object(
+      'submission_id', s.submission_id,
+      'state', s.state,
+      'first_submitted_at', s.first_submitted_at,
+      'latest_submitted_at', s.latest_submitted_at,
+      'is_late', s.is_late,
+      'has_post_deadline_amendment', s.has_post_deadline_amendment,
+      'current_revision_id', s.current_revision_id,
+      'version', s.version
+    ) end,
+    'current_revision', case when r.revision_id is null then null else jsonb_build_object(
+      'revision_id', r.revision_id,
+      'revision_no', r.revision_no,
+      'payload_json', r.payload_json,
+      'created_at', r.created_at
+    ) end,
+    'revisions', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'revision_id', sr.revision_id,
+        'revision_no', sr.revision_no,
+        'payload_json', sr.payload_json,
+        'created_at', sr.created_at
+      ) order by sr.revision_no desc)
+        from public.work_report_submission_revisions sr
+       where sr.submission_id = s.submission_id
+    ), '[]'::jsonb),
+    'assignee_display_name', coalesce(public.work_report__internal_user_display_name(u.app_user_id), u.display_name),
+    'team_display_name', coalesce(o.snapshot_team_display_name, tm.display_name, o.snapshot_team_code, tm.code),
+    'review_events', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'review_event_id', re.review_event_id,
+        'revision_id', re.revision_id,
+        'reviewer_user_id', re.reviewer_user_id,
+        'decision', re.decision,
+        'reason', re.reason_text,
+        'acting_scope_kind', re.acting_scope_kind,
+        'acting_team_id', re.acting_team_id,
+        'delegation_id', re.delegation_id,
+        'created_at', re.created_at,
+        'reviewed_at', re.created_at,
+        'reviewer_display_name', coalesce(public.work_report__internal_user_display_name(ru.app_user_id), ru.display_name),
+        'revision_no', rr.revision_no
+      ) order by re.created_at desc, re.review_event_id desc)
+        from public.work_report_review_events re
+        join public.direct_entry_app_users ru on ru.app_user_id = re.reviewer_user_id
+        left join public.work_report_submission_revisions rr on rr.revision_id = re.revision_id
+       where re.submission_id = s.submission_id
+    ), '[]'::jsonb)
+  ) into v_result
+    from public.work_report_obligations o
+    join public.work_report_templates t on t.template_id = o.template_id
+    join public.work_report_template_versions v on v.version_id = o.template_version_id
+    join public.direct_entry_app_users u on u.app_user_id = o.assignee_app_user_id
+    left join public.teams tm on tm.team_id = o.snapshot_team_id
+    left join public.work_report_submissions s on s.obligation_id = o.obligation_id
+    left join public.work_report_submission_revisions r on r.revision_id = s.current_revision_id
+   where o.obligation_id = v_obligation.obligation_id;
+
+  return v_result;
+end;
+$function$;
+
+revoke all on function public.work_report_get_review_submission(uuid, uuid, uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function public.work_report_get_review_submission(uuid, uuid, uuid)
   to service_role;
 
 -- -----------------------------------------------------------------------------
@@ -5491,6 +5801,8 @@ declare
     'public.work_report_list_assignment_options(uuid,uuid,uuid)',
     'public.work_report_list_assignments(uuid,uuid,uuid)',
     'public.work_report_list_delegations(uuid,uuid)',
+    'public.work_report_list_pending_reviews(uuid,uuid,uuid,text,integer)',
+    'public.work_report_get_review_submission(uuid,uuid,uuid)',
     'public.work_report_create_group(uuid,uuid,text,text,uuid[],text)',
     'public.work_report_update_group(uuid,uuid,uuid,integer,text,text,uuid[],text)',
     'public.work_report_set_group_active(uuid,uuid,uuid,integer,boolean,text)',
@@ -5581,7 +5893,9 @@ declare
     'public.work_report_list_groups(uuid,uuid)',
     'public.work_report_list_assignment_options(uuid,uuid,uuid)',
     'public.work_report_list_assignments(uuid,uuid,uuid)',
-    'public.work_report_list_delegations(uuid,uuid)'
+    'public.work_report_list_delegations(uuid,uuid)',
+    'public.work_report_list_pending_reviews(uuid,uuid,uuid,text,integer)',
+    'public.work_report_get_review_submission(uuid,uuid,uuid)'
   ];
   v_volatile_service_rpcs text[] := array[
     'public.work_report_create_group(uuid,uuid,text,text,uuid[],text)',
@@ -5621,6 +5935,8 @@ declare
     'work_report_list_assignment_options',
     'work_report_list_assignments',
     'work_report_list_delegations',
+    'work_report_list_pending_reviews',
+    'work_report_get_review_submission',
     'work_report_create_group',
     'work_report_update_group',
     'work_report_set_group_active',
@@ -5669,7 +5985,8 @@ declare
     'public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)',
     'public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)',
     'public.work_report__internal_actor_can_assign_member(uuid,uuid,uuid)',
-    'public.work_report__internal_resolve_analytics_scope(uuid,uuid,boolean,uuid,uuid,uuid)'
+    'public.work_report__internal_resolve_analytics_scope(uuid,uuid,boolean,uuid,uuid,uuid)',
+    'public.work_report__internal_user_display_name(uuid)'
   ];
 begin
   foreach v_name in array v_fn_names loop
