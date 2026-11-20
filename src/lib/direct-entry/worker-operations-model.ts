@@ -236,12 +236,31 @@ export function canAccessUploaderSubmissionsTab(
   return canListOwn || hasProjectAssignment === true;
 }
 
-/** Reviewer queue chi hien khi change_review + effective all scope (khop W05 #55). */
+function hasPairedAllGrant(
+  effectiveGrants: readonly { capability: string; scope_kind: string; scope_id?: string | null }[] | undefined,
+  capabilities: readonly string[],
+): boolean {
+  if (!Array.isArray(effectiveGrants)) return false;
+  return effectiveGrants.some(
+    (grant) =>
+      grant !== null &&
+      typeof grant === "object" &&
+      capabilities.includes(grant.capability) &&
+      grant.scope_kind === "ALL" &&
+      (grant.scope_id === null || grant.scope_id === undefined),
+  );
+}
+
+/** Reviewer queue chi hien khi change_review + effective all scope (khop W05 #55; WP8C-1 paired @ ALL khi co effective_grants). */
 export function canReviewChangeRequests(input: {
   capabilities: readonly string[];
   scopes: readonly { kind: string }[];
+  effective_grants?: readonly { capability: string; scope_kind: string; scope_id?: string | null }[];
 } | null): boolean {
   if (input === null) return false;
+  if (input.effective_grants !== undefined) {
+    return hasPairedAllGrant(input.effective_grants, ["change_review"]);
+  }
   return input.scopes.some((scope) => scope.kind === "all") &&
     input.capabilities.includes("change_review");
 }
@@ -249,7 +268,11 @@ export function canReviewChangeRequests(input: {
 export function canViewGlobalChangeRequestHistory(
   capabilities: readonly string[] | null,
   scopes: readonly { kind: string }[] = [],
+  effectiveGrants?: readonly { capability: string; scope_kind: string; scope_id?: string | null }[],
 ): boolean {
+  if (effectiveGrants !== undefined) {
+    return hasPairedAllGrant(effectiveGrants, ["change_review", "entry_admin"]);
+  }
   if (capabilities === null || !scopes.some((scope) => scope.kind === "all")) return false;
   return capabilities.includes("change_review") || capabilities.includes("entry_admin");
 }
@@ -446,6 +469,7 @@ export type WorkerOperationsActor = {
   capabilities: readonly string[];
   scopes: readonly { kind: string; reference?: string; valid_from?: string; valid_to?: string | null }[];
   allowed_worker_tabs?: readonly WorkerOperationsTab[];
+  effective_grants?: readonly { capability: string; scope_kind: string; scope_id?: string | null }[];
 };
 
 /**

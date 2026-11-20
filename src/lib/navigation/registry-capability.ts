@@ -56,11 +56,24 @@ const DIRECT_ENTRY_ENTRY_CAPABILITIES: readonly Capability[] = [
   "entry_admin",
 ];
 
-/** Direct Entry: actor phải có ít nhất một trong entry_own | entry_team | entry_admin. */
-export const directEntryNavPredicate: NavCapabilityPredicate = (actor) =>
-  actor.capabilities.some((capability) =>
-    DIRECT_ENTRY_ENTRY_CAPABILITIES.includes(capability)
+/** Direct Entry: actor phải có ít nhất một trong entry_own (@ OWN|ALL) | entry_team (@ CONTEXT_TEAM|ALL) | entry_admin (@ ALL). */
+export const directEntryNavPredicate: NavCapabilityPredicate = (actor) => {
+  if (actor.effective_grants !== undefined) {
+    return (
+      hasNavOwnCapability(actor, "entry_own") ||
+      hasNavAllCapability(actor, "entry_own") ||
+      hasNavTeamCapability(actor, "entry_team") ||
+      hasNavAllCapability(actor, "entry_team") ||
+      hasNavAllCapability(actor, "entry_admin")
+    );
+  }
+  return (
+    Array.isArray(actor.capabilities) &&
+    actor.capabilities.some((capability) =>
+      DIRECT_ENTRY_ENTRY_CAPABILITIES.includes(capability),
+    )
   );
+};
 
 /** Admin authority rule (P3-C01 §2.1a): AND của 3 token ở scope `all`. */
 export const ADMIN_AUTHORITY_CAPABILITIES: readonly Capability[] = [
@@ -68,6 +81,21 @@ export const ADMIN_AUTHORITY_CAPABILITIES: readonly Capability[] = [
   "recruiter_master_manage",
   "team_master_manage",
 ];
+
+function hasNavOwnCapability(actor: NavActorProjection, capability: Capability): boolean {
+  if (actor.effective_grants !== undefined) {
+    if (!Array.isArray(actor.effective_grants)) return false;
+    return actor.effective_grants.some(
+      (grant) =>
+        grant !== null &&
+        typeof grant === "object" &&
+        grant.capability === capability &&
+        grant.scope_kind === "OWN" &&
+        (grant.scope_id === null || grant.scope_id === undefined),
+    );
+  }
+  return Array.isArray(actor.capabilities) && actor.capabilities.includes(capability);
+}
 
 function hasStrictNavPairedAll(actor: NavActorProjection, capability: Capability): boolean {
   if (!Array.isArray(actor.effective_grants)) return false;
@@ -222,14 +250,14 @@ export const adminPanelNavPredicate: NavCapabilityPredicate = (actor) =>
   adminAreaNavPredicate(actor) || attendanceReportNavPredicate(actor) || workerEditHistoryNavPredicate(actor);
 
 /**
- * P2.5-W06A-R1 / WP8B-1: Project Operations authority chinh xac theo DB W02
+ * P2.5-W06A-R1 / WP8B-1 / WP8C-1: Project Operations authority chinh xac theo DB W02
  * (direct_entry_assert_project_admin) = entry_admin paired @ ALL (khi co effective_grants)
- * hoac Team Leader contextual (`team_manager_assign`).
+ * hoac Team Leader contextual (`team_manager_assign` paired @ CONTEXT_TEAM).
  * KHONG yeu cau recruiter_master_manage/team_master_manage (RPC W02 khong yeu cau).
  * Dung CHUNG cho nav visibility va page decision.
  */
 export const projectAdminNavPredicate: NavCapabilityPredicate = (actor) =>
-  actor.capabilities.includes("team_manager_assign") ||
+  hasNavTeamCapability(actor, "team_manager_assign") ||
   hasNavAllCapability(actor, "entry_admin");
 
 /**
@@ -246,29 +274,30 @@ export const WORKER_OPERATIONS_ALL_CAPABILITIES: readonly Capability[] = [
   "change_review",
 ];
 
-/** scope=all tab + review queue: (entry_admin | change_review) + effective all scope. */
+/** scope=all tab + review queue: (entry_admin | change_review) + effective all scope (WP8C-1 paired @ ALL). */
 export const workerOperationsAllScopePredicate: NavCapabilityPredicate = (actor) =>
-  actor.scopes.some((scope) => scope.kind === "all") &&
-  actor.capabilities.some((capability) =>
-    WORKER_OPERATIONS_ALL_CAPABILITIES.includes(capability));
+  hasNavAllCapability(actor, "entry_admin") ||
+  hasNavAllCapability(actor, "change_review");
 
-/** Reviewer queue: change_review + effective all scope (khop W05 #55). */
+/** Reviewer queue: change_review + effective all scope (khop W05 #55; WP8C-1 paired @ ALL). */
 export const workerOperationsReviewPredicate: NavCapabilityPredicate = (actor) =>
-  actor.scopes.some((scope) => scope.kind === "all") &&
-  actor.capabilities.includes("change_review");
+  hasNavAllCapability(actor, "change_review");
 
-/** Team tab visibility only; the directory RPC still checks current assignment per request. */
+/** Team tab visibility only; the directory RPC still checks current assignment per request (WP8C-1 paired @ CONTEXT_TEAM). */
 export const workerOperationsTeamScopePredicate: NavCapabilityPredicate = (actor) =>
-  actor.capabilities.includes("team_manager_assign") &&
-  actor.scopes.some((scope) => scope.kind === "team");
+  hasNavTeamCapability(actor, "team_manager_assign");
 
 export const workerOperationsNavPredicate: NavCapabilityPredicate = (actor) => {
   if (resolveAllowedWorkerOperationsTabs(actor).length > 0) return true;
   if (workerOperationsAllScopePredicate(actor)) return true;
-  if (actor.capabilities.includes("change_request_create")) return true;
+  if (
+    hasNavOwnCapability(actor, "change_request_create") ||
+    hasNavAllCapability(actor, "change_request_create")
+  ) {
+    return true;
+  }
   if (workerOperationsTeamScopePredicate(actor)) return true;
-  return actor.capabilities.some((capability) =>
-    DIRECT_ENTRY_ENTRY_CAPABILITIES.includes(capability));
+  return directEntryNavPredicate(actor);
 };
 
 /**
@@ -286,32 +315,49 @@ export function resolveAllowedWorkerOperationsTabs(
 /**
  * Mirrors `direct_entry_input_catalog_unscoped_v42` capability requirement (`entry_create` OR `entry_own`)
  * so `/direct-entry/workers` does not fire an avoidable 403 to `GET /api/direct-entry/catalog` on mount.
+ * Evaluates strictly from paired `effective_grants` when present (WP8C-1).
  */
 export function canReadWorkerDirectoryCatalog(
-  actor: { capabilities: readonly string[] } | null | undefined,
+  actor: {
+    capabilities: readonly string[];
+    effective_grants?: readonly PairedEffectiveGrant[];
+  } | null | undefined,
 ): boolean {
   if (!actor) return false;
+  if (actor.effective_grants !== undefined) {
+    if (!Array.isArray(actor.effective_grants)) return false;
+    return actor.effective_grants.some(
+      (grant) =>
+        grant !== null &&
+        typeof grant === "object" &&
+        ((grant.capability === "entry_create" || grant.capability === "entry_own") &&
+          (grant.scope_kind === "OWN" || grant.scope_kind === "ALL") &&
+          (grant.scope_id === null || grant.scope_id === undefined)),
+    );
+  }
   return (
-    actor.capabilities.includes("entry_create") ||
-    actor.capabilities.includes("entry_own")
+    Array.isArray(actor.capabilities) &&
+    (actor.capabilities.includes("entry_create") ||
+      actor.capabilities.includes("entry_own"))
   );
 }
 
 /**
- * R2.2: Reviewer mode predicate cho module /direct-entry/change-requests.
- * Actor co tham quyen duyet khi co (entry_admin | change_review) @ all hoac team_manager_assign @ team.
+ * R2.2 / WP8C-1: Reviewer mode predicate cho module /direct-entry/change-requests.
+ * Actor co tham quyen duyet khi co (entry_admin | change_review) @ all hoac team_manager_assign / change_review @ team.
  */
 export const changeRequestsReviewerPredicate: NavCapabilityPredicate = (actor) =>
   workerOperationsAllScopePredicate(actor) ||
   workerOperationsTeamScopePredicate(actor) ||
-  (actor.capabilities.includes("change_review") &&
-    actor.scopes.some((scope) => scope.kind === "team"));
+  hasNavTeamCapability(actor, "change_review");
 
 /**
- * R2.2: Proposer / history mode predicate cho module /direct-entry/change-requests.
+ * R2.2 / WP8C-1: Proposer / history mode predicate cho module /direct-entry/change-requests.
  */
 export const changeRequestsProposerPredicate: NavCapabilityPredicate = (actor) =>
-  actor.capabilities.includes("change_request_create") || directEntryNavPredicate(actor);
+  hasNavOwnCapability(actor, "change_request_create") ||
+  hasNavAllCapability(actor, "change_request_create") ||
+  directEntryNavPredicate(actor);
 
 /**
  * R2.2: Navigation & default page predicate cho /direct-entry/change-requests.

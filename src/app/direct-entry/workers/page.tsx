@@ -60,7 +60,7 @@ export default async function WorkerOperationsPage() {
         allowed_worker_tabs: [...allowedTabs],
       };
       const canExport = canExportWorkers(actorProjection);
-      const canExportAll = canExportAllWorkers(actorProjection);
+      const canExportAll = canExportAllWorkers(projection);
       return (
         <WorkerOperations
           allowedTabs={allowedTabs}

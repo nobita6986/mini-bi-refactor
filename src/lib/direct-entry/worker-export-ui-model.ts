@@ -79,6 +79,17 @@ export function canExportWorkers(actor: WorkerOperationsActor | null): boolean {
  */
 export function canExportAllWorkers(actor: WorkerOperationsActor | null): boolean {
   if (actor === null) return false;
+  if (actor.effective_grants !== undefined) {
+    if (!Array.isArray(actor.effective_grants)) return false;
+    return actor.effective_grants.some(
+      (grant) =>
+        grant !== null &&
+        typeof grant === "object" &&
+        (grant.capability === "entry_admin" || grant.capability === "change_review") &&
+        grant.scope_kind === "ALL" &&
+        (grant.scope_id === null || grant.scope_id === undefined),
+    );
+  }
   return actor.scopes.some((scope) => scope.kind === "all") &&
     actor.capabilities.some((capability) =>
       capability === "entry_admin" || capability === "change_review");

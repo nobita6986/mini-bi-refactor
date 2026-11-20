@@ -84,7 +84,12 @@ test("T1A: khong log reason/body/PII ra console", () => {
 
 test("T1A: page tinh canExport + canExportAll tu capability projection va truyen xuong", () => {
   assert.match(page, /canExportWorkers\(actorProjection\)/);
-  assert.match(page, /canExportAllWorkers\(actorProjection\)/);
+  assert.match(page, /canExportAllWorkers\(projection\)/);
+  assert.doesNotMatch(
+    page,
+    /const actorProjection =[\s\S]*?effective_grants/,
+    "actorProjection gui xuong client khong duoc lo effective_grants",
+  );
   assert.match(page, /canExport=\{canExport\}/);
   assert.match(page, /canExportAll=\{canExportAll\}/);
   assert.match(page, /import \{ canExportAllWorkers, canExportWorkers \} from "@\/lib\/direct-entry\/worker-export-ui-model"/);
