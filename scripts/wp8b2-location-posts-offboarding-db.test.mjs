@@ -834,7 +834,7 @@ async function resolveViaRealRpc(db, authSubject) {
 // =============================================================================
 // TEST 1: Migration #227 Hygiene, Atomic Rollback, ACL & Function Metadata
 // =============================================================================
-test("WP8B-2 [1/5]: Migration #227 hygiene, atomic rollback, exact 336 service_role RPCs, strict STABLE internal ACL & 19 recruitment_post* routines", async () => {
+test("WP8B-2 [1/6]: Migration #227 hygiene, atomic rollback, exact 336 service_role RPCs, strict STABLE internal ACL & 19 recruitment_post* routines", async () => {
   const migrations = await loadMigrations();
   const idx8b1 = migrations.findIndex((m) => m.name === WP8B1_MIGRATION_NAME);
   const idx8b2 = migrations.findIndex((m) => m.name === WP8B2_MIGRATION_NAME);
@@ -977,7 +977,7 @@ test("WP8B-2 [1/5]: Migration #227 hygiene, atomic rollback, exact 336 service_r
 // =============================================================================
 // TEST 2: Explicit BEFORE (#226) vs AFTER (#227) Behavioral Diff Proof
 // =============================================================================
-test("WP8B-2 [2/5]: BEFORE (#226) vs AFTER (#227) diff on canonical dual-role HR_OPERATOR+TL escalation & simulated drift fixtures", async () => {
+test("WP8B-2 [2/6]: BEFORE (#226) vs AFTER (#227) diff on canonical dual-role HR_OPERATOR+TL escalation & simulated drift fixtures", async () => {
   const migrations = await loadMigrations();
   const dbBefore = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
   const dbAfter = await createDbUpTo(migrations, WP8B2_MIGRATION_NAME);
@@ -1257,7 +1257,7 @@ test("WP8B-2 [2/5]: BEFORE (#226) vs AFTER (#227) diff on canonical dual-role HR
 // =============================================================================
 // TEST 3: Full Post-Cutover 3-Domain Authority Matrix, C4, Feed, Facets & Offboarding
 // =============================================================================
-test("WP8B-2 [3/5]: Post-cutover 3-domain matrix, Location Catalog audit caps, C4 PM-only create, /feeds/jobs.v1.json, include_facets pagination & Offboarding team isolation", async () => {
+test("WP8B-2 [3/6]: Post-cutover 3-domain matrix, Location Catalog audit caps, C4 PM-only create, /feeds/jobs.v1.json, include_facets pagination & Offboarding team isolation", async () => {
   const migrations = await loadMigrations();
   const db = await createDbUpTo(migrations, WP8B2_MIGRATION_NAME);
 
@@ -1658,7 +1658,7 @@ test("WP8B-2 [3/5]: Post-cutover 3-domain matrix, Location Catalog audit caps, C
 // TEST 4: End-to-End SQL -> direct_entry_resolve_actor_context -> resolveActor -> TS Guards
 //         (Pre-cutover R1, Pre-cutover Normal, Post-cutover Canonical, Dual-Role & Drift)
 // =============================================================================
-test("WP8B-2 [4/5]: End-to-end SQL -> direct_entry_resolve_actor_context -> resolveActor -> real TS nav/page/API guards", async () => {
+test("WP8B-2 [4/6]: End-to-end SQL -> direct_entry_resolve_actor_context -> resolveActor -> real TS nav/page/API guards", async () => {
   const migrations = await loadMigrations();
 
   // Helper calling the real Location Catalog HTTP API with a real resolved actor
@@ -1890,7 +1890,7 @@ test("WP8B-2 [4/5]: End-to-end SQL -> direct_entry_resolve_actor_context -> reso
 // =============================================================================
 // TEST 5: Revoke / Disable Lifecycle Transitions & Live TS Error Classifiers
 // =============================================================================
-test("WP8B-2 [5/5]: Revoke ADMIN / Revoke TL / Disable transitions immediately fail closed across SQL + TS & preserve error classifiers", async () => {
+test("WP8B-2 [5/6]: Revoke ADMIN / Revoke TL / Disable transitions immediately fail closed across SQL + TS & preserve error classifiers", async () => {
   const migrations = await loadMigrations();
   const db = await createDbUpTo(migrations, WP8B2_MIGRATION_NAME);
 
@@ -1983,5 +1983,351 @@ test("WP8B-2 [5/5]: Revoke ADMIN / Revoke TL / Disable transitions immediately f
     assert.equal(decideWorkforceOffboardingPageAccess({ actor: revokedTlRes }), "ACCESS_DENIED");
   } finally {
     await db.close();
+  }
+});
+
+// =============================================================================
+// TEST 6: T0 R1/P2 (F-05) Regression — Managed TL Without Legacy Mirror Rows
+//         Evaluates strictly from canonical WP5 contextual/effective access + HRP/team
+//         structural invariants; blocks ambiguity, non-TL direct grants, revoke & disable
+//         without modifying WP8C shared direct_entry_assert_team_leader_current_team.
+// =============================================================================
+test("WP8B-2 [6/6]: R1/P2 (F-05) managed TL with legacy mirror cleared keeps exact team Offboarding access & fails closed on ambiguity/non-TL/revoke/disable", async () => {
+  const migrations = await loadMigrations();
+  const dbBefore = await createDbUpTo(migrations, WP8B1_MIGRATION_NAME);
+  const dbAfter = await createDbUpTo(migrations, WP8B2_MIGRATION_NAME);
+
+  const TEAM_3 = "48b20000-0000-4000-8000-000000000003";
+  const TEAM_4 = "48b20000-0000-4000-8000-000000000004";
+  const TL_NO_LEGACY = {
+    auth: "18b20000-0000-4000-8000-000000000031",
+    app: "28b20000-0000-4000-8000-000000000031",
+    recruiter: "38b20000-0000-4000-8000-000000000031",
+    email: "tl.nolegacy.wp8b2@hrpartner.vn",
+    name: "Managed TL NoLegacy T3",
+  };
+  const TL_NO_LEGACY_DISABLE = {
+    auth: "18b20000-0000-4000-8000-000000000032",
+    app: "28b20000-0000-4000-8000-000000000032",
+    recruiter: "38b20000-0000-4000-8000-000000000032",
+    email: "tl.nolegacy.dis.wp8b2@hrpartner.vn",
+    name: "Managed TL NoLegacy Disable T4",
+  };
+  const REC_T3 = {
+    auth: "18b20000-0000-4000-8000-000000000033",
+    app: "28b20000-0000-4000-8000-000000000033",
+    recruiter: "38b20000-0000-4000-8000-000000000033",
+    email: "rec3.wp8b2@hrpartner.vn",
+    name: "Recruiter Team Three WP8B2",
+  };
+
+  async function setupNoLegacyTlWorld(db) {
+    const world = await seedPostCutoverWorld(db);
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active) values
+        ($1::uuid, 'WP8B2_T3', 'Team WP8B2 Three', true),
+        ($2::uuid, 'WP8B2_T4', 'Team WP8B2 Four', true)`,
+      [TEAM_3, TEAM_4],
+    );
+    for (const u of [TL_NO_LEGACY, TL_NO_LEGACY_DISABLE, REC_T3]) {
+      await seedAccount(db, u);
+      await db.query(
+        "update public.direct_entry_app_users set authz_managed = true where app_user_id = $1::uuid",
+        [u.app],
+      );
+    }
+    await seedRecruiterAndTeam(db, TL_NO_LEGACY, TEAM_3);
+    await seedRecruiterAndTeam(db, TL_NO_LEGACY_DISABLE, TEAM_4);
+    await seedRecruiterAndTeam(db, REC_T3, TEAM_3);
+
+    // Designate both TLs through canonical RPC
+    await serviceRpc(db, "direct_entry_designate_team_leader", [
+      OWNER.auth,
+      OWNER.app,
+      TEAM_3,
+      TL_NO_LEGACY.app,
+      null,
+      1,
+      "Canonical TL on TEAM_3 before clearing legacy mirror",
+      `wp8b2-f05-tl3-${nextUuid()}`,
+    ]);
+    await serviceRpc(db, "direct_entry_designate_team_leader", [
+      OWNER.auth,
+      OWNER.app,
+      TEAM_4,
+      TL_NO_LEGACY_DISABLE.app,
+      null,
+      1,
+      "Canonical TL on TEAM_4 before clearing legacy mirror",
+      `wp8b2-f05-tl4-${nextUuid()}`,
+    ]);
+
+    // Seed an offboarded worker in TEAM_3
+    const workerT3 = await seedOffboardedWorker(db, {
+      createdByUserId: OWNER.app,
+      projectId: PRJ_1,
+      recruiterId: REC_T3.recruiter,
+      teamId: TEAM_3,
+      employeeCode: "882003",
+      workerName: "Công nhân Team 3 F05",
+      cccd: "001098555666",
+      phone: "0905556667",
+    });
+
+    // Clear ONLY legacy capability/scope mirror rows for both managed TLs
+    // (canonical direct_entry_team_leader_assignments & WP5 grants stay completely intact!)
+    await db.query("select set_config('direct_entry.team_leader_marker', 'on', false)");
+    for (const tl of [TL_NO_LEGACY, TL_NO_LEGACY_DISABLE]) {
+      await db.query(
+        "update public.direct_entry_capability_grants set is_current = false, valid_to = valid_from where app_user_id = $1::uuid and is_current",
+        [tl.app],
+      );
+      await db.query(
+        "update public.direct_entry_scope_grants set is_current = false, valid_to = valid_from where app_user_id = $1::uuid and scope_kind = 'team' and is_current",
+        [tl.app],
+      );
+    }
+    await db.query("select set_config('direct_entry.team_leader_marker', 'off', false)");
+
+    return { world, workerT3 };
+  }
+
+  try {
+    await setupNoLegacyTlWorld(dbBefore);
+    const { world: afterWorld, workerT3 } = await setupNoLegacyTlWorld(dbAfter);
+
+    // 1. Confirm WP8C shared helper direct_entry_assert_team_leader_current_team was NOT altered by #227
+    const sharedBefore = (
+      await dbBefore.query("select pg_get_functiondef('public.direct_entry_assert_team_leader_current_team(uuid,uuid,uuid)'::regprocedure) as src")
+    ).rows[0].src;
+    const sharedAfter = (
+      await dbAfter.query("select pg_get_functiondef('public.direct_entry_assert_team_leader_current_team(uuid,uuid,uuid)'::regprocedure) as src")
+    ).rows[0].src;
+    assert.equal(sharedAfter, sharedBefore, "WP8B-2 must NOT modify WP8C shared direct_entry_assert_team_leader_current_team");
+
+    // 2. Confirm canonical assignment & WP5 paired grants are intact while legacy mirror rows are gone
+    const canonicalState = (
+      await dbAfter.query(
+        `select
+           u.authz_managed,
+           (select count(*)::int from public.direct_entry_team_leader_assignments a
+             where a.leader_app_user_id = u.app_user_id and a.team_id = $2::uuid and a.is_current) as active_tl_assignments,
+           (select count(*)::int from public.direct_entry_capability_grants c
+             where c.app_user_id = u.app_user_id and c.is_current) as active_legacy_caps,
+           (select count(*)::int from public.direct_entry_scope_grants s
+             where s.app_user_id = u.app_user_id and s.scope_kind = 'team' and s.is_current) as active_legacy_team_scopes
+         from public.direct_entry_app_users u
+        where u.app_user_id = $1::uuid`,
+        [TL_NO_LEGACY.app, TEAM_3],
+      )
+    ).rows[0];
+    assert.equal(canonicalState.authz_managed, true);
+    assert.equal(canonicalState.active_tl_assignments, 1, "Canonical TL assignment must remain intact");
+    assert.equal(canonicalState.active_legacy_caps, 0, "Legacy capability mirror must be cleared");
+    assert.equal(canonicalState.active_legacy_team_scopes, 0, "Legacy team scope mirror must be cleared");
+
+    // 3. BEFORE (#226): managed TL without legacy mirror FAILED 42501 on SQL offboarding report
+    await expectServiceRpcError(
+      dbBefore,
+      "direct_entry_offboarding_report",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app, 1, 25],
+      "42501",
+      /offboarding report denied/,
+    );
+
+    // 4. AFTER (#227): SQL report ALLOWS strictly TEAM_3 (no phone, no export, no hide),
+    //    TS nav/page ALLOW, and Location Catalog / Recruitment Posts override stay DENIED!
+    const reportRes = await serviceRpc(dbAfter, "direct_entry_offboarding_report", [
+      TL_NO_LEGACY.auth,
+      TL_NO_LEGACY.app,
+      1,
+      25,
+    ]);
+    assert.ok(parseOffboardingReportList(reportRes), "No-legacy managed TL payload must pass strict contract");
+    assert.equal(reportRes.authority, "team_leader");
+    assert.equal(reportRes.scope, "team");
+    assert.equal(reportRes.can_export, false);
+    assert.equal(reportRes.can_hide, false);
+    assert.equal(reportRes.items.length, 1, "Must see ONLY TEAM_3 worker (never TEAM_1 or TEAM_2)");
+    assert.equal(reportRes.items[0].employee_code, workerT3.employeeCode);
+    assert.equal("phone" in reportRes.items[0], false, "TL offboarding view must never expose phone");
+
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_report_export",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app],
+      "42501",
+      /offboarding report export denied/,
+    );
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_hide_snapshot",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app, workerT3.entryId, workerT3.offEventId, "TL cannot hide", nextUuid()],
+      "42501",
+      /WORKFORCE_OFFBOARDING_HIDE_DENIED/,
+    );
+    await expectServiceRpcError(
+      dbAfter,
+      "administrative_province_list_admin",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app, null, false, 1, 10],
+      "42501",
+      /location catalog admin or bod authority denied/,
+    );
+    const tlPostGet = await serviceRpc(dbAfter, "recruitment_post_get", [
+      TL_NO_LEGACY.auth,
+      TL_NO_LEGACY.app,
+      afterWorld.publishedBriefId,
+    ]);
+    assert.equal(tlPostGet.post.allowed_actions.can_edit, false);
+    assert.equal(tlPostGet.post.allowed_actions.can_withdraw, false);
+
+    // Real SQL -> resolveActor -> TS nav/page parity
+    const { resolution: tlNoLegacyTs } = await resolveViaRealRpc(dbAfter, TL_NO_LEGACY.auth);
+    assert.equal(tlNoLegacyTs.ok, true);
+    assert.ok(
+      tlNoLegacyTs.actor.effective_grants.some(
+        (g) => g.capability === "team_manager_assign" && g.scope_kind === "CONTEXT_TEAM" && g.scope_id === TEAM_3,
+      ),
+      "Canonical WP5 effective_grants must still carry team_manager_assign @ CONTEXT_TEAM (TEAM_3)",
+    );
+    assert.equal(workforceOffboardingNavPredicate(tlNoLegacyTs.actor), true);
+    assert.equal(canViewOffboardingReport(tlNoLegacyTs.actor), true);
+    assert.equal(decideWorkforceOffboardingPageAccess({ actor: tlNoLegacyTs }), "ALLOW");
+    assert.equal(canManageRecruitmentLocations(tlNoLegacyTs.actor), false);
+    assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: tlNoLegacyTs }), "ACCESS_DENIED");
+
+    // 5. Non-widening: standalone direct grant team_manager_assign @ CONTEXT_TEAM (no TL assignment) -> DENIED
+    await dbAfter.query(
+      `insert into public.authz_direct_capability_grants
+        (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+       values ($1::uuid, 'team_manager_assign', 'CONTEXT_TEAM', $2::text, 'EXCEPTION_GRANT', 'Non-TL direct grant must not open Offboarding', $3::uuid)`,
+      [BASE_USER.app, TEAM_3, OWNER.app],
+    );
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_report",
+      [BASE_USER.auth, BASE_USER.app, 1, 25],
+      "42501",
+      /offboarding report denied/,
+    );
+
+    // 6. Ambiguity fail-closed: adding a second CONTEXT_TEAM team_manager_assign grant for TEAM_1
+    //    alongside TEAM_3 TL assignment MUST deny Offboarding until ambiguity is removed!
+    const ambigGrantId = (
+      await dbAfter.query(
+        `insert into public.authz_direct_capability_grants
+          (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+         values ($1::uuid, 'team_manager_assign', 'CONTEXT_TEAM', $2::text, 'EXCEPTION_GRANT', 'Simulated ambiguous second team grant', $3::uuid)
+         returning direct_grant_id`,
+        [TL_NO_LEGACY.app, TEAM_1, OWNER.app],
+      )
+    ).rows[0].direct_grant_id;
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_report",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app, 1, 25],
+      "42501",
+      /offboarding report denied/,
+    );
+    // Remove ambiguous extra grant -> exact TEAM_3 access restored
+    await dbAfter.query(
+      "update public.authz_direct_capability_grants set ended_at = now(), ended_by_app_user_id = $2::uuid, ended_reason = 'Clear simulated ambiguity' where direct_grant_id = $1::uuid",
+      [ambigGrantId, OWNER.app],
+    );
+    const restoredRes = await serviceRpc(dbAfter, "direct_entry_offboarding_report", [
+      TL_NO_LEGACY.auth,
+      TL_NO_LEGACY.app,
+      1,
+      25,
+    ]);
+    assert.equal(restoredRes.authority, "team_leader");
+    assert.equal(restoredRes.items.length, 1);
+
+    // 6b. Structural invariant check: mismatched recruiter team membership (recruiter in TEAM_4
+    //     while canonical TL assignment & WP5 grant still point to TEAM_3) fails closed 42501;
+    //     restoring TEAM_3 membership immediately restores exact TEAM_3 access.
+    await dbAfter.query(
+      "update public.recruiter_team_memberships set team_id = $2::uuid where recruiter_id = $1::uuid and is_current",
+      [TL_NO_LEGACY.recruiter, TEAM_4],
+    );
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_report",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app, 1, 25],
+      "42501",
+      /offboarding report denied/,
+    );
+    await dbAfter.query(
+      "update public.recruiter_team_memberships set team_id = $2::uuid where recruiter_id = $1::uuid and is_current",
+      [TL_NO_LEGACY.recruiter, TEAM_3],
+    );
+    const afterRestoreMembership = await serviceRpc(dbAfter, "direct_entry_offboarding_report", [
+      TL_NO_LEGACY.auth,
+      TL_NO_LEGACY.app,
+      1,
+      25,
+    ]);
+    assert.equal(afterRestoreMembership.authority, "team_leader");
+    assert.equal(afterRestoreMembership.items.length, 1);
+
+    // 7. Disable no-legacy managed TL (TL_NO_LEGACY_DISABLE): confirm ALLOW before disable,
+    //    then DENIED 42501 & TS ACCOUNT_UNAVAILABLE immediately after disable
+    const preDisReport = await serviceRpc(dbAfter, "direct_entry_offboarding_report", [
+      TL_NO_LEGACY_DISABLE.auth,
+      TL_NO_LEGACY_DISABLE.app,
+      1,
+      25,
+    ]);
+    assert.equal(preDisReport.authority, "team_leader");
+    assert.equal(preDisReport.scope, "team");
+    const disVer = (
+      await dbAfter.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [
+        TL_NO_LEGACY_DISABLE.app,
+      ])
+    ).rows[0].version;
+    await serviceRpc(dbAfter, "direct_entry_disable_app_user", [
+      OWNER.auth,
+      OWNER.app,
+      TL_NO_LEGACY_DISABLE.app,
+      disVer,
+      "Disable no-legacy TL to verify fail-closed",
+      `wp8b2-f05-dis-${nextUuid()}`,
+    ]);
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_report",
+      [TL_NO_LEGACY_DISABLE.auth, TL_NO_LEGACY_DISABLE.app, 1, 25],
+      "42501",
+      /actor mapping denied/,
+    );
+    const { resolution: disTlTs } = await resolveViaRealRpc(dbAfter, TL_NO_LEGACY_DISABLE.auth);
+    assert.equal(disTlTs.ok, false);
+    assert.equal(disTlTs.reason, "ACTOR_DISABLED");
+    assert.equal(decideWorkforceOffboardingPageAccess({ actor: disTlTs }), "ACCOUNT_UNAVAILABLE");
+
+    // 8. End TL_NO_LEGACY's canonical TL assignment (on this legacy-mirror-cleared fixture;
+    //    canonical RPC direct_entry_revoke_team_leader on intact TL is verified in Test [5/6])
+    //    -> DENIED 42501 on SQL report & TS nav/page flip to false / ACCESS_DENIED
+    await dbAfter.query("select set_config('direct_entry.team_leader_marker', 'on', false)");
+    await dbAfter.query(
+      "update public.direct_entry_team_leader_assignments set is_current = false, valid_to = valid_from where team_id = $1::uuid and leader_app_user_id = $2::uuid and is_current",
+      [TEAM_3, TL_NO_LEGACY.app],
+    );
+    await dbAfter.query("select set_config('direct_entry.team_leader_marker', 'off', false)");
+    await expectServiceRpcError(
+      dbAfter,
+      "direct_entry_offboarding_report",
+      [TL_NO_LEGACY.auth, TL_NO_LEGACY.app, 1, 25],
+      "42501",
+      /offboarding report denied/,
+    );
+    const { resolution: revTlTs } = await resolveViaRealRpc(dbAfter, TL_NO_LEGACY.auth);
+    assert.equal(revTlTs.ok, true);
+    assert.equal(workforceOffboardingNavPredicate(revTlTs.actor), false);
+    assert.equal(canViewOffboardingReport(revTlTs.actor), false);
+    assert.equal(decideWorkforceOffboardingPageAccess({ actor: revTlTs }), "ACCESS_DENIED");
+  } finally {
+    await dbBefore.close();
+    await dbAfter.close();
   }
 });

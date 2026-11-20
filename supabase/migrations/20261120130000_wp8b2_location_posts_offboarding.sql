@@ -13,9 +13,14 @@
 --      capability (entry_admin, entry_privileged_edit, or report_analytics_view).
 --   3. public.direct_entry_offboarding_authority(uuid, uuid) -> jsonb
 --      Preserves Full Admin (WP8B-1 paired), upgrades BoD branch to paired entry_privileged_edit
---      at ALL (without widening to report-only BoD), and pairs Team Leader branch with
---      team_manager_assign on CONTEXT_TEAM matching v_team_id alongside
---      direct_entry_assert_team_leader_current_team (WP8C shared helper kept untouched).
+--      at ALL (without widening to report-only BoD), and evaluates Team Leader branch:
+--      - For authz_managed = true: strictly from canonical direct_entry_team_leader_assignments,
+--        WP5 paired effective access (unique team_manager_assign on matching CONTEXT_TEAM), and
+--        verified HRP/recruiter/team structural invariants (zero legacy mirror dependency,
+--        fail-closed on ambiguity or non-TL direct grants).
+--      - For authz_managed = false: preserves pre-cutover compatibility via
+--        direct_entry_assert_team_leader_current_team (WP8C shared helper kept untouched) paired
+--        with team_manager_assign on CONTEXT_TEAM matching v_team_id.
 --
 -- Hard invariants preserved:
 --   - Exact signatures, return types/values, STABLE volatility, SQLSTATE 42501, and messages.
@@ -136,8 +141,13 @@ comment on function public.recruitment_location_assert_admin_or_bod(uuid, uuid) 
 --    Branch 1: Full Admin via WP8B-1 paired direct_entry_assert_actor_app_user_admin.
 --    Branch 2: BoD via paired entry_privileged_edit at ALL (strictly preserving
 --              policy: report_analytics_view + report_view alone remains denied).
---    Branch 3: Active Team Leader via direct_entry_assert_team_leader_current_team
---              paired with team_manager_assign on CONTEXT_TEAM matching v_team_id.
+--    Branch 3: Active Team Leader:
+--      - authz_managed = true: resolved strictly from canonical contextual assignment
+--        + WP5 paired effective access (unique team_manager_assign at CONTEXT_TEAM)
+--        + verified HRP/recruiter/team invariants (zero legacy capability/scope reads;
+--        fail-closed on multi-team ambiguity or standalone non-TL direct grants).
+--      - authz_managed = false: preserves pre-cutover compatibility via untouched WP8C
+--        direct_entry_assert_team_leader_current_team + paired CONTEXT_TEAM check.
 --    All 3 branches preserve exact payload keys, flags, STABLE volatility, zero locks,
 --    and 42501 error messages across report, export, and hide_snapshot.
 -- -----------------------------------------------------------------------------
@@ -152,7 +162,19 @@ security definer
 set search_path = pg_catalog, public
 as $function$
 declare
+  v_today date := public.direct_entry_authorization_date();
+  v_authz_managed boolean := false;
   v_team_id uuid;
+  v_assignment_count integer := 0;
+  v_assignment_recruiter_id uuid;
+  v_paired_team_count integer := 0;
+  v_matching_paired_team_count integer := 0;
+  v_link_count integer := 0;
+  v_link_recruiter_id uuid;
+  v_provider_count integer := 0;
+  v_hrp_provider_count integer := 0;
+  v_membership_count integer := 0;
+  v_matching_membership_count integer := 0;
 begin
   perform public.direct_entry_assert_actor_mapping(p_auth_subject, p_app_user_id);
 
@@ -183,26 +205,114 @@ begin
     );
   end if;
 
-  begin
-    v_team_id := public.direct_entry_assert_team_leader_current_team(
-      p_auth_subject, p_app_user_id, null
-    );
-    if v_team_id is not null
-       and public.direct_entry_authz__internal_has_paired_capability(
-         p_app_user_id, 'team_manager_assign', 'CONTEXT_TEAM', v_team_id::text
-       ) then
-      return pg_catalog.jsonb_build_object(
-        'scope', 'team',
-        'team_id', v_team_id,
-        'can_phone', false,
-        'can_export', false,
-        'can_hide', false,
-        'authority', 'team_leader'
-      );
+  select coalesce(u.authz_managed, false)
+    into v_authz_managed
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_app_user_id;
+
+  if v_authz_managed then
+    select count(*)::integer,
+           (pg_catalog.array_agg(a.team_id))[1],
+           (pg_catalog.array_agg(a.leader_recruiter_id))[1]
+      into v_assignment_count, v_team_id, v_assignment_recruiter_id
+      from public.direct_entry_team_leader_assignments a
+      join public.teams t
+        on t.team_id = a.team_id
+       and t.active
+       and t.code <> '__system_vendor__'
+     where a.leader_app_user_id = p_app_user_id
+       and public.direct_entry__internal_team_leader_assignment_effective(a.assignment_id, v_today);
+
+    if v_assignment_count = 1
+       and v_team_id is not null
+       and v_assignment_recruiter_id is not null then
+      select count(*)::integer,
+             count(*) filter (where g.scope_id = v_team_id::text)::integer
+        into v_paired_team_count, v_matching_paired_team_count
+        from (
+          select distinct g.scope_id
+            from pg_catalog.jsonb_to_recordset(
+              public.direct_entry_authz__internal_resolve_effective_grants(p_app_user_id)
+            ) as g(capability text, scope_kind text, scope_id text)
+           where g.capability = 'team_manager_assign'
+             and g.scope_kind = 'CONTEXT_TEAM'
+             and g.scope_id is not null
+             and pg_catalog.btrim(g.scope_id) <> ''
+        ) g;
+
+      if v_paired_team_count = 1
+         and v_matching_paired_team_count = 1
+         and public.direct_entry_authz__internal_has_paired_capability(
+           p_app_user_id, 'team_manager_assign', 'CONTEXT_TEAM', v_team_id::text
+         ) then
+        select count(*)::integer, (pg_catalog.array_agg(l.recruiter_id))[1]
+          into v_link_count, v_link_recruiter_id
+          from public.direct_entry_app_user_recruiter_links l
+         where l.app_user_id = p_app_user_id
+           and l.verified
+           and l.is_current
+           and not l.suspended_by_account_disable;
+
+        if v_link_count = 1
+           and v_link_recruiter_id = v_assignment_recruiter_id
+           and exists (
+             select 1
+               from public.recruiters r
+              where r.recruiter_id = v_link_recruiter_id
+                and r.active
+           ) then
+          select count(*)::integer,
+                 count(*) filter (where m.provider_type = 'hrp' and m.vendor_id is null)::integer
+            into v_provider_count, v_hrp_provider_count
+            from public.recruiter_provider_memberships m
+           where m.recruiter_id = v_link_recruiter_id
+             and public.direct_entry__internal_recruiter_provider_membership_effective(m.membership_id, v_today);
+
+          select count(*)::integer,
+                 count(*) filter (where m.team_id = v_team_id)::integer
+            into v_membership_count, v_matching_membership_count
+            from public.recruiter_team_memberships m
+           where m.recruiter_id = v_link_recruiter_id
+             and public.direct_entry__internal_recruiter_team_membership_effective(m.membership_id, v_today);
+
+          if v_provider_count = 1
+             and v_hrp_provider_count = 1
+             and v_membership_count = 1
+             and v_matching_membership_count = 1 then
+            return pg_catalog.jsonb_build_object(
+              'scope', 'team',
+              'team_id', v_team_id,
+              'can_phone', false,
+              'can_export', false,
+              'can_hide', false,
+              'authority', 'team_leader'
+            );
+          end if;
+        end if;
+      end if;
     end if;
-  exception when insufficient_privilege then
-    null;
-  end;
+  else
+    begin
+      v_team_id := public.direct_entry_assert_team_leader_current_team(
+        p_auth_subject, p_app_user_id, null
+      );
+      if v_team_id is not null
+         and public.direct_entry_authz__internal_has_paired_capability(
+           p_app_user_id, 'team_manager_assign', 'CONTEXT_TEAM', v_team_id::text
+         ) then
+        return pg_catalog.jsonb_build_object(
+          'scope', 'team',
+          'team_id', v_team_id,
+          'can_phone', false,
+          'can_export', false,
+          'can_hide', false,
+          'authority', 'team_leader'
+        );
+      end if;
+    exception when insufficient_privilege then
+      null;
+    end;
+  end if;
 
   raise exception 'offboarding report denied' using errcode = '42501';
 end;
@@ -212,7 +322,7 @@ revoke all on function public.direct_entry_offboarding_authority(uuid, uuid)
   from public, anon, authenticated, service_role;
 
 comment on function public.direct_entry_offboarding_authority(uuid, uuid) is
-  'WP8B-2 internal guard: Full Admin (WP8B-1 paired), BoD (entry_privileged_edit paired at ALL), or active Team Leader (current team paired with team_manager_assign at CONTEXT_TEAM). STABLE, zero locks, revoked from every non-owner role.';
+  'WP8B-2 internal guard: Full Admin (WP8B-1 paired), BoD (entry_privileged_edit paired at ALL), or active Team Leader (for authz_managed accounts: canonical contextual TL assignment + WP5 paired team_manager_assign at unique CONTEXT_TEAM + HRP/recruiter/team structural invariants with zero legacy mirror dependency; for pre-cutover accounts: shared TL helper + paired check). STABLE, zero locks, revoked from every non-owner role.';
 
 -- -----------------------------------------------------------------------------
 -- 4. Guarded owner alignment ($align_wp8b2$)
@@ -277,6 +387,10 @@ declare
   v_exposed integer;
   v_overload_cnt integer;
   v_paired_helper_oid oid;
+  v_resolve_grants_oid oid;
+  v_tl_eff_oid oid;
+  v_prov_eff_oid oid;
+  v_team_eff_oid oid;
   v_loc_helper_oid oid;
   v_internal_fns text[] := array[
     'public.recruitment_location_is_admin_or_bod(uuid)',
@@ -293,6 +407,14 @@ declare
 begin
   v_paired_helper_oid :=
     'public.direct_entry_authz__internal_has_paired_capability(uuid,text,text,text)'::pg_catalog.regprocedure;
+  v_resolve_grants_oid :=
+    'public.direct_entry_authz__internal_resolve_effective_grants(uuid)'::pg_catalog.regprocedure;
+  v_tl_eff_oid :=
+    'public.direct_entry__internal_team_leader_assignment_effective(uuid,date)'::pg_catalog.regprocedure;
+  v_prov_eff_oid :=
+    'public.direct_entry__internal_recruiter_provider_membership_effective(uuid,date)'::pg_catalog.regprocedure;
+  v_team_eff_oid :=
+    'public.direct_entry__internal_recruiter_team_membership_effective(uuid,date)'::pg_catalog.regprocedure;
   v_loc_helper_oid :=
     'public.recruitment_location_is_admin_or_bod(uuid)'::pg_catalog.regprocedure;
 
@@ -333,6 +455,10 @@ begin
     end if;
 
     if not pg_catalog.has_function_privilege(v_owner_oid, v_paired_helper_oid, 'EXECUTE')
+       or not pg_catalog.has_function_privilege(v_owner_oid, v_resolve_grants_oid, 'EXECUTE')
+       or not pg_catalog.has_function_privilege(v_owner_oid, v_tl_eff_oid, 'EXECUTE')
+       or not pg_catalog.has_function_privilege(v_owner_oid, v_prov_eff_oid, 'EXECUTE')
+       or not pg_catalog.has_function_privilege(v_owner_oid, v_team_eff_oid, 'EXECUTE')
        or not pg_catalog.has_function_privilege(v_owner_oid, v_loc_helper_oid, 'EXECUTE') then
       raise exception 'WP8B2_CHECK_OWNER_CALLEE_EXEC_FAILED: %', v_sig using errcode = '55000';
     end if;
