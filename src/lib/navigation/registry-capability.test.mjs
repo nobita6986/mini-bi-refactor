@@ -1580,3 +1580,222 @@ test("WP8C-1: paired effective_grants for Direct Entry, Project Operations, Work
     assert.equal(changeRequestsNavPredicate(driftActor), false, `${label}: changeRequestsNavPredicate`);
   }
 });
+
+test("WP8D-2: all 6 Work Reports predicates enforce strict paired effective_grants, mirror-cleared personas, and fail-closed on cross-scope/malformed grants", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  // 1. Mirror-cleared managed Canonical Full Admin (ADMIN 21-cap bundle -> triple @ ALL; no explicit report_form_manage/assign/review/delegate)
+  const mirrorClearedAdmin = {
+    capabilities: [],
+    scopes: [],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(workReportTemplateManagePredicate(mirrorClearedAdmin), true);
+  assert.equal(workReportAssignmentPredicate(mirrorClearedAdmin), true);
+  assert.equal(workReportViewPredicate(mirrorClearedAdmin), true);
+  assert.equal(workReportAnalyticsPredicate(mirrorClearedAdmin), true);
+  assert.equal(workReportReviewPredicate(mirrorClearedAdmin), true);
+  assert.equal(workReportDelegationPredicate(mirrorClearedAdmin), true);
+  assert.equal(workReportsNavPredicate(mirrorClearedAdmin), true);
+
+  // 2. Mirror-cleared managed Team Leader (6 contextual TEAM grants including canonical report_review @ CONTEXT_TEAM)
+  const mirrorClearedTl = {
+    capabilities: [],
+    scopes: [],
+    effective_grants: [
+      { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_review", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+    effective_report_review_scopes: [{ kind: "team", team_id: TEAM_1, label: "Team 1" }],
+  };
+  assert.equal(workReportTemplateManagePredicate(mirrorClearedTl), false);
+  assert.equal(workReportDelegationPredicate(mirrorClearedTl), false);
+  assert.equal(workReportAssignmentPredicate(mirrorClearedTl), true);
+  assert.equal(workReportViewPredicate(mirrorClearedTl), true);
+  assert.equal(workReportAnalyticsPredicate(mirrorClearedTl), true);
+  assert.equal(workReportReviewPredicate(mirrorClearedTl), true);
+  assert.equal(workReportsNavPredicate(mirrorClearedTl), true);
+
+  // 3. report_view + report_analytics_view @ ALL alone (NOT Full Admin) NEVER grant template/assign/review/delegate
+  const viewAndAnalyticsOnly = {
+    capabilities: [],
+    scopes: [],
+    effective_grants: [
+      { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  };
+  assert.equal(workReportViewPredicate(viewAndAnalyticsOnly), true);
+  assert.equal(workReportAnalyticsPredicate(viewAndAnalyticsOnly), true);
+  assert.equal(workReportTemplateManagePredicate(viewAndAnalyticsOnly), false);
+  assert.equal(workReportAssignmentPredicate(viewAndAnalyticsOnly), false);
+  assert.equal(workReportReviewPredicate(viewAndAnalyticsOnly), false);
+  assert.equal(workReportDelegationPredicate(viewAndAnalyticsOnly), false);
+
+  // 4. Delegated reviewer (zero blanket report_review in effective_grants, projected via effective_report_review_scopes)
+  const delegatedReviewer = {
+    capabilities: [],
+    scopes: [],
+    effective_grants: [
+      { capability: "entry_own", scope_kind: "OWN", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+    effective_report_review_scopes: [{ kind: "team", team_id: TEAM_1, label: "Team 1" }],
+  };
+  assert.equal(workReportReviewPredicate(delegatedReviewer), true);
+  assert.equal(workReportsNavPredicate(delegatedReviewer), true);
+  assert.equal(workReportDelegationPredicate(delegatedReviewer), false);
+  assert.equal(workReportAssignmentPredicate(delegatedReviewer), false);
+  assert.equal(workReportTemplateManagePredicate(delegatedReviewer), false);
+  assert.equal(workReportViewPredicate(delegatedReviewer), false);
+  assert.equal(workReportAnalyticsPredicate(delegatedReviewer), false);
+
+  // 5. Cross-scope drift, OWN-only report_*, blank scope_id, stale legacy arrays, malformed effective_grants / review scopes -> ALL fail-closed
+  const failClosedCases = [
+    {
+      label: "report_form_manage @ CONTEXT_TEAM + unrelated ALL grant",
+      actor: {
+        capabilities: ["report_form_manage", "audit_view"],
+        scopes: [{ kind: "all" }, { kind: "team" }],
+        effective_grants: [
+          { capability: "report_form_manage", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        ],
+      },
+    },
+    {
+      label: "report_view/report_assign/report_analytics_view/report_review/report_delegate @ OWN + unrelated ALL grant",
+      actor: {
+        capabilities: ["report_view", "report_assign", "report_analytics_view", "report_review", "report_delegate", "audit_view"],
+        scopes: [{ kind: "all" }, { kind: "own" }],
+        effective_grants: [
+          { capability: "report_view", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_assign", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_analytics_view", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_review", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_delegate", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        ],
+      },
+    },
+    {
+      label: "legacy report_view @ own without effective_grants",
+      actor: makeActor(["report_view"], [{ kind: "own" }]),
+    },
+    {
+      label: "blank CONTEXT_TEAM scope_id & malformed review scopes",
+      actor: {
+        capabilities: ["report_assign", "report_review", "report_view", "report_analytics_view", "report_delegate"],
+        scopes: [{ kind: "team" }],
+        effective_grants: [
+          { capability: "report_assign", scope_kind: "CONTEXT_TEAM", scope_id: "   ", source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_review", scope_kind: "CONTEXT_TEAM", scope_id: "", source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: " ", source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "report_delegate", scope_kind: "CONTEXT_TEAM", scope_id: "", source_type: "DIRECT_GRANT", source_id: null },
+        ],
+        effective_report_review_scopes: [{ kind: "team", team_id: "  " }, { kind: "team" }, null],
+      },
+    },
+    {
+      label: "stale legacy arrays with empty effective_grants",
+      actor: {
+        capabilities: [
+          "entry_admin",
+          "recruiter_master_manage",
+          "team_master_manage",
+          "report_form_manage",
+          "report_assign",
+          "report_view",
+          "report_analytics_view",
+          "report_review",
+          "report_delegate",
+        ],
+        scopes: [{ kind: "all" }, { kind: "team" }],
+        effective_grants: [],
+      },
+    },
+    {
+      label: "non-array null effective_grants",
+      actor: {
+        capabilities: ["report_form_manage", "report_assign", "report_view", "report_analytics_view", "report_review", "report_delegate"],
+        scopes: [{ kind: "all" }],
+        effective_grants: null,
+      },
+    },
+  ];
+
+  for (const { label, actor: badActor } of failClosedCases) {
+    assert.equal(workReportTemplateManagePredicate(badActor), false, `${label}: template`);
+    assert.equal(workReportAssignmentPredicate(badActor), false, `${label}: assign`);
+    assert.equal(workReportViewPredicate(badActor), false, `${label}: view`);
+    assert.equal(workReportAnalyticsPredicate(badActor), false, `${label}: analytics`);
+    assert.equal(workReportReviewPredicate(badActor), false, `${label}: review`);
+    assert.equal(workReportDelegationPredicate(badActor), false, `${label}: delegate`);
+    assert.equal(workReportsNavPredicate(badActor), false, `${label}: nav`);
+  }
+
+  // WP8D-2 R1: Server-projected delegated report_assign boolean opens ONLY assignment + Work Reports nav
+  // without expanding template/review/analytics/view/delegation predicates.
+  const pureAssignDelegate = {
+    capabilities: [],
+    scopes: [{ kind: "own" }],
+    effective_grants: [],
+    hasWorkReportAssignmentAccess: true,
+  };
+  assert.equal(workReportAssignmentPredicate(pureAssignDelegate), true);
+  assert.equal(workReportsNavPredicate(pureAssignDelegate), true);
+  assert.equal(workReportTemplateManagePredicate(pureAssignDelegate), false);
+  assert.equal(workReportViewPredicate(pureAssignDelegate), false);
+  assert.equal(workReportAnalyticsPredicate(pureAssignDelegate), false);
+  assert.equal(workReportReviewPredicate(pureAssignDelegate), false);
+  assert.equal(workReportDelegationPredicate(pureAssignDelegate), false);
+  assert.equal(
+    decideNavEntryVisibility({
+      capabilityKey: "work_report_assignments",
+      actor: pureAssignDelegate,
+      viewport: "desktop",
+      entryVisibleInViewport: true,
+    }),
+    true,
+  );
+  assert.equal(
+    decideNavEntryVisibility({
+      capabilityKey: "work_report_assignments",
+      actor: pureAssignDelegate,
+      viewport: "mobile",
+      entryVisibleInViewport: true,
+    }),
+    true,
+  );
+  assert.equal(
+    decideNavEntryVisibility({
+      capabilityKey: "work_reports",
+      actor: pureAssignDelegate,
+      viewport: "desktop",
+      entryVisibleInViewport: true,
+    }),
+    true,
+  );
+
+  // Non-true values must fail closed.
+  for (const badFlag of [false, undefined, null, "true", 1]) {
+    const nonTrue = {
+      capabilities: [],
+      scopes: [{ kind: "own" }],
+      effective_grants: [],
+      hasWorkReportAssignmentAccess: badFlag,
+    };
+    assert.equal(workReportAssignmentPredicate(nonTrue), false);
+    assert.equal(workReportsNavPredicate(nonTrue), false);
+  }
+});

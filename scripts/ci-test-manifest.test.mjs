@@ -60,6 +60,7 @@ test("R2.1 Zero-Orphan Test Manifest: every *.test.mjs file in src/ and scripts/
     "scripts/wp8d-nav-readonly-concurrency.test.mjs",
     "scripts/wp8c1-contextual-tl-pm-guards-concurrency.test.mjs",
     "scripts/wp8c2-entry-worker-access-concurrency.test.mjs",
+    "scripts/wp8d2-work-report-access-concurrency.test.mjs",
   ]);
 
   const summary = assertZeroOrphanTests({

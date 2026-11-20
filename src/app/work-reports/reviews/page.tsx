@@ -3,7 +3,10 @@ import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denie
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { ReviewInbox } from "@/components/work-reports/renderer/review-inbox";
 import { WorkReportsShell } from "@/components/work-reports/work-reports-shell";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import {
+  resolveActorForRequest,
+  resolveWorkReportShellActorForRequest,
+} from "@/lib/navigation/resolve-nav-actor";
 import { workReportReviewPredicate } from "@/lib/navigation/registry-capability";
 
 export const dynamic = "force-dynamic";
@@ -19,14 +22,18 @@ export default async function WorkReportReviewsPage() {
     return <TemporaryUnavailable />;
   }
 
-  return workReportReviewPredicate(resolution.actor) ? (
+  if (!workReportReviewPredicate(resolution.actor)) {
+    return <AccessDenied />;
+  }
+  const shellActor = await resolveWorkReportShellActorForRequest().catch(() => resolution.actor);
+  return (
     <WorkReportsShell
-      actor={resolution.actor}
+      actor={shellActor}
       active="reviews"
       title="Cần duyệt"
       description="Hàng đợi và nội dung báo cáo chờ duyệt do máy chủ giới hạn theo phạm vi duyệt hiện hành."
     >
       <ReviewInbox />
     </WorkReportsShell>
-  ) : <AccessDenied />;
+  );
 }

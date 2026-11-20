@@ -186,6 +186,27 @@ test("WP8C-2: session bootstrap projects paired effective_grants without leaking
             source_type: "DIRECT_GRANT",
             source_id: null,
           },
+          {
+            capability: "report_view",
+            scope_kind: "OWN",
+            scope_id: null,
+            source_type: "DIRECT_GRANT",
+            source_id: null,
+          },
+          {
+            capability: "report_analytics_view",
+            scope_kind: "CONTEXT_DEPARTMENT",
+            scope_id: "77777777-7777-4777-8777-777777777777",
+            source_type: "DIRECT_GRANT",
+            source_id: null,
+          },
+          {
+            capability: "report_form_manage",
+            scope_kind: "CONTEXT_TEAM",
+            scope_id: teamId,
+            source_type: "DIRECT_GRANT",
+            source_id: null,
+          },
         ],
       },
     }));
@@ -195,4 +216,8 @@ test("WP8C-2: session bootstrap projects paired effective_grants without leaking
   assert.deepEqual(invalidPairBody.actor.scopes, [
     { kind: "own", reference: safeActor.app_user_id, valid_from: "0001-01-01", valid_to: null },
   ]);
+  const invalidPairText = JSON.stringify(invalidPairBody);
+  assert.equal(invalidPairText.includes("effective_grants"), false);
+  assert.equal(invalidPairText.includes("source_type"), false);
+  assert.equal(invalidPairText.includes("source_id"), false);
 });

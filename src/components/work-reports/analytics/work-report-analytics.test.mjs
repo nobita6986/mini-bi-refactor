@@ -17,8 +17,9 @@ const delegationsPage = await readFile(new URL("../../../app/work-reports/delega
 test("analytics page stays capability gated and hosts two server-scoped tabs (Tổng quan / Bài nộp)", () => {
   assert.match(page, /decideWorkReportAnalyticsPageAccess/);
   assert.match(page, /WORK_REPORTS_API_ENABLED/);
+  assert.match(page, /workReportAnalyticsPredicate\(actor\.actor\)/);
   assert.match(page, /workReportViewPredicate\(actor\.actor\)/);
-  assert.match(page, /<WorkReportAnalyticsTabs canViewSubmissions=\{canViewSubmissions\} \/>/);
+  assert.match(page, /<WorkReportAnalyticsTabs[\s\S]*canViewAnalytics=\{canViewAnalytics\}[\s\S]*canViewSubmissions=\{canViewSubmissions\}[\s\S]*\/>/);
   assert.match(tabs, /role="tablist"/);
   assert.match(tabs, /role="tab"/);
   assert.match(tabs, /role="tabpanel"/);

@@ -572,3 +572,127 @@ test("WP8C-1: decideDirectEntryPageAccess, decideProjectOperationsPageAccess, de
   assert.equal(decideWorkerOperationsPageAccess({ uiEnabled: true, actor: crossScopeTlAtAll }), "ACCESS_DENIED");
   assert.equal(decideChangeRequestsPageAccess({ uiEnabled: true, actor: crossScopeTlAtAll }), "ACCESS_DENIED");
 });
+
+test("WP8D-2: Work Reports page decisions enforce paired effective_grants and admit report_view-only on /work-reports/analytics", async () => {
+  const {
+    decideWorkReportsPageAccess,
+    decideWorkReportTemplatesPageAccess,
+    decideWorkReportAssignmentsPageAccess,
+    decideWorkReportAnalyticsPageAccess,
+  } = await import("./direct-entry-page-access.ts");
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+  const withPaired = (capabilities, effective_grants, scopes = []) => ({
+    ...actor(capabilities),
+    actor: {
+      ...actor(capabilities).actor,
+      scopes,
+      effective_grants,
+    },
+  });
+
+  // 1. report_view @ ALL ONLY -> ALLOW /work-reports/analytics (Bài nộp tab) and /work-reports; DENIED templates/assignments
+  const viewOnly = withPaired([], [
+    { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+  ]);
+  assert.equal(decideWorkReportAnalyticsPageAccess({ actor: viewOnly }), "ALLOW");
+  assert.equal(decideWorkReportsPageAccess({ actor: viewOnly }), "ALLOW");
+  assert.equal(decideWorkReportTemplatesPageAccess({ actor: viewOnly }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportAssignmentsPageAccess({ actor: viewOnly }), "ACCESS_DENIED");
+
+  // 2. report_analytics_view @ CONTEXT_TEAM ONLY -> ALLOW /work-reports/analytics (Tổng quan tab)
+  const analyticsTeamOnly = withPaired([], [
+    { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+  ]);
+  assert.equal(decideWorkReportAnalyticsPageAccess({ actor: analyticsTeamOnly }), "ALLOW");
+  assert.equal(decideWorkReportTemplatesPageAccess({ actor: analyticsTeamOnly }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportAssignmentsPageAccess({ actor: analyticsTeamOnly }), "ACCESS_DENIED");
+
+  // 3. report_view @ OWN -> ACCESS_DENIED on /work-reports/analytics
+  const viewOwnOnly = withPaired(["report_view"], [
+    { capability: "report_view", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+  ], [{ kind: "own", reference: "u", valid_from: "2026-01-01", valid_to: null }]);
+  assert.equal(decideWorkReportAnalyticsPageAccess({ actor: viewOwnOnly }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportsPageAccess({ actor: viewOwnOnly }), "ACCESS_DENIED");
+
+  // 4. Mirror-cleared Full Admin triple @ ALL -> ALLOW all Work Reports pages
+  const fullAdmin = withPaired([], [
+    { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+  ]);
+  assert.equal(decideWorkReportTemplatesPageAccess({ actor: fullAdmin }), "ALLOW");
+  assert.equal(decideWorkReportAssignmentsPageAccess({ actor: fullAdmin }), "ALLOW");
+  assert.equal(decideWorkReportAnalyticsPageAccess({ actor: fullAdmin }), "ALLOW");
+  assert.equal(decideWorkReportsPageAccess({ actor: fullAdmin }), "ALLOW");
+
+  // 5. Stale legacy arrays with empty effective_grants -> ACCESS_DENIED everywhere
+  const stale = withPaired(
+    ["entry_admin", "recruiter_master_manage", "team_master_manage", "report_form_manage", "report_assign", "report_view", "report_analytics_view"],
+    [],
+    [{ kind: "all", reference: "all", valid_from: "2026-01-01", valid_to: null }],
+  );
+  assert.equal(decideWorkReportTemplatesPageAccess({ actor: stale }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportAssignmentsPageAccess({ actor: stale }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportAnalyticsPageAccess({ actor: stale }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportsPageAccess({ actor: stale }), "ACCESS_DENIED");
+  assert.equal(decideWorkReportsPageAccess({ actor: stale, hasWorkReportObligations: true }), "ALLOW");
+
+  // 6. WP8D-2 R1: Pure delegated report_assign projection on page guards (ALLOW / ACCESS_DENIED / TEMPORARY_UNAVAILABLE / ACCOUNT_UNAVAILABLE)
+  const pureDelegateActor = withPaired([], [], [{ kind: "own", reference: "u", valid_from: "2026-01-01", valid_to: null }]);
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: true,
+      assignmentAccessStatus: "allowed",
+    }),
+    "ALLOW",
+  );
+  assert.equal(
+    decideWorkReportsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: true,
+    }),
+    "ALLOW",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "denied",
+    }),
+    "ACCESS_DENIED",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "unavailable",
+    }),
+    "TEMPORARY_UNAVAILABLE",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: { ok: false, reason: "ACTOR_DISABLED" },
+      hasWorkReportAssignmentAccess: true,
+      assignmentAccessStatus: "allowed",
+    }),
+    "ACCOUNT_UNAVAILABLE",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: null,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "unavailable",
+    }),
+    "TEMPORARY_UNAVAILABLE",
+  );
+  // Independent direct role still allows even if assignmentAccessStatus is unavailable/denied
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: fullAdmin,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "unavailable",
+    }),
+    "ALLOW",
+  );
+});

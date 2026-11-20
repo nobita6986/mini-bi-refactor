@@ -22,6 +22,7 @@ import {
   workReportAnalyticsPredicate,
   workReportAssignmentPredicate,
   workReportTemplateManagePredicate,
+  workReportViewPredicate,
   workReportsNavPredicate,
   workforceOffboardingNavPredicate,
   workerOperationsNavPredicate,
@@ -231,15 +232,19 @@ export function decideWorkerOperationsPageAccess(input: {
   });
 }
 
+export type WorkReportAssignmentAccessStatus = "allowed" | "denied" | "unavailable";
+
 export function decideWorkReportsPageAccess(input: {
   actor: ActorResolution | null;
   hasWorkReportObligations?: boolean;
+  hasWorkReportAssignmentAccess?: boolean;
 }): DirectEntryPageDecision {
   return decideCapabilityPageAccess({
     actor: input.actor,
     allowed: (actor) => workReportsNavPredicate({
       ...actor,
       hasWorkReportObligations: input.hasWorkReportObligations === true,
+      hasWorkReportAssignmentAccess: input.hasWorkReportAssignmentAccess === true,
     }),
   });
 }
@@ -252,14 +257,33 @@ export function decideWorkReportTemplatesPageAccess(input: {
 
 export function decideWorkReportAssignmentsPageAccess(input: {
   actor: ActorResolution | null;
+  hasWorkReportAssignmentAccess?: boolean;
+  assignmentAccessStatus?: WorkReportAssignmentAccessStatus;
 }): DirectEntryPageDecision {
-  return decideCapabilityPageAccess({ actor: input.actor, allowed: workReportAssignmentPredicate });
+  const decision = decideCapabilityPageAccess({
+    actor: input.actor,
+    allowed: (actor) =>
+      workReportAssignmentPredicate({
+        ...actor,
+        hasWorkReportAssignmentAccess:
+          input.hasWorkReportAssignmentAccess === true ||
+          input.assignmentAccessStatus === "allowed",
+      }),
+  });
+  if (decision === "ACCESS_DENIED" && input.assignmentAccessStatus === "unavailable") {
+    return "TEMPORARY_UNAVAILABLE";
+  }
+  return decision;
 }
 
 export function decideWorkReportAnalyticsPageAccess(input: {
   actor: ActorResolution | null;
 }): DirectEntryPageDecision {
-  return decideCapabilityPageAccess({ actor: input.actor, allowed: workReportAnalyticsPredicate });
+  return decideCapabilityPageAccess({
+    actor: input.actor,
+    allowed: (actor) =>
+      workReportAnalyticsPredicate(actor) || workReportViewPredicate(actor),
+  });
 }
 
 /**
