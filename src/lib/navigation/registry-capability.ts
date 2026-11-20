@@ -73,6 +73,8 @@ function hasStrictNavPairedAll(actor: NavActorProjection, capability: Capability
   if (!Array.isArray(actor.effective_grants)) return false;
   return actor.effective_grants.some(
     (grant) =>
+      grant !== null &&
+      typeof grant === "object" &&
       grant.capability === capability &&
       grant.scope_kind === "ALL" &&
       (grant.scope_id === null || grant.scope_id === undefined),
@@ -80,11 +82,13 @@ function hasStrictNavPairedAll(actor: NavActorProjection, capability: Capability
 }
 
 function hasNavAllCapability(actor: NavActorProjection, capability: Capability): boolean {
-  if (Array.isArray(actor.effective_grants)) {
+  if (actor.effective_grants !== undefined) {
     return hasStrictNavPairedAll(actor, capability);
   }
   return (
-    actor.scopes.some((scope) => scope.kind === "all") &&
+    Array.isArray(actor.scopes) &&
+    Array.isArray(actor.capabilities) &&
+    actor.scopes.some((scope) => scope?.kind === "all") &&
     actor.capabilities.includes(capability)
   );
 }
@@ -363,12 +367,38 @@ export const workReportsNavPredicate: NavCapabilityPredicate = (actor) =>
   workReportReviewPredicate(actor) ||
   workReportDelegationPredicate(actor);
 
+function hasNavTeamCapability(actor: NavActorProjection, capability: Capability): boolean {
+  if (actor.effective_grants !== undefined) {
+    if (!Array.isArray(actor.effective_grants)) return false;
+    return actor.effective_grants.some(
+      (grant) =>
+        grant !== null &&
+        typeof grant === "object" &&
+        grant.capability === capability &&
+        grant.scope_kind === "CONTEXT_TEAM" &&
+        typeof grant.scope_id === "string" &&
+        grant.scope_id.trim().length > 0,
+    );
+  }
+  return (
+    Array.isArray(actor.scopes) &&
+    Array.isArray(actor.capabilities) &&
+    actor.scopes.some((scope) => scope?.kind === "team") &&
+    actor.capabilities.includes(capability)
+  );
+}
+
+/**
+ * WP8B-2: Offboarding report visibility predicate (paired when `effective_grants` is present):
+ * - Full Admin triple paired at `ALL`, OR
+ * - BoD `entry_privileged_edit` paired at `ALL` (report-only BoD remains excluded), OR
+ * - Team Leader `team_manager_assign` paired on a non-empty `CONTEXT_TEAM` scope.
+ * Database (`direct_entry_offboarding_authority`) remains final authority.
+ */
 export const workforceOffboardingNavPredicate: NavCapabilityPredicate = (actor) =>
   adminAuthorityNavPredicate(actor) ||
-  (actor.capabilities.includes("entry_privileged_edit") &&
-    actor.scopes.some((scope) => scope.kind === "all")) ||
-  (actor.capabilities.includes("team_manager_assign") &&
-    actor.scopes.some((scope) => scope.kind === "team"));
+  hasNavAllCapability(actor, "entry_privileged_edit") ||
+  hasNavTeamCapability(actor, "team_manager_assign");
 
 /**
  * VFIN-01 / VFIN-02: Vendor Finance navigation predicate (fail-closed).
