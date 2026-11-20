@@ -83,26 +83,72 @@ export type AdminIndustrialParkCreateResult = AdminIndustrialParkMutation & {
   created: true;
 };
 
+export type RecruitmentLocationAuthorityGrant = {
+  capability: string;
+  scope_kind: string;
+  scope_id?: string | null;
+};
+
 export type RecruitmentLocationAuthorityActor = {
+  enabled?: boolean;
   capabilities: readonly string[];
   scopes: readonly { kind: string }[];
+  effective_grants?: readonly RecruitmentLocationAuthorityGrant[];
 };
+
+function hasLocationPairedAll(
+  grants: readonly RecruitmentLocationAuthorityGrant[],
+  capability: string,
+): boolean {
+  return grants.some(
+    (grant) =>
+      grant !== null &&
+      typeof grant === "object" &&
+      grant.capability === capability &&
+      grant.scope_kind === "ALL" &&
+      (grant.scope_id === null || grant.scope_id === undefined),
+  );
+}
 
 /**
  * Canonical Full Admin / BOD authority predicate for managing Recruitment
  * Provinces & Industrial Parks. Shared by UI and API layers and matches
  * `public.recruitment_location_is_admin_or_bod` in SQL:
- *   has_all_scope AND (
- *     (entry_admin AND recruiter_master_manage AND team_master_manage)
- *     OR entry_privileged_edit
- *     OR (report_analytics_view AND report_view)
- *   )
+ * - When `effective_grants` is present (WP5 paired model): strictly evaluates
+ *   paired `ALL` grants with zero fallback to flat `capabilities` / `scopes`:
+ *     (entry_admin AND recruiter_master_manage AND team_master_manage) at ALL
+ *     OR entry_privileged_edit at ALL
+ *     OR (report_analytics_view AND report_view) both at ALL.
+ * - Legacy fallback (only when `effective_grants` is absent in unit fixtures):
+ *   flat `scope = "all"` AND one of the 3 branches above.
  */
 export function canManageRecruitmentLocations(
   actor: RecruitmentLocationAuthorityActor | null | undefined,
 ): boolean {
+  if (!actor || actor.enabled === false) {
+    return false;
+  }
+  if (actor.effective_grants !== undefined) {
+    if (!Array.isArray(actor.effective_grants)) {
+      return false;
+    }
+    const grants = actor.effective_grants;
+    const isFullAdmin =
+      hasLocationPairedAll(grants, "entry_admin") &&
+      hasLocationPairedAll(grants, "recruiter_master_manage") &&
+      hasLocationPairedAll(grants, "team_master_manage");
+    if (isFullAdmin) {
+      return true;
+    }
+    if (hasLocationPairedAll(grants, "entry_privileged_edit")) {
+      return true;
+    }
+    return (
+      hasLocationPairedAll(grants, "report_analytics_view") &&
+      hasLocationPairedAll(grants, "report_view")
+    );
+  }
   if (
-    !actor ||
     !Array.isArray(actor.capabilities) ||
     !Array.isArray(actor.scopes)
   ) {

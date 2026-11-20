@@ -10,10 +10,13 @@ import {
   decideLaborTypeCatalogPageAccess,
   decideProjectOperationsPageAccess,
   decidePersonnelCatalogPageAccess,
+  decideRecruitmentLocationCatalogPageAccess,
   decideTeamCatalogPageAccess,
   decideVendorCatalogPageAccess,
   decideWorkerOperationsPageAccess,
+  decideWorkforceOffboardingPageAccess,
   canManageProjectMasterFromActor,
+  canViewOffboardingReport,
   HISTORICAL_CHANGE_REQUEST_QUEUES,
   probeHistoricalChangeRequestAccess,
 } from "./direct-entry-page-access.ts";
@@ -396,4 +399,114 @@ test("WP8B-1: canManageProjectMasterFromActor and decideProjectOperationsPageAcc
   const staleLegacy = withPaired(["entry_admin", "catalog_master_manage"], []);
   assert.equal(canManageProjectMasterFromActor(staleLegacy), false);
   assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: staleLegacy }), "ACCESS_DENIED");
+});
+
+test("WP8B-2: canViewOffboardingReport, decideWorkforceOffboardingPageAccess, and decideRecruitmentLocationCatalogPageAccess enforce paired grants", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+  const all = [{ kind: "all", reference: "all", valid_from: "2026-01-01", valid_to: null }];
+  const team = [{ kind: "team", reference: TEAM_1, valid_from: "2026-01-01", valid_to: null }];
+  const withPaired = (capabilities, effective_grants, scopes = all, enabled = true) => ({
+    ...actor(capabilities),
+    actor: {
+      ...actor(capabilities).actor,
+      enabled,
+      scopes,
+      effective_grants,
+    },
+  });
+
+  // 1. Canonical Full Admin -> ALLOW on both Offboarding and Location Catalog.
+  const adminRes = withPaired(
+    ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+    [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  );
+  assert.equal(canViewOffboardingReport(adminRes.actor), true);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: adminRes }), "ALLOW");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: adminRes }), "ALLOW");
+
+  // 2. Canonical BoD privileged (entry_privileged_edit @ ALL) -> ALLOW on both.
+  const bodPrivRes = withPaired(
+    ["entry_privileged_edit"],
+    [{ capability: "entry_privileged_edit", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null }],
+  );
+  assert.equal(canViewOffboardingReport(bodPrivRes.actor), true);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: bodPrivRes }), "ALLOW");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: bodPrivRes }), "ALLOW");
+
+  // 3. Canonical BoD reports-only (report_analytics_view + report_view @ ALL):
+  //    Location Catalog = ALLOW; Offboarding = ACCESS_DENIED (policy preserved).
+  const bodReportsRes = withPaired(
+    ["report_analytics_view", "report_view"],
+    [
+      { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  );
+  assert.equal(canViewOffboardingReport(bodReportsRes.actor), false);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: bodReportsRes }), "ACCESS_DENIED");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: bodReportsRes }), "ALLOW");
+
+  // 4. Canonical Team Leader (team_manager_assign @ CONTEXT_TEAM) & dual-role HR_OPERATOR + TL:
+  //    Offboarding = ALLOW; Location Catalog = ACCESS_DENIED.
+  const tlRes = withPaired(
+    ["team_manager_assign", "report_view", "report_analytics_view"],
+    [
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+    team,
+  );
+  assert.equal(canViewOffboardingReport(tlRes.actor), true);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: tlRes }), "ALLOW");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: tlRes }), "ACCESS_DENIED");
+
+  const dualHrTlRes = withPaired(
+    ["catalog_master_manage", "team_manager_assign", "report_view", "report_analytics_view"],
+    [
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+    [...all, ...team],
+  );
+  assert.equal(canViewOffboardingReport(dualHrTlRes.actor), true);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: dualHrTlRes }), "ALLOW");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: dualHrTlRes }), "ACCESS_DENIED");
+
+  // 5. Cross-scope drift, stale legacy arrays, disabled, and error resolutions fail closed.
+  const crossScopeDrift = withPaired(
+    ["entry_privileged_edit", "team_manager_assign"],
+    [
+      { capability: "entry_privileged_edit", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+    [...all, ...team],
+  );
+  assert.equal(canViewOffboardingReport(crossScopeDrift.actor), false);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: crossScopeDrift }), "ACCESS_DENIED");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: crossScopeDrift }), "ACCESS_DENIED");
+
+  const staleLegacy = withPaired(["entry_privileged_edit", "team_manager_assign"], [], [...all, ...team]);
+  assert.equal(canViewOffboardingReport(staleLegacy.actor), false);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: staleLegacy }), "ACCESS_DENIED");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: staleLegacy }), "ACCESS_DENIED");
+
+  const disabledActor = withPaired(
+    ["entry_privileged_edit"],
+    [{ capability: "entry_privileged_edit", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null }],
+    all,
+    false,
+  );
+  assert.equal(canViewOffboardingReport(disabledActor.actor), false);
+  assert.equal(canViewOffboardingReport(null), false);
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: { ok: false, reason: "UNAUTHENTICATED" } }), "REDIRECT_LOGIN");
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: { ok: false, reason: "ACTOR_DISABLED" } }), "ACCOUNT_UNAVAILABLE");
+  assert.equal(decideWorkforceOffboardingPageAccess({ actor: { ok: false, reason: "ACTOR_MAPPING_MISSING" } }), "ACCOUNT_UNAVAILABLE");
+  assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: { ok: false, reason: "ACTOR_DISABLED" } }), "ACCOUNT_UNAVAILABLE");
 });

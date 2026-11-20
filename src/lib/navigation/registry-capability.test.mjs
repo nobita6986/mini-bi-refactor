@@ -24,6 +24,8 @@ const {
   adminSecurityNavPredicate,
   catalogOperatorNavPredicate,
   projectAdminNavPredicate,
+  recruitmentLocationCatalogNavPredicate,
+  workforceOffboardingNavPredicate,
   workerOperationsAllScopePredicate,
   workerOperationsNavPredicate,
   workerOperationsReviewPredicate,
@@ -1168,4 +1170,166 @@ test("WP8B-1: projectAdminNavPredicate, catalogOperatorNavPredicate, adminSecuri
   assert.equal(adminSecurityNavPredicate(staleLegacyOnly), false);
   assert.equal(catalogOperatorNavPredicate(staleLegacyOnly), false);
   assert.equal(adminAreaNavPredicate(staleLegacyOnly), false);
+});
+
+test("WP8B-2: workforceOffboardingNavPredicate and recruitmentLocationCatalogNavPredicate enforce paired ALL / CONTEXT_TEAM grants", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  // 1. Canonical Full Admin: allowed on both Location Catalog and Offboarding.
+  const canonicalAdmin = {
+    capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(canonicalAdmin), true);
+  assert.equal(workforceOffboardingNavPredicate(canonicalAdmin), true);
+
+  // 2. Canonical BoD privileged (entry_privileged_edit @ ALL): allowed on both.
+  const canonicalBodPriv = {
+    capabilities: ["entry_privileged_edit"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "entry_privileged_edit", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(canonicalBodPriv), true);
+  assert.equal(workforceOffboardingNavPredicate(canonicalBodPriv), true);
+
+  // 3. Canonical BoD executive reports only (report_analytics_view + report_view @ ALL):
+  //    Location Catalog = ALLOW; Offboarding = DENY (policy preserved!).
+  const canonicalBodReportsOnly = {
+    capabilities: ["report_analytics_view", "report_view"],
+    scopes: [{ kind: "all", reference: "all" }],
+    effective_grants: [
+      { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "report_view", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(canonicalBodReportsOnly), true);
+  assert.equal(workforceOffboardingNavPredicate(canonicalBodReportsOnly), false);
+
+  // 4. Canonical active Team Leader (team_manager_assign @ CONTEXT_TEAM):
+  //    Location Catalog = DENY; Offboarding = ALLOW (own team).
+  const canonicalTeamLeader = {
+    capabilities: ["entry_team", "team_manager_assign", "report_view", "report_analytics_view", "report_assign"],
+    scopes: [{ kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "report_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(canonicalTeamLeader), false);
+  assert.equal(workforceOffboardingNavPredicate(canonicalTeamLeader), true);
+
+  // 5. Dual-role HR_OPERATOR (@ ALL) + TEAM_LEADER (@ CONTEXT_TEAM):
+  //    Location Catalog = DENY (no cross-scope escalation!); Offboarding = ALLOW (as TL).
+  const dualRoleHrAndTl = {
+    capabilities: [
+      ...canonicalTeamLeader.capabilities,
+      "recruiter_master_manage",
+      "team_master_manage",
+      "catalog_master_manage",
+      "audit_view",
+      "document_view",
+    ],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      ...canonicalTeamLeader.effective_grants,
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "document_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(dualRoleHrAndTl), false);
+  assert.equal(workforceOffboardingNavPredicate(dualRoleHrAndTl), true);
+
+  // 6. Cross-scope drift fixtures: MUST fail closed on both predicates.
+  const crossScopePrivAtTeam = {
+    capabilities: ["entry_privileged_edit", "catalog_master_manage"],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      { capability: "entry_privileged_edit", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(crossScopePrivAtTeam), false);
+  assert.equal(workforceOffboardingNavPredicate(crossScopePrivAtTeam), false);
+
+  const crossScopeTlCapAtAll = {
+    capabilities: ["team_manager_assign", "entry_team"],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      { capability: "team_manager_assign", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  };
+  assert.equal(workforceOffboardingNavPredicate(crossScopeTlCapAtAll), false);
+
+  const blankTeamScopeId = {
+    capabilities: ["team_manager_assign"],
+    scopes: [{ kind: "team", reference: TEAM_1 }],
+    effective_grants: [
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: "   ", source_type: "DIRECT_GRANT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+    ],
+  };
+  assert.equal(workforceOffboardingNavPredicate(blankTeamScopeId), false);
+
+  // Malformed grant entries and non-array effective_grants fail closed without throwing
+  const malformedGrants = {
+    capabilities: ["entry_privileged_edit", "team_manager_assign"],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: [null, undefined, "bad"],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(malformedGrants), false);
+  assert.equal(workforceOffboardingNavPredicate(malformedGrants), false);
+
+  const nonArrayGrants = {
+    capabilities: ["entry_privileged_edit", "team_manager_assign"],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: null,
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(nonArrayGrants), false);
+  assert.equal(workforceOffboardingNavPredicate(nonArrayGrants), false);
+
+  // 7. Managed stale legacy arrays (effective_grants = []): both fail closed.
+  const staleLegacyOffboarding = {
+    capabilities: ["entry_privileged_edit", "team_manager_assign", "report_analytics_view", "report_view"],
+    scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+    effective_grants: [],
+  };
+  assert.equal(recruitmentLocationCatalogNavPredicate(staleLegacyOffboarding), false);
+  assert.equal(workforceOffboardingNavPredicate(staleLegacyOffboarding), false);
+
+  // 8. Legacy unit fixture without effective_grants preserves backward compatibility.
+  assert.equal(
+    workforceOffboardingNavPredicate({
+      capabilities: ["entry_privileged_edit"],
+      scopes: [{ kind: "all" }],
+    }),
+    true,
+  );
+  assert.equal(
+    workforceOffboardingNavPredicate({
+      capabilities: ["team_manager_assign"],
+      scopes: [{ kind: "team" }],
+    }),
+    true,
+  );
+  assert.equal(
+    workforceOffboardingNavPredicate({
+      capabilities: ["report_analytics_view", "report_view"],
+      scopes: [{ kind: "all" }],
+    }),
+    false,
+  );
 });
