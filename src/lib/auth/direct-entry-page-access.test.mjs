@@ -636,4 +636,63 @@ test("WP8D-2: Work Reports page decisions enforce paired effective_grants and ad
   assert.equal(decideWorkReportAnalyticsPageAccess({ actor: stale }), "ACCESS_DENIED");
   assert.equal(decideWorkReportsPageAccess({ actor: stale }), "ACCESS_DENIED");
   assert.equal(decideWorkReportsPageAccess({ actor: stale, hasWorkReportObligations: true }), "ALLOW");
+
+  // 6. WP8D-2 R1: Pure delegated report_assign projection on page guards (ALLOW / ACCESS_DENIED / TEMPORARY_UNAVAILABLE / ACCOUNT_UNAVAILABLE)
+  const pureDelegateActor = withPaired([], [], [{ kind: "own", reference: "u", valid_from: "2026-01-01", valid_to: null }]);
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: true,
+      assignmentAccessStatus: "allowed",
+    }),
+    "ALLOW",
+  );
+  assert.equal(
+    decideWorkReportsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: true,
+    }),
+    "ALLOW",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "denied",
+    }),
+    "ACCESS_DENIED",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: pureDelegateActor,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "unavailable",
+    }),
+    "TEMPORARY_UNAVAILABLE",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: { ok: false, reason: "ACTOR_DISABLED" },
+      hasWorkReportAssignmentAccess: true,
+      assignmentAccessStatus: "allowed",
+    }),
+    "ACCOUNT_UNAVAILABLE",
+  );
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: null,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "unavailable",
+    }),
+    "TEMPORARY_UNAVAILABLE",
+  );
+  // Independent direct role still allows even if assignmentAccessStatus is unavailable/denied
+  assert.equal(
+    decideWorkReportAssignmentsPageAccess({
+      actor: fullAdmin,
+      hasWorkReportAssignmentAccess: false,
+      assignmentAccessStatus: "unavailable",
+    }),
+    "ALLOW",
+  );
 });

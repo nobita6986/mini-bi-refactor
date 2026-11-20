@@ -3,9 +3,12 @@
  * PGlite Database, Anti-Drift Probe Oracle, and End-to-End SQL -> Actor -> TS Suite.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
+import Module from "node:module";
 import path from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 import { PGlite } from "@electric-sql/pglite";
 import {
@@ -21,6 +24,7 @@ import {
   decideWorkReportsPageAccess,
 } from "../src/lib/auth/direct-entry-page-access.ts";
 import {
+  decideNavEntryVisibility,
   workReportAnalyticsPredicate,
   workReportAssignmentPredicate,
   workReportDelegationPredicate,
@@ -29,6 +33,8 @@ import {
   workReportViewPredicate,
   workReportsNavPredicate,
 } from "../src/lib/navigation/registry-capability.ts";
+import { createAssignmentRepository } from "../src/lib/work-reports/assignment-repository.ts";
+import { createSubmissionRepository } from "../src/lib/work-reports/submission-repository.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
 
@@ -1294,6 +1300,409 @@ test("WP8D-2 [5/5]: Pre-cutover (authz_managed=false) R1 compatibility parity pr
     assert.deepEqual(preStaffCtx.effective_report_review_scopes.map((s) => ({ kind: s.kind, team_id: s.team_id })), [{ kind: "team", team_id: TEAM_A }]);
     assert.equal(workReportReviewPredicate(preStaffRes.actor), true);
   } finally {
+    await db.close();
+  }
+});
+
+test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkReportsShell + /work-reports/assignments via READ ONLY probe, assigns only delegated scope, and immediately loses access on revoke/disable/grantor-loss while keeping independent direct roles", async () => {
+  const { db } = await createDb();
+  const prevWorkReportsEnabled = process.env.WORK_REPORTS_API_ENABLED;
+  const prevDirectEntryApiEnabled = process.env.DIRECT_ENTRY_API_ENABLED;
+  process.env.WORK_REPORTS_API_ENABLED = "true";
+  process.env.DIRECT_ENTRY_API_ENABLED = "false";
+
+  try {
+    // 1. Seed teams, accounts, cutover, designate TL_B (independent direct role), clear all legacy mirrors
+    await db.query(
+      "insert into public.teams (team_id, code, display_name, active) values ($1::uuid, 'R1_A', 'Team A', true), ($2::uuid, 'R1_B', 'Team B', true)",
+      [TEAM_A, TEAM_B],
+    );
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LUANPT, { caps: [], scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LIENVU, { caps: ADMIN_SEED_CAPS.filter((c) => c !== "duplicate_cccd_withdraw"), scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, NGATTT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, DELEG_GRANTOR, { caps: [], scopes: [] });
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A2, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_B1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, ADMIN_AND_TL, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+
+    const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+    const cutover = await runWp5Cutover(db, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint: plan.manifest_fingerprint,
+    });
+    assert.equal(cutover.status, "APPLIED");
+
+    // Grant direct WP5 report_delegate + report_assign @ ALL to DELEG_GRANTOR
+    for (const cap of ["report_delegate", "report_assign"]) {
+      await db.query(
+        `insert into public.authz_direct_capability_grants
+           (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+         values ($1::uuid, $2, 'ALL', null, 'EXCEPTION_GRANT', 'R1 grantor', $3::uuid)`,
+        [DELEG_GRANTOR.app, cap, OWNER.app],
+      );
+    }
+    // Designate ADMIN_AND_TL as Team Leader on TEAM_B (independent direct report_assign @ CONTEXT_TEAM(TEAM_B))
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'R1 Direct TL B', $5)",
+      [OWNER.auth, OWNER.app, TEAM_B, ADMIN_AND_TL.app, nextKey("r1_tlb")],
+    );
+
+    // Clear ALL legacy mirrors for every managed account
+    await clearLegacyMirrors(db, [
+      OWNER.app, LUANPT.app, LIENVU.app, NGATTT.app, DELEG_GRANTOR.app, STAFF_A1.app, STAFF_A2.app, STAFF_B1.app, ADMIN_AND_TL.app,
+    ]);
+
+    const t1 = await createPublishedTemplate(db, OWNER, "R1_T1", { requiresReview: false });
+    const t2 = await createPublishedTemplate(db, OWNER, "R1_T2", { requiresReview: false });
+    const { rows: [{ d: today }] } = await db.query("select (now() at time zone 'Asia/Ho_Chi_Minh')::date::text as d");
+
+    // 2. Wire REAL production resolve-nav-actor.ts + work-reports-shell.tsx against REAL PGlite (READ ONLY tx for nav probes!)
+    const repoRoot = path.resolve(".");
+    let activeRequestCache = null;
+    const runInRequest = (fn) => {
+      const prev = activeRequestCache;
+      activeRequestCache = new Map();
+      return Promise.resolve().then(fn).finally(() => { activeRequestCache = prev; });
+    };
+    const requestScopedCache = (fn) => (...args) => {
+      if (!activeRequestCache) return fn(...args);
+      let map = activeRequestCache.get(fn);
+      if (!map) {
+        map = new Map();
+        activeRequestCache.set(fn, map);
+      }
+      const key = args.length === 0 ? "__noargs__" : JSON.stringify(args);
+      if (map.has(key)) return map.get(key);
+      const val = fn(...args);
+      map.set(key, val);
+      return val;
+    };
+    const loadTs = (relPath, overrides = {}) => {
+      const fullPath = path.join(repoRoot, relPath);
+      const { outputText } = ts.transpileModule(readFileSync(fullPath, "utf8"), {
+        fileName: fullPath,
+        compilerOptions: {
+          module: ts.ModuleKind.CommonJS,
+          target: ts.ScriptTarget.ES2022,
+          jsx: ts.JsxEmit.ReactJSX,
+          esModuleInterop: true,
+        },
+      });
+      const mod = { exports: {} };
+      const req = Module.createRequire(fullPath);
+      const customReq = (spec) => {
+        if (Object.prototype.hasOwnProperty.call(overrides, spec)) return overrides[spec];
+        return req(spec);
+      };
+      new Function("exports", "require", "module", "__filename", "__dirname", outputText)(
+        mod.exports, customReq, mod, fullPath, path.dirname(fullPath),
+      );
+      return mod.exports;
+    };
+
+    let currentAuthSubject = STAFF_A2.auth;
+    let listOptionsReadOnlyCalls = 0;
+    let obligationsReadOnlyCalls = 0;
+    let injectProbeFault = null;
+
+    const readOnlyRpcAdapter = async (fnName, args) => {
+      if (fnName === "work_report_list_assignment_options") {
+        listOptionsReadOnlyCalls += 1;
+        if (injectProbeFault) return injectProbeFault();
+        await db.exec("begin transaction read only;");
+        try {
+          const { rows } = await db.query(
+            "select public.work_report_list_assignment_options($1::uuid, $2::uuid, $3::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id, args.p_team_id ?? null],
+          );
+          await db.exec("commit;");
+          return { data: rows[0]?.res, error: null };
+        } catch (err) {
+          await db.exec("rollback;").catch(() => {});
+          return { data: null, error: { code: err.code, message: err.message } };
+        }
+      }
+      if (fnName === "work_report_has_active_obligations") {
+        obligationsReadOnlyCalls += 1;
+        await db.exec("begin transaction read only;");
+        try {
+          const { rows } = await db.query(
+            "select public.work_report_has_active_obligations($1::uuid, $2::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id],
+          );
+          await db.exec("commit;");
+          return { data: rows[0]?.res, error: null };
+        } catch (err) {
+          await db.exec("rollback;").catch(() => {});
+          return { data: null, error: { code: err.code, message: err.message } };
+        }
+      }
+      throw new Error(`Unexpected RPC in nav probe: ${fnName}`);
+    };
+
+    const registryCapabilityMod = loadTs("src/lib/navigation/registry-capability.ts", { "server-only": {} });
+    const workReportsShellMod = loadTs("src/components/work-reports/work-reports-shell.tsx", {
+      "server-only": {},
+      "@/components/ui/page-shell": { PageHeader: () => null, PageShell: () => null },
+      "@/lib/navigation/registry-capability": registryCapabilityMod,
+      "./work-reports-nav": { WorkReportsModuleNav: () => null },
+    });
+    const navMod = loadTs("src/lib/navigation/resolve-nav-actor.ts", {
+      "server-only": {},
+      react: { cache: requestScopedCache },
+      "@/lib/navigation/registry-capability": registryCapabilityMod,
+      "@/lib/auth/direct-entry-page-access": {
+        EMPTY_CHANGE_REQUEST_HISTORICAL_PROBE: { hasHistoricalRequests: false },
+        probeHistoricalChangeRequestAccess: async () => ({ hasHistoricalRequests: false }),
+      },
+      "@/lib/auth/direct-entry-session": {
+        getDirectEntryActor: async () => (await resolveViaRealRpc(db, currentAuthSubject)).resolution,
+      },
+      "@/lib/auth/direct-entry-session-retry": {
+        resolveSessionWithBoundedRetry: async (loader) => ({ actor: await loader() }),
+      },
+      "@/lib/direct-entry/actor-context-repository": { createDirectEntryActorRepository: () => ({}) },
+      "@/lib/direct-entry/change-request-read-repository": {
+        createChangeRequestReadRepository: () => ({ listChangeRequests: async () => ({ ok: true, data: { items: [] } }) }),
+      },
+      "@/lib/leave/leave-repository": {
+        createLeaveRepository: () => ({ getActorAccess: async () => ({ ok: true, data: { can_access: false, can_manage_config: false, can_view_monthly_report: false } }) }),
+      },
+      "@/lib/salary-advance/salary-advance-repository": {
+        createSalaryAdvanceRepository: () => ({ getActorAccess: async () => ({ ok: true, data: { can_access: false } }) }),
+      },
+      "@/lib/vendor-finance/vendor-finance-repository": {
+        createVendorFinanceRepository: () => ({ getActorAccess: async () => ({ ok: true, data: { can_view: false, can_record: false, can_reconcile: false, can_manage_project_assignments: false } }) }),
+      },
+      "@/lib/work-reports/assignment-repository": {
+        createAssignmentRepository: () => createAssignmentRepository(readOnlyRpcAdapter),
+      },
+      "@/lib/work-reports/submission-repository": {
+        createSubmissionRepository: () => createSubmissionRepository(readOnlyRpcAdapter),
+      },
+    });
+
+    const evaluateUiFlow = async (user) => {
+      currentAuthSubject = user.auth;
+      const beforeObs = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
+      const beforeListCalls = listOptionsReadOnlyCalls;
+      const out = await runInRequest(async () => {
+        const appShellActor = await navMod.resolveNavActorForAppShell({ directEntryEnabled: true, adminNavigationEnabled: true });
+        const actorRes = await navMod.resolveActorForRequest();
+        const assignProbe = actorRes.ok ? await navMod.resolveWorkReportAssignmentAccessForRequest() : null;
+        const shellActor = await navMod.resolveWorkReportShellActorForRequest();
+        const pageDecision = decideWorkReportAssignmentsPageAccess({
+          actor: actorRes,
+          hasWorkReportAssignmentAccess: assignProbe?.hasAssignmentAccess,
+          assignmentAccessStatus: assignProbe?.status,
+        });
+        const rootPageDecision = decideWorkReportsPageAccess({
+          actor: actorRes,
+          hasWorkReportAssignmentAccess: assignProbe?.hasAssignmentAccess,
+        });
+        const shellLinks = workReportsShellMod.buildWorkReportsNavLinks(shellActor);
+        const appShellShowsAssignments =
+          decideNavEntryVisibility({
+            capabilityKey: "work_report_assignments",
+            actor: appShellActor,
+            viewport: "desktop",
+            entryVisibleInViewport: true,
+          }) &&
+          decideNavEntryVisibility({
+            capabilityKey: "work_report_assignments",
+            actor: appShellActor,
+            viewport: "mobile",
+            entryVisibleInViewport: true,
+          });
+        const appShellShowsWorkReports =
+          decideNavEntryVisibility({
+            capabilityKey: "work_reports",
+            actor: appShellActor,
+            viewport: "desktop",
+            entryVisibleInViewport: true,
+          }) &&
+          decideNavEntryVisibility({
+            capabilityKey: "work_reports",
+            actor: appShellActor,
+            viewport: "mobile",
+            entryVisibleInViewport: true,
+          });
+        const moduleShowsAssignments = shellLinks.some((g) =>
+          g.subLinks?.some((s) => s.href === "/work-reports/assignments"),
+        );
+        const moduleShowsGroups = shellLinks.some((g) =>
+          g.subLinks?.some((s) => s.href === "/work-reports/assignments?tab=groups"),
+        );
+        return {
+          appShellActor,
+          actorRes,
+          assignProbe,
+          shellActor,
+          pageDecision,
+          rootPageDecision,
+          appShellShowsAssignments,
+          appShellShowsWorkReports,
+          moduleShowsAssignments,
+          moduleShowsGroups,
+        };
+      });
+      const afterObs = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
+      assert.equal(afterObs, beforeObs, "Menu/page probe MUST NEVER write or materialize obligations");
+      assert.ok(listOptionsReadOnlyCalls - beforeListCalls <= 1, "At most 1 read-only listOptions call per request");
+      return out;
+    };
+
+    // 3. Before delegation: unauthorized STAFF_A2 & STAFF_B1 CANNOT see menu or open /work-reports/assignments
+    const unauthA2 = await evaluateUiFlow(STAFF_A2);
+    assert.equal(unauthA2.appShellShowsAssignments, false);
+    assert.equal(unauthA2.moduleShowsAssignments, false);
+    assert.equal(unauthA2.pageDecision, "ACCESS_DENIED");
+    const unauthB1 = await evaluateUiFlow(STAFF_B1);
+    assert.equal(unauthB1.appShellShowsAssignments, false);
+    assert.equal(unauthB1.moduleShowsAssignments, false);
+    assert.equal(unauthB1.pageDecision, "ACCESS_DENIED");
+
+    // 4. Delegate ONLY report_assign on (T1, TEAM_A) to STAFF_A2 (pure delegate — 0 direct report_* grants!)
+    const { rows: [{ res: del1 }] } = await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6) as res",
+      [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("r1_del_a2")],
+    );
+    const { rawContext: a2Raw } = await resolveViaRealRpc(db, STAFF_A2.auth);
+    assert.equal(a2Raw.effective_grants.some((g) => g.capability === "report_assign"), false, "R3: 0 blanket report_assign in effective_grants");
+    assert.equal(Object.keys(a2Raw).length, 12, "Actor RPC preserves exact 12-key contract");
+
+    const obsCallsBeforeDelegate = obligationsReadOnlyCalls;
+    assert.ok(obsCallsBeforeDelegate >= 2, "Unauthorized users fell through to read-only obligations probe");
+    const pureDelFlow = await evaluateUiFlow(STAFF_A2);
+    assert.equal(obligationsReadOnlyCalls, obsCallsBeforeDelegate, "Pure report_assign delegate short-circuits obligations probe");
+    assert.equal(pureDelFlow.appShellShowsWorkReports, true, "Pure delegate sees Báo cáo của tôi in AppShell");
+    assert.equal(pureDelFlow.appShellShowsAssignments, true, "Pure delegate sees Quản lý/Giao báo cáo in AppShell");
+    assert.equal(pureDelFlow.moduleShowsAssignments, true, "Pure delegate sees Đợt giao in WorkReportsShell");
+    assert.equal(pureDelFlow.moduleShowsGroups, true, "Pure delegate sees Nhóm nhận báo cáo in WorkReportsShell");
+    assert.equal(pureDelFlow.pageDecision, "ALLOW", "Pure delegate opens /work-reports/assignments directly");
+    assert.equal(pureDelFlow.rootPageDecision, "ALLOW");
+
+    // 5. Pure delegate assigns exact delegated (T1, TEAM_A) -> SUCCEEDS; wrong template T2 or wrong team TEAM_B -> 42501!
+    const { rows: [{ res: okAsg }] } = await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6) as res",
+      [STAFF_A2.auth, STAFF_A2.app, t1.template_id, STAFF_A1.app, today, nextKey("r1_asg_ok")],
+    );
+    assert.ok(okAsg.assignment_id, "Pure delegate succeeds assigning delegated T1/TEAM_A");
+    await assert.rejects(
+      db.query(
+        "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)",
+        [STAFF_A2.auth, STAFF_A2.app, t2.template_id, STAFF_A1.app, today, nextKey("r1_asg_wrong_tpl")],
+      ),
+      (e) => e.code === "42501",
+      "Wrong template T2 stays denied by SQL",
+    );
+    await assert.rejects(
+      db.query(
+        "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)",
+        [STAFF_A2.auth, STAFF_A2.app, t1.template_id, TEAM_B, today, nextKey("r1_asg_wrong_team")],
+      ),
+      (e) => e.code === "42501",
+      "Wrong team TEAM_B stays denied by SQL",
+    );
+
+    // 6. Probe error / malformed payload fails closed without crashing AppShell and yields TEMPORARY_UNAVAILABLE on page
+    injectProbeFault = () => ({ data: { templates: "corrupted" }, error: null });
+    const faultFlow = await evaluateUiFlow(STAFF_A2);
+    assert.ok(faultFlow.appShellActor !== null, "Malformed probe never crashes AppShell");
+    assert.equal(faultFlow.appShellShowsAssignments, false, "Malformed probe fails closed in AppShell");
+    assert.equal(faultFlow.moduleShowsAssignments, false, "Malformed probe fails closed in WorkReportsShell");
+    assert.equal(faultFlow.pageDecision, "TEMPORARY_UNAVAILABLE", "Malformed probe preserves page TEMPORARY_UNAVAILABLE");
+    injectProbeFault = null;
+
+    // 7. Revoke delegation -> immediately loses AppShell, WorkReportsShell & /work-reports/assignments
+    await db.query(
+      "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, $4, $5)",
+      [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, del1.delegation_id, del1.version, nextKey("r1_rev_del1")],
+    );
+    const afterRevokeFlow = await evaluateUiFlow(STAFF_A2);
+    assert.equal(afterRevokeFlow.appShellShowsAssignments, false);
+    assert.equal(afterRevokeFlow.moduleShowsAssignments, false);
+    assert.equal(afterRevokeFlow.pageDecision, "ACCESS_DENIED");
+
+    // 8. Re-delegate, then disable STAFF_A2 -> ACCOUNT_UNAVAILABLE & AppShell null; re-enable -> regains access; disable grantor -> loses access!
+    await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6)",
+      [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("r1_del_a2_2")],
+    );
+    const { rows: [{ version: a2Ver1 }] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [STAFF_A2.app],
+    );
+    await db.query(
+      "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Disable delegate', $5)",
+      [OWNER.auth, OWNER.app, STAFF_A2.app, a2Ver1, nextKey("r1_dis_a2")],
+    );
+    const disabledFlow = await evaluateUiFlow(STAFF_A2);
+    assert.equal(disabledFlow.appShellActor, null);
+    assert.equal(disabledFlow.pageDecision, "ACCOUNT_UNAVAILABLE");
+
+    const { rows: [{ version: a2Ver2 }] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [STAFF_A2.app],
+    );
+    await db.query(
+      "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Re-enable delegate', $5)",
+      [OWNER.auth, OWNER.app, STAFF_A2.app, a2Ver2, nextKey("r1_en_a2")],
+    );
+    await clearLegacyMirrors(db, [STAFF_A2.app]);
+    assert.equal((await evaluateUiFlow(STAFF_A2)).pageDecision, "ALLOW");
+
+    // Grantor loses authority (disabled) -> delegate immediately loses AppShell/Shell/Page access
+    const { rows: [{ version: grVer }] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [DELEG_GRANTOR.app],
+    );
+    await db.query(
+      "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Disable grantor', $5)",
+      [OWNER.auth, OWNER.app, DELEG_GRANTOR.app, grVer, nextKey("r1_dis_gr")],
+    );
+    const grantorLostFlow = await evaluateUiFlow(STAFF_A2);
+    assert.equal(grantorLostFlow.appShellShowsAssignments, false);
+    assert.equal(grantorLostFlow.moduleShowsAssignments, false);
+    assert.equal(grantorLostFlow.pageDecision, "ACCESS_DENIED");
+
+    // 9. Independent direct role preserved: ADMIN_AND_TL (direct TL on TEAM_B) receives ALL delegation from OWNER,
+    //    then delegation is revoked -> still keeps direct TEAM_B access (0 listOptions probe calls needed!) while losing TEAM_A!
+    const { rows: [{ res: delTl }] } = await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid, 'all', null, null, null, $5) as res",
+      [OWNER.auth, OWNER.app, ADMIN_AND_TL.app, t1.template_id, nextKey("r1_del_tlb")],
+    );
+    await db.query(
+      "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, $4, $5)",
+      [OWNER.auth, OWNER.app, delTl.delegation_id, delTl.version, nextKey("r1_rev_tlb")],
+    );
+    const callsBeforeDirectTl = listOptionsReadOnlyCalls;
+    const directTlFlow = await evaluateUiFlow(ADMIN_AND_TL);
+    assert.equal(directTlFlow.appShellShowsAssignments, true);
+    assert.equal(directTlFlow.moduleShowsAssignments, true);
+    assert.equal(directTlFlow.pageDecision, "ALLOW");
+    assert.equal(listOptionsReadOnlyCalls, callsBeforeDirectTl, "Direct TL short-circuits listOptions probe");
+    // Direct TL still assigns TEAM_B cleanly, denied TEAM_A after delegation revoke
+    const { rows: [{ res: tlTeamBAsg }] } = await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6) as res",
+      [ADMIN_AND_TL.auth, ADMIN_AND_TL.app, t1.template_id, TEAM_B, today, nextKey("r1_tlb_ok")],
+    );
+    assert.ok(tlTeamBAsg.assignment_id);
+    await assert.rejects(
+      db.query(
+        "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)",
+        [ADMIN_AND_TL.auth, ADMIN_AND_TL.app, t1.template_id, TEAM_A, today, nextKey("r1_tlb_deny_a")],
+      ),
+      (e) => e.code === "42501",
+    );
+  } finally {
+    if (prevWorkReportsEnabled === undefined) delete process.env.WORK_REPORTS_API_ENABLED;
+    else process.env.WORK_REPORTS_API_ENABLED = prevWorkReportsEnabled;
+    if (prevDirectEntryApiEnabled === undefined) delete process.env.DIRECT_ENTRY_API_ENABLED;
+    else process.env.DIRECT_ENTRY_API_ENABLED = prevDirectEntryApiEnabled;
     await db.close();
   }
 });

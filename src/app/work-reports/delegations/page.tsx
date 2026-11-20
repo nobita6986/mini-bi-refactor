@@ -3,7 +3,10 @@ import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denie
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { DelegationManager } from "@/components/work-reports/renderer/delegation-manager";
 import { WorkReportsShell } from "@/components/work-reports/work-reports-shell";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import {
+  resolveActorForRequest,
+  resolveWorkReportShellActorForRequest,
+} from "@/lib/navigation/resolve-nav-actor";
 import { workReportDelegationPredicate } from "@/lib/navigation/registry-capability";
 
 export const dynamic = "force-dynamic";
@@ -18,14 +21,18 @@ export default async function WorkReportDelegationsPage() {
     if (resolution.reason === "ACTOR_MAPPING_MISSING" || resolution.reason === "ACTOR_DISABLED") return <AccountUnavailable />;
     return <TemporaryUnavailable />;
   }
-  return workReportDelegationPredicate(resolution.actor) ? (
+  if (!workReportDelegationPredicate(resolution.actor)) {
+    return <AccessDenied />;
+  }
+  const shellActor = await resolveWorkReportShellActorForRequest().catch(() => resolution.actor);
+  return (
     <WorkReportsShell
-      actor={resolution.actor}
+      actor={shellActor}
       active="delegations"
       title="Ủy quyền"
       description="Giao quyền báo cáo trong phạm vi và thời hạn được máy chủ cấp phép."
     >
       <DelegationManager />
     </WorkReportsShell>
-  ) : <AccessDenied />;
+  );
 }

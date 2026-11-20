@@ -5,7 +5,10 @@ import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { FormBuilder } from "@/components/work-reports/form-builder/form-builder";
 import { WorkReportsModuleNav } from "@/components/work-reports/work-reports-nav";
 import { buildWorkReportsNavLinks } from "@/components/work-reports/work-reports-shell";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import {
+  resolveActorForRequest,
+  resolveWorkReportShellActorForRequest,
+} from "@/lib/navigation/resolve-nav-actor";
 import { canManageWorkReportTemplates } from "@/lib/work-reports/form-builder-model";
 
 export const dynamic = "force-dynamic";
@@ -24,5 +27,6 @@ export default async function WorkReportTemplatesPage() {
   }
   const allowed = canManageWorkReportTemplates(resolution.actor);
   if (!allowed) return <AccessDenied />;
-  return <FormBuilder moduleNav={<WorkReportsModuleNav links={buildWorkReportsNavLinks(resolution.actor)} />} />;
+  const shellActor = await resolveWorkReportShellActorForRequest().catch(() => resolution.actor);
+  return <FormBuilder moduleNav={<WorkReportsModuleNav links={buildWorkReportsNavLinks(shellActor)} />} />;
 }

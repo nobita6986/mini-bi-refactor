@@ -36,6 +36,7 @@ export type NavActorProjection = {
   effective_report_review_scopes?: readonly { kind: "all" | "team"; team_id?: string | null; label?: string }[];
   hasHistoricalChangeRequests?: boolean;
   hasWorkReportObligations?: boolean;
+  hasWorkReportAssignmentAccess?: boolean;
   hasVendorFinanceAccess?: boolean;
   hasVendorFinanceRecordAccess?: boolean;
   hasVendorFinanceReconcileAccess?: boolean;
@@ -379,6 +380,7 @@ export const workReportTemplateManagePredicate: NavCapabilityPredicate = (actor)
   hasNavAllCapability(actor, "report_form_manage");
 
 export const workReportAssignmentPredicate: NavCapabilityPredicate = (actor) =>
+  actor.hasWorkReportAssignmentAccess === true ||
   adminAuthorityNavPredicate(actor) ||
   hasNavAllCapability(actor, "report_assign") ||
   hasNavTeamCapability(actor, "report_assign");

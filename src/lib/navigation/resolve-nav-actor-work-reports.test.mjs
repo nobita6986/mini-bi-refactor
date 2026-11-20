@@ -112,12 +112,18 @@ function createHarness() {
   const state = {
     actorResult: { ok: true, actor: USER_A },
     workReportCalls: [],
+    assignmentOptionsCalls: [],
     listMineCalls: [],
     leaveCalls: [],
     createSubmissionRepoImpl: null,
+    createAssignmentRepoImpl: null,
     hasActiveObligationsImpl: async () => ({
       ok: true,
       data: { has_active_obligations: false },
+    }),
+    listAssignmentOptionsImpl: async () => ({
+      ok: false,
+      kind: "denied",
     }),
     leaveAccessImpl: async () => ({
       ok: true,
@@ -138,6 +144,10 @@ function createHarness() {
     "./contracts.ts": {},
     "./assignment-repository.ts": {},
     "./schema-validator.ts": { validateWorkReportSchema: () => ({ ok: true }) },
+  });
+
+  const assignmentRepoModule = loadTsModule("src/lib/work-reports/assignment-repository.ts", {
+    "server-only": {},
   });
 
   const navModule = loadTsModule("src/lib/navigation/resolve-nav-actor.ts", {
@@ -191,6 +201,19 @@ function createHarness() {
         }),
       }),
     },
+    "@/lib/work-reports/assignment-repository": {
+      createAssignmentRepository: () => {
+        if (state.createAssignmentRepoImpl) {
+          return state.createAssignmentRepoImpl();
+        }
+        return {
+          listOptions: async (input) => {
+            state.assignmentOptionsCalls.push(input);
+            return state.listAssignmentOptionsImpl(input);
+          },
+        };
+      },
+    },
     "@/lib/work-reports/submission-repository": {
       createSubmissionRepository: () => {
         if (state.createSubmissionRepoImpl) {
@@ -210,7 +233,7 @@ function createHarness() {
     },
   });
 
-  return { state, navModule, registryCapability, submissionRepoModule };
+  return { state, navModule, registryCapability, submissionRepoModule, assignmentRepoModule };
 }
 
 function withEnv(vars, fn) {
@@ -416,6 +439,221 @@ test("WP8D nav runtime: zero cross-request or cross-user cache leakage", async (
     assert.equal(state.workReportCalls.length, 3);
     assert.deepEqual(
       state.workReportCalls.map((c) => c.app_user_id),
+      [USER_A.app_user_id, USER_B.app_user_id, USER_A.app_user_id],
+    );
+  });
+});
+
+test("WP8D-2 R1 nav runtime: pure report_assign delegate projects request-cached boolean across AppShell, page probe & WorkReportsShell without leaking PII or triggering obligations probe", async () => {
+  const { state, navModule, registryCapability } = createHarness();
+  const tplId = "11111111-1111-4111-8111-111111111111";
+  const verId = "22222222-2222-4222-8222-222222222222";
+  const teamId = "33333333-3333-4333-8333-333333333333";
+
+  state.listAssignmentOptionsImpl = async () => ({
+    ok: true,
+    data: {
+      templates: [
+        {
+          template_id: tplId,
+          template_code: "T1",
+          display_name: "Template 1",
+          default_frequency: "DAILY",
+          current_published_version_id: verId,
+        },
+      ],
+      teams: [{ team_id: teamId, code: "TEAM_A", display_name: "Team A" }],
+      users: [],
+    },
+  });
+
+  // Feature flag off -> 0 assignment probe calls
+  await withEnv({ WORK_REPORTS_API_ENABLED: "false", DIRECT_ENTRY_API_ENABLED: "false" }, async () => {
+    const offProjection = await runInRequest(() =>
+      navModule.resolveNavActorForAppShell({ directEntryEnabled: true }),
+    );
+    assert.equal(state.assignmentOptionsCalls.length, 0);
+    assert.equal(offProjection.hasWorkReportAssignmentAccess, undefined);
+  });
+
+  // Feature flag on -> single request shares React cache across AppShell + page + WorkReportsShell
+  await withEnv({ WORK_REPORTS_API_ENABLED: "true", DIRECT_ENTRY_API_ENABLED: "false" }, async () => {
+    await runInRequest(async () => {
+      const appShellProjection = await navModule.resolveNavActorForAppShell({ directEntryEnabled: true });
+      const pageProbe = await navModule.resolveWorkReportAssignmentAccessForRequest();
+      const shellActor = await navModule.resolveWorkReportShellActorForRequest();
+
+      assert.equal(appShellProjection.hasWorkReportAssignmentAccess, true);
+      assert.equal(pageProbe.status, "allowed");
+      assert.equal(pageProbe.hasAssignmentAccess, true);
+      assert.equal(shellActor.hasWorkReportAssignmentAccess, true);
+      assert.equal(registryCapability.workReportAssignmentPredicate(appShellProjection), true);
+      assert.equal(registryCapability.workReportsNavPredicate(appShellProjection), true);
+      assert.equal(registryCapability.workReportAssignmentPredicate(shellActor), true);
+      assert.equal(
+        state.assignmentOptionsCalls.length,
+        1,
+        "React cache deduplicates read-only listOptions probe across AppShell, page, and WorkReportsShell",
+      );
+      assert.deepEqual(state.assignmentOptionsCalls[0], {
+        auth_subject: USER_A.auth_subject,
+        app_user_id: USER_A.app_user_id,
+        team_id: null,
+      });
+      assert.equal(
+        state.workReportCalls.length,
+        0,
+        "Obligations probe is short-circuited once delegated assignment access already opens Work Reports",
+      );
+      assert.equal("app_user_id" in appShellProjection, false, "zero app_user_id PII leak in AppShell projection");
+      assert.equal("app_user_id" in shellActor, false, "zero app_user_id PII leak in WorkReportsShell projection");
+      assert.equal("templates" in appShellProjection, false, "zero template payload leak onto NavActorProjection");
+      assert.equal("effective_grants" in appShellProjection && appShellProjection.effective_grants.length, 0, "R3: zero blanket report_assign added to effective_grants");
+    });
+
+    // Direct report_assign actor short-circuits BOTH listOptions and hasActiveObligations
+    state.actorResult = { ok: true, actor: REPORT_ADMIN };
+    const beforeCalls = state.assignmentOptionsCalls.length;
+    await runInRequest(async () => {
+      const directProj = await navModule.resolveNavActorForAppShell({ directEntryEnabled: true });
+      const directProbe = await navModule.resolveWorkReportAssignmentAccessForRequest();
+      assert.equal(directProbe.status, "allowed");
+      assert.equal(directProbe.hasAssignmentAccess, true);
+      assert.equal(registryCapability.workReportAssignmentPredicate(directProj), true);
+      assert.equal(state.assignmentOptionsCalls.length, beforeCalls, "direct report_assign never calls listOptions probe");
+    });
+  });
+});
+
+test("WP8D-2 R1 nav runtime: assignment probe errors/malformed responses fail closed without crashing AppShell and preserve unavailable page status + zero cross-user cache", async () => {
+  const failureCases = [
+    {
+      name: "listOptions denied (42501)",
+      expectedStatus: "denied",
+      setup: (state) => {
+        state.listAssignmentOptionsImpl = async () => ({ ok: false, kind: "denied" });
+      },
+    },
+    {
+      name: "listOptions unavailable",
+      expectedStatus: "unavailable",
+      setup: (state) => {
+        state.listAssignmentOptionsImpl = async () => ({ ok: false, kind: "unavailable" });
+      },
+    },
+    {
+      name: "listOptions throws",
+      expectedStatus: "unavailable",
+      setup: (state) => {
+        state.listAssignmentOptionsImpl = async () => {
+          throw new Error("DB timeout");
+        };
+      },
+    },
+    {
+      name: "createAssignmentRepository throws",
+      expectedStatus: "unavailable",
+      setup: (state) => {
+        state.createAssignmentRepoImpl = () => {
+          throw new Error("SUPABASE_SECRET_KEY missing");
+        };
+      },
+    },
+    {
+      name: "malformed RPC payload via real assignment-repository parser",
+      expectedStatus: "unavailable",
+      setup: (state, _subMod, assignMod) => {
+        state.createAssignmentRepoImpl = () =>
+          assignMod.createAssignmentRepository(async () => ({
+            data: { templates: [{ template_id: "not-a-uuid" }], teams: [], users: [] },
+            error: null,
+          }));
+      },
+    },
+    {
+      name: "empty templates array fails closed as denied",
+      expectedStatus: "denied",
+      setup: (state) => {
+        state.listAssignmentOptionsImpl = async () => ({
+          ok: true,
+          data: { templates: [], teams: [], users: [] },
+        });
+      },
+    },
+    {
+      name: "non-array templates shape fails closed as unavailable",
+      expectedStatus: "unavailable",
+      setup: (state) => {
+        state.listAssignmentOptionsImpl = async () => ({
+          ok: true,
+          data: { templates: "bad", teams: [], users: [] },
+        });
+      },
+    },
+    {
+      name: "non-empty templates with empty template_id fails closed as unavailable",
+      expectedStatus: "unavailable",
+      setup: (state) => {
+        state.listAssignmentOptionsImpl = async () => ({
+          ok: true,
+          data: { templates: [{ template_id: "" }], teams: [], users: [] },
+        });
+      },
+    },
+  ];
+
+  for (const tc of failureCases) {
+    const { state, navModule, registryCapability, submissionRepoModule, assignmentRepoModule } = createHarness();
+    state.leaveAccessImpl = async () => ({
+      ok: true,
+      data: { can_access: true, can_manage_config: false, can_view_monthly_report: false },
+    });
+    tc.setup(state, submissionRepoModule, assignmentRepoModule);
+
+    await withEnv({ WORK_REPORTS_API_ENABLED: "true", DIRECT_ENTRY_API_ENABLED: "true" }, async () => {
+      await runInRequest(async () => {
+        const projection = await navModule.resolveNavActorForAppShell({ directEntryEnabled: true });
+        const probe = await navModule.resolveWorkReportAssignmentAccessForRequest();
+        assert.ok(projection, `${tc.name}: AppShell projection must still render`);
+        assert.equal(projection.hasWorkReportAssignmentAccess, undefined, `${tc.name}: nav flag fails closed`);
+        assert.equal(registryCapability.workReportAssignmentPredicate(projection), false, `${tc.name}: predicate false`);
+        assert.equal(probe.hasAssignmentAccess, false, `${tc.name}: page probe false`);
+        assert.equal(probe.status, tc.expectedStatus, `${tc.name}: exact page status`);
+        assert.equal(projection.hasLeaveManagementAccess, true, `${tc.name}: Leave probe unaffected`);
+      });
+    });
+  }
+
+  // Zero cross-user / cross-request leakage for assignment access probe
+  const { state, navModule } = createHarness();
+  const delegatedUsers = new Set([USER_A.app_user_id]);
+  state.listAssignmentOptionsImpl = async (input) =>
+    delegatedUsers.has(input.app_user_id)
+      ? {
+          ok: true,
+          data: {
+            templates: [{ template_id: "11111111-1111-4111-8111-111111111111", template_code: "T1", display_name: "T1", default_frequency: "DAILY", current_published_version_id: "22222222-2222-4222-8222-222222222222" }],
+            teams: [{ team_id: "33333333-3333-4333-8333-333333333333", code: "TEAM_A", display_name: "Team A" }],
+            users: [],
+          },
+        }
+      : { ok: false, kind: "denied" };
+
+  await withEnv({ WORK_REPORTS_API_ENABLED: "true", DIRECT_ENTRY_API_ENABLED: "false" }, async () => {
+    state.actorResult = { ok: true, actor: USER_A };
+    const a1 = await runInRequest(() => navModule.resolveNavActorForAppShell({ directEntryEnabled: true }));
+    assert.equal(a1.hasWorkReportAssignmentAccess, true);
+
+    state.actorResult = { ok: true, actor: USER_B };
+    const b1 = await runInRequest(() => navModule.resolveNavActorForAppShell({ directEntryEnabled: true }));
+    assert.equal(b1.hasWorkReportAssignmentAccess, undefined);
+
+    delegatedUsers.delete(USER_A.app_user_id);
+    state.actorResult = { ok: true, actor: USER_A };
+    const a2 = await runInRequest(() => navModule.resolveNavActorForAppShell({ directEntryEnabled: true }));
+    assert.equal(a2.hasWorkReportAssignmentAccess, undefined);
+    assert.deepEqual(
+      state.assignmentOptionsCalls.map((c) => c.app_user_id),
       [USER_A.app_user_id, USER_B.app_user_id, USER_A.app_user_id],
     );
   });

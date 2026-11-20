@@ -1743,4 +1743,59 @@ test("WP8D-2: all 6 Work Reports predicates enforce strict paired effective_gran
     assert.equal(workReportDelegationPredicate(badActor), false, `${label}: delegate`);
     assert.equal(workReportsNavPredicate(badActor), false, `${label}: nav`);
   }
+
+  // WP8D-2 R1: Server-projected delegated report_assign boolean opens ONLY assignment + Work Reports nav
+  // without expanding template/review/analytics/view/delegation predicates.
+  const pureAssignDelegate = {
+    capabilities: [],
+    scopes: [{ kind: "own" }],
+    effective_grants: [],
+    hasWorkReportAssignmentAccess: true,
+  };
+  assert.equal(workReportAssignmentPredicate(pureAssignDelegate), true);
+  assert.equal(workReportsNavPredicate(pureAssignDelegate), true);
+  assert.equal(workReportTemplateManagePredicate(pureAssignDelegate), false);
+  assert.equal(workReportViewPredicate(pureAssignDelegate), false);
+  assert.equal(workReportAnalyticsPredicate(pureAssignDelegate), false);
+  assert.equal(workReportReviewPredicate(pureAssignDelegate), false);
+  assert.equal(workReportDelegationPredicate(pureAssignDelegate), false);
+  assert.equal(
+    decideNavEntryVisibility({
+      capabilityKey: "work_report_assignments",
+      actor: pureAssignDelegate,
+      viewport: "desktop",
+      entryVisibleInViewport: true,
+    }),
+    true,
+  );
+  assert.equal(
+    decideNavEntryVisibility({
+      capabilityKey: "work_report_assignments",
+      actor: pureAssignDelegate,
+      viewport: "mobile",
+      entryVisibleInViewport: true,
+    }),
+    true,
+  );
+  assert.equal(
+    decideNavEntryVisibility({
+      capabilityKey: "work_reports",
+      actor: pureAssignDelegate,
+      viewport: "desktop",
+      entryVisibleInViewport: true,
+    }),
+    true,
+  );
+
+  // Non-true values must fail closed.
+  for (const badFlag of [false, undefined, null, "true", 1]) {
+    const nonTrue = {
+      capabilities: [],
+      scopes: [{ kind: "own" }],
+      effective_grants: [],
+      hasWorkReportAssignmentAccess: badFlag,
+    };
+    assert.equal(workReportAssignmentPredicate(nonTrue), false);
+    assert.equal(workReportsNavPredicate(nonTrue), false);
+  }
 });

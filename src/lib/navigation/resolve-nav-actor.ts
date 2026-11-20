@@ -32,6 +32,7 @@ import {
   EMPTY_CHANGE_REQUEST_HISTORICAL_PROBE,
   probeHistoricalChangeRequestAccess,
   type ChangeRequestHistoricalAccessProbe,
+  type WorkReportAssignmentAccessStatus,
 } from "@/lib/auth/direct-entry-page-access";
 import { getDirectEntryActor } from "@/lib/auth/direct-entry-session";
 import { resolveSessionWithBoundedRetry } from "@/lib/auth/direct-entry-session-retry";
@@ -40,6 +41,7 @@ import { createChangeRequestReadRepository } from "@/lib/direct-entry/change-req
 import { createLeaveRepository } from "@/lib/leave/leave-repository";
 import { createSalaryAdvanceRepository } from "@/lib/salary-advance/salary-advance-repository";
 import { createVendorFinanceRepository } from "@/lib/vendor-finance/vendor-finance-repository";
+import { createAssignmentRepository } from "@/lib/work-reports/assignment-repository";
 import { createSubmissionRepository } from "@/lib/work-reports/submission-repository";
 import type { ActorResolution } from "@/lib/auth/direct-entry-v2";
 import {
@@ -49,6 +51,7 @@ import {
   type NavActorProjection,
   salaryAdvanceNavPredicate,
   vendorFinanceRecordNavPredicate,
+  workReportAssignmentPredicate,
   workReportsNavPredicate,
 } from "@/lib/navigation/registry-capability";
 
@@ -201,6 +204,94 @@ export const resolveSalaryAdvanceAccessForRequest = cache(
   },
 );
 
+export type WorkReportAssignmentAccessProbe = {
+  status: WorkReportAssignmentAccessStatus;
+  hasAssignmentAccess: boolean;
+};
+
+/**
+ * WP8D-2 R1: Request-scoped read-only server projection for effective `report_assign`
+ * authority (including delegated `report_assign` without expanding `effective_grants`,
+ * preserving WP5 R3 and the 12/13-key actor RPC contract).
+ *
+ * Reuses the existing `STABLE` read-only SQL reader (`work_report_list_assignment_options`
+ * via `createAssignmentRepository().listOptions(..., team_id: null)`), short-circuits when
+ * direct paired `report_assign` or Full Admin is already present, and fails closed on any
+ * denied, malformed, or unavailable outcome.
+ */
+export const resolveWorkReportAssignmentAccessForRequest = cache(
+  async (): Promise<WorkReportAssignmentAccessProbe> => {
+    try {
+      const actor = await resolveActorForRequest();
+      if (!actor.ok) {
+        return { status: "denied", hasAssignmentAccess: false };
+      }
+      if (workReportAssignmentPredicate(actor.actor)) {
+        return { status: "allowed", hasAssignmentAccess: true };
+      }
+      const options = await createAssignmentRepository().listOptions({
+        auth_subject: actor.actor.auth_subject,
+        app_user_id: actor.actor.app_user_id,
+        team_id: null,
+      });
+      if (options?.ok === true) {
+        const templates = options.data?.templates;
+        const teams = options.data?.teams;
+        if (!Array.isArray(templates) || !Array.isArray(teams)) {
+          return { status: "unavailable", hasAssignmentAccess: false };
+        }
+        if (templates.length === 0) {
+          return { status: "denied", hasAssignmentAccess: false };
+        }
+        const allValidTemplates = templates.every(
+          (item) =>
+            item !== null &&
+            typeof item === "object" &&
+            typeof item.template_id === "string" &&
+            item.template_id.trim().length > 0,
+        );
+        return allValidTemplates
+          ? { status: "allowed", hasAssignmentAccess: true }
+          : { status: "unavailable", hasAssignmentAccess: false };
+      }
+      if (options && options.ok === false && options.kind === "denied") {
+        return { status: "denied", hasAssignmentAccess: false };
+      }
+      return { status: "unavailable", hasAssignmentAccess: false };
+    } catch {
+      // Fail closed without disrupting AppShell rendering.
+      return { status: "unavailable", hasAssignmentAccess: false };
+    }
+  },
+);
+
+export const resolveWorkReportShellActorForRequest = cache(
+  async (): Promise<NavActorProjection | null> => {
+    const actor = await resolveActorForRequest();
+    if (!actor.ok) return null;
+    const projection: NavActorProjection = {
+      capabilities: actor.actor.capabilities,
+      scopes: actor.actor.scopes.map((scope) => ({ kind: scope.kind })),
+      ...(actor.actor.effective_grants !== undefined
+        ? { effective_grants: actor.actor.effective_grants }
+        : {}),
+      ...(actor.actor.effective_report_review_scopes !== undefined
+        ? { effective_report_review_scopes: actor.actor.effective_report_review_scopes }
+        : {}),
+    };
+    if (
+      process.env.WORK_REPORTS_API_ENABLED === "true" &&
+      !workReportAssignmentPredicate(projection)
+    ) {
+      const assignmentAccess = await resolveWorkReportAssignmentAccessForRequest();
+      if (assignmentAccess.hasAssignmentAccess) {
+        projection.hasWorkReportAssignmentAccess = true;
+      }
+    }
+    return projection;
+  },
+);
+
 export const resolveWorkReportObligationsAccessForRequest = cache(
   async (): Promise<{
     hasActiveObligations: boolean;
@@ -250,10 +341,18 @@ export const resolveNavActorForAppShell = cache(
         : {}),
       hasAttendanceDepartmentHeadAccess: hasActiveDepartmentHeadRole(actor.actor),
     };
-    if (process.env.WORK_REPORTS_API_ENABLED === "true" && !workReportsNavPredicate(projection)) {
-      const obligations = await resolveWorkReportObligationsAccessForRequest();
-      if (obligations.hasActiveObligations) {
-        projection.hasWorkReportObligations = true;
+    if (process.env.WORK_REPORTS_API_ENABLED === "true") {
+      if (!workReportAssignmentPredicate(projection)) {
+        const assignmentAccess = await resolveWorkReportAssignmentAccessForRequest();
+        if (assignmentAccess.hasAssignmentAccess) {
+          projection.hasWorkReportAssignmentAccess = true;
+        }
+      }
+      if (!workReportsNavPredicate(projection)) {
+        const obligations = await resolveWorkReportObligationsAccessForRequest();
+        if (obligations.hasActiveObligations) {
+          projection.hasWorkReportObligations = true;
+        }
       }
     }
     if (

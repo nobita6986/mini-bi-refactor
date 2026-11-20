@@ -8,7 +8,10 @@ import {
   workReportAnalyticsPredicate,
   workReportViewPredicate,
 } from "@/lib/navigation/registry-capability";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import {
+  resolveActorForRequest,
+  resolveWorkReportShellActorForRequest,
+} from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Theo dõi báo cáo — Mini BI" };
@@ -25,9 +28,12 @@ export default async function WorkReportAnalyticsPage() {
     case "ALLOW": {
       const canViewAnalytics = actor?.ok === true && workReportAnalyticsPredicate(actor.actor);
       const canViewSubmissions = actor?.ok === true && workReportViewPredicate(actor.actor);
+      const shellActor = await resolveWorkReportShellActorForRequest().catch(() =>
+        actor?.ok ? actor.actor : null,
+      );
       return (
         <WorkReportsShell
-          actor={actor?.ok ? actor.actor : null}
+          actor={shellActor}
           active="analytics"
           title="Theo dõi báo cáo"
           description="Theo dõi tổng quan tiến độ, chỉ tiêu KPI và danh sách bài nộp trong phạm vi được cấp quyền."

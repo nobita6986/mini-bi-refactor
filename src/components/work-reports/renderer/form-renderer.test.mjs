@@ -63,10 +63,13 @@ test("assignment manager provides Tạo đợt giao form, pre-confirmation summa
   assert.match(source, /Các báo cáo đã nộp và toàn bộ lịch sử bài nộp được giữ nguyên, không bị xóa/);
 });
 
-test("assignment page resolves the request actor and requires report_assign scope server-side", async () => {
+test("assignment page resolves the request actor and requires report_assign scope server-side (including delegated read-only probe)", async () => {
   const source = await readFile(assignmentPagePath, "utf8");
   assert.match(source, /resolveActorForRequest\(\)/);
-  assert.match(source, /decideWorkReportAssignmentsPageAccess\(\{ actor \}\)/);
+  assert.match(source, /resolveWorkReportAssignmentAccessForRequest\(\)/);
+  assert.match(source, /resolveWorkReportShellActorForRequest\(\)/);
+  assert.match(source, /decideWorkReportAssignmentsPageAccess\(\{[\s\S]*actor,[\s\S]*hasWorkReportAssignmentAccess:[\s\S]*assignmentAccessStatus:/);
+  assert.match(source, /case "TEMPORARY_UNAVAILABLE": return <TemporaryUnavailable \/>/);
   assert.match(source, /case "ACCESS_DENIED": return <AccessDenied \/>/);
   assert.doesNotMatch(source, /actor\.(?:role|title)|role_name|job_title/i);
 });

@@ -280,3 +280,21 @@ test("WP8D nav readonly: resolveWorkReportObligationsAccessForRequest is wrapped
   assert.match(resolveNavActor, /resolveWorkReportObligationsAccessForRequest\(\)/);
   assert.match(resolveNavActor, /projection\.hasWorkReportObligations\s*=\s*true/);
 });
+
+test("WP8D-2 R1: resolveWorkReportAssignmentAccessForRequest & resolveWorkReportShellActorForRequest are wrapped by React cache(), reuse read-only listOptions, and avoid cross-request cache", () => {
+  assert.match(
+    resolveNavActor,
+    /export\s+const\s+resolveWorkReportAssignmentAccessForRequest\s*=\s*cache\(/,
+  );
+  assert.match(
+    resolveNavActor,
+    /export\s+const\s+resolveWorkReportShellActorForRequest\s*=\s*cache\(/,
+  );
+  assert.match(
+    resolveNavActor,
+    /createAssignmentRepository\(\)\.listOptions\(/,
+  );
+  assert.match(resolveNavActor, /!workReportAssignmentPredicate\(projection\)/);
+  assert.match(resolveNavActor, /projection\.hasWorkReportAssignmentAccess\s*=\s*true/);
+  assert.match(registryCapability, /hasWorkReportAssignmentAccess\?:\s*boolean;/);
+});
