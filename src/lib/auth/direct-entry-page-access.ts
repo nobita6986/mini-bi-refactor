@@ -22,6 +22,7 @@ import {
   workReportAssignmentPredicate,
   workReportTemplateManagePredicate,
   workReportsNavPredicate,
+  workforceOffboardingNavPredicate,
   workerOperationsNavPredicate,
   workerEditHistoryNavPredicate,
 } from "../navigation/registry-capability.ts";
@@ -266,16 +267,16 @@ export function decideWorkReportAnalyticsPageAccess(input: {
 }
 
 /**
- * Offboarding / unemployed worker report visibility hint. The RPC still enforces the
- * exact authority (Full Admin triple, BoD entry_privileged_edit@all, or current Team
- * Leader); this predicate only decides whether the page/nav link is shown.
+ * Offboarding / unemployed worker report visibility hint (WP8B-2 paired via
+ * `workforceOffboardingNavPredicate`). The RPC (`direct_entry_offboarding_authority`)
+ * still enforces exact authority (Full Admin triple at ALL, BoD entry_privileged_edit
+ * at ALL, or current Team Leader paired on CONTEXT_TEAM).
  */
-export function canViewOffboardingReport(actor: NavActorProjection | null): boolean {
-  if (!actor) return false;
-  if (adminSecurityNavPredicate(actor)) return true;
-  if (actor.capabilities.includes("entry_privileged_edit") && actor.scopes.some((scope) => scope.kind === "all")) return true;
-  if (actor.capabilities.includes("team_manager_assign") && actor.scopes.some((scope) => scope.kind === "team")) return true;
-  return false;
+export function canViewOffboardingReport(
+  actor: (NavActorProjection & { enabled?: boolean }) | null,
+): boolean {
+  if (!actor || actor.enabled === false) return false;
+  return workforceOffboardingNavPredicate(actor);
 }
 
 export function decideWorkforceOffboardingPageAccess(input: {

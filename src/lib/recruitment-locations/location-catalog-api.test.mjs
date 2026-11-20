@@ -632,3 +632,219 @@ test("6. Query and request parsers enforce strict field validation", () => {
     false,
   );
 });
+
+test("7. WP8B-2: canManageRecruitmentLocations and API routes enforce paired @ ALL when effective_grants is present", async () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  const allowedPairedActors = [
+    {
+      label: "canonical ADMIN triple @ ALL",
+      actor: {
+        enabled: true,
+        capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+        scopes: [{ kind: "all" }],
+        effective_grants: [
+          { capability: "entry_admin", scope_kind: "ALL", scope_id: null },
+          { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null },
+          { capability: "team_master_manage", scope_kind: "ALL", scope_id: null },
+        ],
+      },
+    },
+    {
+      label: "canonical BoD entry_privileged_edit @ ALL",
+      actor: {
+        enabled: true,
+        capabilities: ["entry_privileged_edit"],
+        scopes: [{ kind: "all" }],
+        effective_grants: [
+          { capability: "entry_privileged_edit", scope_kind: "ALL", scope_id: null },
+        ],
+      },
+    },
+    {
+      label: "canonical BoD report_analytics_view + report_view @ ALL",
+      actor: {
+        enabled: true,
+        capabilities: ["report_analytics_view", "report_view"],
+        scopes: [{ kind: "all" }],
+        effective_grants: [
+          { capability: "report_analytics_view", scope_kind: "ALL", scope_id: null },
+          { capability: "report_view", scope_kind: "ALL", scope_id: null },
+        ],
+      },
+    },
+  ];
+
+  for (const { label, actor } of allowedPairedActors) {
+    assert.equal(canManageRecruitmentLocations(actor), true, `Expected ALLOW for ${label}`);
+    const deps = makeDeps(
+      { ok: true, data: PROVINCE_LIST },
+      {
+        actor: {
+          ok: true,
+          actor: {
+            auth_subject: ACTOR.auth_subject,
+            app_user_id: ACTOR.app_user_id,
+            ...actor,
+          },
+        },
+      },
+    );
+    const res = await listProvincesCatalog(
+      new Request("https://app.test/api/admin/catalog/provinces"),
+      "true",
+      deps.dependencies,
+    );
+    assert.equal(res.status, 200, `Expected HTTP 200 for ${label}`);
+    assert.equal(deps.calls.rpc.length, 1);
+  }
+
+  const deniedPairedActors = [
+    {
+      label: "dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM (cross-scope escalation blocked)",
+      actor: {
+        enabled: true,
+        capabilities: [
+          "recruiter_master_manage",
+          "team_master_manage",
+          "catalog_master_manage",
+          "audit_view",
+          "document_view",
+          "entry_team",
+          "team_manager_assign",
+          "report_view",
+          "report_analytics_view",
+          "report_assign",
+        ],
+        scopes: [{ kind: "all" }, { kind: "team" }],
+        effective_grants: [
+          { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null },
+          { capability: "team_master_manage", scope_kind: "ALL", scope_id: null },
+          { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null },
+          { capability: "audit_view", scope_kind: "ALL", scope_id: null },
+          { capability: "document_view", scope_kind: "ALL", scope_id: null },
+          { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+          { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+          { capability: "report_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+          { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+          { capability: "report_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+        ],
+      },
+    },
+    {
+      label: "cross-scope entry_privileged_edit @ CONTEXT_TEAM + catalog @ ALL",
+      actor: {
+        enabled: true,
+        capabilities: ["entry_privileged_edit", "catalog_master_manage"],
+        scopes: [{ kind: "all" }, { kind: "team" }],
+        effective_grants: [
+          { capability: "entry_privileged_edit", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+          { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null },
+        ],
+      },
+    },
+    {
+      label: "split BoD reports (report_analytics_view @ CONTEXT_TEAM + report_view @ ALL)",
+      actor: {
+        enabled: true,
+        capabilities: ["report_analytics_view", "report_view"],
+        scopes: [{ kind: "all" }, { kind: "team" }],
+        effective_grants: [
+          { capability: "report_analytics_view", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1 },
+          { capability: "report_view", scope_kind: "ALL", scope_id: null },
+        ],
+      },
+    },
+    {
+      label: "malformed ALL grant carrying non-null scope_id",
+      actor: {
+        enabled: true,
+        capabilities: ["entry_privileged_edit"],
+        scopes: [{ kind: "all" }],
+        effective_grants: [
+          { capability: "entry_privileged_edit", scope_kind: "ALL", scope_id: TEAM_1 },
+        ],
+      },
+    },
+    {
+      label: "managed stale legacy arrays (effective_grants = [])",
+      actor: {
+        enabled: true,
+        capabilities: [
+          "entry_admin",
+          "recruiter_master_manage",
+          "team_master_manage",
+          "entry_privileged_edit",
+          "report_analytics_view",
+          "report_view",
+        ],
+        scopes: [{ kind: "all" }],
+        effective_grants: [],
+      },
+    },
+    {
+      label: "disabled actor even with valid paired grants",
+      actor: {
+        enabled: false,
+        capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+        scopes: [{ kind: "all" }],
+        effective_grants: [
+          { capability: "entry_admin", scope_kind: "ALL", scope_id: null },
+          { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null },
+          { capability: "team_master_manage", scope_kind: "ALL", scope_id: null },
+        ],
+      },
+    },
+    {
+      label: "disabled legacy actor without effective_grants",
+      actor: {
+        enabled: false,
+        capabilities: ["entry_privileged_edit"],
+        scopes: [{ kind: "all" }],
+      },
+    },
+    {
+      label: "non-array effective_grants (null) fails closed without legacy fallback",
+      actor: {
+        enabled: true,
+        capabilities: ["entry_privileged_edit"],
+        scopes: [{ kind: "all" }],
+        effective_grants: null,
+      },
+    },
+    {
+      label: "malformed effective_grants entries [null, undefined, string] fail closed without throwing",
+      actor: {
+        enabled: true,
+        capabilities: ["entry_privileged_edit"],
+        scopes: [{ kind: "all" }],
+        effective_grants: [null, undefined, "entry_privileged_edit"],
+      },
+    },
+  ];
+
+  for (const { label, actor } of deniedPairedActors) {
+    assert.equal(canManageRecruitmentLocations(actor), false, `Expected DENY for ${label}`);
+    const deps = makeDeps(
+      { ok: true, data: PROVINCE_LIST },
+      {
+        actor: {
+          ok: true,
+          actor: {
+            auth_subject: ACTOR.auth_subject,
+            app_user_id: ACTOR.app_user_id,
+            ...actor,
+          },
+        },
+      },
+    );
+    const res = await listProvincesCatalog(
+      new Request("https://app.test/api/admin/catalog/provinces"),
+      "true",
+      deps.dependencies,
+    );
+    assert.equal(res.status, 403, `Expected HTTP 403 for ${label}`);
+    assert.deepEqual(await res.json(), { ok: false, code: "LOCATION_CATALOG_DENIED" });
+    assert.equal(deps.calls.rpc.length, 0, `RPC must not run for denied ${label}`);
+  }
+});
