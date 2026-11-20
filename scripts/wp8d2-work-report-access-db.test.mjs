@@ -1,0 +1,1299 @@
+/**
+ * WP8D-2 — Work Reports Subsystem Authorization Migration to WP5 Paired Access
+ * PGlite Database, Anti-Drift Probe Oracle, and End-to-End SQL -> Actor -> TS Suite.
+ */
+import assert from "node:assert/strict";
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+
+import { PGlite } from "@electric-sql/pglite";
+import {
+  migrationChecksum,
+  migrationSqlForTransaction,
+} from "./lib/migration-validation.mjs";
+import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
+import { resolveActor } from "../src/lib/auth/direct-entry-v2.ts";
+import {
+  decideWorkReportAnalyticsPageAccess,
+  decideWorkReportAssignmentsPageAccess,
+  decideWorkReportTemplatesPageAccess,
+  decideWorkReportsPageAccess,
+} from "../src/lib/auth/direct-entry-page-access.ts";
+import {
+  workReportAnalyticsPredicate,
+  workReportAssignmentPredicate,
+  workReportDelegationPredicate,
+  workReportReviewPredicate,
+  workReportTemplateManagePredicate,
+  workReportViewPredicate,
+  workReportsNavPredicate,
+} from "../src/lib/navigation/registry-capability.ts";
+import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
+import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
+
+const MIGRATION_DIR = path.resolve("supabase/migrations");
+const WP8D2_MIGRATION_NAME = "20261120170000_wp8d2_work_report_access.sql";
+const WP8C1_MIGRATION_NAME = "20261120150000_wp8c1_contextual_tl_pm_guards.sql";
+
+const PROLOGUE =
+  "create role anon; create role authenticated; create role service_role;" +
+  " create schema auth; create table auth.users (id uuid primary key, email text);";
+
+const TEAM_A = "58d20000-0000-4000-8000-00000000000a";
+const TEAM_B = "58d20000-0000-4000-8000-00000000000b";
+const TEAM_INACTIVE = "58d20000-0000-4000-8000-00000000000c";
+
+const OWNER = { auth: "18d20000-0000-4000-8000-000000000001", app: "28d20000-0000-4000-8000-000000000001", email: "nobita6986@gmail.com", name: "Owner WP8D2" };
+const LUANPT = { auth: "18d20000-0000-4000-8000-000000000002", app: "28d20000-0000-4000-8000-000000000002", email: "luanpt@hrpartner.vn", name: "Luan PT" };
+const LIENVU = { auth: "18d20000-0000-4000-8000-000000000003", app: "28d20000-0000-4000-8000-000000000003", email: "lienvu@hrpartner.vn", name: "Lien Vu" };
+const NGATTT = { auth: "18d20000-0000-4000-8000-000000000004", app: "28d20000-0000-4000-8000-000000000004", email: "ngattt@hrpartner.vn", name: "Nga TTT" };
+
+const TL_A = { auth: "18d20000-0000-4000-8000-000000000005", app: "28d20000-0000-4000-8000-000000000005", recruiter: "38d20000-0000-4000-8000-000000000005", email: "tla.wp8d2@hrpartner.vn", name: "Leader A Mirror Cleared" };
+const HR_TL_A = { auth: "18d20000-0000-4000-8000-000000000006", app: "28d20000-0000-4000-8000-000000000006", recruiter: "38d20000-0000-4000-8000-000000000006", email: "hrtla.wp8d2@hrpartner.vn", name: "Dual HR Operator + TL A" };
+const STAFF_A1 = { auth: "18d20000-0000-4000-8000-000000000007", app: "28d20000-0000-4000-8000-000000000007", recruiter: "38d20000-0000-4000-8000-000000000007", email: "staffa1.wp8d2@hrpartner.vn", name: "Staff A1" };
+const STAFF_A2 = { auth: "18d20000-0000-4000-8000-000000000008", app: "28d20000-0000-4000-8000-000000000008", recruiter: "38d20000-0000-4000-8000-000000000008", email: "staffa2.wp8d2@hrpartner.vn", name: "Staff A2 Delegate" };
+const STAFF_B1 = { auth: "18d20000-0000-4000-8000-000000000009", app: "28d20000-0000-4000-8000-000000000009", recruiter: "38d20000-0000-4000-8000-000000000009", email: "staffb1.wp8d2@hrpartner.vn", name: "Staff B1" };
+const VIEW_ANALYTICS_ONLY = { auth: "18d20000-0000-4000-8000-000000000010", app: "28d20000-0000-4000-8000-000000000010", email: "vaonly.wp8d2@hrpartner.vn", name: "View + Analytics Only" };
+const VIEW_ONLY = { auth: "18d20000-0000-4000-8000-000000000011", app: "28d20000-0000-4000-8000-000000000011", email: "viewonly.wp8d2@hrpartner.vn", name: "View Only" };
+const ANALYTICS_ONLY = { auth: "18d20000-0000-4000-8000-000000000012", app: "28d20000-0000-4000-8000-000000000012", email: "anonly.wp8d2@hrpartner.vn", name: "Analytics Only" };
+const CROSS_AV = { auth: "18d20000-0000-4000-8000-000000000013", app: "28d20000-0000-4000-8000-000000000013", email: "crossav.wp8d2@hrpartner.vn", name: "Analytics ALL + View Team A" };
+const OWN_VIEWER = { auth: "18d20000-0000-4000-8000-000000000014", app: "28d20000-0000-4000-8000-000000000014", email: "ownview.wp8d2@hrpartner.vn", name: "Own Scope Report View" };
+const TEAM_FORM_MGR = { auth: "18d20000-0000-4000-8000-000000000015", app: "28d20000-0000-4000-8000-000000000015", email: "teamform.wp8d2@hrpartner.vn", name: "Team Scope Form Manage" };
+const DELEG_GRANTOR = { auth: "18d20000-0000-4000-8000-000000000016", app: "28d20000-0000-4000-8000-000000000016", email: "grantor.wp8d2@hrpartner.vn", name: "Direct Delegation Grantor" };
+const DISJOINT_DELEG = { auth: "18d20000-0000-4000-8000-000000000017", app: "28d20000-0000-4000-8000-000000000017", email: "disjoint.wp8d2@hrpartner.vn", name: "Disjoint Team Delegator" };
+const ADMIN_AND_TL = { auth: "18d20000-0000-4000-8000-000000000018", app: "28d20000-0000-4000-8000-000000000018", recruiter: "38d20000-0000-4000-8000-000000000018", email: "admintl.wp8d2@hrpartner.vn", name: "Admin Plus TL B" };
+const SHARED_ACCT = { auth: "18d20000-0000-4000-8000-000000000019", app: "28d20000-0000-4000-8000-000000000019", email: "shared.wp8d2@hrpartner.vn", name: "Shared Account" };
+const DISABLED_ADMIN = { auth: "18d20000-0000-4000-8000-000000000020", app: "28d20000-0000-4000-8000-000000000020", email: "disadm.wp8d2@hrpartner.vn", name: "Disabled Admin" };
+const INACTIVE_TL = { auth: "18d20000-0000-4000-8000-000000000021", app: "28d20000-0000-4000-8000-000000000021", recruiter: "38d20000-0000-4000-8000-000000000021", email: "inacttl.wp8d2@hrpartner.vn", name: "Inactive Team TL" };
+const NO_TEAM_USER = { auth: "18d20000-0000-4000-8000-000000000022", app: "28d20000-0000-4000-8000-000000000022", email: "noteam.wp8d2@hrpartner.vn", name: "No Team Employee" };
+
+const ADMIN_SEED_CAPS = [
+  "entry_admin", "entry_team", "entry_own", "entry_create", "submission_create",
+  "entry_privileged_edit", "entry_restore", "recruiter_master_manage", "team_master_manage",
+  "audit_view", "worker_edit_history_view", "document_upload", "document_view",
+  "employment_status.review", "employment_status.apply", "change_request_create",
+  "change_review", "employment_status.request", "duplicate_cccd_withdraw",
+];
+const RECRUITER_SEED_CAPS = [
+  "entry_create", "entry_own", "submission_create", "document_upload",
+  "document_view", "change_request_create", "employment_status.request",
+];
+
+let keySeq = 1;
+const nextKey = (prefix) => `wp8d2_${prefix}_${keySeq++}`;
+const nextUuid = () => `98d20000-0000-4000-8000-${(keySeq++).toString(16).padStart(12, "0")}`;
+
+async function loadMigrations() {
+  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  return Promise.all(
+    names.map(async (name) => ({
+      name,
+      sql: await readFile(path.join(MIGRATION_DIR, name), "utf8"),
+    })),
+  );
+}
+
+async function createDb({ stopBefore = null, upToInclusive = null } = {}) {
+  const db = new PGlite();
+  await db.exec(PROLOGUE);
+  const migrations = await loadMigrations();
+  let slice = migrations;
+  if (stopBefore) {
+    const idx = migrations.findIndex((m) => m.name === stopBefore);
+    assert.ok(idx >= 0, `migration ${stopBefore} must exist`);
+    slice = migrations.slice(0, idx);
+  } else if (upToInclusive) {
+    const idx = migrations.findIndex((m) => m.name === upToInclusive);
+    assert.ok(idx >= 0, `migration ${upToInclusive} must exist`);
+    slice = migrations.slice(0, idx + 1);
+  }
+  for (const m of slice) {
+    await db.exec(m.sql);
+  }
+  return { db, migrations };
+}
+
+async function seedBaseUser(db, user, { enabled = true, accountType = "NORMAL", caps = [], scopes = [], teamId = null } = {}) {
+  await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [user.auth, user.email]);
+  await db.query(
+    `insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled, account_type)
+     values ($1::uuid, $2::uuid, $3, $4, $5)`,
+    [user.app, user.auth, user.name, enabled, accountType],
+  );
+  if (user.recruiter) {
+    const code = user.email.split("@")[0].replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 16);
+    await db.query(
+      `insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active)
+       values ($1::uuid, $2, $3, 'STAFF', true)`,
+      [user.recruiter, user.name, code],
+    );
+    await db.query(
+      `insert into public.recruiter_provider_memberships (recruiter_id, provider_type, valid_from, is_current)
+       values ($1::uuid, 'hrp', '2026-01-01', true)`,
+      [user.recruiter],
+    );
+    await db.query(
+      `insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current)
+       values ($1::uuid, $2::uuid, true, '2026-01-01', true)`,
+      [user.app, user.recruiter],
+    );
+    if (teamId) {
+      await db.query(
+        `insert into public.recruiter_team_memberships (recruiter_id, team_id, valid_from, is_current)
+         values ($1::uuid, $2::uuid, '2026-01-01', true)`,
+        [user.recruiter, teamId],
+      );
+    }
+  }
+  for (const cap of caps) {
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, $2, '2026-01-01', true)`,
+      [user.app, cap],
+    );
+  }
+  for (const sc of scopes) {
+    await db.query(
+      `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current)
+       values ($1::uuid, $2, $3::uuid, '2026-01-01', true)`,
+      [user.app, sc.kind, sc.teamId ?? null],
+    );
+  }
+}
+
+async function clearLegacyMirrors(db, appUserIds) {
+  await db.query(
+    `delete from public.work_report_team_leader_capability_grants x
+      where exists (
+        select 1 from public.direct_entry_capability_grants g
+         where g.grant_id = x.capability_grant_id
+           and g.app_user_id = any($1::uuid[])
+      )`,
+    [appUserIds],
+  );
+  await db.query("select pg_catalog.set_config('direct_entry.team_leader_marker', 'on', false)");
+  await db.query("delete from public.direct_entry_capability_grants where app_user_id = any($1::uuid[])", [appUserIds]);
+  await db.query("delete from public.direct_entry_scope_grants where app_user_id = any($1::uuid[])", [appUserIds]);
+  await db.query("select pg_catalog.set_config('direct_entry.team_leader_marker', '', false)");
+}
+
+async function resolveViaRealRpc(db, authSubject) {
+  const { rows } = await db.query(
+    "select public.direct_entry_resolve_actor_context($1::uuid) as ctx",
+    [authSubject],
+  );
+  const rawContext = rows[0]?.ctx ?? null;
+  const resolution = await resolveActor({
+    session: {
+      auth_subject: authSubject,
+      provider: "supabase",
+      authenticated_at: "2026-11-20T00:00:00.000Z",
+    },
+    repository: {
+      loadByAuthSubject: async () => rawContext,
+    },
+    at: "2026-11-20T00:00:00.000Z",
+  });
+  return { rawContext, resolution };
+}
+
+async function createPublishedTemplate(db, actor, code, { requiresReview = true } = {}) {
+  const schema = RECRUITMENT_DAILY_TEMPLATE_SCHEMA;
+  const metrics = buildWorkReportMetricContract(schema);
+  const { rows: [{ res: created }] } = await db.query(
+    `select public.work_report_create_template(
+       $1::uuid, $2::uuid, $3, $3, 'WP8D2 Template', 'DAILY', $4::jsonb, $5::jsonb, $6
+     ) as res`,
+    [actor.auth, actor.app, code, JSON.stringify(schema), JSON.stringify(metrics), nextKey("tpl")],
+  );
+  if (requiresReview) {
+    await db.query(
+      "update public.work_report_template_versions set requires_review = true where version_id = $1::uuid",
+      [created.draft_version_id],
+    );
+  }
+  await db.query(
+    "select public.work_report_publish_template($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6)",
+    [actor.auth, actor.app, created.template_id, created.draft_version_id, created.version, nextKey("pub")],
+  );
+  return created;
+}
+
+test("WP8D-2 [1/5]: Migration #230 hygiene, atomic rollback zero drift, exact 337 service_role RPCs, STABLE probe chain & role catalog invariants", async () => {
+  const { db, migrations } = await createDb({ stopBefore: WP8D2_MIGRATION_NAME });
+  try {
+    const wp8d2 = migrations.find((m) => m.name === WP8D2_MIGRATION_NAME);
+    assert.ok(wp8d2, "WP8D-2 migration must exist");
+    assert.equal(wp8d2.sql.includes("@"), false, "Migration must not contain @ character");
+    assert.equal(/savepoint/i.test(wp8d2.sql), false, "Migration must not contain literal SAVEPOINT");
+    assert.equal(wp8d2.sql.includes("'40001'"), false, "Migration must use PT409 (never PostgREST-retried 40001) for OCC conflicts");
+    const checksum = migrationChecksum(wp8d2.sql);
+    assert.match(checksum, /^[0-9a-f]{64}$/);
+    assert.equal(migrationChecksum(wp8d2.sql.replace(/\n/g, "\r\n")), checksum);
+
+    const { rows: [{ cnt: beforeSrCount }] } = await db.query(
+      `select count(*)::int as cnt
+         from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public'
+          and has_function_privilege('service_role', p.oid, 'EXECUTE')`,
+    );
+    assert.equal(beforeSrCount, 337, "Baseline #229 must have exact 337 service_role RPCs");
+
+    await db.exec(`
+      create table if not exists public.schema_migrations (
+        version text primary key,
+        checksum text not null,
+        applied_at timestamptz not null default now()
+      );
+    `);
+
+    const failingSql = `${migrationSqlForTransaction(wp8d2.sql)}\nselect 1 / 0;\n`;
+    await assert.rejects(
+      async () => {
+        await db.exec("begin;");
+        try {
+          await db.exec(failingSql);
+          await db.query("insert into public.schema_migrations (version, checksum) values ($1, $2)", [wp8d2.name, checksum]);
+          await db.exec("commit;");
+        } catch (err) {
+          await db.exec("rollback;");
+          throw err;
+        }
+      },
+      (err) => err.code === "22012",
+    );
+
+    const { rows: [{ n: rollbackNewFn }] } = await db.query(
+      `select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname in ('work_report__internal_is_full_admin', 'work_report__internal_direct_team_ids')`,
+    );
+    assert.equal(rollbackNewFn, 0, "Rolled-back migration leaves zero new helpers");
+    const { rows: [{ n: rollbackLedger }] } = await db.query(
+      "select count(*)::int as n from public.schema_migrations where version = $1",
+      [wp8d2.name],
+    );
+    assert.equal(rollbackLedger, 0, "Rolled-back migration leaves zero ledger row");
+
+    // Clean apply
+    await db.exec(wp8d2.sql);
+
+    const { rows: [{ cnt: afterSrCount }] } = await db.query(
+      `select count(*)::int as cnt
+         from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public'
+          and has_function_privilege('service_role', p.oid, 'EXECUTE')`,
+    );
+    assert.equal(afterSrCount, 337, "WP8D-2 adds +0 new service_role RPCs (exact 337)");
+
+    // Verify ZERO public work_report* RPCs reference legacy direct_entry_has_scope / direct_entry_scope_grants / direct_entry_capability_grants
+    // except explicit pre-cutover (not authz_managed) delegate fallback in work_report_create_delegation
+    const { rows: legacyPublicRefs } = await db.query(`
+      select p.proname, pg_get_functiondef(p.oid) as def
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+         and p.proname like 'work_report%'
+         and has_function_privilege('service_role', p.oid, 'EXECUTE')
+         and (
+           pg_get_functiondef(p.oid) like '%direct_entry_has_scope%'
+           or pg_get_functiondef(p.oid) like '%direct_entry_has_capability%'
+           or pg_get_functiondef(p.oid) like '%direct_entry_capability_grants%'
+           or (
+             pg_get_functiondef(p.oid) like '%direct_entry_scope_grants%'
+             and p.proname <> 'work_report_create_delegation'
+           )
+         )
+    `);
+    assert.deepEqual(legacyPublicRefs, [], "Zero public work_report RPCs may read legacy capability/scope helpers directly");
+
+    // Verify all 12 touched/new internal helpers are STABLE and revoked from service_role/client/PUBLIC
+    const internalSigs = [
+      "public.direct_entry_authz__internal_resolve_effective_grants(uuid)",
+      "public.work_report__internal_is_full_admin(uuid)",
+      "public.work_report__internal_has_direct_capability(uuid,text)",
+      "public.work_report__internal_has_direct_scope(uuid,text,text,uuid)",
+      "public.work_report__internal_direct_team_ids(uuid,text)",
+      "public.work_report_assert_actor(uuid,uuid,text)",
+      "public.work_report_assert_scope(uuid,text,uuid,boolean)",
+      "public.work_report__internal_is_delegation_effective(uuid,timestamptz)",
+      "public.work_report__internal_resolve_capability_authority(uuid,text,uuid,uuid,timestamptz)",
+      "public.work_report__internal_has_any_capability_authority(uuid,text,timestamptz)",
+      "public.work_report__internal_actor_can_assign_member(uuid,uuid,uuid)",
+      "public.work_report__internal_resolve_analytics_scope(uuid,uuid,boolean,uuid,uuid,uuid)",
+    ];
+    for (const sig of internalSigs) {
+      const { rows: [r] } = await db.query(
+        `select p.provolatile, p.prosecdef,
+                has_function_privilege('public', p.oid, 'EXECUTE') as pub_exec,
+                has_function_privilege('anon', p.oid, 'EXECUTE') as anon_exec,
+                has_function_privilege('authenticated', p.oid, 'EXECUTE') as auth_exec,
+                has_function_privilege('service_role', p.oid, 'EXECUTE') as sr_exec
+           from pg_proc p where p.oid = $1::regprocedure`,
+        [sig],
+      );
+      assert.equal(r.provolatile, "s", `${sig} must be STABLE`);
+      assert.equal(r.prosecdef, true, `${sig} must be SECURITY DEFINER`);
+      assert.equal(r.pub_exec, false, `${sig} PUBLIC denied`);
+      assert.equal(r.anon_exec, false, `${sig} anon denied`);
+      assert.equal(r.auth_exec, false, `${sig} authenticated denied`);
+      assert.equal(r.sr_exec, false, `${sig} service_role denied`);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test("WP8D-2 [2/5]: Mirror-cleared managed personas keep full SQL -> Actor -> TS parity & block cross-scope HR_OPERATOR+TL escalation", async () => {
+  const { db } = await createDb();
+  try {
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active)
+       values ($1::uuid, 'WR8D_A', 'Team Alpha', true),
+              ($2::uuid, 'WR8D_B', 'Team Beta', true),
+              ($3::uuid, 'WR8D_C', 'Team Inactive', true)`,
+      [TEAM_A, TEAM_B, TEAM_INACTIVE],
+    );
+
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LUANPT, { caps: [], scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LIENVU, { caps: ADMIN_SEED_CAPS.filter((c) => c !== "duplicate_cccd_withdraw"), scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, NGATTT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, TL_A, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, HR_TL_A, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A2, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_B1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, VIEW_ANALYTICS_ONLY, {});
+    await seedBaseUser(db, VIEW_ONLY, {});
+    await seedBaseUser(db, ANALYTICS_ONLY, {});
+    await seedBaseUser(db, CROSS_AV, {});
+    await seedBaseUser(db, OWN_VIEWER, {});
+    await seedBaseUser(db, TEAM_FORM_MGR, {});
+    await seedBaseUser(db, SHARED_ACCT, { accountType: "SHARED" });
+    await seedBaseUser(db, DISABLED_ADMIN, { enabled: false });
+    await seedBaseUser(db, INACTIVE_TL, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_INACTIVE });
+
+    const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+    const cutover = await runWp5Cutover(db, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint: plan.manifest_fingerprint,
+    });
+    assert.equal(cutover.status, "APPLIED");
+
+    // Designate TL_A on TEAM_A, INACTIVE_TL on TEAM_INACTIVE
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'Designate TL A', $5)",
+      [OWNER.auth, OWNER.app, TEAM_A, TL_A.app, nextKey("des_tla")],
+    );
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'Designate Inactive TL', $5)",
+      [OWNER.auth, OWNER.app, TEAM_INACTIVE, INACTIVE_TL.app, nextKey("des_inact")],
+    );
+    // Deactivate TEAM_INACTIVE directly after designation
+    await db.query("update public.teams set active = false where team_id = $1::uuid", [TEAM_INACTIVE]);
+
+    // Assign HR_OPERATOR to HR_TL_A and also give HR_TL_A contextual TEAM_LEADER on TEAM_A (by replacing TL_A? No, test TL_A first, or assign HR_OPERATOR to TL_A later!)
+    // Actually give HR_TL_A HR_OPERATOR global role + DIRECT_GRANT report_review/assign/view/analytics_view @ CONTEXT_TEAM(TEAM_A) to simulate dual-role HR_OPERATOR + TL simultaneously with TL_A!
+    await db.query(
+      `select public.direct_entry_authz_assign_global_role_admin(
+         $1::uuid, $2::uuid, $3::uuid, 'HR_OPERATOR', 1, 'Dual role HR_OPERATOR', $4::uuid, $5
+       )`,
+      [OWNER.auth, OWNER.app, HR_TL_A.app, nextUuid(), "a".repeat(64)],
+    );
+    for (const cap of ["report_view", "report_analytics_view", "report_assign", "report_review", "team_manager_assign"]) {
+      await db.query(
+        `insert into public.authz_direct_capability_grants
+           (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+         values ($1::uuid, $2, 'CONTEXT_TEAM', $3, 'EXCEPTION_GRANT', 'Dual-role team grants', $4::uuid)`,
+        [HR_TL_A.app, cap, TEAM_A, OWNER.app],
+      );
+    }
+
+    // Seed direct grants for narrow managed personas
+    await db.query(
+      `insert into public.authz_direct_capability_grants
+         (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+       values
+         ($1::uuid, 'report_view', 'ALL', null, 'EXCEPTION_GRANT', 'VA view', $7::uuid),
+         ($1::uuid, 'report_analytics_view', 'ALL', null, 'EXCEPTION_GRANT', 'VA analytics', $7::uuid),
+         ($2::uuid, 'report_view', 'ALL', null, 'EXCEPTION_GRANT', 'View only', $7::uuid),
+         ($3::uuid, 'report_analytics_view', 'ALL', null, 'EXCEPTION_GRANT', 'Analytics only', $7::uuid),
+         ($4::uuid, 'report_analytics_view', 'ALL', null, 'EXCEPTION_GRANT', 'Cross analytics ALL', $7::uuid),
+         ($4::uuid, 'report_view', 'CONTEXT_TEAM', $8, 'EXCEPTION_GRANT', 'Cross view TEAM_A', $7::uuid),
+         ($5::uuid, 'report_view', 'OWN', null, 'EXCEPTION_GRANT', 'Invalid OWN view', $7::uuid),
+         ($6::uuid, 'report_form_manage', 'CONTEXT_TEAM', $8, 'EXCEPTION_GRANT', 'Invalid team form manage', $7::uuid)`,
+      [VIEW_ANALYTICS_ONLY.app, VIEW_ONLY.app, ANALYTICS_ONLY.app, CROSS_AV.app, OWN_VIEWER.app, TEAM_FORM_MGR.app, OWNER.app, TEAM_A],
+    );
+    await db.query(
+      `insert into public.authz_account_role_assignments
+         (app_user_id, role_code, source_kind, reason, assigned_by_app_user_id)
+       values ($1::uuid, 'ADMIN', 'ADMIN_ASSIGNMENT', 'Disabled admin role', $2::uuid)`,
+      [DISABLED_ADMIN.app, OWNER.app],
+    );
+
+    // CLEAR ALL LEGACY MIRRORS FOR EVERY MANAGED ACCOUNT!
+    const managedAll = [
+      OWNER.app, LUANPT.app, LIENVU.app, NGATTT.app, TL_A.app, HR_TL_A.app,
+      STAFF_A1.app, STAFF_A2.app, STAFF_B1.app, VIEW_ANALYTICS_ONLY.app, VIEW_ONLY.app,
+      ANALYTICS_ONLY.app, CROSS_AV.app, OWN_VIEWER.app, TEAM_FORM_MGR.app,
+      SHARED_ACCT.app, DISABLED_ADMIN.app, INACTIVE_TL.app,
+    ];
+    await clearLegacyMirrors(db, managedAll);
+
+    // 1. Mirror-cleared OWNER (ADMIN 21-cap bundle, 0 explicit report_form_manage/assign/review/delegate)
+    const { rawContext: ownerCtx, resolution: ownerRes } = await resolveViaRealRpc(db, OWNER.auth);
+    assert.equal(ownerRes.ok, true);
+    assert.equal(ownerCtx.capabilities.length, 0, "Legacy capabilities mirror is cleared");
+    assert.equal(ownerCtx.effective_grants.length, 21, "ADMIN bundle stays exact 21 grants");
+    for (const forbidden of ["report_form_manage", "report_assign", "report_review", "report_delegate"]) {
+      assert.equal(
+        ownerCtx.effective_grants.some((g) => g.capability === forbidden),
+        false,
+        `ADMIN effective_grants must NEVER auto-emit ${forbidden}`,
+      );
+    }
+    assert.deepEqual(Object.keys(ownerCtx).sort(), [
+      "all_scope_grants", "allowed_worker_tabs", "app_user_id", "assigned_roles", "auth_subject",
+      "capabilities", "display_name", "effective_grants", "enabled", "recruiter_links",
+      "team_scope_grants", "teams",
+    ], "ADMIN without explicit report_review keeps exact 12-key payload");
+
+    assert.equal(workReportTemplateManagePredicate(ownerRes.actor), true);
+    assert.equal(workReportAssignmentPredicate(ownerRes.actor), true);
+    assert.equal(workReportViewPredicate(ownerRes.actor), true);
+    assert.equal(workReportAnalyticsPredicate(ownerRes.actor), true);
+    assert.equal(workReportReviewPredicate(ownerRes.actor), true);
+    assert.equal(workReportDelegationPredicate(ownerRes.actor), true);
+    assert.equal(decideWorkReportTemplatesPageAccess({ actor: ownerRes }), "ALLOW");
+    assert.equal(decideWorkReportAssignmentsPageAccess({ actor: ownerRes }), "ALLOW");
+    assert.equal(decideWorkReportAnalyticsPageAccess({ actor: ownerRes }), "ALLOW");
+
+    // OWNER creates template, assigns TEAM_A & TEAM_B, staff submits
+    const tpl1 = await createPublishedTemplate(db, OWNER, "WP8D2_DAILY_1", { requiresReview: true });
+    const { rows: [{ d: today }] } = await db.query("select public.direct_entry_authorization_date()::text as d");
+    await db.query(
+      `select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)`,
+      [OWNER.auth, OWNER.app, tpl1.template_id, TEAM_A, today, nextKey("asg_a")],
+    );
+    await db.query(
+      `select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)`,
+      [OWNER.auth, OWNER.app, tpl1.template_id, TEAM_B, today, nextKey("asg_b")],
+    );
+    const { rows: obs } = await db.query(
+      "select obligation_id, assignee_app_user_id from public.work_report_obligations where template_id = $1::uuid",
+      [tpl1.template_id],
+    );
+    const obA1 = obs.find((o) => o.assignee_app_user_id === STAFF_A1.app).obligation_id;
+    const obB1 = obs.find((o) => o.assignee_app_user_id === STAFF_B1.app).obligation_id;
+    const { rows: [{ res: subA1 }] } = await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5) as res",
+      [STAFF_A1.auth, STAFF_A1.app, obA1, JSON.stringify({ calls_made: 10, interested_candidates: 3, workers_started: 1, notes: null }), nextKey("sub_a1")],
+    );
+    await db.query(
+      "select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)",
+      [STAFF_B1.auth, STAFF_B1.app, obB1, JSON.stringify({ calls_made: 20, interested_candidates: 6, workers_started: 2, notes: null }), nextKey("sub_b1")],
+    );
+
+    // 2. Mirror-cleared TEAM_LEADER (TL_A): canonical report_review @ CONTEXT_TEAM(TEAM_A) with 0 legacy mirrors!
+    const { rawContext: tlCtx, resolution: tlRes } = await resolveViaRealRpc(db, TL_A.auth);
+    assert.equal(tlRes.ok, true);
+    assert.equal(tlCtx.capabilities.length, 0, "TL_A legacy capabilities mirror is empty");
+    assert.ok(
+      tlCtx.effective_grants.some(
+        (g) => g.capability === "report_review" && g.scope_kind === "CONTEXT_TEAM" && g.scope_id === TEAM_A && g.source_type === "CONTEXTUAL_ASSIGNMENT",
+      ),
+      "Managed TL_A derives canonical report_review @ CONTEXT_TEAM from CONTEXTUAL_ASSIGNMENT with zero legacy mirror",
+    );
+    assert.deepEqual(
+      tlCtx.effective_report_review_scopes.map((s) => ({ kind: s.kind, team_id: s.team_id })),
+      [{ kind: "team", team_id: TEAM_A }],
+    );
+    assert.equal(workReportTemplateManagePredicate(tlRes.actor), false);
+    assert.equal(workReportDelegationPredicate(tlRes.actor), false);
+    assert.equal(workReportAssignmentPredicate(tlRes.actor), true);
+    assert.equal(workReportViewPredicate(tlRes.actor), true);
+    assert.equal(workReportAnalyticsPredicate(tlRes.actor), true);
+    assert.equal(workReportReviewPredicate(tlRes.actor), true);
+
+    // TL_A SQL: allowed TEAM_A, denied TEAM_B, denied templates, denied delegations
+    const { rows: [{ res: tlPending }] } = await db.query(
+      "select public.work_report_list_pending_reviews($1::uuid, $2::uuid, null, null, 50) as res",
+      [TL_A.auth, TL_A.app],
+    );
+    assert.deepEqual(tlPending.items.map((i) => i.obligation_id), [obA1]);
+    const { rows: [{ res: tlReadable }] } = await db.query(
+      "select public.work_report_list_readable_submissions($1::uuid, $2::uuid) as res",
+      [TL_A.auth, TL_A.app],
+    );
+    assert.equal(tlReadable.effective_scope.kind, "team");
+    assert.deepEqual(tlReadable.items.map((i) => i.obligation_id), [obA1]);
+    await assert.rejects(
+      db.query("select public.work_report_get_submission($1::uuid, $2::uuid, $3::uuid)", [TL_A.auth, TL_A.app, obB1]),
+      (e) => e.code === "42501",
+      "TL_A cannot read TEAM_B submission",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_get_review_submission($1::uuid, $2::uuid, $3::uuid)", [TL_A.auth, TL_A.app, obB1]),
+      (e) => e.code === "42501",
+      "TL_A cannot review TEAM_B submission",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_list_templates($1::uuid, $2::uuid)", [TL_A.auth, TL_A.app]),
+      (e) => e.code === "42501",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_list_delegations($1::uuid, $2::uuid)", [TL_A.auth, TL_A.app]),
+      (e) => e.code === "42501",
+    );
+
+    // 3. Dual-role HR_OPERATOR (@ ALL) + TEAM_A report grants (@ CONTEXT_TEAM): ZERO cross-scope escalation to ALL!
+    const { rawContext: hrTlCtx, resolution: hrTlRes } = await resolveViaRealRpc(db, HR_TL_A.auth);
+    assert.equal(hrTlRes.ok, true);
+    assert.deepEqual(
+      hrTlCtx.effective_report_review_scopes.map((s) => ({ kind: s.kind, team_id: s.team_id })),
+      [{ kind: "team", team_id: TEAM_A }],
+      "Dual-role HR_OPERATOR(@ALL)+TL(@TEAM_A) must NEVER escalate effective_report_review_scopes to 'all'",
+    );
+    const { rows: [{ res: hrTlReadable }] } = await db.query(
+      "select public.work_report_list_readable_submissions($1::uuid, $2::uuid) as res",
+      [HR_TL_A.auth, HR_TL_A.app],
+    );
+    assert.equal(hrTlReadable.effective_scope.kind, "team", "HR_OPERATOR+TL readable scope stays 'team', never 'all'");
+    assert.deepEqual(hrTlReadable.items.map((i) => i.obligation_id), [obA1]);
+    const { rows: [{ res: hrTlOverview }] } = await db.query(
+      "select public.work_report_analytics_overview($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included') as res",
+      [HR_TL_A.auth, HR_TL_A.app, tpl1.template_id],
+    );
+    assert.equal(hrTlOverview.effective_scope.kind, "team", "HR_OPERATOR+TL analytics stays 'team', never 'all'");
+    await assert.rejects(
+      db.query("select public.work_report_analytics_overview($1::uuid, $2::uuid, $3::uuid, null, null, null, $4::uuid, null, 'provisional_included')", [HR_TL_A.auth, HR_TL_A.app, tpl1.template_id, TEAM_B]),
+      (e) => e.code === "42501",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_list_assignment_options($1::uuid, $2::uuid, $3::uuid)", [HR_TL_A.auth, HR_TL_A.app, TEAM_B]),
+      (e) => e.code === "42501",
+    );
+    const { rows: [{ res: hrTlGroups }] } = await db.query(
+      "select public.work_report_list_groups($1::uuid, $2::uuid) as res",
+      [HR_TL_A.auth, HR_TL_A.app],
+    );
+    assert.equal(hrTlGroups.scope_kind, "team");
+
+    // 4. VIEW_ANALYTICS_ONLY (report_view + report_analytics_view @ ALL, NOT Full Admin):
+    //    NEVER gains assign/review/delegate/template!
+    const { resolution: vaRes } = await resolveViaRealRpc(db, VIEW_ANALYTICS_ONLY.auth);
+    assert.equal(workReportViewPredicate(vaRes.actor), true);
+    assert.equal(workReportAnalyticsPredicate(vaRes.actor), true);
+    assert.equal(workReportTemplateManagePredicate(vaRes.actor), false);
+    assert.equal(workReportAssignmentPredicate(vaRes.actor), false);
+    assert.equal(workReportReviewPredicate(vaRes.actor), false);
+    assert.equal(workReportDelegationPredicate(vaRes.actor), false);
+    assert.equal(decideWorkReportAnalyticsPageAccess({ actor: vaRes }), "ALLOW");
+    const { rows: [{ res: vaReadable }] } = await db.query(
+      "select public.work_report_list_readable_submissions($1::uuid, $2::uuid) as res",
+      [VIEW_ANALYTICS_ONLY.auth, VIEW_ANALYTICS_ONLY.app],
+    );
+    assert.equal(vaReadable.effective_scope.kind, "all");
+    assert.equal(vaReadable.items.length, 2);
+    for (const [label, sql, params] of [
+      ["templates", "select public.work_report_list_templates($1::uuid, $2::uuid)", [VIEW_ANALYTICS_ONLY.auth, VIEW_ANALYTICS_ONLY.app]],
+      ["assignments", "select public.work_report_list_assignments($1::uuid, $2::uuid)", [VIEW_ANALYTICS_ONLY.auth, VIEW_ANALYTICS_ONLY.app]],
+      ["pending_reviews", "select public.work_report_list_pending_reviews($1::uuid, $2::uuid)", [VIEW_ANALYTICS_ONLY.auth, VIEW_ANALYTICS_ONLY.app]],
+      ["decide_review", "select public.work_report_decide_review($1::uuid, $2::uuid, $3::uuid, 'APPROVED', null, $4, $5)", [VIEW_ANALYTICS_ONLY.auth, VIEW_ANALYTICS_ONLY.app, obA1, subA1.version, nextKey("va_rev")]],
+      ["delegations", "select public.work_report_list_delegations($1::uuid, $2::uuid)", [VIEW_ANALYTICS_ONLY.auth, VIEW_ANALYTICS_ONLY.app]],
+    ]) {
+      await assert.rejects(db.query(sql, params), (e) => e.code === "42501", `VIEW_ANALYTICS_ONLY denied on ${label}`);
+    }
+
+    // 5. VIEW_ONLY vs ANALYTICS_ONLY vs CROSS_AV (analytics @ ALL + view @ TEAM_A)
+    const { resolution: voRes } = await resolveViaRealRpc(db, VIEW_ONLY.auth);
+    assert.equal(workReportViewPredicate(voRes.actor), true);
+    assert.equal(workReportAnalyticsPredicate(voRes.actor), false);
+    assert.equal(decideWorkReportAnalyticsPageAccess({ actor: voRes }), "ALLOW");
+    const { rows: [{ res: voSubs }] } = await db.query(
+      "select public.work_report_list_readable_submissions($1::uuid, $2::uuid) as res",
+      [VIEW_ONLY.auth, VIEW_ONLY.app],
+    );
+    assert.equal(voSubs.items.length, 2);
+    await assert.rejects(
+      db.query("select public.work_report_analytics_overview($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included')", [VIEW_ONLY.auth, VIEW_ONLY.app, tpl1.template_id]),
+      (e) => e.code === "42501",
+    );
+
+    const { resolution: aoRes } = await resolveViaRealRpc(db, ANALYTICS_ONLY.auth);
+    assert.equal(workReportAnalyticsPredicate(aoRes.actor), true);
+    assert.equal(workReportViewPredicate(aoRes.actor), false);
+    assert.equal(decideWorkReportAnalyticsPageAccess({ actor: aoRes }), "ALLOW");
+    const { rows: [{ res: aoOver }] } = await db.query(
+      "select public.work_report_analytics_overview($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included') as res",
+      [ANALYTICS_ONLY.auth, ANALYTICS_ONLY.app, tpl1.template_id],
+    );
+    assert.equal(aoOver.effective_scope.kind, "all");
+    await assert.rejects(
+      db.query("select public.work_report_analytics_contributions($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included')", [ANALYTICS_ONLY.auth, ANALYTICS_ONLY.app, tpl1.template_id]),
+      (e) => e.code === "42501",
+    );
+
+    // CROSS_AV: analytics_overview -> 'all'; analytics_contributions (requires report_view!) -> intersects to 'team' (TEAM_A only)!
+    const { rows: [{ res: cavOver }] } = await db.query(
+      "select public.work_report_analytics_overview($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included') as res",
+      [CROSS_AV.auth, CROSS_AV.app, tpl1.template_id],
+    );
+    assert.equal(cavOver.effective_scope.kind, "all");
+    const { rows: [{ res: cavContrib }] } = await db.query(
+      "select public.work_report_analytics_contributions($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included') as res",
+      [CROSS_AV.auth, CROSS_AV.app, tpl1.template_id],
+    );
+    assert.equal(cavContrib.effective_scope.kind, "team", "Contributions must intersect analytics @ ALL with report_view @ TEAM_A");
+    await assert.rejects(
+      db.query("select public.work_report_analytics_contributions($1::uuid, $2::uuid, $3::uuid, null, null, null, null, null, 'provisional_included', null, null, $4::uuid)", [CROSS_AV.auth, CROSS_AV.app, tpl1.template_id, TEAM_B]),
+      (e) => e.code === "42501",
+      "CROSS_AV cannot drill down TEAM_B contributions",
+    );
+
+    // 6. Fail-closed negative personas: OWN_VIEWER, TEAM_FORM_MGR, INACTIVE_TL, SHARED_ACCT, DISABLED_ADMIN
+    const { resolution: ownRes } = await resolveViaRealRpc(db, OWN_VIEWER.auth);
+    assert.equal(workReportViewPredicate(ownRes.actor), false);
+    assert.equal(decideWorkReportAnalyticsPageAccess({ actor: ownRes }), "ACCESS_DENIED");
+    await assert.rejects(
+      db.query("select public.work_report_list_readable_submissions($1::uuid, $2::uuid)", [OWN_VIEWER.auth, OWN_VIEWER.app]),
+      (e) => e.code === "42501" && e.message.includes("WORK_REPORT_SCOPE_DENIED"),
+    );
+
+    const { resolution: tfmRes } = await resolveViaRealRpc(db, TEAM_FORM_MGR.auth);
+    assert.equal(workReportTemplateManagePredicate(tfmRes.actor), false);
+    assert.equal(decideWorkReportTemplatesPageAccess({ actor: tfmRes }), "ACCESS_DENIED");
+    await assert.rejects(
+      db.query("select public.work_report_list_templates($1::uuid, $2::uuid)", [TEAM_FORM_MGR.auth, TEAM_FORM_MGR.app]),
+      (e) => e.code === "42501" && e.message.includes("WORK_REPORT_ALL_SCOPE_REQUIRED"),
+    );
+
+    const { resolution: inactTlRes } = await resolveViaRealRpc(db, INACTIVE_TL.auth);
+    assert.equal(workReportReviewPredicate(inactTlRes.actor), false, "Inactive team TL loses report_review immediately");
+    assert.equal(workReportAssignmentPredicate(inactTlRes.actor), false);
+    await assert.rejects(
+      db.query("select public.work_report_list_pending_reviews($1::uuid, $2::uuid)", [INACTIVE_TL.auth, INACTIVE_TL.app]),
+      (e) => e.code === "42501",
+    );
+
+    const { resolution: sharedRes } = await resolveViaRealRpc(db, SHARED_ACCT.auth);
+    assert.equal(workReportsNavPredicate(sharedRes.actor), false);
+    assert.equal(decideWorkReportsPageAccess({ actor: sharedRes }), "ACCESS_DENIED");
+    assert.equal(decideWorkReportsPageAccess({ actor: tlRes }), "ALLOW");
+    await assert.rejects(
+      db.query("select public.work_report_list_templates($1::uuid, $2::uuid)", [SHARED_ACCT.auth, SHARED_ACCT.app]),
+      (e) => e.code === "42501",
+    );
+
+    const { resolution: disRes } = await resolveViaRealRpc(db, DISABLED_ADMIN.auth);
+    assert.equal(disRes.ok, false);
+    assert.equal(decideWorkReportsPageAccess({ actor: disRes }), "ACCOUNT_UNAVAILABLE");
+    assert.equal(decideWorkReportTemplatesPageAccess({ actor: disRes }), "ACCOUNT_UNAVAILABLE");
+    await assert.rejects(
+      db.query("select public.work_report_list_templates($1::uuid, $2::uuid)", [DISABLED_ADMIN.auth, DISABLED_ADMIN.app]),
+      (e) => e.code === "42501" && e.message.includes("WORK_REPORT_ACTOR_DENIED"),
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("WP8D-2 [3/5]: Delegation (R3, immediate-only, no self-review, no chaining, disjoint grantor, SHARED blocked), independent role isolation & idempotency before OCC", async () => {
+  const { db } = await createDb();
+  try {
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active)
+       values ($1::uuid, 'WR8D3_A', 'Team 3A', true),
+              ($2::uuid, 'WR8D3_B', 'Team 3B', true)`,
+      [TEAM_A, TEAM_B],
+    );
+
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LUANPT, { caps: [], scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LIENVU, { caps: ADMIN_SEED_CAPS.filter((c) => c !== "duplicate_cccd_withdraw"), scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, NGATTT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, DELEG_GRANTOR, {});
+    await seedBaseUser(db, DISJOINT_DELEG, {});
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A2, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_B1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, ADMIN_AND_TL, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, SHARED_ACCT, { accountType: "SHARED" });
+
+    const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+    await runWp5Cutover(db, { mode: "apply", confirmApply: true, expectedFingerprint: plan.manifest_fingerprint });
+
+    // Direct grants for DELEG_GRANTOR & DISJOINT_DELEG; ADMIN + TL on ADMIN_AND_TL
+    await db.query(
+      `insert into public.authz_direct_capability_grants
+         (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id)
+       values
+         ($1::uuid, 'report_delegate', 'ALL', null, 'EXCEPTION_GRANT', 'Grantor delegate', $3::uuid),
+         ($1::uuid, 'report_review', 'ALL', null, 'EXCEPTION_GRANT', 'Grantor review', $3::uuid),
+         ($1::uuid, 'report_assign', 'ALL', null, 'EXCEPTION_GRANT', 'Grantor assign', $3::uuid),
+         ($2::uuid, 'report_delegate', 'CONTEXT_TEAM', $4, 'EXCEPTION_GRANT', 'Disjoint delegate A', $3::uuid),
+         ($2::uuid, 'report_review', 'CONTEXT_TEAM', $5, 'EXCEPTION_GRANT', 'Disjoint review B', $3::uuid)`,
+      [DELEG_GRANTOR.app, DISJOINT_DELEG.app, OWNER.app, TEAM_A, TEAM_B],
+    );
+    await db.query(
+      "select public.direct_entry_authz_assign_global_role_admin($1::uuid, $2::uuid, $3::uuid, 'ADMIN', 1, 'Assign ADMIN to ADMIN_AND_TL', $4::uuid, $5)",
+      [OWNER.auth, OWNER.app, ADMIN_AND_TL.app, nextUuid(), "b".repeat(64)],
+    );
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'Designate ADMIN_AND_TL on TEAM_B', $5)",
+      [OWNER.auth, OWNER.app, TEAM_B, ADMIN_AND_TL.app, nextKey("des_admtl")],
+    );
+
+    // Clear ALL legacy mirrors on all managed users
+    await clearLegacyMirrors(db, [
+      OWNER.app, DELEG_GRANTOR.app, DISJOINT_DELEG.app, STAFF_A1.app, STAFF_A2.app,
+      STAFF_B1.app, ADMIN_AND_TL.app, SHARED_ACCT.app,
+    ]);
+
+    const t1 = await createPublishedTemplate(db, OWNER, "WP8D3_T1", { requiresReview: true });
+    const t2 = await createPublishedTemplate(db, OWNER, "WP8D3_T2", { requiresReview: true });
+    const { rows: [{ d: today }] } = await db.query("select public.direct_entry_authorization_date()::text as d");
+
+    for (const tpl of [t1, t2]) {
+      await db.query(
+        "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)",
+        [OWNER.auth, OWNER.app, tpl.template_id, TEAM_A, today, nextKey("asg")],
+      );
+    }
+    await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6)",
+      [OWNER.auth, OWNER.app, t1.template_id, TEAM_B, today, nextKey("asgb")],
+    );
+
+    const { rows: obs } = await db.query("select obligation_id, template_id, assignee_app_user_id from public.work_report_obligations");
+    const findOb = (tplId, uid) => obs.find((o) => o.template_id === tplId && o.assignee_app_user_id === uid).obligation_id;
+    const obA1T1 = findOb(t1.template_id, STAFF_A1.app);
+    const obA2T1 = findOb(t1.template_id, STAFF_A2.app);
+    const obA1T2 = findOb(t2.template_id, STAFF_A1.app);
+    const obB1T1 = findOb(t1.template_id, STAFF_B1.app);
+
+    const payload = JSON.stringify({ calls_made: 5, interested_candidates: 2, workers_started: 1, notes: null });
+    const { rows: [{ res: subA1T1 }] } = await db.query("select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5) as res", [STAFF_A1.auth, STAFF_A1.app, obA1T1, payload, nextKey("s1")]);
+    const { rows: [{ res: subA2T1 }] } = await db.query("select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5) as res", [STAFF_A2.auth, STAFF_A2.app, obA2T1, payload, nextKey("s2")]);
+    await db.query("select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)", [STAFF_A1.auth, STAFF_A1.app, obA1T2, payload, nextKey("s3")]);
+    await db.query("select public.work_report_submit($1::uuid, $2::uuid, $3::uuid, $4::jsonb, null, $5)", [STAFF_B1.auth, STAFF_B1.app, obB1T1, payload, nextKey("s4")]);
+
+    // Disjoint team delegator: report_delegate @ TEAM_A + report_review @ TEAM_B -> options.capabilities=[] & creation denied
+    const { rows: [{ res: disjList }] } = await db.query(
+      "select public.work_report_list_delegations($1::uuid, $2::uuid) as res",
+      [DISJOINT_DELEG.auth, DISJOINT_DELEG.app],
+    );
+    assert.deepEqual(disjList.options.capabilities, [], "Disjoint delegate@TEAM_A + review@TEAM_B must offer 0 delegatable capabilities");
+    await assert.rejects(
+      db.query("select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6)", [DISJOINT_DELEG.auth, DISJOINT_DELEG.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("disj_a")]),
+      (e) => e.code === "42501",
+    );
+
+    // Immediate-only rule (reject scheduled dates) + SHARED account blocked from delegation options & creation
+    const { rows: [{ res: grantorOpts }] } = await db.query(
+      "select public.work_report_list_delegations($1::uuid, $2::uuid) as res",
+      [DELEG_GRANTOR.auth, DELEG_GRANTOR.app],
+    );
+    assert.equal(grantorOpts.options.delegates.some((d) => d.app_user_id === SHARED_ACCT.app), false, "SHARED account excluded from delegate options");
+    await assert.rejects(
+      db.query("select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'all', null, null, null, $5)", [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, SHARED_ACCT.app, t1.template_id, nextKey("shared_del")]),
+      (e) => e.code === "42501" && e.message.includes("WORK_REPORT_DELEGATE_NOT_AVAILABLE"),
+    );
+    await assert.rejects(
+      db.query("select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, now(), now() + interval '1 day', $6)", [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("sched_del")]),
+      (e) => e.code === "22023",
+    );
+
+    // Valid immediate open-ended delegations (review + assign) on T1 for TEAM_A -> STAFF_A2
+    const { rows: [{ res: delRev }] } = await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6) as res",
+      [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("del_rev")],
+    );
+    assert.equal(delRev.effective_to, null);
+    await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6)",
+      [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, STAFF_A2.app, t1.template_id, TEAM_A, nextKey("del_asg")],
+    );
+
+    // R3 check on STAFF_A2: 0 blanket report_review/assign in effective_grants, projected review scope present!
+    const { rawContext: a2Ctx, resolution: a2Res } = await resolveViaRealRpc(db, STAFF_A2.auth);
+    assert.equal(a2Ctx.effective_grants.some((g) => g.capability === "report_review" || g.capability === "report_assign"), false);
+    assert.deepEqual(a2Ctx.effective_report_review_scopes.map((s) => ({ kind: s.kind, team_id: s.team_id })), [{ kind: "team", team_id: TEAM_A }]);
+    assert.equal(workReportReviewPredicate(a2Res.actor), true);
+    assert.equal(workReportDelegationPredicate(a2Res.actor), false);
+
+    // No self-review, no wrong template, no wrong team, no chaining
+    await assert.rejects(
+      db.query("select public.work_report_decide_review($1::uuid, $2::uuid, $3::uuid, 'APPROVED', null, $4, $5)", [STAFF_A2.auth, STAFF_A2.app, obA2T1, subA2T1.version, nextKey("self_rev")]),
+      (e) => e.code === "42501" && e.message.includes("WORK_REPORT_SELF_REVIEW_FORBIDDEN"),
+    );
+    await assert.rejects(
+      db.query("select public.work_report_get_review_submission($1::uuid, $2::uuid, $3::uuid)", [STAFF_A2.auth, STAFF_A2.app, obA1T2]),
+      (e) => e.code === "42501",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_get_review_submission($1::uuid, $2::uuid, $3::uuid)", [STAFF_A2.auth, STAFF_A2.app, obB1T1]),
+      (e) => e.code === "42501",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6)", [STAFF_A2.auth, STAFF_A2.app, STAFF_A1.app, t1.template_id, TEAM_A, nextKey("chain")]),
+      (e) => e.code === "42501",
+    );
+
+    // Delegated review decision + idempotency replay AFTER version bump (idempotency before OCC!)
+    const revKey = nextKey("del_decide");
+    const { rows: [{ res: decided1 }] } = await db.query(
+      "select public.work_report_decide_review($1::uuid, $2::uuid, $3::uuid, 'APPROVED', null, $4, $5) as res",
+      [STAFF_A2.auth, STAFF_A2.app, obA1T1, subA1T1.version, revKey],
+    );
+    assert.equal(decided1.state, "APPROVED");
+    const { rows: [{ res: decidedReplay }] } = await db.query(
+      "select public.work_report_decide_review($1::uuid, $2::uuid, $3::uuid, 'APPROVED', null, $4, $5) as res",
+      [STAFF_A2.auth, STAFF_A2.app, obA1T1, subA1T1.version, revKey],
+    );
+    assert.deepEqual(decidedReplay, decided1, "decide_review replays idempotency before OCC");
+
+    // Group update & set_group_active: idempotency BEFORE OCC!
+    const { rows: [{ res: grpCreated }] } = await db.query(
+      "select public.work_report_create_group($1::uuid, $2::uuid, 'Nhóm A', 'Mô tả', $3::uuid[], $4) as res",
+      [STAFF_A2.auth, STAFF_A2.app, [STAFF_A1.app], nextKey("grp_create")],
+    );
+    const grpUpdKey = nextKey("grp_upd");
+    const { rows: [{ res: grpUpd1 }] } = await db.query(
+      "select public.work_report_update_group($1::uuid, $2::uuid, $3::uuid, 1, 'Nhóm A v2', null, $4::uuid[], $5) as res",
+      [STAFF_A2.auth, STAFF_A2.app, grpCreated.group_id, [STAFF_A1.app, STAFF_A2.app], grpUpdKey],
+    );
+    assert.equal(grpUpd1.version, 2);
+    const { rows: [{ res: grpUpdReplay }] } = await db.query(
+      "select public.work_report_update_group($1::uuid, $2::uuid, $3::uuid, 1, 'Nhóm A v2', null, $4::uuid[], $5) as res",
+      [STAFF_A2.auth, STAFF_A2.app, grpCreated.group_id, [STAFF_A1.app, STAFF_A2.app], grpUpdKey],
+    );
+    assert.deepEqual(grpUpdReplay, grpUpd1, "update_group replays idempotency BEFORE OCC check");
+
+    const grpActKey = nextKey("grp_act");
+    const { rows: [{ res: grpAct1 }] } = await db.query(
+      "select public.work_report_set_group_active($1::uuid, $2::uuid, $3::uuid, 2, false, $4) as res",
+      [STAFF_A2.auth, STAFF_A2.app, grpCreated.group_id, grpActKey],
+    );
+    assert.equal(grpAct1.version, 3);
+    const { rows: [{ res: grpActReplay }] } = await db.query(
+      "select public.work_report_set_group_active($1::uuid, $2::uuid, $3::uuid, 2, false, $4) as res",
+      [STAFF_A2.auth, STAFF_A2.app, grpCreated.group_id, grpActKey],
+    );
+    assert.deepEqual(grpActReplay, grpAct1, "set_group_active replays idempotency BEFORE OCC check");
+
+    // Genuine stale OCC MUST raise PT409 (never 40001) on set_group_active, revoke_delegation, set_assignment_state & change_obligation_status
+    await assert.rejects(
+      db.query(
+        "select public.work_report_set_group_active($1::uuid, $2::uuid, $3::uuid, 2, true, $4)",
+        [STAFF_A2.auth, STAFF_A2.app, grpCreated.group_id, nextKey("grp_act_stale")],
+      ),
+      (e) => e.code === "PT409",
+      "Stale set_group_active must raise PT409",
+    );
+    await assert.rejects(
+      db.query(
+        "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, 99, $4)",
+        [DELEG_GRANTOR.auth, DELEG_GRANTOR.app, delRev.delegation_id, nextKey("rev_del_stale")],
+      ),
+      (e) => e.code === "PT409",
+      "Stale revoke_delegation must raise PT409",
+    );
+    const { rows: [{ res: t1Asg }] } = await db.query(
+      "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6) as res",
+      [STAFF_A2.auth, STAFF_A2.app, t1.template_id, STAFF_A1.app, today, nextKey("del_asg_state")],
+    );
+    const asgStateKey = nextKey("asg_pause");
+    const { rows: [{ res: asgPaused1 }] } = await db.query(
+      "select public.work_report_set_assignment_state($1::uuid, $2::uuid, $3::uuid, 1, 'PAUSED', $4) as res",
+      [STAFF_A2.auth, STAFF_A2.app, t1Asg.assignment_id, asgStateKey],
+    );
+    assert.equal(asgPaused1.version, 2);
+    const { rows: [{ res: asgPausedReplay }] } = await db.query(
+      "select public.work_report_set_assignment_state($1::uuid, $2::uuid, $3::uuid, 1, 'PAUSED', $4) as res",
+      [STAFF_A2.auth, STAFF_A2.app, t1Asg.assignment_id, asgStateKey],
+    );
+    assert.deepEqual(asgPausedReplay, asgPaused1, "set_assignment_state replays idempotency BEFORE OCC");
+    await assert.rejects(
+      db.query(
+        "select public.work_report_set_assignment_state($1::uuid, $2::uuid, $3::uuid, 1, 'ACTIVE', $4)",
+        [STAFF_A2.auth, STAFF_A2.app, t1Asg.assignment_id, nextKey("asg_stale")],
+      ),
+      (e) => e.code === "PT409",
+      "Stale set_assignment_state must raise PT409",
+    );
+    const { rows: [{ version: obA2T1Ver }] } = await db.query(
+      "select version from public.work_report_obligations where obligation_id = $1::uuid",
+      [obA2T1],
+    );
+    const obExKey = nextKey("ob_exempt");
+    const { rows: [{ res: obEx1 }] } = await db.query(
+      "select public.work_report_change_obligation_status($1::uuid, $2::uuid, $3::uuid, $4, 'EXEMPT', 'Miễn báo cáo kiểm thử', null, $5) as res",
+      [STAFF_A2.auth, STAFF_A2.app, obA2T1, obA2T1Ver, obExKey],
+    );
+    assert.equal(obEx1.status, "EXEMPTED");
+    const { rows: [{ res: obExReplay }] } = await db.query(
+      "select public.work_report_change_obligation_status($1::uuid, $2::uuid, $3::uuid, $4, 'EXEMPT', 'Miễn báo cáo kiểm thử', null, $5) as res",
+      [STAFF_A2.auth, STAFF_A2.app, obA2T1, obA2T1Ver, obExKey],
+    );
+    assert.deepEqual(obExReplay, obEx1, "change_obligation_status replays idempotency BEFORE OCC");
+    await assert.rejects(
+      db.query(
+        "select public.work_report_change_obligation_status($1::uuid, $2::uuid, $3::uuid, $4, 'EXEMPT', 'Stale', null, $5)",
+        [STAFF_A2.auth, STAFF_A2.app, obA2T1, obA2T1Ver, nextKey("ob_stale")],
+      ),
+      (e) => e.code === "PT409",
+      "Stale change_obligation_status must raise PT409",
+    );
+
+    // Disable grantor -> immediately kills delegation (review scope vanishes, pending reviews denied)
+    await db.query(
+      "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, 1, 'Disable grantor', $4)",
+      [OWNER.auth, OWNER.app, DELEG_GRANTOR.app, nextKey("dis_gr")],
+    );
+    const { rawContext: a2AfterDis } = await resolveViaRealRpc(db, STAFF_A2.auth);
+    assert.equal(a2AfterDis.effective_report_review_scopes, undefined, "Grantor disable immediately removes delegated review scopes");
+    await assert.rejects(
+      db.query("select public.work_report_list_pending_reviews($1::uuid, $2::uuid)", [STAFF_A2.auth, STAFF_A2.app]),
+      (e) => e.code === "42501",
+    );
+
+    // Independent grant isolation on ADMIN_AND_TL: revoke ADMIN -> retains TEAM_LEADER on TEAM_B (loses TEAM_A & templates)!
+    const { rows: [{ assignment_id: admAsgId }] } = await db.query(
+      "select assignment_id from public.authz_account_role_assignments where app_user_id = $1::uuid and role_code = 'ADMIN' and ended_at is null",
+      [ADMIN_AND_TL.app],
+    );
+    const { rows: [{ version: admTlVer }] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [ADMIN_AND_TL.app],
+    );
+    await db.query(
+      "select public.direct_entry_authz_revoke_global_role_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 'Revoke ADMIN keep TL', $6::uuid, $7)",
+      [OWNER.auth, OWNER.app, ADMIN_AND_TL.app, admAsgId, admTlVer, nextUuid(), "c".repeat(64)],
+    );
+    await clearLegacyMirrors(db, [ADMIN_AND_TL.app]);
+    // Still reviews TEAM_B via contextual TL, denied templates and TEAM_A!
+    const { rows: [{ res: bPending }] } = await db.query(
+      "select public.work_report_list_pending_reviews($1::uuid, $2::uuid) as res",
+      [ADMIN_AND_TL.auth, ADMIN_AND_TL.app],
+    );
+    assert.deepEqual(bPending.items.map((i) => i.obligation_id), [obB1T1]);
+    await assert.rejects(
+      db.query("select public.work_report_list_templates($1::uuid, $2::uuid)", [ADMIN_AND_TL.auth, ADMIN_AND_TL.app]),
+      (e) => e.code === "42501",
+    );
+    await assert.rejects(
+      db.query("select public.work_report_get_submission($1::uuid, $2::uuid, $3::uuid)", [ADMIN_AND_TL.auth, ADMIN_AND_TL.app, obA1T1]),
+      (e) => e.code === "42501",
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("WP8D-2 [4/5]: Probe #18 20-case anti-drift oracle (against BOTH #230 and baseline #229 materializers) + strict READ ONLY 0-write guarantee", async () => {
+  const { db: db230 } = await createDb();
+  const { db: db229 } = await createDb({ upToInclusive: WP8C1_MIGRATION_NAME });
+
+  async function runOracle(db, { managedMirrorCleared }) {
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active)
+       values ($1::uuid, 'ORC_A', 'Oracle Team A', true),
+              ($2::uuid, 'ORC_B', 'Oracle Team B', true)`,
+      [TEAM_A, TEAM_B],
+    );
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LUANPT, { caps: [], scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, LIENVU, { caps: ADMIN_SEED_CAPS.filter((c) => c !== "duplicate_cccd_withdraw"), scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, NGATTT, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, TL_A, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A2, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_B1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_B });
+    await seedBaseUser(db, NO_TEAM_USER, {});
+
+    if (managedMirrorCleared) {
+      const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+      await runWp5Cutover(db, { mode: "apply", confirmApply: true, expectedFingerprint: plan.manifest_fingerprint });
+    }
+
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'Oracle TL', $5)",
+      [OWNER.auth, OWNER.app, TEAM_A, TL_A.app, nextKey("orc_tl")],
+    );
+
+    if (managedMirrorCleared) {
+      await clearLegacyMirrors(db, [OWNER.app, TL_A.app, STAFF_A1.app, STAFF_A2.app, STAFF_B1.app, NO_TEAM_USER.app]);
+    }
+
+    const tUser = await createPublishedTemplate(db, OWNER, "ORC_USER", { requiresReview: false });
+    const tUserSet = await createPublishedTemplate(db, OWNER, "ORC_USET", { requiresReview: false });
+    const tTeam = await createPublishedTemplate(db, OWNER, "ORC_TEAM", { requiresReview: false });
+    const tGroup = await createPublishedTemplate(db, OWNER, "ORC_GRP", { requiresReview: false });
+    const tOnce = await createPublishedTemplate(db, OWNER, "ORC_ONCE", { requiresReview: false });
+
+    const { rows: [{ d: today }] } = await db.query("select (now() at time zone 'Asia/Ho_Chi_Minh')::date as d");
+    const todayIso = typeof today === "string" ? today.slice(0, 10) : today.toISOString().slice(0, 10);
+
+    // Helper: compare READ ONLY probe vs actual materialization (inside rollback so cases stay independent)
+    const checkCase = async (label, targetUser, { expectedBool, setupSql = null, setupParams = [] } = {}) => {
+      if (setupSql) {
+        await db.query(setupSql, setupParams);
+      }
+      const { rows: [{ cnt: beforeObCnt }] } = await db.query("select count(*)::int as cnt from public.work_report_obligations");
+
+      // 1. Strict READ ONLY probe
+      await db.exec("begin transaction read only;");
+      let probeVal;
+      try {
+        const { rows: [{ res }] } = await db.query(
+          "select public.work_report_has_active_obligations($1::uuid, $2::uuid) as res",
+          [targetUser.auth, targetUser.app],
+        );
+        probeVal = res.has_active_obligations;
+        await db.exec("commit;");
+      } catch (err) {
+        await db.exec("rollback;");
+        throw err;
+      }
+
+      const { rows: [{ cnt: afterProbeCnt }] } = await db.query("select count(*)::int as cnt from public.work_report_obligations");
+      assert.equal(afterProbeCnt, beforeObCnt, `${label}: probe must write 0 rows`);
+      assert.equal(probeVal, expectedBool, `${label}: probe expected ${expectedBool}`);
+
+      // 2. Compare against real business list_my_obligations materializer (rollback after check to isolate)
+      await db.exec("begin;");
+      let matHasActive;
+      try {
+        const { rows: [{ res: listRes }] } = await db.query(
+          "select public.work_report_list_my_obligations($1::uuid, $2::uuid, 'ACTIVE') as res",
+          [targetUser.auth, targetUser.app],
+        );
+        matHasActive = Array.isArray(listRes.items) && listRes.items.length > 0;
+      } finally {
+        await db.exec("rollback;");
+      }
+      assert.equal(probeVal, matHasActive, `${label}: probe (${probeVal}) MUST equal materializer (${matHasActive})`);
+      return probeVal;
+    };
+
+    const results = {};
+    // Case 1: Empty user (0 assignments)
+    results.c01_empty = await checkCase("C01 empty", STAFF_A1, { expectedBool: false });
+
+    // Case 2: USER assignment (future effective_from -> false)
+    await db.query(
+      `insert into public.work_report_assignments
+         (template_id, template_version_id, target_kind, target_user_id, frequency, is_mandatory, due_day_offset, due_time_local, exclude_sundays, effective_from, assigned_by_user_id, state, is_current)
+       values ($1::uuid, $2::uuid, 'USER', $3::uuid, 'DAILY', true, 0, '23:59:59', false, ($4::date + 2), $5::uuid, 'ACTIVE', true)`,
+      [tUser.template_id, tUser.draft_version_id, STAFF_A1.app, todayIso, OWNER.app],
+    );
+    results.c02_user_future = await checkCase("C02 USER future", STAFF_A1, { expectedBool: false });
+
+    // Case 3: USER assignment effective today (unmaterialized yet -> true)
+    await db.query("update public.work_report_assignments set effective_from = $1::date where template_id = $2::uuid", [todayIso, tUser.template_id]);
+    results.c03_user_active = await checkCase("C03 USER active unmaterialized", STAFF_A1, { expectedBool: true });
+
+    // Case 4: USER assignment paused -> false
+    await db.query("update public.work_report_assignments set state = 'PAUSED' where template_id = $1::uuid", [tUser.template_id]);
+    results.c04_user_paused = await checkCase("C04 USER paused", STAFF_A1, { expectedBool: false });
+
+    // Case 5: USER_SET assignment active -> true for STAFF_A2, false for STAFF_B1
+    const { rows: [{ assignment_id: usetAsg }] } = await db.query(
+      `insert into public.work_report_assignments
+         (template_id, template_version_id, target_kind, frequency, is_mandatory, due_day_offset, due_time_local, exclude_sundays, effective_from, assigned_by_user_id, state, is_current)
+       values ($1::uuid, $2::uuid, 'USER_SET', 'DAILY', true, 0, '23:59:59', false, $3::date, $4::uuid, 'ACTIVE', true)
+       returning assignment_id`,
+      [tUserSet.template_id, tUserSet.draft_version_id, todayIso, OWNER.app],
+    );
+    await db.query("insert into public.work_report_assignment_targets (assignment_id, target_user_id) values ($1::uuid, $2::uuid)", [usetAsg, STAFF_A2.app]);
+    results.c05_userset_hit = await checkCase("C05 USER_SET member", STAFF_A2, { expectedBool: true });
+    results.c06_userset_miss = await checkCase("C06 USER_SET non-member", STAFF_B1, { expectedBool: false });
+    await db.query("update public.work_report_assignments set state = 'REVOKED', is_current = false where assignment_id = $1::uuid", [usetAsg]);
+
+    // Case 7: TEAM assignment active -> true for STAFF_B1, false for NO_TEAM_USER
+    const { rows: [{ assignment_id: teamAsg }] } = await db.query(
+      `insert into public.work_report_assignments
+         (template_id, template_version_id, target_kind, target_team_id, frequency, is_mandatory, due_day_offset, due_time_local, exclude_sundays, effective_from, assigned_by_user_id, state, is_current)
+       values ($1::uuid, $2::uuid, 'TEAM', $3::uuid, 'DAILY', true, 0, '23:59:59', false, $4::date, $5::uuid, 'ACTIVE', true)
+       returning assignment_id`,
+      [tTeam.template_id, tTeam.draft_version_id, TEAM_B, todayIso, OWNER.app],
+    );
+    results.c07_team_hit = await checkCase("C07 TEAM member", STAFF_B1, { expectedBool: true });
+    results.c08_team_miss = await checkCase("C08 TEAM non-member", NO_TEAM_USER, { expectedBool: false });
+    await db.query("update public.work_report_assignments set state = 'REVOKED', is_current = false where assignment_id = $1::uuid", [teamAsg]);
+
+    // Case 9-12: GROUP assignment assigned by TL_A (mirror-cleared on #230!):
+    // - All members in TEAM_A -> true
+    // - Add out-of-scope STAFF_B1 into group -> all-or-nothing fails -> false for STAFF_A1!
+    // - Remove STAFF_B1, deactivate group -> false
+    // - Reactivate group, check eligible vs ineligible
+    const { rows: [{ res: grp }] } = await db.query(
+      "select public.work_report_create_group($1::uuid, $2::uuid, 'TL A Group', null, $3::uuid[], $4) as res",
+      [TL_A.auth, TL_A.app, [STAFF_A1.app, STAFF_A2.app], nextKey("orc_grp")],
+    );
+    const { rows: [{ assignment_id: grpAsg }] } = await db.query(
+      `insert into public.work_report_assignments
+         (template_id, template_version_id, target_kind, target_group_id, frequency, is_mandatory, due_day_offset, due_time_local, exclude_sundays, effective_from, assigned_by_user_id, state, is_current)
+       values ($1::uuid, $2::uuid, 'GROUP', $3::uuid, 'DAILY', true, 0, '23:59:59', false, $4::date, $5::uuid, 'ACTIVE', true)
+       returning assignment_id`,
+      [tGroup.template_id, tGroup.draft_version_id, grp.group_id, todayIso, TL_A.app],
+    );
+    results.c09_group_tl_ok = await checkCase("C09 GROUP assigned by TL_A", STAFF_A1, { expectedBool: true });
+    // Inject out-of-scope member -> all-or-nothing fails for TL_A assignor!
+    await db.query("insert into public.work_report_group_members (group_id, member_user_id, added_by_user_id) values ($1::uuid, $2::uuid, $3::uuid)", [grp.group_id, STAFF_B1.app, OWNER.app]);
+    results.c10_group_all_or_nothing = await checkCase("C10 GROUP all-or-nothing out-of-scope", STAFF_A1, { expectedBool: false });
+    await db.query("delete from public.work_report_group_members where group_id = $1::uuid and member_user_id = $2::uuid", [grp.group_id, STAFF_B1.app]);
+    // Group inactive -> false
+    await db.query("update public.work_report_groups set active = false where group_id = $1::uuid", [grp.group_id]);
+    results.c11_group_inactive = await checkCase("C11 GROUP inactive", STAFF_A1, { expectedBool: false });
+    await db.query("update public.work_report_groups set active = true where group_id = $1::uuid", [grp.group_id]);
+    // Template archived -> false
+    await db.query("update public.work_report_templates set status = 'ARCHIVED' where template_id = $1::uuid", [tGroup.template_id]);
+    results.c12_template_inactive = await checkCase("C12 template archived", STAFF_A1, { expectedBool: false });
+    await db.query("update public.work_report_assignments set state = 'REVOKED', is_current = false where assignment_id = $1::uuid", [grpAsg]);
+
+    // Case 13-17: ONCE collision, CANCELLED unsubmitted reactivation, CANCELLED submitted non-reactivation, EXEMPTED, existing ACTIVE submitted
+    const { rows: [{ assignment_id: onceAsg }] } = await db.query(
+      `insert into public.work_report_assignments
+         (template_id, template_version_id, target_kind, target_user_id, frequency, is_mandatory, due_day_offset, due_time_local, exclude_sundays, effective_from, assigned_by_user_id, state, is_current)
+       values ($1::uuid, $2::uuid, 'USER', $3::uuid, 'ONCE', true, 0, '23:59:59', false, $4::date, $5::uuid, 'ACTIVE', true)
+       returning assignment_id`,
+      [tOnce.template_id, tOnce.draft_version_id, STAFF_A1.app, todayIso, OWNER.app],
+    );
+    results.c13_once_fresh = await checkCase("C13 ONCE fresh", STAFF_A1, { expectedBool: true });
+
+    // Materialize ONCE obligation for real via business RPC
+    const { rows: [{ res: realMat }] } = await db.query(
+      "select public.work_report_list_my_obligations($1::uuid, $2::uuid, 'ACTIVE') as res",
+      [STAFF_A1.auth, STAFF_A1.app],
+    );
+    assert.equal(realMat.items.length, 1, "Business list_my_obligations materializes ONCE obligation");
+    const onceObId = realMat.items[0].obligation_id;
+    results.c14_existing_active = await checkCase("C14 existing ACTIVE", STAFF_A1, { expectedBool: true });
+
+    // Exempt ONCE obligation -> probe = false (never reactivates EXEMPTED)
+    await db.query("update public.work_report_obligations set obligation_status = 'EXEMPTED' where obligation_id = $1::uuid", [onceObId]);
+    results.c15_exempted = await checkCase("C15 EXEMPTED non-reactivated", STAFF_A1, { expectedBool: false });
+
+    // Cancel ONCE obligation -> ONCE already has row for assignment_id -> probe = false (ONCE collision!)
+    await db.query("update public.work_report_obligations set obligation_status = 'CANCELLED' where obligation_id = $1::uuid", [onceObId]);
+    results.c16_once_collision = await checkCase("C16 ONCE collision on cancelled", STAFF_A1, { expectedBool: false });
+
+    // Switch to DAILY active assignment on same template & today -> materialize DAILY obligation -> cancel unsubmitted -> reactivates (true)!
+    await db.query("update public.work_report_assignments set state = 'REVOKED', is_current = false where assignment_id = $1::uuid", [onceAsg]);
+    await db.query("delete from public.work_report_obligations where obligation_id = $1::uuid", [onceObId]);
+    await db.query(
+      `insert into public.work_report_assignments
+         (template_id, template_version_id, target_kind, target_user_id, frequency, is_mandatory, due_day_offset, due_time_local, exclude_sundays, effective_from, assigned_by_user_id, state, is_current)
+       values ($1::uuid, $2::uuid, 'USER', $3::uuid, 'DAILY', true, 0, '23:59:59', false, $4::date, $5::uuid, 'ACTIVE', true)`,
+      [tOnce.template_id, tOnce.draft_version_id, STAFF_A1.app, todayIso, OWNER.app],
+    );
+    const { rows: [{ res: dailyMat }] } = await db.query(
+      "select public.work_report_list_my_obligations($1::uuid, $2::uuid, 'ACTIVE') as res",
+      [STAFF_A1.auth, STAFF_A1.app],
+    );
+    assert.equal(dailyMat.items.length, 1, "Business list_my_obligations materializes DAILY obligation");
+    const dailyObId = dailyMat.items[0].obligation_id;
+    await db.query("update public.work_report_obligations set obligation_status = 'CANCELLED' where obligation_id = $1::uuid", [dailyObId]);
+    results.c17_cancelled_unsubmitted = await checkCase("C17 CANCELLED unsubmitted reactivates", STAFF_A1, { expectedBool: true });
+
+    // Mark that cancelled DAILY obligation as submitted (first_submitted_at IS NOT NULL) -> NEVER reactivates -> false!
+    await db.query(
+      `insert into public.work_report_submissions
+         (obligation_id, template_id, template_version_id, assignee_app_user_id, state, first_submitted_at, latest_submitted_at, submitted_by_user_id)
+       values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'COMPLETED', now(), now(), $4::uuid)`,
+      [dailyObId, tOnce.template_id, tOnce.draft_version_id, STAFF_A1.app],
+    );
+    results.c18_cancelled_submitted = await checkCase("C18 CANCELLED submitted never reactivates", STAFF_A1, { expectedBool: false });
+
+    // Case 19-20: Vietnam +07:00 window lookback boundary (effective_to = today - 8 days -> outside 7-day lookback -> false; today - 6 days -> inside -> true)
+    await db.query("delete from public.work_report_submissions where obligation_id = $1::uuid", [dailyObId]);
+    await db.query("delete from public.work_report_obligations where obligation_id = $1::uuid", [dailyObId]);
+    await db.query("update public.work_report_assignments set effective_from = ($1::date - 10), effective_to = ($1::date - 8) where template_id = $2::uuid and state = 'ACTIVE'", [todayIso, tOnce.template_id]);
+    results.c19_lookback_outside = await checkCase("C19 outside 7d window", STAFF_A1, { expectedBool: false });
+    await db.query("update public.work_report_assignments set effective_to = ($1::date - 6) where template_id = $2::uuid and state = 'ACTIVE'", [todayIso, tOnce.template_id]);
+    results.c20_lookback_inside = await checkCase("C20 inside 7d VN boundary", STAFF_A1, { expectedBool: true });
+
+    // Negative actor check: mismatched auth_subject denied 42501
+    await assert.rejects(
+      db.query("select public.work_report_has_active_obligations($1::uuid, $2::uuid)", [STAFF_B1.auth, STAFF_A1.app]),
+      (e) => e.code === "42501",
+    );
+
+    return results;
+  }
+
+  try {
+    const res230 = await runOracle(db230, { managedMirrorCleared: true });
+    const res229 = await runOracle(db229, { managedMirrorCleared: false });
+    assert.deepEqual(res230, res229, "All 20 probe cases on mirror-cleared #230 must match baseline #229 oracle identically");
+  } finally {
+    await db230.close();
+    await db229.close();
+  }
+});
+
+test("WP8D-2 [5/5]: Pre-cutover (authz_managed=false) R1 compatibility parity preserved (legacy tombstone, tl_wr_compat_bridge, team report_delegate bridge)", async () => {
+  const { db } = await createDb();
+  try {
+    await db.query(
+      "insert into public.teams (team_id, code, display_name, active) values ($1::uuid, 'PRE_A', 'Pre Team A', true)",
+      [TEAM_A],
+    );
+    await seedBaseUser(db, OWNER, { caps: ADMIN_SEED_CAPS, scopes: [{ kind: "all" }] });
+    await seedBaseUser(db, TL_A, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, STAFF_A1, { caps: RECRUITER_SEED_CAPS, scopes: [{ kind: "own" }], teamId: TEAM_A });
+    await seedBaseUser(db, VIEW_ONLY, { caps: ["entry_admin", "recruiter_master_manage", "team_master_manage"], scopes: [{ kind: "all" }] });
+    // Explicit legacy tombstone for report_view on pre-cutover Full Admin
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, valid_to, is_current)
+       values ($1::uuid, 'report_view', '2026-01-01', '2026-02-01', false)`,
+      [VIEW_ONLY.app],
+    );
+    // Designate pre-cutover TL_A + grant report_delegate on team
+    await db.query(
+      "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, public.direct_entry_authorization_date(), 1, 'Pre TL', $5)",
+      [OWNER.auth, OWNER.app, TEAM_A, TL_A.app, nextKey("pre_tl")],
+    );
+    await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1::uuid, 'report_delegate', '2026-01-01', true)",
+      [TL_A.app],
+    );
+
+    // Verify legacy tombstone still denies pre-cutover Full Admin
+    await assert.rejects(
+      db.query("select public.work_report_list_readable_submissions($1::uuid, $2::uuid)", [VIEW_ONLY.auth, VIEW_ONLY.app]),
+      (e) => e.code === "42501" && e.message.includes("WORK_REPORT_CAPABILITY_DENIED"),
+    );
+
+    // Verify pre-cutover TL_A has report_review via tl_wr_compat_bridge AND report_delegate via legacy_bridge_candidates CONTEXT_TEAM!
+    const { rawContext: preTlCtx, resolution: preTlRes } = await resolveViaRealRpc(db, TL_A.auth);
+    assert.equal(preTlRes.ok, true);
+    assert.ok(
+      preTlCtx.effective_grants.some((g) => g.capability === "report_review" && g.scope_kind === "CONTEXT_TEAM" && g.scope_id === TEAM_A),
+      "Pre-cutover TL retains report_review @ CONTEXT_TEAM",
+    );
+    assert.ok(
+      preTlCtx.effective_grants.some((g) => g.capability === "report_delegate" && g.scope_kind === "CONTEXT_TEAM" && g.scope_id === TEAM_A && g.source_type === "LEGACY_BRIDGE"),
+      "Pre-cutover team delegator emits report_delegate @ CONTEXT_TEAM in LEGACY_BRIDGE",
+    );
+    assert.equal(workReportDelegationPredicate(preTlRes.actor), true);
+
+    const tpl = await createPublishedTemplate(db, OWNER, "PRE_TPL", { requiresReview: true });
+    const { rows: [{ res: preDel }] } = await db.query(
+      "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_review', $3::uuid, $4::uuid, 'team', $5::uuid, null, null, $6) as res",
+      [TL_A.auth, TL_A.app, STAFF_A1.app, tpl.template_id, TEAM_A, nextKey("pre_del")],
+    );
+    assert.equal(preDel.status, "ACTIVE");
+    const { rawContext: preStaffCtx, resolution: preStaffRes } = await resolveViaRealRpc(db, STAFF_A1.auth);
+    assert.deepEqual(preStaffCtx.effective_report_review_scopes.map((s) => ({ kind: s.kind, team_id: s.team_id })), [{ kind: "team", team_id: TEAM_A }]);
+    assert.equal(workReportReviewPredicate(preStaffRes.actor), true);
+  } finally {
+    await db.close();
+  }
+});

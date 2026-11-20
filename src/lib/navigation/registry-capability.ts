@@ -367,41 +367,51 @@ export const changeRequestsNavPredicate: NavCapabilityPredicate = (actor) =>
   changeRequestsProposerPredicate(actor) ||
   actor.hasHistoricalChangeRequests === true;
 
+/**
+ * WP8D-2: All 6 Work Reports predicates evaluate strictly from paired `effective_grants`
+ * when present (`hasNavAllCapability` / `hasNavTeamCapability`), preserving canonical
+ * Full Admin override (`adminAuthorityNavPredicate`) and server-projected review scopes
+ * (`effective_report_review_scopes`), while preventing cross-scope escalation and
+ * rejecting `own`-only `report_view` (matching SQL guards).
+ */
 export const workReportTemplateManagePredicate: NavCapabilityPredicate = (actor) =>
-  adminAuthorityNavPredicate(actor) || (
-    actor.capabilities.includes("report_form_manage") &&
-    actor.scopes.some((scope) => scope.kind === "all")
-  );
+  adminAuthorityNavPredicate(actor) ||
+  hasNavAllCapability(actor, "report_form_manage");
 
 export const workReportAssignmentPredicate: NavCapabilityPredicate = (actor) =>
-  adminAuthorityNavPredicate(actor) || (
-    actor.capabilities.includes("report_assign") &&
-    actor.scopes.some((scope) => scope.kind === "team" || scope.kind === "all")
-  );
+  adminAuthorityNavPredicate(actor) ||
+  hasNavAllCapability(actor, "report_assign") ||
+  hasNavTeamCapability(actor, "report_assign");
 
 export const workReportViewPredicate: NavCapabilityPredicate = (actor) =>
-  adminAuthorityNavPredicate(actor) || (
-    actor.capabilities.includes("report_view") &&
-    actor.scopes.some((scope) => scope.kind === "own" || scope.kind === "team" || scope.kind === "all")
-  );
+  adminAuthorityNavPredicate(actor) ||
+  hasNavAllCapability(actor, "report_view") ||
+  hasNavTeamCapability(actor, "report_view");
 
 export const workReportAnalyticsPredicate: NavCapabilityPredicate = (actor) =>
-  adminAuthorityNavPredicate(actor) || (
-    actor.capabilities.includes("report_analytics_view") &&
-    actor.scopes.some((scope) => scope.kind === "team" || scope.kind === "all")
-  );
+  adminAuthorityNavPredicate(actor) ||
+  hasNavAllCapability(actor, "report_analytics_view") ||
+  hasNavTeamCapability(actor, "report_analytics_view");
 
 export const workReportReviewPredicate: NavCapabilityPredicate = (actor) =>
   adminAuthorityNavPredicate(actor) ||
-  (actor.capabilities.some((capability) => (capability as string) === "report_review") &&
-    actor.scopes.some((scope) => scope.kind === "team" || scope.kind === "all")) ||
-  (actor.effective_report_review_scopes?.some((scope) => scope.kind === "all" || scope.kind === "team") ?? false);
+  hasNavAllCapability(actor, "report_review") ||
+  hasNavTeamCapability(actor, "report_review") ||
+  (Array.isArray(actor.effective_report_review_scopes) &&
+    actor.effective_report_review_scopes.some(
+      (scope) =>
+        scope !== null &&
+        typeof scope === "object" &&
+        (scope.kind === "all" ||
+          (scope.kind === "team" &&
+            typeof scope.team_id === "string" &&
+            scope.team_id.trim().length > 0)),
+    ));
 
 export const workReportDelegationPredicate: NavCapabilityPredicate = (actor) =>
-  adminAuthorityNavPredicate(actor) || (
-    actor.capabilities.some((capability) => (capability as string) === "report_delegate") &&
-    actor.scopes.some((scope) => scope.kind === "team" || scope.kind === "all")
-  );
+  adminAuthorityNavPredicate(actor) ||
+  hasNavAllCapability(actor, "report_delegate") ||
+  hasNavTeamCapability(actor, "report_delegate");
 
 /** Staff access is projected by the server from an active obligation, never inferred from role/title. */
 export const workReportsNavPredicate: NavCapabilityPredicate = (actor) =>

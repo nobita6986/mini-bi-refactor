@@ -22,6 +22,7 @@ import {
   workReportAnalyticsPredicate,
   workReportAssignmentPredicate,
   workReportTemplateManagePredicate,
+  workReportViewPredicate,
   workReportsNavPredicate,
   workforceOffboardingNavPredicate,
   workerOperationsNavPredicate,
@@ -259,7 +260,11 @@ export function decideWorkReportAssignmentsPageAccess(input: {
 export function decideWorkReportAnalyticsPageAccess(input: {
   actor: ActorResolution | null;
 }): DirectEntryPageDecision {
-  return decideCapabilityPageAccess({ actor: input.actor, allowed: workReportAnalyticsPredicate });
+  return decideCapabilityPageAccess({
+    actor: input.actor,
+    allowed: (actor) =>
+      workReportAnalyticsPredicate(actor) || workReportViewPredicate(actor),
+  });
 }
 
 /**
