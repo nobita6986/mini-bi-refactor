@@ -39,6 +39,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp8c1-contextual-tl-pm-guards-concurrency.test.mjs",
   "scripts/wp8c2-entry-worker-access-concurrency.test.mjs",
   "scripts/wp8d2-work-report-access-concurrency.test.mjs",
+  "scripts/wp9-org-obligations-concurrency.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -133,6 +134,7 @@ const TEST_WEIGHTS = {
   "test:wp8c1-contextual-tl-pm-guards": 14.0,
   "test:wp8c2-entry-worker-access": 18.0,
   "test:wp8d2-work-report-access": 14.0,
+  "test:wp9-org-obligations": 14.0,
 };
 
 const target = process.argv[2];
