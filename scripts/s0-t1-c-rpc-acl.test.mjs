@@ -121,6 +121,8 @@ import {
   WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
   WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME,
   WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
+  WP8D_NAV_READONLY_MIGRATION_NAME,
+  WP8D_NAV_READONLY_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
   OFFBOARDING_REPORT_RPC_SIGNATURES,
   migrationChecksum,
@@ -1135,7 +1137,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES,
         ...WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES,
         ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
-        ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES);
+        ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
+        ...WP8D_NAV_READONLY_RPC_SIGNATURES);
       assert.ok(expectedSignatures.length > 0, "the explicit server/invoker allowlist is not empty");
       assert.equal(new Set(expectedSignatures).size, expectedSignatures.length, "the allowlist has no duplicates");
       const { rows: resolvedExpected } = await client.query(
@@ -1200,7 +1203,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...WP2A_EFFECTIVE_ACCESS_SHADOW_RPC_SIGNATURES,
           ...WP3B_PERSON_ACCOUNT_ORG_RPC_SIGNATURES,
           ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
-          ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES].sort(),
+          ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
+          ...WP8D_NAV_READONLY_RPC_SIGNATURES].sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
       const recruitmentLocationCatalogMigration = await readFile(
@@ -1436,6 +1440,41 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `revoke all on function ${internalSig.toLowerCase()} from public, anon, authenticated, service_role;`,
           ),
           `WP7B internal helper ${internalSig} revokes EXECUTE from all roles including service_role`,
+        );
+      }
+      const wp8dNavReadonlyMigration = await readFile(
+        path.join(MIGRATION_DIR, WP8D_NAV_READONLY_MIGRATION_NAME),
+        "utf8",
+      );
+      const wp8dNavReadonlyNormalized = wp8dNavReadonlyMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of WP8D_NAV_READONLY_RPC_SIGNATURES) {
+        assert.ok(
+          wp8dNavReadonlyNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `WP8D nav readonly RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          wp8dNavReadonlyNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `WP8D nav readonly RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      for (const internalSig of [
+        "public.work_report__internal_actor_materialization_candidates(uuid, date, integer)",
+        "public.work_report__internal_materialize_actor_obligations(uuid, date, integer)",
+        "public.work_report__internal_has_active_obligations_for_date(uuid, date, integer)",
+      ]) {
+        assert.ok(
+          wp8dNavReadonlyNormalized.includes(
+            `revoke all on function ${internalSig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `WP8D nav readonly internal helper ${internalSig} revokes EXECUTE from all roles including service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(

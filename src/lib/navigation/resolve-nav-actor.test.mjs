@@ -251,3 +251,32 @@ test("WP7B D-WP7B-01: server projection builders project minimal hasAttendanceDe
     /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\)/,
   );
 });
+
+test("WP8D nav readonly: resolveWorkReportObligationsAccessForRequest is wrapped by React cache(), uses read-only hasActiveObligations probe instead of listMine, and avoids cross-request cache", () => {
+  assert.match(
+    resolveNavActor,
+    /export\s+const\s+resolveWorkReportObligationsAccessForRequest\s*=\s*cache\(/,
+  );
+  assert.match(
+    resolveNavActor,
+    /createSubmissionRepository\(\)\.hasActiveObligations\(/,
+  );
+  assert.doesNotMatch(
+    resolveNavActor,
+    /createSubmissionRepository\(\)\.listMine\(/,
+    "AppShell navbar probe must NEVER call listMine (which triggers materializer DB writes)",
+  );
+  const codeOnly = resolveNavActor
+    .split("\n")
+    .filter((line) => !/^\s*(\/\*\*|\*|\/\/)/.test(line))
+    .join("\n");
+  assert.doesNotMatch(
+    codeOnly,
+    /\bunstable_cache\b/,
+    "resolve-nav-actor.ts must never use cross-request unstable_cache",
+  );
+  assert.match(resolveNavActor, /process\.env\.WORK_REPORTS_API_ENABLED\s*===\s*["']true["']/);
+  assert.match(resolveNavActor, /!workReportsNavPredicate\(projection\)/);
+  assert.match(resolveNavActor, /resolveWorkReportObligationsAccessForRequest\(\)/);
+  assert.match(resolveNavActor, /projection\.hasWorkReportObligations\s*=\s*true/);
+});

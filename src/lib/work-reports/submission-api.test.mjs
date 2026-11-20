@@ -165,3 +165,68 @@ test("submission repository preserves server is_overdue boolean on obligations a
   const detailJson = await detailRes.json();
   assert.equal(detailJson.data.obligation.is_overdue, true);
 });
+
+test("WP8D nav probe: hasActiveObligations calls read-only RPC, enforces exact 1-key boolean payload, and fails closed on errors/malformed data", async () => {
+  const calls = [];
+  const makeRepo = (handler) => createSubmissionRepository(async (name, args) => {
+    calls.push([name, args]);
+    return handler(name, args);
+  });
+
+  const trueRes = await makeRepo(async () => ({
+    data: { has_active_obligations: true },
+    error: null,
+  })).hasActiveObligations(actor);
+  assert.deepEqual(trueRes, { ok: true, data: { has_active_obligations: true } });
+  assert.deepEqual(calls[0], [
+    "work_report_has_active_obligations",
+    { p_auth_subject: actor.auth_subject, p_app_user_id: actor.app_user_id },
+  ]);
+
+  const falseRes = await makeRepo(async () => ({
+    data: { has_active_obligations: false },
+    error: null,
+  })).hasActiveObligations(actor);
+  assert.deepEqual(falseRes, { ok: true, data: { has_active_obligations: false } });
+
+  const deniedRes = await makeRepo(async () => ({
+    data: null,
+    error: { code: "42501", message: "WORK_REPORT_ACTOR_DENIED" },
+  })).hasActiveObligations(actor);
+  assert.deepEqual(deniedRes, { ok: false, kind: "denied" });
+
+  const rpcErrRes = await makeRepo(async () => ({
+    data: null,
+    error: { code: "25006", message: "cannot execute in a read-only transaction" },
+  })).hasActiveObligations(actor);
+  assert.deepEqual(rpcErrRes, { ok: false, kind: "unavailable" });
+
+  const thrownRes = await makeRepo(async () => {
+    throw new Error("socket hang up");
+  }).hasActiveObligations(actor);
+  assert.deepEqual(thrownRes, { ok: false, kind: "unavailable" });
+
+  const malformedPayloads = [
+    null,
+    undefined,
+    true,
+    false,
+    "true",
+    1,
+    [],
+    {},
+    { has_active_obligations: "true" },
+    { has_active_obligations: 1 },
+    { has_active_obligations: null },
+    { has_active_obligations: true, extra_field: "no-pii-leak" },
+    { items: [] },
+  ];
+  for (const payload of malformedPayloads) {
+    const res = await makeRepo(async () => ({ data: payload, error: null })).hasActiveObligations(actor);
+    assert.deepEqual(
+      res,
+      { ok: false, kind: "unavailable" },
+      `malformed probe payload ${JSON.stringify(payload)} must fail closed`,
+    );
+  }
+});

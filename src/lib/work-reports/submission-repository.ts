@@ -53,7 +53,12 @@ export type WorkReportSubmissionDetail = {
   revisions: Array<{ revision_id: string; revision_no: number; payload_json: Record<string, unknown>; created_at: string }>;
 };
 
+export type WorkReportActiveObligationsProbe = {
+  has_active_obligations: boolean;
+};
+
 export type SubmissionRepository = {
+  hasActiveObligations(input: WorkReportActorRef): Promise<WorkReportSubmissionRpcOutcome<WorkReportActiveObligationsProbe>>;
   listMine(input: WorkReportActorRef & { status: string | null }): Promise<WorkReportSubmissionRpcOutcome<WorkReportObligation[]>>;
   get(input: WorkReportActorRef & { obligation_id: string }): Promise<WorkReportSubmissionRpcOutcome<WorkReportSubmissionDetail>>;
   saveDraft(input: WorkReportActorRef & { obligation_id: string; payload_json: Record<string, unknown>;
@@ -127,6 +132,12 @@ function isDetail(value: unknown): value is WorkReportSubmissionDetail {
       Number.isInteger(value.submission.version)));
 }
 
+function isActiveObligationsProbe(value: unknown): value is WorkReportActiveObligationsProbe {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "has_active_obligations" && typeof value.has_active_obligations === "boolean";
+}
+
 function isObligationList(value: unknown): value is { items: WorkReportObligation[] } {
   return isRecord(value) && Array.isArray(value.items) && value.items.every(isObligation);
 }
@@ -150,6 +161,12 @@ export function createSubmissionRepository(rpc?: Rpc): SubmissionRepository {
     }
   };
   return {
+    hasActiveObligations(input) {
+      return run("work_report_has_active_obligations", {
+        p_auth_subject: input.auth_subject,
+        p_app_user_id: input.app_user_id,
+      }, isActiveObligationsProbe);
+    },
     listMine(input) {
       return run("work_report_list_my_obligations", {
         p_auth_subject: input.auth_subject, p_app_user_id: input.app_user_id, p_status: input.status,

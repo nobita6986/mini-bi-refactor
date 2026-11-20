@@ -201,6 +201,29 @@ export const resolveSalaryAdvanceAccessForRequest = cache(
   },
 );
 
+export const resolveWorkReportObligationsAccessForRequest = cache(
+  async (): Promise<{
+    hasActiveObligations: boolean;
+  }> => {
+    const actor = await resolveActorForRequest();
+    if (!actor.ok) {
+      return { hasActiveObligations: false };
+    }
+    try {
+      const probe = await createSubmissionRepository().hasActiveObligations({
+        auth_subject: actor.actor.auth_subject,
+        app_user_id: actor.actor.app_user_id,
+      });
+      if (probe.ok && probe.data.has_active_obligations) {
+        return { hasActiveObligations: true };
+      }
+    } catch {
+      // Fail closed without disrupting AppShell rendering.
+    }
+    return { hasActiveObligations: false };
+  },
+);
+
 export const resolveNavActorForAppShell = cache(
   async (input: {
     directEntryEnabled: boolean;
@@ -228,12 +251,8 @@ export const resolveNavActorForAppShell = cache(
       hasAttendanceDepartmentHeadAccess: hasActiveDepartmentHeadRole(actor.actor),
     };
     if (process.env.WORK_REPORTS_API_ENABLED === "true" && !workReportsNavPredicate(projection)) {
-      const obligations = await createSubmissionRepository().listMine({
-        auth_subject: actor.actor.auth_subject,
-        app_user_id: actor.actor.app_user_id,
-        status: "ACTIVE",
-      });
-      if (obligations.ok && obligations.data.length > 0) {
+      const obligations = await resolveWorkReportObligationsAccessForRequest();
+      if (obligations.hasActiveObligations) {
         projection.hasWorkReportObligations = true;
       }
     }
