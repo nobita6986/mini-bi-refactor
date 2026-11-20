@@ -1,4 +1,8 @@
-import type { DirectEntryActor } from "../auth/direct-entry-v2";
+import {
+  projectClientCapabilities,
+  projectClientScopes,
+  type DirectEntryActor,
+} from "../auth/direct-entry-v2.ts";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core";
 
 const NO_STORE = "private, no-store";
@@ -37,8 +41,8 @@ export async function createDirectEntrySessionResponse(
       | "allowed_worker_tabs"
     > = {
       app_user_id: result.actor.actor.app_user_id,
-      capabilities: result.actor.actor.capabilities,
-      scopes: result.actor.actor.scopes,
+      capabilities: projectClientCapabilities(result.actor.actor),
+      scopes: projectClientScopes(result.actor.actor),
       self_recruiter_suggestion: result.actor.actor.self_recruiter_suggestion,
       ...(result.actor.actor.effective_report_review_scopes !== undefined
         ? { effective_report_review_scopes: result.actor.actor.effective_report_review_scopes }

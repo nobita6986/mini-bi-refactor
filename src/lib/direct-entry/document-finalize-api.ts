@@ -3,6 +3,10 @@ import "server-only";
 import { inspectDocumentContent, sha256Hex } from "./document-r2-contract.ts";
 import { sanitizeWorkerPortrait } from "./worker-portrait-sanitizer.ts";
 import {
+  hasActiveContextualRole,
+  hasAnyValidPairedGrant,
+} from "../auth/direct-entry-v2.ts";
+import {
   fail,
   isEntryVersion,
   json,
@@ -301,13 +305,15 @@ export async function previewCccdDocument(
     }
     const resolvedActor = session.actor.actor;
     const canPreviewCccd =
-      resolvedActor.capabilities.includes("document_view") ||
-      resolvedActor.capabilities.includes("document_upload") ||
-      resolvedActor.capabilities.includes("change_request_create") ||
-      resolvedActor.capabilities.includes("change_review") ||
-      resolvedActor.capabilities.includes("entry_privileged_edit") ||
-      resolvedActor.capabilities.includes("entry_admin") ||
-      resolvedActor.capabilities.includes("entry_create");
+      hasAnyValidPairedGrant(resolvedActor, "document_view") ||
+      hasAnyValidPairedGrant(resolvedActor, "document_upload") ||
+      hasAnyValidPairedGrant(resolvedActor, "change_request_create") ||
+      hasAnyValidPairedGrant(resolvedActor, "change_review") ||
+      hasAnyValidPairedGrant(resolvedActor, "entry_privileged_edit") ||
+      hasAnyValidPairedGrant(resolvedActor, "entry_admin") ||
+      hasAnyValidPairedGrant(resolvedActor, "entry_create") ||
+      hasActiveContextualRole(resolvedActor, "TEAM_LEADER") ||
+      hasActiveContextualRole(resolvedActor, "PROJECT_MANAGER");
     if (!canPreviewCccd) {
       return fail("DOCUMENT_DENIED", 403);
     }

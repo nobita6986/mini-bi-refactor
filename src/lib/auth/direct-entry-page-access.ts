@@ -204,7 +204,7 @@ export function decideProjectOperationsPageAccess(input: {
 /** Server-side fallback for an empty project list; mirrors #72's catalog-operator/admin authority order (WP8B-1 paired @ ALL when effective_grants is present). */
 export function canManageProjectMasterFromActor(actor: ActorResolution | null): boolean {
   if (actor?.ok !== true) return false;
-  if (Array.isArray(actor.actor.effective_grants)) {
+  if (actor.actor.effective_grants !== undefined) {
     return (
       hasPairedCapability(actor.actor, "catalog_master_manage", { kind: "all" }) ||
       hasPairedCapability(actor.actor, "entry_admin", { kind: "all" })

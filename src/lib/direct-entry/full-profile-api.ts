@@ -1,4 +1,5 @@
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
+import { hasAnyValidPairedGrant } from "../auth/direct-entry-v2.ts";
 import { createHash } from "node:crypto";
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import {
@@ -245,7 +246,7 @@ export async function postFullProfileBatch(
       ? idempotencyKey
       : deriveStageBatchIdempotencyKey(idempotencyKey, stageRows);
     if (stageRows.length > 0 &&
-        !session.actor.actor.capabilities.includes("document_upload")) {
+        !hasAnyValidPairedGrant(session.actor.actor, "document_upload", ["OWN", "ALL"])) {
       return fail("DOCUMENT_DENIED", 403);
     }
     if (stageRows.length > 0 && (

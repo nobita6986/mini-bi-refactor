@@ -4,6 +4,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
+import { hasAnyValidPairedGrant } from "../auth/direct-entry-v2.ts";
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import {
   inspectDocumentContent,
@@ -85,7 +86,10 @@ async function resolveUploadActor(
         session.actor.reason === "UNAUTHENTICATED" ? 401 : 403),
     };
   }
-  if (requireCapability && !session.actor.actor.capabilities.includes("document_upload")) {
+  if (
+    requireCapability &&
+    !hasAnyValidPairedGrant(session.actor.actor, "document_upload", ["OWN", "ALL"])
+  ) {
     return { ok: false as const, response: fail("DOCUMENT_DENIED", 403) };
   }
   const { auth_subject, app_user_id } = session.actor.actor;

@@ -2,7 +2,11 @@ import "server-only";
 
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
-import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
+import {
+  hasActiveContextualRole,
+  hasAnyValidPairedGrant,
+  validateClientBusinessPayload,
+} from "../auth/direct-entry-v2.ts";
 import {
   isValidReviewEntryId,
   parseCccdReviewListQuery,
@@ -56,16 +60,20 @@ async function resolveReviewActor(
   }
   const actor = session.actor.actor;
   const hasReviewOrCreateCapability =
-    actor.capabilities.includes("worker_edit_history_view") ||
-    actor.capabilities.includes("entry_admin") ||
-    actor.capabilities.includes("entry_privileged_edit") ||
-    actor.capabilities.includes("change_request_create") ||
-    actor.capabilities.includes("change_review") ||
-    actor.capabilities.includes("entry_create") ||
-    actor.capabilities.includes("entry_own") ||
-    actor.capabilities.includes("entry_team") ||
-    actor.capabilities.includes("document_upload") ||
-    actor.capabilities.includes("document_view");
+    hasAnyValidPairedGrant(actor, "worker_edit_history_view") ||
+    hasAnyValidPairedGrant(actor, "entry_admin") ||
+    hasAnyValidPairedGrant(actor, "entry_privileged_edit") ||
+    hasAnyValidPairedGrant(actor, "change_request_create") ||
+    hasAnyValidPairedGrant(actor, "change_review") ||
+    hasAnyValidPairedGrant(actor, "entry_create") ||
+    hasAnyValidPairedGrant(actor, "entry_own") ||
+    hasAnyValidPairedGrant(actor, "entry_team") ||
+    hasAnyValidPairedGrant(actor, "document_upload") ||
+    hasAnyValidPairedGrant(actor, "document_view") ||
+    hasActiveContextualRole(actor, "TEAM_LEADER") ||
+    hasActiveContextualRole(actor, "PROJECT_MANAGER") ||
+    actor.self_recruiter_suggestion !== null ||
+    (Array.isArray(actor.allowed_worker_tabs) && actor.allowed_worker_tabs.length > 0);
 
   if (!hasReviewOrCreateCapability) {
     return { ok: false, response: fail("CCCD_REVIEW_DENIED", 403) };

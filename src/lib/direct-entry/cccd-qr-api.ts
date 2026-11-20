@@ -2,7 +2,11 @@ import "server-only";
 
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
-import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
+import {
+  hasActiveContextualRole,
+  hasAnyValidPairedGrant,
+  validateClientBusinessPayload,
+} from "../auth/direct-entry-v2.ts";
 import {
   isCccdQrDocumentType,
   parseCccdQrProcessRequest,
@@ -70,14 +74,15 @@ async function resolveQrActor(
   }
   const actor = session.actor.actor;
   const canUpload =
-    actor.capabilities.includes("document_upload") ||
-    actor.capabilities.includes("change_request_create") ||
-    actor.capabilities.includes("change_review") ||
-    actor.capabilities.includes("entry_privileged_edit") ||
-    actor.capabilities.includes("entry_admin");
+    hasAnyValidPairedGrant(actor, "document_upload") ||
+    hasAnyValidPairedGrant(actor, "change_request_create") ||
+    hasAnyValidPairedGrant(actor, "change_review") ||
+    hasAnyValidPairedGrant(actor, "entry_privileged_edit") ||
+    hasAnyValidPairedGrant(actor, "entry_admin") ||
+    hasActiveContextualRole(actor, "PROJECT_MANAGER");
   const canView =
     canUpload ||
-    actor.capabilities.includes("document_view");
+    hasAnyValidPairedGrant(actor, "document_view");
 
   if (mode === "write" && !canUpload) {
     return { ok: false, response: fail("DOCUMENT_DENIED", 403) };

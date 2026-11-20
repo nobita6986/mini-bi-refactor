@@ -4,6 +4,10 @@ import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denie
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { WorkerOperations } from "@/components/direct-entry/worker-operations";
 import { decideWorkerOperationsPageAccess } from "@/lib/auth/direct-entry-page-access";
+import {
+  projectClientCapabilities,
+  projectClientScopes,
+} from "@/lib/auth/direct-entry-v2";
 import { canExportAllWorkers, canExportWorkers } from "@/lib/direct-entry/worker-export-ui-model";
 import {
   canReadWorkerDirectoryCatalog,
@@ -55,8 +59,8 @@ export default async function WorkerOperationsPage() {
       const canReadCatalog = canReadWorkerDirectoryCatalog(projection);
       // Chi truyen capabilities + scope kind + allowed_worker_tabs: khong lo auth_subject/app_user_id/PII.
       const actorProjection = projection === null ? null : {
-        capabilities: [...projection.capabilities],
-        scopes: projection.scopes.map((scope) => ({ kind: scope.kind })),
+        capabilities: [...projectClientCapabilities(projection)],
+        scopes: projectClientScopes(projection).map((scope) => ({ kind: scope.kind })),
         allowed_worker_tabs: [...allowedTabs],
       };
       const canExport = canExportWorkers(actorProjection);

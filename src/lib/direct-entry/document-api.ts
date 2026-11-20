@@ -1,6 +1,10 @@
 import "server-only";
 
-import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
+import {
+  hasActiveContextualRole,
+  hasAnyValidPairedGrant,
+  validateClientBusinessPayload,
+} from "../auth/direct-entry-v2.ts";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import { DOCUMENT_MIME_TYPES, type DirectEntryDocumentType } from "../contracts/direct-entry-v1.ts";
@@ -95,10 +99,12 @@ export async function resolveActor(
     };
   }
   const actor = session.actor.actor;
+  const hasDocumentCap = hasAnyValidPairedGrant(actor, capability);
   const canUploadDraftAsProjectManager =
     capability === "document_upload" &&
-    actor.capabilities.includes("change_request_create");
-  if (!actor.capabilities.includes(capability) && !canUploadDraftAsProjectManager) {
+    (hasAnyValidPairedGrant(actor, "change_request_create", ["OWN", "ALL", "CONTEXT_PROJECT"]) ||
+      hasActiveContextualRole(actor, "PROJECT_MANAGER"));
+  if (!hasDocumentCap && !canUploadDraftAsProjectManager) {
     return { ok: false, response: fail("DOCUMENT_DENIED", 403) };
   }
   return { ok: true, auth_subject: actor.auth_subject, app_user_id: actor.app_user_id };
