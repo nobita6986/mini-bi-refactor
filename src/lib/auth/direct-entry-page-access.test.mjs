@@ -510,3 +510,65 @@ test("WP8B-2: canViewOffboardingReport, decideWorkforceOffboardingPageAccess, an
   assert.equal(decideWorkforceOffboardingPageAccess({ actor: { ok: false, reason: "ACTOR_MAPPING_MISSING" } }), "ACCOUNT_UNAVAILABLE");
   assert.equal(decideRecruitmentLocationCatalogPageAccess({ actor: { ok: false, reason: "ACTOR_DISABLED" } }), "ACCOUNT_UNAVAILABLE");
 });
+
+test("WP8C-1: decideDirectEntryPageAccess, decideProjectOperationsPageAccess, decideWorkerOperationsPageAccess, decideChangeRequestsPageAccess enforce paired effective_grants & allowed_worker_tabs", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+  const own = [{ kind: "own", reference: "u", valid_from: "2026-01-01", valid_to: null }];
+  const team = [{ kind: "team", reference: TEAM_1, valid_from: "2026-01-01", valid_to: null }];
+  const all = [{ kind: "all", reference: "all", valid_from: "2026-01-01", valid_to: null }];
+  const withPaired = (capabilities, effective_grants, scopes = own, allowed_worker_tabs = []) => ({
+    ...actor(capabilities),
+    actor: {
+      ...actor(capabilities).actor,
+      scopes,
+      effective_grants,
+      allowed_worker_tabs,
+    },
+  });
+
+  // 1. Mirror-cleared managed Team Leader -> ALLOW on all 4 pages
+  const mirrorClearedTl = withPaired(
+    [],
+    [
+      { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+    own,
+    ["recruited", "team"],
+  );
+  assert.equal(decideDirectEntryPageAccess({ uiEnabled: true, actor: mirrorClearedTl }), "ALLOW");
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: mirrorClearedTl }), "ALLOW");
+  assert.equal(decideWorkerOperationsPageAccess({ uiEnabled: true, actor: mirrorClearedTl }), "ALLOW");
+  assert.equal(decideChangeRequestsPageAccess({ uiEnabled: true, actor: mirrorClearedTl }), "ALLOW");
+
+  // 2. Mirror-cleared managed PM -> ALLOW on Worker Operations; ACCESS_DENIED on Project Operations & Direct Entry
+  const mirrorClearedPm = withPaired([], [], own, ["uploader", "recruited", "managed"]);
+  assert.equal(decideWorkerOperationsPageAccess({ uiEnabled: true, actor: mirrorClearedPm }), "ALLOW");
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: mirrorClearedPm }), "ACCESS_DENIED");
+  assert.equal(decideDirectEntryPageAccess({ uiEnabled: true, actor: mirrorClearedPm }), "ACCESS_DENIED");
+  assert.equal(decideChangeRequestsPageAccess({ uiEnabled: true, actor: mirrorClearedPm }), "ACCESS_DENIED");
+
+  // 3. Stale legacy arrays with empty effective_grants & allowed_worker_tabs -> ACCESS_DENIED on all 4 pages
+  const staleLegacy = withPaired(
+    ["entry_admin", "team_manager_assign", "change_review"],
+    [],
+    [...all, ...team],
+    [],
+  );
+  assert.equal(decideDirectEntryPageAccess({ uiEnabled: true, actor: staleLegacy }), "ACCESS_DENIED");
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: staleLegacy }), "ACCESS_DENIED");
+  assert.equal(decideWorkerOperationsPageAccess({ uiEnabled: true, actor: staleLegacy }), "ACCESS_DENIED");
+  assert.equal(decideChangeRequestsPageAccess({ uiEnabled: true, actor: staleLegacy }), "ACCESS_DENIED");
+
+  // 4. Cross-scope team_manager_assign @ ALL -> ACCESS_DENIED on Project Operations (and all 4 pages)
+  const crossScopeTlAtAll = withPaired(
+    ["team_manager_assign"],
+    [{ capability: "team_manager_assign", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null }],
+    [...all, ...team],
+    [],
+  );
+  assert.equal(decideProjectOperationsPageAccess({ uiEnabled: true, actor: crossScopeTlAtAll }), "ACCESS_DENIED");
+  assert.equal(decideDirectEntryPageAccess({ uiEnabled: true, actor: crossScopeTlAtAll }), "ACCESS_DENIED");
+  assert.equal(decideWorkerOperationsPageAccess({ uiEnabled: true, actor: crossScopeTlAtAll }), "ACCESS_DENIED");
+  assert.equal(decideChangeRequestsPageAccess({ uiEnabled: true, actor: crossScopeTlAtAll }), "ACCESS_DENIED");
+});

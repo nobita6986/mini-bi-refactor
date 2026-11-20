@@ -1333,3 +1333,250 @@ test("WP8B-2: workforceOffboardingNavPredicate and recruitmentLocationCatalogNav
     false,
   );
 });
+
+test("WP8C-1: paired effective_grants for Direct Entry, Project Operations, Worker Operations, and Change Requests (mirror-cleared TL/PM/Admin/Recruiter, dual-role HR_OPERATOR+TL, cross-scope drift, stale legacy)", () => {
+  const {
+    canReadWorkerDirectoryCatalog,
+    changeRequestsNavPredicate,
+    changeRequestsProposerPredicate,
+    changeRequestsReviewerPredicate,
+  } = cap;
+
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  // 1. Canonical managed Team Leader with cleared legacy arrays
+  const mirrorClearedTl = {
+    capabilities: [],
+    scopes: [{ kind: "own" }],
+    effective_grants: [
+      { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+    allowed_worker_tabs: ["recruited", "team"],
+  };
+  assert.equal(projectAdminNavPredicate(mirrorClearedTl), true);
+  assert.equal(directEntryNavPredicate(mirrorClearedTl), true);
+  assert.equal(workerOperationsTeamScopePredicate(mirrorClearedTl), true);
+  assert.equal(workerOperationsNavPredicate(mirrorClearedTl), true);
+  assert.equal(changeRequestsReviewerPredicate(mirrorClearedTl), true);
+  assert.equal(changeRequestsProposerPredicate(mirrorClearedTl), true);
+  assert.equal(changeRequestsNavPredicate(mirrorClearedTl), true);
+  assert.equal(workerOperationsAllScopePredicate(mirrorClearedTl), false);
+  assert.equal(workerOperationsReviewPredicate(mirrorClearedTl), false);
+  assert.equal(canReadWorkerDirectoryCatalog(mirrorClearedTl), false);
+
+  // 2. Canonical managed PM with empty effective_grants and server-confirmed allowed_worker_tabs
+  const mirrorClearedPm = {
+    capabilities: [],
+    scopes: [{ kind: "own" }],
+    effective_grants: [],
+    allowed_worker_tabs: ["uploader", "recruited", "managed"],
+  };
+  assert.equal(workerOperationsNavPredicate(mirrorClearedPm), true);
+  assert.equal(projectAdminNavPredicate(mirrorClearedPm), false);
+  assert.equal(workerOperationsAllScopePredicate(mirrorClearedPm), false);
+  assert.equal(workerOperationsTeamScopePredicate(mirrorClearedPm), false);
+  assert.equal(workerOperationsReviewPredicate(mirrorClearedPm), false);
+  assert.equal(directEntryNavPredicate(mirrorClearedPm), false);
+  assert.equal(canReadWorkerDirectoryCatalog(mirrorClearedPm), false);
+  assert.equal(changeRequestsReviewerPredicate(mirrorClearedPm), false);
+  assert.equal(changeRequestsProposerPredicate(mirrorClearedPm), false);
+  assert.equal(changeRequestsNavPredicate(mirrorClearedPm), false);
+
+  // 3. Canonical managed Admin & global Reviewer with cleared legacy arrays
+  const mirrorClearedAdmin = {
+    capabilities: [],
+    scopes: [],
+    effective_grants: [
+      { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+    allowed_worker_tabs: ["all"],
+  };
+  assert.equal(projectAdminNavPredicate(mirrorClearedAdmin), true);
+  assert.equal(directEntryNavPredicate(mirrorClearedAdmin), true);
+  assert.equal(workerOperationsAllScopePredicate(mirrorClearedAdmin), true);
+  assert.equal(workerOperationsNavPredicate(mirrorClearedAdmin), true);
+  assert.equal(changeRequestsReviewerPredicate(mirrorClearedAdmin), true);
+  assert.equal(changeRequestsProposerPredicate(mirrorClearedAdmin), true);
+  assert.equal(changeRequestsNavPredicate(mirrorClearedAdmin), true);
+  assert.equal(workerOperationsTeamScopePredicate(mirrorClearedAdmin), false);
+  assert.equal(workerOperationsReviewPredicate(mirrorClearedAdmin), false);
+  assert.equal(canReadWorkerDirectoryCatalog(mirrorClearedAdmin), false);
+
+  const mirrorClearedReviewer = {
+    capabilities: [],
+    scopes: [],
+    effective_grants: [
+      { capability: "change_review", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+    allowed_worker_tabs: ["all"],
+  };
+  assert.equal(workerOperationsAllScopePredicate(mirrorClearedReviewer), true);
+  assert.equal(workerOperationsReviewPredicate(mirrorClearedReviewer), true);
+  assert.equal(workerOperationsNavPredicate(mirrorClearedReviewer), true);
+  assert.equal(changeRequestsReviewerPredicate(mirrorClearedReviewer), true);
+  assert.equal(changeRequestsNavPredicate(mirrorClearedReviewer), true);
+  assert.equal(projectAdminNavPredicate(mirrorClearedReviewer), false);
+  assert.equal(directEntryNavPredicate(mirrorClearedReviewer), false);
+  assert.equal(changeRequestsProposerPredicate(mirrorClearedReviewer), false);
+  assert.equal(canReadWorkerDirectoryCatalog(mirrorClearedReviewer), false);
+
+  // 4. Canonical managed RECRUITER with cleared legacy arrays
+  const mirrorClearedRecruiter = {
+    capabilities: [],
+    scopes: [{ kind: "own" }],
+    effective_grants: [
+      { capability: "entry_create", scope_kind: "OWN", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "entry_own", scope_kind: "OWN", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "change_request_create", scope_kind: "OWN", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+    ],
+  };
+  assert.equal(directEntryNavPredicate(mirrorClearedRecruiter), true);
+  assert.equal(canReadWorkerDirectoryCatalog(mirrorClearedRecruiter), true);
+  assert.equal(changeRequestsProposerPredicate(mirrorClearedRecruiter), true);
+  assert.equal(changeRequestsNavPredicate(mirrorClearedRecruiter), true);
+  assert.equal(workerOperationsNavPredicate(mirrorClearedRecruiter), true);
+  assert.equal(projectAdminNavPredicate(mirrorClearedRecruiter), false);
+  assert.equal(workerOperationsAllScopePredicate(mirrorClearedRecruiter), false);
+  assert.equal(workerOperationsTeamScopePredicate(mirrorClearedRecruiter), false);
+  assert.equal(workerOperationsReviewPredicate(mirrorClearedRecruiter), false);
+  assert.equal(changeRequestsReviewerPredicate(mirrorClearedRecruiter), false);
+
+  // 5. Canonical dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM
+  const dualRoleHrAndTl = {
+    capabilities: [
+      "recruiter_master_manage",
+      "team_master_manage",
+      "catalog_master_manage",
+      "audit_view",
+      "document_view",
+      "entry_team",
+      "team_manager_assign",
+    ],
+    scopes: [
+      { kind: "all", reference: "all" },
+      { kind: "team", reference: TEAM_1 },
+    ],
+    effective_grants: [
+      { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "document_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+    ],
+  };
+  assert.equal(projectAdminNavPredicate(dualRoleHrAndTl), true);
+  assert.equal(directEntryNavPredicate(dualRoleHrAndTl), true);
+  assert.equal(workerOperationsTeamScopePredicate(dualRoleHrAndTl), true);
+  assert.equal(workerOperationsNavPredicate(dualRoleHrAndTl), true);
+  assert.equal(changeRequestsReviewerPredicate(dualRoleHrAndTl), true);
+  assert.equal(changeRequestsProposerPredicate(dualRoleHrAndTl), true);
+  assert.equal(workerOperationsAllScopePredicate(dualRoleHrAndTl), false);
+  assert.equal(workerOperationsReviewPredicate(dualRoleHrAndTl), false);
+  assert.equal(canReadWorkerDirectoryCatalog(dualRoleHrAndTl), false);
+
+  // 6. Cross-scope drift, stale legacy arrays, blank team scope_id, and malformed grants -> ALL fail closed
+  const failClosedFixtures = [
+    {
+      label: "team_manager_assign @ ALL + legacy team scope",
+      actor: {
+        capabilities: ["team_manager_assign"],
+        scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+        effective_grants: [
+          { capability: "team_manager_assign", scope_kind: "ALL", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+        ],
+        allowed_worker_tabs: [],
+      },
+    },
+    {
+      label: "entry_admin @ CONTEXT_TEAM + unrelated ALL grant",
+      actor: {
+        capabilities: ["entry_admin", "audit_view"],
+        scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }],
+        effective_grants: [
+          { capability: "entry_admin", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        ],
+        allowed_worker_tabs: [],
+      },
+    },
+    {
+      label: "change_review @ OWN + unrelated ALL grant",
+      actor: {
+        capabilities: ["change_review", "audit_view"],
+        scopes: [{ kind: "all", reference: "all" }, { kind: "own" }],
+        effective_grants: [
+          { capability: "change_review", scope_kind: "OWN", scope_id: null, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        ],
+        allowed_worker_tabs: [],
+      },
+    },
+    {
+      label: "entry_own/entry_create/change_request_create @ CONTEXT_TEAM + blank team scope_id",
+      actor: {
+        capabilities: ["entry_own", "entry_create", "change_request_create", "team_manager_assign"],
+        scopes: [{ kind: "own" }, { kind: "team", reference: TEAM_1 }],
+        effective_grants: [
+          { capability: "entry_own", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "entry_create", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "change_request_create", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+          { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: "   ", source_type: "DIRECT_GRANT", source_id: null },
+        ],
+        allowed_worker_tabs: [],
+      },
+    },
+    {
+      label: "stale legacy arrays with empty effective_grants",
+      actor: {
+        capabilities: [
+          "entry_admin",
+          "entry_team",
+          "entry_own",
+          "entry_create",
+          "team_manager_assign",
+          "change_review",
+          "change_request_create",
+        ],
+        scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }, { kind: "own" }],
+        effective_grants: [],
+        allowed_worker_tabs: [],
+      },
+    },
+    {
+      label: "malformed null/undefined/string elements in effective_grants",
+      actor: {
+        capabilities: ["entry_admin", "entry_team", "entry_own", "entry_create", "team_manager_assign", "change_review", "change_request_create"],
+        scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }, { kind: "own" }],
+        effective_grants: [null, undefined, "bad"],
+        allowed_worker_tabs: [],
+      },
+    },
+    {
+      label: "non-array null effective_grants",
+      actor: {
+        capabilities: ["entry_admin", "entry_team", "entry_own", "entry_create", "team_manager_assign", "change_review", "change_request_create"],
+        scopes: [{ kind: "all", reference: "all" }, { kind: "team", reference: TEAM_1 }, { kind: "own" }],
+        effective_grants: null,
+        allowed_worker_tabs: [],
+      },
+    },
+  ];
+
+  for (const { label, actor: driftActor } of failClosedFixtures) {
+    assert.equal(projectAdminNavPredicate(driftActor), false, `${label}: projectAdminNavPredicate`);
+    assert.equal(directEntryNavPredicate(driftActor), false, `${label}: directEntryNavPredicate`);
+    assert.equal(workerOperationsAllScopePredicate(driftActor), false, `${label}: workerOperationsAllScopePredicate`);
+    assert.equal(workerOperationsTeamScopePredicate(driftActor), false, `${label}: workerOperationsTeamScopePredicate`);
+    assert.equal(workerOperationsReviewPredicate(driftActor), false, `${label}: workerOperationsReviewPredicate`);
+    assert.equal(workerOperationsNavPredicate(driftActor), false, `${label}: workerOperationsNavPredicate`);
+    assert.equal(canReadWorkerDirectoryCatalog(driftActor), false, `${label}: canReadWorkerDirectoryCatalog`);
+    assert.equal(changeRequestsReviewerPredicate(driftActor), false, `${label}: changeRequestsReviewerPredicate`);
+    assert.equal(changeRequestsProposerPredicate(driftActor), false, `${label}: changeRequestsProposerPredicate`);
+    assert.equal(changeRequestsNavPredicate(driftActor), false, `${label}: changeRequestsNavPredicate`);
+  }
+});

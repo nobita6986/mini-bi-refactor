@@ -1648,4 +1648,89 @@ test("T1A-10: page gate and nav predicate allow Worker Directory (/direct-entry/
   assert.equal(workerOperationsNavPredicate(noTabsNoEntryCaps.actor), false);
 });
 
+test("WP8C-1: canReviewChangeRequests and canViewGlobalChangeRequestHistory enforce paired @ ALL when effective_grants is present", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  // 1. Mirror-cleared capabilities/scopes + paired change_review @ ALL -> both true
+  const reviewerAllGrants = [
+    { capability: "change_review", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+  ];
+  assert.equal(
+    canReviewChangeRequests({ capabilities: [], scopes: [], effective_grants: reviewerAllGrants }),
+    true,
+  );
+  assert.equal(canViewGlobalChangeRequestHistory([], [], reviewerAllGrants), true);
+
+  // 2. Mirror-cleared capabilities/scopes + paired entry_admin @ ALL -> review=false, global history=true
+  const adminAllGrants = [
+    { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+  ];
+  assert.equal(
+    canReviewChangeRequests({ capabilities: [], scopes: [], effective_grants: adminAllGrants }),
+    false,
+  );
+  assert.equal(canViewGlobalChangeRequestHistory([], [], adminAllGrants), true);
+
+  // 3. Cross-scope drift (change_review @ CONTEXT_TEAM + unrelated ALL) -> both false
+  const crossScopeGrants = [
+    { capability: "change_review", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "entry_admin", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+    { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+  ];
+  assert.equal(
+    canReviewChangeRequests({
+      capabilities: ["change_review", "entry_admin", "audit_view"],
+      scopes: [{ kind: "all" }, { kind: "team" }],
+      effective_grants: crossScopeGrants,
+    }),
+    false,
+  );
+  assert.equal(
+    canViewGlobalChangeRequestHistory(
+      ["change_review", "entry_admin", "audit_view"],
+      [{ kind: "all" }, { kind: "team" }],
+      crossScopeGrants,
+    ),
+    false,
+  );
+
+  // 4. Stale legacy arrays with effective_grants: [] and malformed grants -> both false
+  assert.equal(
+    canReviewChangeRequests({
+      capabilities: ["change_review", "entry_admin"],
+      scopes: [{ kind: "all" }],
+      effective_grants: [],
+    }),
+    false,
+  );
+  assert.equal(
+    canViewGlobalChangeRequestHistory(["change_review", "entry_admin"], [{ kind: "all" }], []),
+    false,
+  );
+  assert.equal(
+    canReviewChangeRequests({
+      capabilities: ["change_review"],
+      scopes: [{ kind: "all" }],
+      effective_grants: [null, undefined, "bad"],
+    }),
+    false,
+  );
+  assert.equal(
+    canViewGlobalChangeRequestHistory(["change_review", "entry_admin"], [{ kind: "all" }], [null, undefined, "bad"]),
+    false,
+  );
+  assert.equal(
+    canReviewChangeRequests({
+      capabilities: ["change_review"],
+      scopes: [{ kind: "all" }],
+      effective_grants: null,
+    }),
+    false,
+  );
+  assert.equal(
+    canViewGlobalChangeRequestHistory(["change_review", "entry_admin"], [{ kind: "all" }], null),
+    false,
+  );
+});
+
 

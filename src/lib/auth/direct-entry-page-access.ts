@@ -16,6 +16,7 @@ import {
   adminSecurityNavPredicate,
   attendanceReportNavPredicate,
   changeRequestsNavPredicate,
+  directEntryNavPredicate,
   projectAdminNavPredicate,
   recruitmentLocationCatalogNavPredicate,
   workReportAnalyticsPredicate,
@@ -160,8 +161,6 @@ export function decideOrganizationPersonsPageAccess(input: {
   return decideAccountAccessPageAccess(input);
 }
 
-const ENTRY_CAPABILITIES = ["entry_own", "entry_team", "entry_admin"] as const;
-
 function decideUiCapabilityPageAccess(input: {
   uiEnabled: boolean;
   actor: ActorResolution | null;
@@ -181,10 +180,7 @@ export function decideDirectEntryPageAccess(input: {
   return decideUiCapabilityPageAccess({
     uiEnabled: input.uiEnabled,
     actor: input.actor,
-    allowed: (actor) =>
-      actor.capabilities.some((capability) =>
-        (ENTRY_CAPABILITIES as readonly string[]).includes(capability),
-      ),
+    allowed: directEntryNavPredicate,
   });
 }
 

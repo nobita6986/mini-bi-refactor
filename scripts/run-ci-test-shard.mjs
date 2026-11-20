@@ -36,6 +36,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp8b1-shared-admin-guards-concurrency.test.mjs",
   "scripts/wp8b2-location-posts-offboarding-concurrency.test.mjs",
   "scripts/wp8d-nav-readonly-concurrency.test.mjs",
+  "scripts/wp8c1-contextual-tl-pm-guards-concurrency.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -127,6 +128,7 @@ const TEST_WEIGHTS = {
   "test:wp8b1-shared-admin-guards": 12.0,
   "test:wp8b2-location-posts-offboarding": 12.0,
   "test:wp8d-nav-readonly": 10.0,
+  "test:wp8c1-contextual-tl-pm-guards": 14.0,
 };
 
 const target = process.argv[2];

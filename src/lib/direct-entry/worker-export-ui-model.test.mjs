@@ -269,3 +269,103 @@ test("UIUX-S2-06: isUsableWorkerExportBlob verifies PK\\x03\\x04 ZIP header and 
     true,
   );
 });
+
+test("WP8C-1: canExportAllWorkers enforces paired (entry_admin | change_review) @ ALL when effective_grants is present", () => {
+  const TEAM_1 = "11111111-1111-4111-8111-111111111111";
+
+  // 1. Mirror-cleared legacy arrays with paired entry_admin @ ALL or change_review @ ALL -> true
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: [],
+      scopes: [],
+      effective_grants: [
+        { capability: "entry_admin", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      ],
+    }),
+    true,
+  );
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: [],
+      scopes: [],
+      effective_grants: [
+        { capability: "change_review", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      ],
+    }),
+    true,
+  );
+
+  // 2. Cross-scope drift, stale legacy arrays, and malformed effective_grants -> false
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: ["entry_admin", "audit_view"],
+      scopes: [{ kind: "all" }, { kind: "team" }],
+      effective_grants: [
+        { capability: "entry_admin", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+        { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: ["change_review", "document_view"],
+      scopes: [{ kind: "all" }, { kind: "team" }],
+      effective_grants: [
+        { capability: "change_review", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "DIRECT_GRANT", source_id: null },
+        { capability: "document_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: ["entry_admin", "change_review"],
+      scopes: [{ kind: "all" }],
+      effective_grants: [],
+    }),
+    false,
+  );
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: ["entry_admin"],
+      scopes: [{ kind: "all" }],
+      effective_grants: [null, undefined, "bad"],
+    }),
+    false,
+  );
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: ["entry_admin"],
+      scopes: [{ kind: "all" }],
+      effective_grants: null,
+    }),
+    false,
+  );
+
+  // 3. Dual-role HR_OPERATOR @ ALL + TEAM_LEADER @ CONTEXT_TEAM -> false
+  assert.equal(
+    canExportAllWorkers({
+      capabilities: [
+        "recruiter_master_manage",
+        "team_master_manage",
+        "catalog_master_manage",
+        "audit_view",
+        "document_view",
+        "entry_team",
+        "team_manager_assign",
+      ],
+      scopes: [{ kind: "all" }, { kind: "team" }],
+      effective_grants: [
+        { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "team_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "catalog_master_manage", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "audit_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "document_view", scope_kind: "ALL", scope_id: null, source_type: "ROLE_BUNDLE", source_id: null },
+        { capability: "entry_team", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+        { capability: "team_manager_assign", scope_kind: "CONTEXT_TEAM", scope_id: TEAM_1, source_type: "CONTEXTUAL_ASSIGNMENT", source_id: null },
+      ],
+    }),
+    false,
+  );
+});

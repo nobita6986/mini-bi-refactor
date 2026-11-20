@@ -65,7 +65,11 @@ export default async function ChangeRequestsPage() {
       const canReview = projection !== null && changeRequestsReviewerPredicate(projection);
       const canPropose = projection !== null && changeRequestsProposerPredicate(projection);
       const canViewGlobalHistory = projection !== null &&
-        canViewGlobalChangeRequestHistory(projection.capabilities, projection.scopes);
+        canViewGlobalChangeRequestHistory(
+          projection.capabilities,
+          projection.scopes,
+          projection.effective_grants,
+        );
       const canAccessDirectEntry = projection !== null && directEntryNavPredicate(projection);
       const canAccessWorkerDirectory = projection !== null && workerOperationsNavPredicate(projection);
       return (
