@@ -455,6 +455,11 @@ export const WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME =
 export const WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES = Object.freeze([
   "public.leave_management_get_actor_access(uuid, uuid)",
 ]);
+export const WP8D_NAV_READONLY_MIGRATION_NAME =
+  "20261120140000_wp8d_nav_readonly.sql";
+export const WP8D_NAV_READONLY_RPC_SIGNATURES = Object.freeze([
+  "public.work_report_has_active_obligations(uuid, uuid)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -749,6 +754,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     wp3bPersonAccountOrgApplied: has(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME),
     wp5b1RoleEffectiveAccessApplied: has(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
     wp7bAttendanceOrgScopeApplied: has(WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME),
+    wp8dNavReadonlyApplied: has(WP8D_NAV_READONLY_MIGRATION_NAME),
   };
 }
 
@@ -818,6 +824,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     wp3bPersonAccountOrgApplied = false,
     wp5b1RoleEffectiveAccessApplied = false,
     wp7bAttendanceOrgScopeApplied = false,
+    wp8dNavReadonlyApplied = false,
   } = flags ?? {};
 
   const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -957,6 +964,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(wp7bAttendanceOrgScopeApplied
       ? WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES
+      : []),
+    ...(wp8dNavReadonlyApplied
+      ? WP8D_NAV_READONLY_RPC_SIGNATURES
       : []),
   ];
 }

@@ -18,6 +18,7 @@ import {
   HF_WORK_REPORTS_GROUPS_AND_ANALYTICS_OPTIONS_RPC_SIGNATURES,
   WORK_REPORTS_ANDROID_SYNC_AND_UX_RPC_SIGNATURE,
   WORK_REPORTS_READER_CONTRACT_RPC_SIGNATURES,
+  WP8D_NAV_READONLY_RPC_SIGNATURES,
 } from "./lib/migration-validation.mjs";
 import { AUTH_PROLOGUE } from "./lib/s04c-read-fixture.mjs";
 
@@ -340,6 +341,7 @@ test("F2 RPCs are SECURITY DEFINER, owned by migration operator and executable o
     ...WORK_REPORTS_READER_CONTRACT_RPC_SIGNATURES,
     ...HF_WORK_REPORTS_GROUPS_AND_ANALYTICS_OPTIONS_RPC_SIGNATURES,
     WORK_REPORTS_ANDROID_SYNC_AND_UX_RPC_SIGNATURE,
+    ...WP8D_NAV_READONLY_RPC_SIGNATURES,
   ].map((signature) => signature.replace(/^public\./, "")).sort();
   assert.deepEqual(serviceRows.map((row) => normalizeSignature(row.signature)).sort(), expectedServiceRpcSignatures,
     "service_role EXECUTE is limited to the explicit F1/F1.5/F2 API allowlist");
