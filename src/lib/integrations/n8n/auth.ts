@@ -247,6 +247,23 @@ function hasVerifiedPairedAllReportingGrant(effectiveGrants: unknown): boolean {
   });
 }
 
+function extractPairedAllCapabilities(effectiveGrants: unknown): readonly string[] {
+  if (!Array.isArray(effectiveGrants)) return [];
+  const capabilities = new Set<string>();
+  for (const grant of effectiveGrants) {
+    if (!isRecord(grant)) continue;
+    if (
+      typeof grant.capability === "string" &&
+      grant.capability.length > 0 &&
+      grant.scope_kind === "ALL" &&
+      (grant.scope_id === null || grant.scope_id === undefined)
+    ) {
+      capabilities.add(grant.capability);
+    }
+  }
+  return [...capabilities].sort();
+}
+
 function isVerifiedAllScopeActor(
   payload: ActorContextResolutionPayload,
   expectedAuthSubject: string,
@@ -256,7 +273,7 @@ function isVerifiedAllScopeActor(
   app_user_id: string;
   enabled: true;
   capabilities?: unknown;
-  all_scope_grants: unknown[];
+  all_scope_grants?: unknown;
   effective_grants: unknown[];
 } {
   if (payload.enabled !== true) return false;
@@ -279,10 +296,6 @@ function isVerifiedAllScopeActor(
   ) {
     return false;
   }
-  const allScopeGrants = Array.isArray(payload.all_scope_grants)
-    ? payload.all_scope_grants
-    : [];
-  if (allScopeGrants.length === 0) return false;
   if (!hasVerifiedPairedAllReportingGrant(payload.effective_grants)) {
     return false;
   }
@@ -313,8 +326,10 @@ export type N8nActorResolverDependencies = {
  * 2. Optional `N8N_BOD_READONLY_APP_USER_ID` must be a valid UUID and match the
  *    DB-resolved `app_user_id` if provided.
  * 3. Always verifies on every request via `direct_entry_resolve_actor_context`
- *    (no TTL cache) that the actor is enabled and holds active `all` scope
- *    (`all_scope_grants.length > 0`) before allowing any query execution.
+ *    (no TTL cache) that the actor is enabled and holds paired `ALL` scope
+ *    (`entry_admin` or `report_analytics_view` with `scope_kind = 'ALL'` in
+ *    `effective_grants`, including SQL `LEGACY_BRIDGE` entries pre-cutover)
+ *    before allowing any query execution.
  */
 export async function resolveN8nBodServiceActor(
   deps: N8nActorResolverDependencies = {},
@@ -370,11 +385,9 @@ export async function resolveN8nBodServiceActor(
         auth_subject: data.auth_subject,
         app_user_id: data.app_user_id,
       };
-      const capabilities: readonly string[] = Array.isArray(data.capabilities)
-        ? (data.capabilities as unknown[]).filter(
-            (item: unknown): item is string => typeof item === "string",
-          )
-        : [];
+      const capabilities: readonly string[] = extractPairedAllCapabilities(
+        data.effective_grants,
+      );
       return { ok: true, actor, capabilities };
     }
   } catch {

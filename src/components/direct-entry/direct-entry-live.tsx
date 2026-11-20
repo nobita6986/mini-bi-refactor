@@ -499,6 +499,32 @@ export function DirectEntryLive() {
     setRows((current) => mergeReloadedDrafts(current, serverRows));
   }, []);
 
+  const refreshSessionCapabilities = useCallback(async () => {
+    try {
+      const response = await fetch("/api/direct-entry/session", {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (response.status === 401 || response.status === 403) {
+        setCapabilities([]);
+        return;
+      }
+      if (!response.ok) return;
+      const session = await readJson(response);
+      if (
+        isRecord(session) &&
+        session.ok === true &&
+        isRecord(session.actor) &&
+        Array.isArray(session.actor.capabilities) &&
+        session.actor.capabilities.every((capability) => typeof capability === "string")
+      ) {
+        setCapabilities(session.actor.capabilities);
+      }
+    } catch {
+      // Network failure keeps existing UI state until next server response.
+    }
+  }, []);
+
   /**
    * P3.1-HF-R1: tra ve "applied" | "duplicate-changed" | "failed" de danh sach submission biet
    * co phai preflight lai khi server bao tap conflict da thay doi.
@@ -611,6 +637,9 @@ export function DirectEntryLive() {
       }
       intentKeys.current.set(submissionId, clearIntentKey(resolved.state, intent));
       setLifecycleMessage(transitionErrorMessage(status));
+      if (status === 401 || status === 403) {
+        await refreshSessionCapabilities();
+      }
       if (status === 401 || status === 403 || status === 404) {
         await loadSubmissions("replace");
       }
@@ -623,7 +652,7 @@ export function DirectEntryLive() {
       transitionInFlightRef.current.delete(submissionId);
       setBusySubmissionId(null);
     }
-  }, [loadSubmissions, notify, reloadDrafts]);
+  }, [loadSubmissions, notify, refreshSessionCapabilities, reloadDrafts]);
 
   /** P3.1-HF-R1: read-only preflight dùng khi máy chủ yêu cầu xác nhận CCCD trùng. */
   const blockedSubmissionIds = useMemo(() => {
@@ -649,6 +678,9 @@ export function DirectEntryLive() {
       const body = await readJson(response);
       if (!response.ok) {
         setLifecycleMessage(transitionErrorMessage(response.status));
+        if (response.status === 401 || response.status === 403) {
+          await refreshSessionCapabilities();
+        }
         if (response.status === 401 || response.status === 403 || response.status === 404) {
           await loadSubmissions("replace");
         }
@@ -674,7 +706,7 @@ export function DirectEntryLive() {
       setLifecycleMessage(transitionErrorMessage(0));
       return null;
     }
-  }, [loadSubmissions]);
+  }, [loadSubmissions, refreshSessionCapabilities]);
 
   const openFormDuplicateConfirmation = useCallback(async (
     submission: SubmissionReadItem,

@@ -836,6 +836,189 @@ export function hasPairedAllReportingAccess(actor: DirectEntryActor | null | und
   );
 }
 
+/**
+ * WP8C-2 canonical capability -> allowed `AuthzScopeKind` matrix for paired pre-guards
+ * and minimal client session projections. Mirrors `authz_role_capabilities`, WP5B-2,
+ * WP8B-1/2, and WP8C-1/2 SQL boundaries so invalid cross-scope pairings are never
+ * projected onto client `capabilities`/`scopes` or accepted by API pre-guards.
+ */
+const PAIRED_CAPABILITY_ALLOWED_SCOPE_KINDS: Readonly<
+  Record<Capability, readonly AuthzScopeKind[]>
+> = {
+  entry_create: ["OWN", "ALL"],
+  entry_own: ["OWN"],
+  entry_team: ["CONTEXT_TEAM", "ALL"],
+  entry_admin: ["ALL"],
+  submission_create: ["OWN", "ALL"],
+  change_request_create: ["OWN", "ALL", "CONTEXT_TEAM", "CONTEXT_PROJECT"],
+  change_review: ["ALL", "CONTEXT_TEAM"],
+  entry_privileged_edit: ["ALL", "CONTEXT_TEAM", "OWN"],
+  "employment_status.request": ["OWN", "ALL"],
+  "employment_status.review": ["ALL"],
+  "employment_status.apply": ["ALL", "CONTEXT_TEAM", "OWN"],
+  document_upload: ["OWN", "ALL", "CONTEXT_TEAM", "CONTEXT_PROJECT"],
+  document_view: ["OWN", "ALL", "CONTEXT_TEAM", "CONTEXT_PROJECT"],
+  recruiter_master_manage: ["ALL"],
+  team_master_manage: ["ALL"],
+  audit_view: ["ALL"],
+  entry_restore: ["ALL"],
+  catalog_master_manage: ["ALL"],
+  team_manager_assign: ["CONTEXT_TEAM"],
+  report_form_manage: ["ALL"],
+  report_assign: ["ALL", "CONTEXT_TEAM", "CONTEXT_DEPARTMENT"],
+  report_view: ["ALL", "CONTEXT_TEAM", "CONTEXT_DEPARTMENT", "OWN"],
+  report_analytics_view: ["ALL", "CONTEXT_TEAM", "CONTEXT_DEPARTMENT"],
+  report_review: ["ALL", "CONTEXT_TEAM", "CONTEXT_DEPARTMENT"],
+  report_delegate: ["ALL", "CONTEXT_TEAM", "CONTEXT_DEPARTMENT"],
+  vendor_finance_view: ["ALL"],
+  vendor_finance_record: ["ALL"],
+  duplicate_cccd_withdraw: ["ALL"],
+  worker_edit_history_view: ["ALL"],
+};
+
+/**
+ * WP8C-2 paired capability pre-guard evaluator for API routes where the exact
+ * resource/entry scope is subsequently enforced by PostgreSQL `SECURITY DEFINER` RPCs.
+ *
+ * Fail-closed rules:
+ * - When `actor.effective_grants !== undefined`: evaluates strictly `actor.effective_grants`
+ *   (returning `false` if non-array) against `allowedScopeKinds` (defaulting to the
+ *   capability's canonical valid scope kinds) and NEVER falls back to legacy `actor.capabilities`.
+ * - When `actor.effective_grants === undefined`: falls back to `actor.capabilities` solely
+ *   for legacy unit-test fixtures that do not populate `effective_grants`.
+ */
+export function hasAnyValidPairedGrant(
+  actor: DirectEntryActor | null | undefined,
+  capability: Capability,
+  allowedScopeKinds?: readonly AuthzScopeKind[],
+): boolean {
+  if (!actor || actor.enabled === false) return false;
+  if (!CAPABILITY_SET.has(capability)) return false;
+  if (actor.effective_grants !== undefined) {
+    if (!Array.isArray(actor.effective_grants)) return false;
+    const allowed = allowedScopeKinds ?? PAIRED_CAPABILITY_ALLOWED_SCOPE_KINDS[capability];
+    return actor.effective_grants.some(
+      (grant) =>
+        isPairedEffectiveGrant(grant) &&
+        grant.capability === capability &&
+        allowed.includes(grant.scope_kind),
+    );
+  }
+  return actor.capabilities.includes(capability);
+}
+
+/**
+ * WP8C-2 contextual role presence helper for API pre-guards (e.g., `PROJECT_MANAGER`
+ * or `TEAM_LEADER` whose canonical contextual assignment does not carry all legacy
+ * capability tokens in `authz_role_capabilities`). Server RPCs remain authoritative
+ * for exact project/team scope enforcement.
+ */
+export function hasActiveContextualRole(
+  actor: DirectEntryActor | null | undefined,
+  roleCode: "TEAM_LEADER" | "DEPARTMENT_HEAD" | "PROJECT_MANAGER" | "PROJECT_ACCOUNTANT",
+): boolean {
+  if (!actor || actor.enabled === false) return false;
+  if (!Array.isArray(actor.assigned_roles)) return false;
+  return actor.assigned_roles.some(
+    (role) =>
+      isAssignedRoleSummary(role) &&
+      role.role_code === roleCode &&
+      role.assignment_mode === "CONTEXTUAL" &&
+      role.scope_id !== null,
+  );
+}
+
+/**
+ * WP8C-2 minimal client capability projection derived strictly from paired
+ * `effective_grants` on the server (never exposing raw `effective_grants`, `source_type`,
+ * or `source_id` to the browser). Falls back to `actor.capabilities` only when
+ * `effective_grants === undefined` (legacy/unit fixture compatibility).
+ */
+export function projectClientCapabilities(
+  actor: DirectEntryActor | null | undefined,
+): readonly Capability[] {
+  if (!actor || actor.enabled === false) return [];
+  if (actor.effective_grants === undefined) {
+    return [...actor.capabilities];
+  }
+  if (!Array.isArray(actor.effective_grants)) return [];
+  const valid = new Set<Capability>();
+  for (const grant of actor.effective_grants) {
+    if (!isPairedEffectiveGrant(grant)) continue;
+    const allowed = PAIRED_CAPABILITY_ALLOWED_SCOPE_KINDS[grant.capability];
+    if (allowed.includes(grant.scope_kind)) {
+      valid.add(grant.capability);
+    }
+  }
+  return CAPABILITIES.filter((capability) => valid.has(capability));
+}
+
+/**
+ * WP8C-2 minimal client scope projection derived strictly from paired `effective_grants`
+ * on the server (never exposing raw `effective_grants` or stale legacy mirror scopes).
+ * Falls back to `actor.scopes` only when `effective_grants === undefined`.
+ */
+export function projectClientScopes(
+  actor: DirectEntryActor | null | undefined,
+): readonly EffectiveScope[] {
+  if (!actor || actor.enabled === false) return [];
+  if (actor.effective_grants === undefined) {
+    return [...actor.scopes];
+  }
+  if (!Array.isArray(actor.effective_grants)) return [];
+
+  const existingOwn = actor.scopes.find((scope) => scope.kind === "own");
+  const projected: EffectiveScope[] = [
+    existingOwn ?? {
+      kind: "own",
+      reference: actor.app_user_id,
+      valid_from: "0001-01-01",
+      valid_to: null,
+    },
+  ];
+
+  const teamIds = new Set<string>();
+  let hasValidAll = false;
+  for (const grant of actor.effective_grants) {
+    if (!isPairedEffectiveGrant(grant)) continue;
+    const allowed = PAIRED_CAPABILITY_ALLOWED_SCOPE_KINDS[grant.capability];
+    if (!allowed.includes(grant.scope_kind)) continue;
+    if (grant.scope_kind === "ALL" && grant.scope_id === null) {
+      hasValidAll = true;
+    } else if (grant.scope_kind === "CONTEXT_TEAM" && grant.scope_id !== null) {
+      teamIds.add(grant.scope_id);
+    }
+  }
+
+  for (const teamId of [...teamIds].sort()) {
+    const existingTeam = actor.scopes.find(
+      (scope) => scope.kind === "team" && scope.reference === teamId,
+    );
+    projected.push(
+      existingTeam ?? {
+        kind: "team",
+        reference: teamId,
+        valid_from: "0001-01-01",
+        valid_to: null,
+      },
+    );
+  }
+
+  if (hasValidAll) {
+    const existingAll = actor.scopes.find((scope) => scope.kind === "all");
+    projected.push(
+      existingAll ?? {
+        kind: "all",
+        reference: "all",
+        valid_from: "0001-01-01",
+        valid_to: null,
+      },
+    );
+  }
+
+  return projected;
+}
+
 function isAllowedByPairedGrants(
   actor: DirectEntryActor,
   requiredCapability: Capability,

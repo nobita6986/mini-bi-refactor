@@ -1009,3 +1009,188 @@ test("Lịch sử chỉnh sửa NLĐ contract & API: enforces 3-Admin capability
   );
   assert.equal(allowedDetail.status, 200);
 });
+
+test("WP8C-2: CCCD review preflight admits mirror-cleared contextual roles, HR_OPERATOR paired grants, and verified recruiters while denying stale legacy mirrors", async () => {
+  const makeReviewDeps = (actorOverrides) => {
+    let listCalls = 0;
+    let missingCalls = 0;
+    let resolveCalls = 0;
+    return {
+      listCalls: () => listCalls,
+      missingCalls: () => missingCalls,
+      resolveCalls: () => resolveCalls,
+      deps: {
+        resolveSession: async () => ({
+          actor: {
+            ok: true,
+            actor: {
+              auth_subject: AUTH_SUB,
+              app_user_id: USER_ID,
+              display_name: "Synthetic Review Actor",
+              enabled: true,
+              capabilities: [],
+              scopes: [{ kind: "own", reference: USER_ID, valid_from: "2020-01-01", valid_to: null }],
+              effective_grants: [],
+              assigned_roles: [],
+              self_recruiter_suggestion: null,
+              allowed_worker_tabs: [],
+              session: { provider: "supabase", verification: "getUser", authenticated_at: null },
+              ...actorOverrides,
+            },
+          },
+          response_headers: {},
+        }),
+        reviewRepository: {
+          async listReviewQueue() {
+            listCalls += 1;
+            return { ok: true, data: { rows: [] } };
+          },
+          async listMissingDocumentWorkers() {
+            missingCalls += 1;
+            return { ok: true, data: { items: [] } };
+          },
+          async resolveReview() {
+            resolveCalls += 1;
+            return { ok: false, kind: "not-found" };
+          },
+        },
+      },
+    };
+  };
+
+  const admittedCases = [
+    [
+      "contextual PROJECT_MANAGER",
+      {
+        capabilities: [],
+        effective_grants: [],
+        assigned_roles: [
+          {
+            role_code: "PROJECT_MANAGER",
+            display_name: "QLDA",
+            assignment_mode: "CONTEXTUAL",
+            scope_kind: "CONTEXT_PROJECT",
+            scope_id: "proj_alpha",
+            assignment_id: null,
+            is_protected: false,
+            can_revoke: true,
+            cannot_revoke_reason: null,
+          },
+        ],
+      },
+    ],
+    [
+      "contextual TEAM_LEADER",
+      {
+        capabilities: [],
+        effective_grants: [],
+        assigned_roles: [
+          {
+            role_code: "TEAM_LEADER",
+            display_name: "Trưởng nhóm",
+            assignment_mode: "CONTEXTUAL",
+            scope_kind: "CONTEXT_TEAM",
+            scope_id: TEAM_ID,
+            assignment_id: null,
+            is_protected: false,
+            can_revoke: true,
+            cannot_revoke_reason: null,
+          },
+        ],
+      },
+    ],
+    [
+      "HR_OPERATOR (worker_edit_history_view @ ALL)",
+      {
+        capabilities: [],
+        effective_grants: [
+          {
+            capability: "worker_edit_history_view",
+            scope_kind: "ALL",
+            scope_id: null,
+            source_type: "ROLE_BUNDLE",
+            source_id: null,
+          },
+        ],
+      },
+    ],
+    [
+      "verified recruiter (self_recruiter_suggestion)",
+      {
+        capabilities: [],
+        effective_grants: [],
+        self_recruiter_suggestion: RECRUITER_ID,
+      },
+    ],
+  ];
+
+  for (const [label, overrides] of admittedCases) {
+    const spy = makeReviewDeps(overrides);
+    const queueRes = await getDirectEntryCccdReviewQueue(
+      new Request("https://app.example/api/direct-entry/cccd-review?status=NEEDS_REVIEW"),
+      "true",
+      spy.deps,
+    );
+    assert.equal(queueRes.status, 200, `${label} should pass queue preflight`);
+    assert.equal(spy.listCalls(), 1, `${label} should reach listReviewQueue`);
+
+    const missingRes = await getDirectEntryMissingDocumentWorkers(
+      new Request("https://app.example/api/direct-entry/cccd-review/missing-documents?employment_status=ON"),
+      "true",
+      spy.deps,
+    );
+    assert.equal(missingRes.status, 200, `${label} should pass missing-documents preflight`);
+    assert.equal(spy.missingCalls(), 1, `${label} should reach listMissingDocumentWorkers`);
+  }
+
+  // Managed actor with stale legacy capabilities and empty effective_grants, no contextual roles,
+  // no self_recruiter_suggestion, and empty allowed_worker_tabs -> 403 CCCD_REVIEW_DENIED
+  const stale = makeReviewDeps({
+    capabilities: ["entry_admin"],
+    effective_grants: [],
+    assigned_roles: [],
+    self_recruiter_suggestion: null,
+    allowed_worker_tabs: [],
+  });
+
+  const deniedQueue = await getDirectEntryCccdReviewQueue(
+    new Request("https://app.example/api/direct-entry/cccd-review?status=NEEDS_REVIEW"),
+    "true",
+    stale.deps,
+  );
+  assert.equal(deniedQueue.status, 403);
+  assert.deepEqual(await deniedQueue.json(), { ok: false, code: "CCCD_REVIEW_DENIED" });
+  assert.equal(stale.listCalls(), 0);
+
+  const deniedMissing = await getDirectEntryMissingDocumentWorkers(
+    new Request("https://app.example/api/direct-entry/cccd-review/missing-documents?employment_status=ON"),
+    "true",
+    stale.deps,
+  );
+  assert.equal(deniedMissing.status, 403);
+  assert.deepEqual(await deniedMissing.json(), { ok: false, code: "CCCD_REVIEW_DENIED" });
+  assert.equal(stale.missingCalls(), 0);
+
+  const deniedResolve = await postDirectEntryCccdReviewResolution(
+    new Request(`https://app.example/api/direct-entry/entries/${ENTRY_ID}/cccd-review`, {
+      method: "POST",
+      headers: {
+        origin: "https://app.example",
+        host: "app.example",
+        "content-type": "application/json",
+        "idempotency-key": "idem-wp8c2-stale-deny",
+      },
+      body: JSON.stringify({
+        expected_entry_version: 2,
+        action: "UPDATE_ENTERED_CCCD",
+        national_id: "079095008811",
+      }),
+    }),
+    ENTRY_ID,
+    "true",
+    stale.deps,
+  );
+  assert.equal(deniedResolve.status, 403);
+  assert.deepEqual(await deniedResolve.json(), { ok: false, code: "CCCD_REVIEW_DENIED" });
+  assert.equal(stale.resolveCalls(), 0);
+});

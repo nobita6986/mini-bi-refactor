@@ -356,3 +356,136 @@ test("route handlers are dynamic Node server compositions and session reuses get
   const sessionCore = readFileSync(new URL("./direct-entry-session-core.ts", import.meta.url), "utf8");
   assert.match(sessionCore, /client\.auth\.getUser\(\)/);
 });
+
+test("WP8C-2: auth session and login responses project paired effective_grants without leaking grant metadata and drop stale legacy mirrors or invalid scope pairings", async () => {
+  const teamId = "33333333-3333-4333-8333-333333333333";
+  const sourceIdA = "44444444-4444-4444-8444-444444444444";
+  const sourceIdB = "55555555-5555-4555-8555-555555555555";
+  const sourceIdC = "66666666-6666-4666-8666-666666666666";
+
+  const canonicalActor = {
+    ...actor,
+    capabilities: [],
+    scopes: [{ kind: "own", reference: actor.app_user_id, valid_from: "0001-01-01", valid_to: null }],
+    effective_grants: [
+      {
+        capability: "entry_admin",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "ROLE_BUNDLE",
+        source_id: sourceIdA,
+      },
+      {
+        capability: "document_upload",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "DIRECT_GRANT",
+        source_id: sourceIdB,
+      },
+      {
+        capability: "team_manager_assign",
+        scope_kind: "CONTEXT_TEAM",
+        scope_id: teamId,
+        source_type: "CONTEXTUAL_ASSIGNMENT",
+        source_id: sourceIdC,
+      },
+    ],
+  };
+
+  const staleLegacyActor = {
+    ...actor,
+    capabilities: ["entry_admin"],
+    scopes: [
+      { kind: "own", reference: actor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+      { kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null },
+    ],
+    effective_grants: [],
+  };
+
+  const invalidPairingActor = {
+    ...actor,
+    capabilities: ["entry_admin", "team_manager_assign"],
+    scopes: [
+      { kind: "own", reference: actor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+      { kind: "all", reference: "all", valid_from: "2020-01-01", valid_to: null },
+    ],
+    effective_grants: [
+      {
+        capability: "entry_admin",
+        scope_kind: "OWN",
+        scope_id: null,
+        source_type: "DIRECT_GRANT",
+        source_id: null,
+      },
+      {
+        capability: "team_manager_assign",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "DIRECT_GRANT",
+        source_id: null,
+      },
+    ],
+  };
+
+  const callBoth = async (targetActor) => {
+    const sessionRes = await createAuthSessionResponse(async () => ({
+      actor: { ok: true, actor: targetActor },
+    }));
+    const loginRes = await createAuthLoginResponse(request("/api/auth/login", credentials), {
+      ...baseDependencies(),
+      createClient: async () => successClient(),
+      resolveActor: async () => ({ ok: true, actor: targetActor }),
+    });
+    return [sessionRes, loginRes];
+  };
+
+  // 1. Mirror-cleared canonical managed actor gets paired capabilities & derived scopes with zero grant metadata leak
+  for (const res of await callBoth(canonicalActor)) {
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(Object.keys(body.actor).sort(), [
+      "app_user_id",
+      "capabilities",
+      "display_name",
+      "scopes",
+      "self_recruiter_suggestion",
+    ]);
+    assert.deepEqual(body.actor.capabilities, [
+      "entry_admin",
+      "document_upload",
+      "team_manager_assign",
+    ]);
+    assert.deepEqual(body.actor.scopes, [
+      { kind: "own", reference: actor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+      { kind: "team", reference: teamId, valid_from: "0001-01-01", valid_to: null },
+      { kind: "all", reference: "all", valid_from: "0001-01-01", valid_to: null },
+    ]);
+    const serialized = JSON.stringify(body);
+    assert.equal(serialized.includes("effective_grants"), false);
+    assert.equal(serialized.includes("source_type"), false);
+    assert.equal(serialized.includes("source_id"), false);
+    assert.equal(serialized.includes("ROLE_BUNDLE"), false);
+    assert.equal(serialized.includes(sourceIdA), false);
+    assert.equal(serialized.includes("auth_subject"), false);
+  }
+
+  // 2. Stale legacy actor with effective_grants: [] gets empty capabilities and own-only scope
+  for (const res of await callBoth(staleLegacyActor)) {
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.actor.capabilities, []);
+    assert.deepEqual(body.actor.scopes, [
+      { kind: "own", reference: actor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+    ]);
+  }
+
+  // 3. Invalid scope pairings in effective_grants are dropped from capabilities and scopes
+  for (const res of await callBoth(invalidPairingActor)) {
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.actor.capabilities, []);
+    assert.deepEqual(body.actor.scopes, [
+      { kind: "own", reference: actor.app_user_id, valid_from: "0001-01-01", valid_to: null },
+    ]);
+  }
+});

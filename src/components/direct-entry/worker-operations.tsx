@@ -226,10 +226,12 @@ export function WorkerOperations({
       ? canReadCatalog
       : actor?.capabilities.includes("entry_create") === true ||
         actor?.capabilities.includes("entry_own") === true;
+  const propCanUploadDocuments = actor?.capabilities.includes("document_upload") === true;
   const [sessionPermissionOverride, setSessionPermissionOverride] = useState<{
     baseKey: string;
     allowedTabs: readonly WorkerOperationsTab[];
     canReadCatalog: boolean;
+    canUploadDocuments: boolean;
   } | null>(null);
   const activeSessionOverride =
     sessionPermissionOverride !== null && sessionPermissionOverride.baseKey === propAllowedTabsKey
@@ -241,7 +243,9 @@ export function WorkerOperations({
     [serverTabs, revokedTabs],
   );
   /** W2S1: capability document_upload do server-resolved actor quyet dinh, khong suy tu tab/role. */
-  const canUploadDocuments = actor?.capabilities.includes("document_upload") === true;
+  const canUploadDocuments = activeSessionOverride
+    ? activeSessionOverride.canUploadDocuments
+    : propCanUploadDocuments;
   const mayReadCatalog = activeSessionOverride
     ? activeSessionOverride.canReadCatalog
     : propCanReadCatalog;
@@ -387,16 +391,42 @@ export function WorkerOperations({
     denialMessage: string | null,
   ): Promise<void> => {
     const response = await fetch(API + "/session", {
+      cache: "no-store",
+      credentials: "same-origin",
       headers: { accept: "application/json" },
     }).catch(() => null);
-    if (response === null || response.status !== 200) return;
-    const parsed = parseSessionWorkerPermissionsResponse(await readJson(response));
+    if (response === null) return;
+    if (response.status === 401 || response.status === 403) {
+      setSessionPermissionOverride({
+        baseKey: propAllowedTabsKey,
+        allowedTabs: [],
+        canReadCatalog: false,
+        canUploadDocuments: false,
+      });
+      setFilterCatalogState("denied");
+      return;
+    }
+    if (response.status !== 200) return;
+    const sessionBody = await readJson(response);
+    const parsed = parseSessionWorkerPermissionsResponse(sessionBody);
     if (parsed === null) return;
+    const sessionActor =
+      typeof sessionBody === "object" &&
+      sessionBody !== null &&
+      !Array.isArray(sessionBody) &&
+      typeof (sessionBody as { actor?: unknown }).actor === "object" &&
+      (sessionBody as { actor?: unknown }).actor !== null
+        ? ((sessionBody as { actor: { capabilities?: unknown } }).actor)
+        : null;
+    const nextCanUploadDocuments =
+      Array.isArray(sessionActor?.capabilities) &&
+      sessionActor.capabilities.includes("document_upload");
     const effectiveAllowed = parsed.allowedTabs.filter((item) => item !== revokedTab);
     setSessionPermissionOverride({
       baseKey: propAllowedTabsKey,
       allowedTabs: effectiveAllowed,
       canReadCatalog: parsed.canReadCatalog,
+      canUploadDocuments: nextCanUploadDocuments,
     });
     if (!parsed.canReadCatalog) {
       setFilterCatalogState("denied");

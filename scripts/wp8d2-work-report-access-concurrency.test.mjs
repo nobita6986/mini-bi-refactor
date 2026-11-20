@@ -21,7 +21,7 @@
  *     - 4A: MVCC non-blocking barrier during uncommitted `disable_app_user(TL_A)` with `lock_timeout = '500ms'` and 0 materialized obligations.
  *     - 4B: 40 concurrent `READ ONLY` RPCs across 4 sessions racing 2 disable/enable cycles -> 0 `40P01`/`25006`/`0A000`/`55P03`.
  *     - 4C: Live PG18 catalog: exact `337` `service_role` RPCs, `0` client/PUBLIC EXECUTE, `provolatile = 's'` & `prosecdef = true` on all 12 internal helpers + 7 STABLE RPCs + probe chain, `ADMIN=21`/`TEAM_LEADER=5`.
- *   Guard 5 — Fail-closed `55000` check when applying #230 against a `NOBYPASSRLS` table owner.
+ *   Guard 5 — Fail-closed `55000` check when applying #231 against a `NOBYPASSRLS` table owner.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -400,12 +400,25 @@ test("WP8D-2 Real PostgreSQL 18 Concurrency: Delegation/Grantor/Move/TL-Revoke/D
     );
 
     const migrationFiles = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
-    assert.ok(migrationFiles.includes(WP8D2_MIGRATION_NAME), `${WP8D2_MIGRATION_NAME} must exist`);
+    assert.ok(migrationFiles.length >= 231, "Expected at least 231 migrations through WP8D-2 after WP8C-2");
+    assert.equal(
+      migrationFiles.indexOf("20261120160000_wp8c2_entry_worker_access.sql"),
+      229,
+      "WP8C-2 migration must be #230 immediately before WP8D-2",
+    );
+    assert.equal(
+      migrationFiles.indexOf(WP8D2_MIGRATION_NAME),
+      230,
+      `${WP8D2_MIGRATION_NAME} must be #231 right after WP8C-2`,
+    );
+    let appliedCount = 0;
     for (const file of migrationFiles) {
       const sql = await readFile(path.join(MIGRATION_DIR, file), "utf8");
       await setup.query(sql);
+      appliedCount += 1;
       if (file === WP8D2_MIGRATION_NAME) break;
     }
+    assert.equal(appliedCount, 231, "All 231 migrations through WP8D-2 applied in Real PG18");
 
     // Seed accounts & teams before WP5 cutover
     await setup.query(
@@ -1034,7 +1047,7 @@ test("WP8D-2 Real PostgreSQL 18 Concurrency: Delegation/Grantor/Move/TL-Revoke/D
     }
 
     // =========================================================================
-    // GUARD 5: NOBYPASSRLS table owner causes migration #230 self-check to FAIL CLOSED (55000)
+    // GUARD 5: NOBYPASSRLS table owner causes migration #231 self-check to FAIL CLOSED (55000)
     // =========================================================================
     await setup.query("create role wp8d2_nobypass_owner nologin nosuperuser nobypassrls");
     await setup.query("create database wp8d2_nobypass_db");
@@ -1054,7 +1067,7 @@ test("WP8D-2 Real PostgreSQL 18 Concurrency: Delegation/Grantor/Move/TL-Revoke/D
     await assert.rejects(
       guardClient.query(wp8d2Sql),
       (err) => err.code === "55000" && err.message.includes("WP8D2"),
-      "Migration #230 MUST fail closed with 55000 when routine owner lacks SUPERUSER/BYPASSRLS",
+      "Migration #231 MUST fail closed with 55000 when routine owner lacks SUPERUSER/BYPASSRLS",
     );
   } finally {
     for (const c of clients) {

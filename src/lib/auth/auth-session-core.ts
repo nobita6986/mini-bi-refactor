@@ -1,5 +1,11 @@
-import type { ActorRepository, DirectEntryActor, SessionIdentity } from "./direct-entry-v2";
-import type { ActorResolution } from "./direct-entry-v2";
+import {
+  projectClientCapabilities,
+  projectClientScopes,
+  type ActorRepository,
+  type ActorResolution,
+  type DirectEntryActor,
+  type SessionIdentity,
+} from "./direct-entry-v2.ts";
 import { isSameOriginAuthRequest } from "./same-origin-auth-request.ts";
 import { z } from "zod";
 
@@ -48,12 +54,12 @@ function failure(code: string, status: number): Response {
 
 function actorProjection(actor: DirectEntryActor) {
   // P2.5-HF-R5: display_name is the only identity field added for the header.
-  // Email, auth_subject and login metadata are never projected.
+  // Email, auth_subject, login metadata, and raw effective_grants are never projected.
   return {
     app_user_id: actor.app_user_id,
     display_name: actor.display_name,
-    capabilities: actor.capabilities,
-    scopes: actor.scopes,
+    capabilities: projectClientCapabilities(actor),
+    scopes: projectClientScopes(actor),
     self_recruiter_suggestion: actor.self_recruiter_suggestion,
   };
 }

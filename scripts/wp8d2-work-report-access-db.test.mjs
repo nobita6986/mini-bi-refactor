@@ -232,9 +232,20 @@ async function createPublishedTemplate(db, actor, code, { requiresReview = true 
   return created;
 }
 
-test("WP8D-2 [1/5]: Migration #230 hygiene, atomic rollback zero drift, exact 337 service_role RPCs, STABLE probe chain & role catalog invariants", async () => {
+test("WP8D-2 [1/5]: Migration #231 hygiene, atomic rollback zero drift, exact 231 migrations (C2 #230 -> D2 #231), exact 337 service_role RPCs, STABLE probe chain & role catalog invariants", async () => {
   const { db, migrations } = await createDb({ stopBefore: WP8D2_MIGRATION_NAME });
   try {
+    assert.ok(migrations.length >= 231, "Merged migration chain must contain at least 231 migrations through WP8D-2");
+    assert.equal(
+      migrations.findIndex((m) => m.name === "20261120160000_wp8c2_entry_worker_access.sql"),
+      229,
+      "WP8C-2 migration must sit at #230 immediately before WP8D-2",
+    );
+    assert.equal(
+      migrations.findIndex((m) => m.name === WP8D2_MIGRATION_NAME),
+      230,
+      "WP8D-2 migration must sit at #231 immediately after WP8C-2",
+    );
     const wp8d2 = migrations.find((m) => m.name === WP8D2_MIGRATION_NAME);
     assert.ok(wp8d2, "WP8D-2 migration must exist");
     assert.equal(wp8d2.sql.includes("@"), false, "Migration must not contain @ character");
@@ -251,7 +262,7 @@ test("WP8D-2 [1/5]: Migration #230 hygiene, atomic rollback zero drift, exact 33
         where n.nspname = 'public'
           and has_function_privilege('service_role', p.oid, 'EXECUTE')`,
     );
-    assert.equal(beforeSrCount, 337, "Baseline #229 must have exact 337 service_role RPCs");
+    assert.equal(beforeSrCount, 337, "Pre-WP8D-2 baseline (#230 after WP8C-2) must have exact 337 service_role RPCs");
 
     await db.exec(`
       create table if not exists public.schema_migrations (
