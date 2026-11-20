@@ -12,8 +12,8 @@
  *      same `Idempotency-Key` replays identical response before OCC;
  *      distinct `Idempotency-Key` yields 1 winner + 1 `PT409` (`VERSION_CONFLICT`).
  *   3. Concurrent actor authority loss (`revoke ADMIN` and `disable` actor racing
- *      `ai_provider_config_save` & `assign_global_role_admin`):
- *      serialized via row locks on `direct_entry_app_users`, 0 `40P01`, loser returns `AI_FORBIDDEN` / `42501`.
+ *      `direct_entry_authz_assign_global_role_admin`):
+ *      serialized via row locks on `direct_entry_app_users`, 0 `40P01`, loser returns `42501`.
  *   4. R1 lock-order regression under `HR_OPERATOR` (`team_master_manage @ ALL`, non-`ADMIN`):
  *      `enable_app_user` vs `designate_team_leader` (replace TL) and `revoke_team_leader`:
  *      0 `40P01` deadlocks across multiple rounds, 0 resurrected TL authority.
@@ -247,8 +247,6 @@ const DESIGNATE_TL_SQL =
   "select public.direct_entry_designate_team_leader($1::uuid, $2::uuid, $3::uuid, $4::uuid, null::date, $5::int, $6, $7) as data";
 const REVOKE_TL_SQL =
   "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, null::date, $4::int, $5, $6) as data";
-const AI_SAVE_SQL =
-  "select public.ai_provider_config_save($1, $2::int, $3, $4, $5, $6, $7::jsonb, $8, $9, $10) as data";
 const BEGIN_OP_SQL =
   "select public.direct_entry_account_operation_begin($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7, $8) as data";
 const CLAIM_OP_SQL =
@@ -256,24 +254,7 @@ const CLAIM_OP_SQL =
 const FINALIZE_CREATE_SQL =
   "select public.direct_entry_account_operation_finalize_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6) as data";
 
-function buildAiEnvelope(configId, version, profile, url, model) {
-  return {
-    envelope_version: 2,
-    algorithm: "aes-256-gcm",
-    key_id: "k1",
-    config_id: configId,
-    provider_profile: profile,
-    config_version: version,
-    api_base_url: url,
-    model,
-    iv: Buffer.alloc(12, 3).toString("base64"),
-    ciphertext: Buffer.from("pg18-race-cipher").toString("base64"),
-    authentication_tag: Buffer.alloc(16, 4).toString("base64"),
-    created_at: "2026-11-18T16:00:00.000Z",
-  };
-}
-
-test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI authority loss, and HR_OPERATOR R1 TL lock-order", async (t) => {
+test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, concurrent ADMIN revoke authority loss, and HR_OPERATOR R1 TL lock-order", async (t) => {
   const initdb = binary("initdb");
   const pgCtl = binary("pg_ctl");
   if (!initdb || !pgCtl) {
@@ -896,7 +877,7 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
     assert.equal(occLosers[0].reason?.code, "PT409");
 
     // -------------------------------------------------------------------------
-    // Race 3a: Concurrent authority loss: OWNER revokes NGATTT ADMIN vs NGATTT calling ai_provider_config_save
+    // Race 3a: Concurrent authority loss: OWNER revokes NGATTT ADMIN vs NGATTT calling assign_global_role_admin
     // -------------------------------------------------------------------------
     await Promise.all([worker1.query("reset role"), worker2.query("reset role")]);
     const { rows: [ngaAssign] } = await observer.query(
@@ -918,7 +899,7 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
       }
     };
 
-    // Hold revoke uncommitted while AI save blocks on NGATTT FOR SHARE -> revoke commits -> AI save sees authority loss -> AI_FORBIDDEN!
+    // Hold revoke uncommitted while NGATTT's assign blocks on NGATTT row lock -> revoke commits -> assign sees authority loss -> 42501!
     await worker1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
     await worker1.query(REVOKE_SQL, [
       OWNER.auth,
@@ -926,39 +907,41 @@ test("WP5B-2 real PostgreSQL concurrency: cutover race, idempotency vs OCC, AI a
       NGATTT.app,
       ngaAssign.assignment_id,
       ngaAssign.version,
-      "Revoke NGATTT during AI save",
+      "Revoke NGATTT during concurrent assign",
       nextUuidKey(),
-      sha256Hex({ op: "revoke-nga-ai" }),
+      sha256Hex({ op: "revoke-nga-admin" }),
     ]);
 
     await worker2.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'; set local role service_role");
-    const aiRacePromise = settleTx(
+    const revokeRacePromise = settleTx(
       worker2,
-      worker2.query(AI_SAVE_SQL, [
-        "pilot",
-        null,
-        "openai-compatible",
-        "https://api.openai.com/v1",
-        "api.openai.com",
-        "gpt-4o-mini",
-        JSON.stringify(buildAiEnvelope("pilot", 1, "openai-compatible", "https://api.openai.com/v1", "gpt-4o-mini")),
-        "d".repeat(16),
+      worker2.query(ASSIGN_SQL, [
+        NGATTT.auth,
         NGATTT.app,
-        "config_created",
+        STAFF_AUTH_LOSS.app,
+        "HR_OPERATOR",
+        1,
+        "NGATTT assign during ADMIN revoke race",
+        nextUuidKey(),
+        sha256Hex({ op: "nga-assign-during-revoke" }),
       ]),
     );
     await waitUntilBlocked(observer, "wp5b2-w2");
     await worker1.query("commit");
 
-    const aiRaceResult = await aiRacePromise;
-    assert.equal(aiRaceResult.status, "fulfilled", `ai_provider_config_save threw unexpectedly: ${aiRaceResult.reason?.message}`);
-    assert.deepEqual(
-      { ok: aiRaceResult.value.rows[0].data.ok, code: aiRaceResult.value.rows[0].data.code },
-      { ok: false, code: "AI_FORBIDDEN" },
-      "NGATTT losing ADMIN under lock must cause ai_provider_config_save to return AI_FORBIDDEN",
+    const revokeRaceResult = await revokeRacePromise;
+    assert.equal(revokeRaceResult.status, "rejected");
+    assert.notEqual(revokeRaceResult.reason?.code, "40P01");
+    assert.equal(
+      revokeRaceResult.reason?.code,
+      "42501",
+      "NGATTT losing ADMIN under lock must cause concurrent assign_global_role_admin to reject with 42501",
     );
-    const { rows: [{ cnt: aiCount }] } = await observer.query("select count(*)::int as cnt from public.ai_provider_configs");
-    assert.equal(aiCount, 0, "Denied AI save must not insert into ai_provider_configs");
+    const { rows: [{ cnt: grantedCount }] } = await observer.query(
+      "select count(*)::int as cnt from public.authz_account_role_assignments where app_user_id = $1::uuid and role_code = 'HR_OPERATOR' and ended_at is null",
+      [STAFF_AUTH_LOSS.app],
+    );
+    assert.equal(grantedCount, 0, "Denied concurrent assign must not grant HR_OPERATOR");
 
     // -------------------------------------------------------------------------
     // Race 3b: Concurrent disable of LIENVU vs LIENVU calling assign_global_role_admin

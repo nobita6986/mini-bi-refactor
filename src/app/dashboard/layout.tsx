@@ -6,23 +6,12 @@ import { resolveNavActorForAppShell } from "@/lib/navigation/resolve-nav-actor";
 import { isDirectEntryUiEnabled } from "@/lib/direct-entry/ui-model";
 
 /**
- * P3-W06A Scope B: AI deferred to P3.1.
+ * Dashboard layout wrapper around AppShell.
  *
- * Hai action `Tạo báo cáo AI` (AiReportPanel) và `Cấu hình AI` (AiSettingsPanel)
- * KHÔNG render trong P3 release hiện tại — kể cả khi `AI_REPORTS_ENABLED` /
- * `AI_SETTINGS_ENABLED` được bật nhầm trên Production. Implementation vẫn
- * giữ nguyên trong source (không xoá), AI API internals không bị động vào,
- * PILOT_ACTOR_REF và rate limiter vẫn thuộc P3.1.
- *
- * `headerActions` rỗng nghĩa là AppShell không render bất kỳ action header nào.
- * Khi P3.1 re-enable, layout này sẽ đọc lại cờ + capability và truyền header
- * actions phù hợp — không phải đụng vào AppShell.
- *
- * P3-W06A R1: `resolveNavActorForAppShell` duoc wrap boi React `cache()`
- * (request-scoped) → cung `ActorResolution` voi `DashboardPage` o duoi
- * (page goi cung function `resolveActorForRequest`, cache hit, khong co
- * 2 getUser + 2 RPC). Admin nav can actor projection ngay ca khi Direct
- * Entry UI flag off; resolver van bo qua query neu ca hai surface deu off.
+ * AI Reports and AI Settings panels/routes were permanently retired (2026-11-21).
+ * `resolveNavActorForAppShell` is wrapped by React `cache()` (request-scoped),
+ * sharing `ActorResolution` with `DashboardPage` below without duplicate auth/RPC
+ * calls. Admin nav needs actor projection even when Direct Entry UI flag is off.
  */
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   await connection();

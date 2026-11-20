@@ -135,10 +135,6 @@ const { executeSessionLogout } = await import(
 );
 
 const {
-  buildAiJobRecheckRetryAction,
-  settleTrackedJobToast,
-  shouldShowAiJobProgress,
-  startOrRetrackAiJobToast,
   validateDownloadableExportBlob,
   validateHtmlExportDocument,
 } = await import("@/lib/ui/long-running-feedback");
@@ -467,8 +463,8 @@ describe("UIUX S2-08 — Chặng 2 Release Gate, Performance & Motion Governance
 
     // Pending -> in-place success update (preserves Chặng 1 4-tone union with pending=true)
     const jobToastId = store.api.pending({
-      title: "Đang tạo báo cáo AI…",
-      dedupeKey: "ai-job:1",
+      title: "Đang xuất dữ liệu…",
+      dedupeKey: "export-job:1",
     });
     assert.equal(store.getSnapshot().visible[0]?.tone, "info");
     assert.equal(store.getSnapshot().visible[0]?.pending, true);
@@ -476,7 +472,7 @@ describe("UIUX S2-08 — Chặng 2 Release Gate, Performance & Motion Governance
 
     store.api.update(jobToastId, {
       tone: "success",
-      title: "Bản nháp báo cáo AI đã sẵn sàng.",
+      title: "Tệp xuất dữ liệu đã sẵn sàng.",
     });
     assert.equal(store.getSnapshot().visible.length, 1);
     assert.equal(store.getSnapshot().visible[0]?.tone, "success");
@@ -625,7 +621,7 @@ describe("UIUX S2-08 — Chặng 2 Release Gate, Performance & Motion Governance
     detach();
   });
 
-  it("7. Long-running operations verify real XLSX ZIP signature, halt progress on AI poll error while preserving drawer-closed polling, and never render fake percentage progress", async () => {
+  it("7. Long-running operations verify real XLSX ZIP signature and never render fake percentage progress", async () => {
     assert.equal(
       validateDownloadableExportBlob({
         blob: new Blob([], {
@@ -664,121 +660,9 @@ describe("UIUX S2-08 — Chặng 2 Release Gate, Performance & Motion Governance
       true,
     );
 
-    // Indeterminate AI progress stops immediately when polling encounters transport/projection error
-    assert.equal(shouldShowAiJobProgress("computing", "polling"), true);
-    assert.equal(shouldShowAiJobProgress("computing", "error"), false);
-
-    const updates = [];
-    const tracked = { jobId: "job-99", toastId: "t-99" };
-    const settledOutcome = settleTrackedJobToast({
-      tracker: tracked,
-      incomingJobId: "job-99",
-      status: "draft",
-      errorCode: null,
-      codeToText: (code) => `ERR:${code}`,
-      notify: {
-        update: (id, patch) => {
-          updates.push({ id, patch });
-          return true;
-        },
-      },
-    });
-    assert.equal(settledOutcome.settled, true);
-    assert.equal(settledOutcome.nextTracker, null);
-    assert.equal(updates.length, 1);
-    assert.equal(updates[0].id, "t-99");
-    assert.equal(updates[0].patch.tone, "success");
-    assert.equal(updates[0].patch.pending, false);
-
-    // Full round-trip: pending -> transport error -> click retry -> pending survives -> terminal draft updates same toastId
-    const retryClock = createFakeClock();
-    retryClock.prefersReducedMotion = () => false;
-    const retryStore = createNotifyStore(retryClock);
-    const detachRetry = bindNotifyTimerScheduler(retryStore, retryClock);
-
-    let liveTracker = startOrRetrackAiJobToast({
-      currentTracker: null,
-      jobId: "job-roundtrip-1",
-      title: "Đang tổng hợp báo cáo AI…",
-      notify: retryStore.api,
-    });
-    const roundtripToastId = liveTracker.toastId;
-    retryClock.advanceBy(250);
-    assert.equal(retryStore.getSnapshot().visible.length, 1);
-    assert.equal(retryStore.getSnapshot().visible[0].id, roundtripToastId);
-    assert.equal(retryStore.getSnapshot().visible[0].pending, true);
-
-    const errStep = settleTrackedJobToast({
-      tracker: liveTracker,
-      incomingJobId: "job-roundtrip-1",
-      status: null,
-      errorCode: null,
-      transportError: "Không kết nối được tới server.",
-      retryAction: buildAiJobRecheckRetryAction({
-        jobId: "job-roundtrip-1",
-        isMounted: () => true,
-        onRecheck: (nextId) => {
-          liveTracker = startOrRetrackAiJobToast({
-            currentTracker: liveTracker,
-            jobId: nextId,
-            title: "Đang kiểm tra lại tiến trình báo cáo AI…",
-            notify: retryStore.api,
-          });
-        },
-      }),
-      codeToText: (code) => `ERR:${code}`,
-      notify: retryStore.api,
-    });
-    liveTracker = errStep.nextTracker;
-    assert.equal(liveTracker, null);
-    const errToast = retryStore.getSnapshot().visible[0];
-    assert.equal(errToast.id, roundtripToastId);
-    assert.equal(errToast.tone, "error");
-    assert.equal(errToast.pending, false);
-    assert.ok(errToast.action);
-
-    let retryBusy = false;
-    assert.equal(
-      await executeToastActionClick({
-        action: errToast.action,
-        isBusy: () => retryBusy,
-        setBusy: (next) => {
-          retryBusy = next;
-        },
-        onDismiss: () => retryStore.dismiss(errToast.id),
-      }),
-      true,
-    );
-    retryClock.advanceBy(500);
-    assert.equal(retryStore.getSnapshot().visible.length, 1);
-    assert.equal(retryStore.getSnapshot().visible[0].id, roundtripToastId);
-    assert.equal(retryStore.getSnapshot().visible[0].pending, true);
-    assert.equal(retryStore.getSnapshot().visible[0].action, undefined);
-
-    const finalStep = settleTrackedJobToast({
-      tracker: liveTracker,
-      incomingJobId: "job-roundtrip-1",
-      status: "draft",
-      errorCode: null,
-      codeToText: (code) => `ERR:${code}`,
-      notify: retryStore.api,
-    });
-    assert.equal(finalStep.settled, true);
-    assert.equal(retryStore.getSnapshot().visible.length, 1);
-    assert.equal(retryStore.getSnapshot().visible[0].id, roundtripToastId);
-    assert.equal(retryStore.getSnapshot().visible[0].tone, "success");
-    assert.equal(retryStore.getSnapshot().visible[0].pending, false);
-    detachRetry();
-
-    const aiPanelSrc = readRel("src/components/ai-report/ai-report-panel.tsx");
-    assert.doesNotMatch(aiPanelSrc, /if\s*\(\s*!open\s*\)\s*\{?\s*getController\(\)\.stopPolling\(\)/);
-    assert.doesNotMatch(aiPanelSrc, /dismissOnAction\s*:\s*true/);
-    assert.match(aiPanelSrc, /controllerRef\.current\?\.stopPolling\(\)/);
-    assert.match(aiPanelSrc, /Kiểm tra lại trạng thái/);
-
     for (const rel of [
       "src/components/direct-entry/worker-operations.tsx",
-      "src/components/ai-report/ai-report-panel.tsx",
+      "src/components/direct-entry/worker-portrait-panel.tsx",
     ]) {
       const src = readRel(rel);
       assert.match(src, /<progress\b/);

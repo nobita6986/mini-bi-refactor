@@ -60,7 +60,7 @@ const TEST_WEIGHTS = {
   "test:p2.5-w03": 19.4,
   "test:p2.5-w05": 17.8,
   "test:p2.5-hf-r2": 16.6,
-  "test:main": 16.4,
+  "test:main": 10.0,
   "test:p3-1-w02c-labor-type-catalog": 15.8,
   "test:p3-1-w01d-a2-leader-server": 15.3,
   "test:p1.6-w04-s04c-s02b": 13.3,
@@ -133,6 +133,7 @@ const TEST_WEIGHTS = {
   "test:wp8c1-contextual-tl-pm-guards": 14.0,
   "test:wp8c2-entry-worker-access": 18.0,
   "test:wp8d2-work-report-access": 14.0,
+  "test:ai-reports-retirement": 10.0,
 };
 
 const target = process.argv[2];

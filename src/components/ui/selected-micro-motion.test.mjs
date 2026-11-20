@@ -195,15 +195,6 @@ describe("UIUX S2-07 — Selected Module Micro-Motion", () => {
     assert.match(workerOpsSrc, /data-ui-panel-motion="true"/);
     assert.match(workerOpsSrc, /data-ui-dialog-motion="true"/);
 
-    const aiReportSrc = readRel("src/components/ai-report/ai-report-panel.tsx");
-    assert.match(aiReportSrc, /data-ui-overlay-motion="true"/);
-    assert.match(aiReportSrc, /data-ui-drawer-motion="right"/);
-
-    const aiSettingsSrc = readRel("src/components/dashboard/ai-settings-panel.tsx");
-    assert.match(aiSettingsSrc, /data-ui-overlay-motion="true"/);
-    assert.match(aiSettingsSrc, /data-ui-drawer-motion="right"/);
-    assert.match(aiSettingsSrc, /data-ui-popover-motion="true"/);
-
     const cccdPanelSrc = readRel(
       "src/components/reporting/duplicate-cccd-report-panel.tsx",
     );

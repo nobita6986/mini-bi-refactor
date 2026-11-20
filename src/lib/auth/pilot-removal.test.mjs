@@ -43,7 +43,7 @@ test("P1.7-H04: guard tra 401/403 sanitized va luon private/no-store", () => {
   assert.equal(/app_user_id|capabilities|stack/.test(guard), false);
 });
 
-test("P1.7-H04: moi route AI tung nam sau Basic Auth deu tu guard bang session", () => {
+test("P1.7-H04 / AI retirement: moi route /api/ai/** da duoc go hoan toan (404 theo router)", () => {
   const routes = [
     "../../app/api/ai/reports/route.ts",
     "../../app/api/ai/reports/capability/route.ts",
@@ -56,11 +56,10 @@ test("P1.7-H04: moi route AI tung nam sau Basic Auth deu tu guard bang session",
     "../../app/api/ai/settings/disable/route.ts",
     "../../app/api/ai/settings/rotate/route.ts",
     "../../app/api/ai/settings/test/route.ts",
+    "../../app/api/ai/worker/run/route.ts",
   ];
   for (const route of routes) {
-    const text = source(route);
-    assert.match(text, /await guardApiSession\(\)/, route + " phai guard session");
-    assert.match(text, /if \(!session\.ok\) return session\.response;/, route);
+    assert.equal(missing(route), true, route + " phai bi xoa");
   }
 });
 

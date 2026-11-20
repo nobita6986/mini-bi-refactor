@@ -21,7 +21,6 @@ env:
   SUPABASE_CONFIG_FILE: /dev/null
   DIRECT_ENTRY_API_ENABLED: "false"
   PIPELINE_CHECK_ENABLED: "false"
-  AI_REPORTS_ENABLED: "false"
 
 jobs:
   static:
