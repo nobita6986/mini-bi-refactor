@@ -466,6 +466,12 @@ export const WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES = Object.fr
   "public.direct_entry_list_app_users_filtered_admin(uuid, uuid, text, text, integer, integer, text, text)",
   "public.direct_entry_list_personnel_filtered_admin(uuid, uuid, text, boolean, integer, integer, uuid)",
 ]);
+export const PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME =
+  "20261121140000_pr28_unified_user_directory_reader.sql";
+export const PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES = Object.freeze([
+  "public.org_department_list_user_directory_admin(uuid, uuid, text, text, text, text, uuid, timestamp with time zone, integer, integer)",
+  "public.org_department_get_user_directory_entry_admin(uuid, uuid, uuid, uuid, timestamp with time zone)",
+]);
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
   "20261121090000_retire_ai_reports_and_provider_config.sql";
 export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
@@ -791,6 +797,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     wp13Pr0BackendFiltersOptionalReasonApplied: has(
       WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME,
     ),
+    pr28UnifiedUserDirectoryReaderApplied: has(
+      PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME,
+    ),
   };
 }
 
@@ -863,6 +872,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     wp8dNavReadonlyApplied = false,
     retireAiReportsApplied = false,
     wp13Pr0BackendFiltersOptionalReasonApplied = false,
+    pr28UnifiedUserDirectoryReaderApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1011,6 +1021,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(wp13Pr0BackendFiltersOptionalReasonApplied
       ? WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES
+      : []),
+    ...(pr28UnifiedUserDirectoryReaderApplied
+      ? PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES
       : []),
   ];
 }

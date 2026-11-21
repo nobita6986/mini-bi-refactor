@@ -125,6 +125,8 @@ import {
   WP8D_NAV_READONLY_RPC_SIGNATURES,
   WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME,
   WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
+  PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME,
+  PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
@@ -1159,7 +1161,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
         ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
         ...WP8D_NAV_READONLY_RPC_SIGNATURES,
-        ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES);
+        ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
+        ...PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES);
       assert.ok(expectedSignatures.length > 0, "the explicit server/invoker allowlist is not empty");
       assert.equal(new Set(expectedSignatures).size, expectedSignatures.length, "the allowlist has no duplicates");
       const { rows: resolvedExpected } = await client.query(
@@ -1226,7 +1229,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
           ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
           ...WP8D_NAV_READONLY_RPC_SIGNATURES,
-          ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES].sort(),
+          ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
+          ...PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES].sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
       const recruitmentLocationCatalogMigration = await readFile(
@@ -1527,6 +1531,29 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `grant execute on function ${sig.toLowerCase()} to service_role;`,
           ),
           `WP13 PR-0 RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const pr28DirectoryMigration = await readFile(
+        path.join(MIGRATION_DIR, PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME),
+        "utf8",
+      );
+      const pr28DirectoryNormalized = pr28DirectoryMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES) {
+        assert.ok(
+          pr28DirectoryNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `PR #28 unified user directory RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          pr28DirectoryNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `PR #28 unified user directory RPC ${sig} grants EXECUTE only to service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(
