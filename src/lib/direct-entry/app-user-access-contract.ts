@@ -6,6 +6,12 @@ const REASON_MAX = 4000;
 export const ACCOUNT_TYPES = ["NORMAL", "SHARED", "SERVICE"] as const;
 export type AccountType = (typeof ACCOUNT_TYPES)[number];
 
+export const ACCOUNT_TYPE_FILTER_VALUES = ["all", "NORMAL", "SHARED", "SERVICE", "SPECIAL"] as const;
+export type AccountTypeFilter = (typeof ACCOUNT_TYPE_FILTER_VALUES)[number];
+
+export const ACCOUNT_LINK_STATE_VALUES = ["all", "linked", "unlinked"] as const;
+export type AccountLinkStateFilter = (typeof ACCOUNT_LINK_STATE_VALUES)[number];
+
 export type ActivePersonLinkSummary = {
   link_id: string;
   person_id: string;
@@ -38,6 +44,8 @@ export type AccountListQuery = {
   enabled: "all" | "true" | "false";
   page: number;
   page_size: number;
+  account_type: AccountTypeFilter;
+  link_state: AccountLinkStateFilter;
 };
 
 export type AccountAccessParsed<T> =
@@ -131,7 +139,7 @@ function integer(value: unknown, min: number): number | null {
 }
 
 export function parseAccountListQuery(url: URL): AccountAccessParsed<AccountListQuery> {
-  const allowed = new Set(["search", "enabled", "page", "page_size"]);
+  const allowed = new Set(["search", "enabled", "page", "page_size", "account_type", "link_state"]);
   for (const key of url.searchParams.keys()) if (!allowed.has(key)) return { ok: false, code: "ACCOUNT_INVALID" };
   for (const key of allowed) if (url.searchParams.getAll(key).length > 1) return { ok: false, code: "ACCOUNT_INVALID" };
   const rawSearch = url.searchParams.get("search");
@@ -139,13 +147,31 @@ export function parseAccountListQuery(url: URL): AccountAccessParsed<AccountList
   const search = rawSearch === null ? null : rawSearch.trim();
   const enabled = url.searchParams.get("enabled") ?? "all";
   if (enabled !== "all" && enabled !== "true" && enabled !== "false") return { ok: false, code: "ACCOUNT_INVALID" };
+  const rawAccountType = url.searchParams.get("account_type") ?? "all";
+  if (!(ACCOUNT_TYPE_FILTER_VALUES as readonly string[]).includes(rawAccountType)) {
+    return { ok: false, code: "ACCOUNT_INVALID" };
+  }
+  const rawLinkState = url.searchParams.get("link_state") ?? "all";
+  if (!(ACCOUNT_LINK_STATE_VALUES as readonly string[]).includes(rawLinkState)) {
+    return { ok: false, code: "ACCOUNT_INVALID" };
+  }
   const rawPage = url.searchParams.get("page") ?? "1";
   const rawPageSize = url.searchParams.get("page_size") ?? "25";
   if (!/^\d{1,6}$/.test(rawPage) || !/^\d{1,6}$/.test(rawPageSize)) return { ok: false, code: "ACCOUNT_INVALID" };
   const page = Number(rawPage);
   const page_size = Number(rawPageSize);
   if (page < 1 || page > 1000 || page_size < 1 || page_size > 100) return { ok: false, code: "ACCOUNT_INVALID" };
-  return { ok: true, value: { search, enabled, page, page_size } };
+  return {
+    ok: true,
+    value: {
+      search,
+      enabled,
+      page,
+      page_size,
+      account_type: rawAccountType as AccountTypeFilter,
+      link_state: rawLinkState as AccountLinkStateFilter,
+    },
+  };
 }
 
 export type AccountMutationRequest = {

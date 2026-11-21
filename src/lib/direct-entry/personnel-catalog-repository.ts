@@ -38,7 +38,11 @@ export type PersonnelCatalogErrorKind =
 
 export type PersonnelCatalogRepository = {
   listPersonnel(input: AdminActorRef & {
-    search: string | null; include_inactive: boolean; page: number; page_size: number;
+    search: string | null;
+    include_inactive: boolean;
+    page: number;
+    page_size: number;
+    team_id?: string | null;
   }): Promise<PersonnelCatalogOutcome<AdminPersonnelList>>;
   getPersonnel(input: AdminActorRef & { recruiter_id: string }):
     Promise<PersonnelCatalogOutcome<AdminPersonnel>>;
@@ -117,13 +121,24 @@ export function createPersonnelCatalogRepository(rpc?: Rpc): PersonnelCatalogRep
 
   return {
     listPersonnel(input) {
-      return call("direct_entry_list_personnel_admin", {
+      if (input.team_id === undefined || input.team_id === null) {
+        return call("direct_entry_list_personnel_admin", {
+          p_auth_subject: input.auth_subject,
+          p_app_user_id: input.app_user_id,
+          p_search: input.search,
+          p_include_inactive: input.include_inactive,
+          p_page: input.page,
+          p_page_size: input.page_size,
+        }, personnelCatalogList);
+      }
+      return call("direct_entry_list_personnel_filtered_admin", {
         p_auth_subject: input.auth_subject,
         p_app_user_id: input.app_user_id,
         p_search: input.search,
         p_include_inactive: input.include_inactive,
         p_page: input.page,
         p_page_size: input.page_size,
+        p_team_id: input.team_id,
       }, personnelCatalogList);
     },
     getPersonnel(input) {

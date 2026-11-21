@@ -302,13 +302,24 @@ test("AI retirement migration: historical prefix replay -> data cleanup -> dynam
       await db.exec("reset role");
     }
 
-    // Dynamic allowlist drops exact 22 retired RPCs and matches live pg_proc 100%
-    const postExpected = buildExpectedS0T1CAllowlist(s0Sql, postAppliedMap);
+    // Dynamic allowlist drops exact 22 retired RPCs at the retirement step,
+    // and the full post-tail allowlist matches live pg_proc 100% with 0 retired AI signatures
+    const postAtRetireMap = new Map(preAppliedMap);
+    postAtRetireMap.set(RETIRE_AI_REPORTS_MIGRATION_NAME, migrationChecksum(retireSql));
+    const postAtRetireExpected = buildExpectedS0T1CAllowlist(s0Sql, postAtRetireMap);
     assert.equal(
-      preExpected.length - postExpected.length,
+      preExpected.length - postAtRetireExpected.length,
       RETIRED_AI_REPORTS_RPC_SIGNATURES.length,
-      "dynamic allowlist must drop exactly the 22 retired AI RPC signatures",
+      "dynamic allowlist must drop exactly the 22 retired AI RPC signatures at retirement",
     );
+    const postExpected = buildExpectedS0T1CAllowlist(s0Sql, postAppliedMap);
+    for (const retiredSig of RETIRED_AI_REPORTS_RPC_SIGNATURES) {
+      assert.equal(
+        postExpected.includes(retiredSig),
+        false,
+        `retired AI signature must stay excluded after trailing migrations: ${retiredSig}`,
+      );
+    }
     const postCheck = await verifyS0T1CSecurityPostconditions(
       createPgliteClientAdapter(db),
       s0Sql,

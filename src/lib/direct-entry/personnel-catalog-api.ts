@@ -164,9 +164,22 @@ function mutationPreflight(request: Request, flag: string | undefined): Response
 }
 
 export type ListPersonnelQuery = {
-  search: string | null; include_inactive: boolean; page: number; page_size: number;
+  search: string | null;
+  include_inactive: boolean;
+  page: number;
+  page_size: number;
+  team_id: string | null;
 };
 export function personnelCatalogListQuery(url: URL): Parsed<ListPersonnelQuery> {
+  const allowed = new Set(["search", "include_inactive", "page", "page_size", "team_id"]);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key)) return { ok: false, response: fail("PERSONNEL_INVALID", 400) };
+  }
+  for (const key of allowed) {
+    if (url.searchParams.getAll(key).length > 1) {
+      return { ok: false, response: fail("PERSONNEL_INVALID", 400) };
+    }
+  }
   const rawSearch = url.searchParams.get("search");
   if (rawSearch !== null && rawSearch.length > SEARCH_MAX) {
     return { ok: false, response: fail("PERSONNEL_INVALID", 400) };
@@ -185,7 +198,12 @@ export function personnelCatalogListQuery(url: URL): Parsed<ListPersonnelQuery> 
   if (page === null || page_size === null) {
     return { ok: false, response: fail("PERSONNEL_INVALID", 400) };
   }
-  return { ok: true, value: { search, include_inactive, page, page_size } };
+  const rawTeamId = url.searchParams.get("team_id");
+  const team_id = rawTeamId === null || rawTeamId === "" ? null : uuid(rawTeamId);
+  if (rawTeamId !== null && rawTeamId !== "" && team_id === null) {
+    return { ok: false, response: fail("PERSONNEL_INVALID", 400) };
+  }
+  return { ok: true, value: { search, include_inactive, page, page_size, team_id } };
 }
 
 export type CreatePersonnelRequest = {
