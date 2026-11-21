@@ -1013,8 +1013,9 @@ test("AdminSubnav dropdown renamed to 'Danh mục tuyển dụng' while preservi
   assert.ok(recruitmentGroup && recruitmentGroup.type === "group");
   assert.equal(recruitmentGroup.label, "Danh mục tuyển dụng");
 
-  // PR-1 scope guard: Accounts and Teams remain accessible until PR-2/PR-3!
-  assert.equal(sections.some((s) => s.id === "accounts"), true);
+  // PR-2 consolidates standalone `accounts` under `Nhân sự` while keeping `teams` until PR-3!
+  assert.equal(sections.some((s) => s.id === "organization-persons" && s.label === "Nhân sự"), true);
+  assert.equal(sections.some((s) => s.id === "accounts"), false);
   assert.equal(sections.some((s) => s.id === "teams"), true);
   assert.equal(ADMIN_SECTIONS.some((s) => s.href.includes("/ai")), false);
 

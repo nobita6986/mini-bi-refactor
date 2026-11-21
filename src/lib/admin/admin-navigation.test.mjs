@@ -90,6 +90,9 @@ test("one top-level /admin entry is independently authorized and is not a Direct
 
 test("Admin internal navigation exposes mapping, departments, organization persons, and worker edit history only to authorized Admin actors", () => {
   assert.deepEqual(ADMIN_SECTIONS.map(({ id, href }) => ({ id, href })), [
+    { id: "organization-persons", href: "/admin/organization/persons" },
+    { id: "departments", href: "/admin/departments" },
+    { id: "effective-access", href: "/admin/access/effective" },
     { id: "personnel", href: "/admin/catalog/personnel" },
     { id: "teams", href: "/admin/catalog/teams" },
     { id: "labor-types", href: "/admin/catalog/labor-types" },
@@ -97,14 +100,13 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "industrial-parks", href: "/admin/catalog/industrial-parks" },
     { id: "project-team-scopes", href: "/admin/catalog/project-team-scopes" },
     { id: "vendors", href: "/admin/catalog/vendors" },
-    { id: "organization-persons", href: "/admin/organization/persons" },
-    { id: "departments", href: "/admin/departments" },
-    { id: "accounts", href: "/admin/access/accounts" },
-    { id: "effective-access", href: "/admin/access/effective" },
     { id: "attendance", href: "/admin/attendance" },
     { id: "worker-edit-history", href: "/admin/worker-edit-history" },
   ]);
   assert.deepEqual(ADMIN_SECTIONS.map(({ id, label }) => ({ id, label })), [
+    { id: "organization-persons", label: "Nhân sự" },
+    { id: "departments", label: "Phòng ban" },
+    { id: "effective-access", label: "Quyền hiệu lực" },
     { id: "personnel", label: "Hồ sơ tính công tuyển dụng" },
     { id: "teams", label: "Nhóm" },
     { id: "labor-types", label: "Loại hình lao động" },
@@ -112,15 +114,11 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "industrial-parks", label: "Khu công nghiệp" },
     { id: "project-team-scopes", label: "Mapping Dự án ↔ Nhóm" },
     { id: "vendors", label: "Vendor (NCC)" },
-    { id: "organization-persons", label: "Nhân sự nội bộ" },
-    { id: "departments", label: "Phòng ban" },
-    { id: "accounts", label: "Tài khoản truy cập" },
-    { id: "effective-access", label: "Quyền hiệu lực" },
     { id: "attendance", label: "Báo cáo chấm công" },
     { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ" },
   ]);
   const serializableSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
-  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "accounts", "effective-access", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
+  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "effective-access", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
   const fullAdminWithoutHistory = serializableSections.filter(({ id }) => id !== "worker-edit-history");
   const allowlistedAdmin = makeNavActor(
@@ -197,8 +195,8 @@ test("catalog and access paths highlight exactly one internal tab", () => {
     ["/admin/catalog/industrial-parks", "industrial-parks"],
     ["/admin/departments", "departments"],
     ["/admin/departments/40000000-0000-4000-8000-000000000003", "departments"],
-    ["/admin/access/accounts", "accounts"],
-    ["/admin/access/accounts/record", "accounts"],
+    ["/admin/access/accounts", "organization-persons"],
+    ["/admin/access/accounts/record", "organization-persons"],
     ["/admin/access/effective", "effective-access"],
     ["/admin/access/effective/detail", "effective-access"],
     ["/admin/catalog/project-team-scopes", "project-team-scopes"],

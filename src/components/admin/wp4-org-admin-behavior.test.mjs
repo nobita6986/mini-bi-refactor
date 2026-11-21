@@ -611,7 +611,25 @@ function makePersonnelListEnvelope(personnel, search = null) {
 
 const { PersonListManager } = repoRequire("./src/components/admin/person-list-manager.tsx");
 const { PersonDetailManager } = repoRequire("./src/components/admin/person-detail-manager.tsx");
+const { AccountProvisionAndLinkStepper } = repoRequire(
+  "./src/components/admin/account-provision-and-link-stepper.tsx",
+);
 const { DepartmentListManager } = repoRequire("./src/components/admin/department-list-manager.tsx");
+
+function makeMemoryStorage() {
+  const map = new Map();
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => {
+      map.set(key, String(value));
+    },
+    removeItem: (key) => {
+      map.delete(key);
+    },
+  };
+}
+const WP4_TEST_ACTOR_SCOPE = "act_0123456789abcdef01234567";
+const WP4_TEST_ORIGIN = "https://hrp.example.test";
 const { DepartmentDetailManager } = repoRequire(
   "./src/components/admin/department-detail-manager.tsx",
 );
@@ -1027,7 +1045,11 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   assert.equal(maybeNode(h, (n) => n.type?.name === "FilterToolbar"), null);
 
   // Test in-flight mutation race with 403 -> delayed mutation 200 must NEVER emit notify.success
-  const h2 = mount(PersonListManager);
+  const h2 = mount(PersonListManager, {
+    checkpointActorScope: WP4_TEST_ACTOR_SCOPE,
+    storage: makeMemoryStorage(),
+    originOverride: WP4_TEST_ORIGIN,
+  });
   await h2.flush();
   const d2 = requests.at(-2);
   const p2 = requests.at(-1);
@@ -1035,25 +1057,26 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   respond(p2, 200, makePersonListEnvelope());
   await h2.flush();
 
-  findButton(h2, "Tạo hồ sơ nhân sự").props.onClick();
+  findButton(h2, "+ Thêm nhân viên").props.onClick();
   await h2.flush();
-  findNode(h2, (n) => n.props?.id === "create-person-employee-code").props.onChange({
+  const stepper2 = await syncChildFromTree(h2, AccountProvisionAndLinkStepper, null);
+  findNode(stepper2, (n) => n.props?.id === "create-person-employee-code").props.onChange({
     target: { value: "NS-777" },
   });
-  findNode(h2, (n) => n.props?.id === "create-person-full-name").props.onChange({
+  findNode(stepper2, (n) => n.props?.id === "create-person-full-name").props.onChange({
     target: { value: "Trần Thị B" },
   });
-  findNode(h2, (n) => n.props?.id === "create-person-reason").props.onChange({
+  findNode(stepper2, (n) => n.props?.id === "create-person-reason").props.onChange({
     target: { value: "Tạo mới" },
   });
-  await h2.flush();
+  await stepper2.flush();
 
   const createForm = findNode(
-    h2,
+    stepper2,
     (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "create-person-full-name"),
   );
   createForm.props.onSubmit({ preventDefault() {} });
-  await h2.flush();
+  await stepper2.flush();
   const createPost = findLastRequest((r) => r.method === "POST");
   assert.ok(createPost);
 
@@ -1073,6 +1096,7 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
     replayed: false,
     person: makePersonDetail({ employee_code: "NS-777", full_name: "Trần Thị B" }),
   });
+  await stepper2.flush();
   await h2.flush();
 
   assert.equal(notifications.success.length, 0);
@@ -1241,57 +1265,60 @@ test("Finding 2 [PersonDetail & DepartmentDetail]: 403/entity-switch/unmount inv
 // ===========================================================================
 
 test("Finding 3 [PersonDetail & PersonList]: uncertain write keeps payload + Idempotency-Key across Hủy/Đóng/Escape & failed reconcile GET", async () => {
-  // 3a) PersonListManager create -> network rejection -> Escape / Đóng blocked -> failed GET keeps key -> retry sends exact key
-  const pl = mount(PersonListManager);
+  // 3a) PersonListManager create via AccountProvisionAndLinkStepper -> network rejection -> Escape / Hủy blocked -> retry sends exact K_person + frozen body
+  const pl = mount(PersonListManager, {
+    checkpointActorScope: WP4_TEST_ACTOR_SCOPE,
+    storage: makeMemoryStorage(),
+    originOverride: WP4_TEST_ORIGIN,
+  });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
   await pl.flush();
 
-  findButton(pl, "Tạo hồ sơ nhân sự").props.onClick();
+  findButton(pl, "+ Thêm nhân viên").props.onClick();
   await pl.flush();
-  findNode(pl, (n) => n.props?.id === "create-person-employee-code").props.onChange({
+  const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+  findNode(stepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({
     target: { value: "NS-901" },
   });
-  findNode(pl, (n) => n.props?.id === "create-person-full-name").props.onChange({
+  findNode(stepper, (n) => n.props?.id === "create-person-full-name").props.onChange({
     target: { value: "Lê Văn C" },
   });
-  findNode(pl, (n) => n.props?.id === "create-person-reason").props.onChange({
+  findNode(stepper, (n) => n.props?.id === "create-person-reason").props.onChange({
     target: { value: "Tuyển mới" },
   });
-  await pl.flush();
-  findNode(
-    pl,
-    (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "create-person-full-name"),
-  ).props.onSubmit({ preventDefault() {} });
-  await pl.flush();
+  await stepper.flush();
+  const stepperForm = () =>
+    findNode(
+      stepper,
+      (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "create-person-full-name"),
+    );
+  stepperForm().props.onSubmit({ preventDefault() {} });
+  await stepper.flush();
 
   const createReq1 = findLastRequest((r) => r.method === "POST");
   const key1 = createReq1.options.headers["Idempotency-Key"];
   const body1 = createReq1.options.body;
   rejectNetwork(createReq1);
-  await pl.flush();
+  await stepper.flush();
 
-  const createDialog = () => findNode(pl, (n) => n.type?.name === "FormDialog");
+  const createDialog = () => findNode(stepper, (n) => n.type?.name === "FormDialog");
   assert.equal(createDialog().props.closeDisabled, true);
   createDialog().props.onOpenChange(false);
-  findButton(pl, "Đóng").props.onClick();
-  await pl.flush();
+  findButton(stepper, "Hủy").props.onClick();
+  await stepper.flush();
   assert.equal(createDialog().props.open, true);
-  assert.ok(maybeButton(pl, "Thử lại đúng yêu cầu"));
+  assert.ok(
+    maybeNode(
+      stepper,
+      (n) => n.props?.type === "submit" && textOf(n).trim() === "Thử gửi lại bước 1 (cùng K_person)",
+    ),
+  );
 
-  // Reconcile GET fails -> lock + key STILL preserved!
-  findButton(pl, "Tải lại để đối chiếu").props.onClick();
-  await pl.flush();
-  const reconGetFail = findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons"));
-  rejectNetwork(reconGetFail);
-  await pl.flush();
-  assert.equal(createDialog().props.open, true);
-  assert.ok(maybeButton(pl, "Thử lại đúng yêu cầu"));
-
-  // Retry sends EXACT same key & body!
-  findButton(pl, "Thử lại đúng yêu cầu").props.onClick();
-  await pl.flush();
+  // Retry sends EXACT same key & frozen body!
+  stepperForm().props.onSubmit({ preventDefault() {} });
+  await stepper.flush();
   const createReq2 = findLastRequest((r) => r.method === "POST");
   assert.equal(createReq2.options.headers["Idempotency-Key"], key1);
   assert.equal(createReq2.options.body, body1);
@@ -1554,18 +1581,28 @@ test("Finding 3 [Department HEAD/Memberships & AccountOrgDialogs]: 409 IDEMPOTEN
 // ===========================================================================
 
 test("Finding 4 [Pickers across Person, Department Memberships, Account]: editing name/code/reason never refetches pickers; search/page changes do & drop stale responses", async () => {
-  // 4a) PersonListManager + DepartmentSelectPicker + AccountSearchPicker
-  const pl = mount(PersonListManager);
+  // 4a) PersonListManager + AccountProvisionAndLinkStepper + DepartmentSelectPicker & standalone AccountSearchPicker
+  const pl = mount(PersonListManager, {
+    checkpointActorScope: WP4_TEST_ACTOR_SCOPE,
+    storage: makeMemoryStorage(),
+    originOverride: WP4_TEST_ORIGIN,
+  });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
   await pl.flush();
 
-  findButton(pl, "Tạo hồ sơ nhân sự").props.onClick();
+  findButton(pl, "+ Thêm nhân viên").props.onClick();
   await pl.flush();
-
-  const deptPicker = await syncChildFromTree(pl, DepartmentSelectPicker, null);
-  const accountPicker = await syncChildFromTree(pl, AccountSearchPicker, null);
+  const stepper4 = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+  const deptPicker = await syncChildFromTree(stepper4, DepartmentSelectPicker, null);
+  const accountPicker = mount(AccountSearchPicker, {
+    id: "test-account-picker",
+    label: "Chọn tài khoản",
+    selectedAccountRef: null,
+    onSelect: () => {},
+  });
+  await accountPicker.flush();
 
   const countPickerGets = () =>
     requests.filter(
@@ -1583,23 +1620,22 @@ test("Finding 4 [Pickers across Person, Department Memberships, Account]: editin
 
   const baselineCount = countPickerGets();
 
-  // Edit unrelated fields repeatedly across parent form
+  // Edit unrelated fields repeatedly across parent stepper form
   for (const suffix of ["1", "12", "123"]) {
-    findNode(pl, (n) => n.props?.id === "create-person-employee-code").props.onChange({
+    findNode(stepper4, (n) => n.props?.id === "create-person-employee-code").props.onChange({
       target: { value: `NS-${suffix}` },
     });
-    findNode(pl, (n) => n.props?.id === "create-person-full-name").props.onChange({
+    findNode(stepper4, (n) => n.props?.id === "create-person-full-name").props.onChange({
       target: { value: `Tên sửa ${suffix}` },
     });
-    findNode(pl, (n) => n.props?.id === "create-person-joined-on").props.onChange({
+    findNode(stepper4, (n) => n.props?.id === "create-person-joined-on").props.onChange({
       target: { value: "2026-11-01" },
     });
-    findNode(pl, (n) => n.props?.id === "create-person-reason").props.onChange({
+    findNode(stepper4, (n) => n.props?.id === "create-person-reason").props.onChange({
       target: { value: `Lý do ${suffix}` },
     });
-    await pl.flush();
-    await syncChildFromTree(pl, DepartmentSelectPicker, deptPicker);
-    await syncChildFromTree(pl, AccountSearchPicker, accountPicker);
+    await stepper4.flush();
+    await syncChildFromTree(stepper4, DepartmentSelectPicker, deptPicker);
   }
   assert.equal(countPickerGets() - baselineCount, 0);
 

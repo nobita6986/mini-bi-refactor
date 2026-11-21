@@ -33,8 +33,12 @@ import {
   type UnlinkAccountPersonRpcProjection,
 } from "../organization/person-contract.ts";
 import {
+  ACCOUNT_LINK_STATE_VALUES,
+  ACCOUNT_TYPE_FILTER_VALUES,
   projectExistingAccount,
   projectExistingAccountList,
+  type AccountLinkStateFilter,
+  type AccountTypeFilter,
   type ExistingAccount,
   type ExistingAccountList,
 } from "../direct-entry/app-user-access-contract.ts";
@@ -51,11 +55,43 @@ export const ACCOUNT_LIST_PAGE_SIZE = 25;
 const SEARCH_MAX = 256;
 
 export type AccountEnabledFilter = "all" | "true" | "false";
+export type AccountManagementView = "all" | "special" | "unlinked";
+export { ACCOUNT_TYPE_FILTER_VALUES, ACCOUNT_LINK_STATE_VALUES };
+export type { AccountTypeFilter, AccountLinkStateFilter };
+
 export type AccountListQuery = {
   search: string;
   enabled: AccountEnabledFilter;
   page: number;
+  accountType?: AccountTypeFilter;
+  linkState?: AccountLinkStateFilter;
 };
+
+export function parseAccountManagementView(
+  raw: string | string[] | null | undefined,
+): AccountManagementView {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (value === "special" || value === "unlinked") return value;
+  return "all";
+}
+
+/**
+ * Maps UI-only `?view=` query parameter to strict PR-0 API filters.
+ * NEVER forwards `view`, `tab`, or `account` to `/api/admin/access/accounts`.
+ */
+export function resolveAccountViewFilters(view: AccountManagementView): {
+  accountType: AccountTypeFilter;
+  linkState: AccountLinkStateFilter;
+} {
+  switch (view) {
+    case "special":
+      return { accountType: "SPECIAL", linkState: "all" };
+    case "unlinked":
+      return { accountType: "NORMAL", linkState: "unlinked" };
+    case "all":
+      return { accountType: "all", linkState: "all" };
+  }
+}
 
 export type AccountMutationOutcome =
   | { kind: "applied" }
@@ -108,12 +144,19 @@ export function buildAccountListQuery(input: AccountListQuery): URLSearchParams 
   if (search.length > SEARCH_MAX) return null;
   if (!Number.isSafeInteger(input.page) || input.page < 1 || input.page > 1000) return null;
   if (input.enabled !== "all" && input.enabled !== "true" && input.enabled !== "false") return null;
+  const accountType = input.accountType ?? "all";
+  const linkState = input.linkState ?? "all";
+  if (!ACCOUNT_TYPE_FILTER_VALUES.includes(accountType)) return null;
+  if (!ACCOUNT_LINK_STATE_VALUES.includes(linkState)) return null;
+
   const query = new URLSearchParams({
     enabled: input.enabled,
     page: String(input.page),
     page_size: String(ACCOUNT_LIST_PAGE_SIZE),
   });
   if (search) query.set("search", search);
+  if (accountType !== "all") query.set("account_type", accountType);
+  if (linkState !== "all") query.set("link_state", linkState);
   return query;
 }
 

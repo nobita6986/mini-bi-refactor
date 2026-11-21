@@ -6,6 +6,7 @@ import {
 } from "@/components/admin/account-access-workspace";
 import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
+import { parseAccountManagementView } from "@/lib/admin/account-access-model";
 import { hasPairedFullAdminAuthority } from "@/lib/admin/effective-access-page-guard";
 import { decideAccountAccessPageAccess } from "@/lib/auth/direct-entry-page-access";
 import { isUuid } from "@/lib/http/direct-entry-api-guard";
@@ -36,14 +37,17 @@ export default async function ExistingAccountAccessPage({
         rawTab === "global-roles" ? "global-roles" : "accounts";
       const rawAccount = Array.isArray(params?.account) ? params.account[0] : params?.account;
       const initialAccountRef = isUuid(rawAccount) ? rawAccount.toLowerCase() : null;
+      const initialView = parseAccountManagementView(params?.view);
       const canManageGlobalRoles = actor?.ok
         ? hasPairedFullAdminAuthority(actor.actor)
         : false;
       return (
         <AccountAccessWorkspace
+          key={`${initialTab}:${initialView}:${initialAccountRef ?? ""}`}
           canManageGlobalRoles={canManageGlobalRoles}
           initialTab={initialTab}
           initialAccountRef={initialAccountRef}
+          initialView={initialView}
         />
       );
     }

@@ -10,6 +10,7 @@ import {
 import { AccountManager } from "@/components/admin/account-manager";
 import { buttonClasses } from "@/components/ui/button";
 import { PageHeader, PageShell } from "@/components/ui/page-shell";
+import type { AccountManagementView } from "@/lib/admin/account-access-model";
 import { cn } from "@/lib/utils";
 
 export type AccountWorkspaceTab = "accounts" | "global-roles";
@@ -18,11 +19,13 @@ export function AccountAccessWorkspace({
   canManageGlobalRoles,
   initialTab = "accounts",
   initialAccountRef = null,
+  initialView = "all",
   initialGlobalRolesSnapshot,
 }: {
   canManageGlobalRoles: boolean;
   initialTab?: AccountWorkspaceTab;
   initialAccountRef?: string | null;
+  initialView?: AccountManagementView;
   initialGlobalRolesSnapshot?: AccountGlobalRolesFixtureSnapshot;
 }) {
   const [activeTab, setActiveTab] = useState<AccountWorkspaceTab>(initialTab);
@@ -66,17 +69,34 @@ export function AccountAccessWorkspace({
 
   return (
     <PageShell dataTestId="account-access-workspace">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Link
+          href="/admin/organization/persons"
+          className="inline-flex min-h-10 items-center text-sm font-medium text-primary hover:underline"
+        >
+          ← Quay lại Nhân sự
+        </Link>
+      </div>
+
       <PageHeader
-        eyebrow="Quản trị truy cập"
-        title="Tài khoản truy cập & Vai trò toàn cục"
-        description="Quản lý tài khoản đăng nhập, phân loại cá nhân/dùng chung/dịch vụ, liên kết hồ sơ nhân sự và gán vai trò toàn cục."
+        eyebrow="Công cụ quản trị phụ · Tài khoản & Đối chiếu"
+        title="Tài khoản đặc biệt & Đối chiếu dữ liệu cũ"
+        description="Công cụ dành cho Full Admin để quản lý tài khoản dùng chung/tích hợp, đối chiếu tài khoản cũ chưa liên kết hồ sơ nhân viên và quản trị vai trò toàn cục."
         actions={
-          <Link
-            href={effectiveAccessHref}
-            className={buttonClasses({ variant: "secondary", size: "md" })}
-          >
-            Xem quyền hiệu lực
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href="/admin/organization/persons"
+              className={buttonClasses({ variant: "secondary", size: "md" })}
+            >
+              Mở Nhân sự
+            </Link>
+            <Link
+              href={effectiveAccessHref}
+              className={buttonClasses({ variant: "secondary", size: "md" })}
+            >
+              Xem quyền hiệu lực
+            </Link>
+          </div>
         }
       />
 
@@ -100,7 +120,7 @@ export function AccountAccessWorkspace({
               "aria-selected:text-primary after:pointer-events-none after:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:border-b-[3px] after:border-transparent aria-selected:after:border-primary",
             )}
           >
-            Tài khoản & Liên kết
+            Tài khoản &amp; Liên kết
           </button>
           <button
             ref={globalRolesTabRef}
@@ -128,7 +148,11 @@ export function AccountAccessWorkspace({
       >
         {activeTab === "accounts" ? (
           <div className="space-y-4">
-            <AccountManager embedded onOpenGlobalRoles={handleOpenGlobalRolesForAccount} />
+            <AccountManager
+              embedded
+              initialView={initialView}
+              onOpenGlobalRoles={handleOpenGlobalRolesForAccount}
+            />
           </div>
         ) : null}
       </div>
