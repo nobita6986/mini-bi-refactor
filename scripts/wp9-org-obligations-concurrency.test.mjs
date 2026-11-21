@@ -38,6 +38,11 @@
  *            `Team A <-> Team B` effective `today` against active `Team B` DAILY assignment
  *            (`effective_from = today - 15`) -> zero `40P01`, zero `25006`, zero `0A000`,
  *            zero `55P03`, and zero retroactive `Team B` obligations (`period_start_date < today`).
+ *   Race 6 — R3/P2 `ONCE` `REVOKED -> ACTIVE` Same-Assignment Restore vs
+ *            `work_report_ensure_obligations_for_window(today & today+1)`,
+ *            `work_report_list_my_obligations` & Strict `READ ONLY`
+ *            `work_report_has_active_obligations` -> zero `40P01`/`23505`/`25006`/`0A000`/`55P03`,
+ *            exact original `obligation_id` restored to `ACTIVE` (`version = 3`), singleton `1` row.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -49,10 +54,17 @@ import path from "node:path";
 import { test } from "node:test";
 import { Client } from "pg";
 
+import {
+  S0_T1_C_MIGRATION_NAME,
+  migrationChecksum,
+  verifyS0T1CSecurityPostconditions,
+} from "./lib/migration-validation.mjs";
 import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
+const WP7B_MIGRATION_NAME = "20261119180000_wp7b_attendance_org_scope_and_leave_nav_probe.sql";
+const WP8D_MIGRATION_NAME = "20261120140000_wp8d_nav_readonly.sql";
 const WP8D2_MIGRATION_NAME = "20261120170000_wp8d2_work_report_access.sql";
 const WP9_MIGRATION_NAME = "20261121090000_wp9_org_obligations.sql";
 
@@ -127,6 +139,13 @@ const EMP_TRANSFER = {
   email: "wp9.transfer@hrpartner.vn",
   name: "Emp Team Transfer",
 };
+const EMP_ONCE_RESTORE = {
+  auth: "19001000-0000-4000-8000-000000000018",
+  app: "29001000-0000-4000-8000-000000000018",
+  recruiter: "39001000-0000-4000-8000-000000000018",
+  email: "wp9.once.restore@hrpartner.vn",
+  name: "Emp Once Restore",
+};
 
 const ALL_USERS = [
   OWNER,
@@ -140,6 +159,7 @@ const ALL_USERS = [
   EMP_ONCE_1,
   EMP_ONCE_2,
   EMP_TRANSFER,
+  EMP_ONCE_RESTORE,
 ];
 
 const ADMIN_SEED_CAPS = [
@@ -501,20 +521,46 @@ test("WP9 Real PostgreSQL 18 Concurrency: Tier 1->2 Person/Account lock serializ
     );
 
     const migrationFiles = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
-    assert.ok(migrationFiles.length >= 232, `Expected at least 232 migrations through WP9, found ${migrationFiles.length}`);
-    assert.equal(
-      migrationFiles.indexOf(WP8D2_MIGRATION_NAME),
-      230,
-      `${WP8D2_MIGRATION_NAME} must be #231 immediately before WP9`,
-    );
-    assert.equal(
-      migrationFiles.indexOf(WP9_MIGRATION_NAME),
-      231,
-      `${WP9_MIGRATION_NAME} must be #232 right after WP8D-2`,
-    );
+    const wp7bIdx = migrationFiles.indexOf(WP7B_MIGRATION_NAME);
+    const wp8dIdx = migrationFiles.indexOf(WP8D_MIGRATION_NAME);
+    const wp8d2Idx = migrationFiles.indexOf(WP8D2_MIGRATION_NAME);
+    const wp9Idx = migrationFiles.indexOf(WP9_MIGRATION_NAME);
+    assert.ok(wp7bIdx >= 0, `${WP7B_MIGRATION_NAME} must exist`);
+    assert.ok(wp8dIdx > wp7bIdx, `${WP8D_MIGRATION_NAME} must follow ${WP7B_MIGRATION_NAME}`);
+    assert.ok(wp8d2Idx > wp8dIdx, `${WP8D2_MIGRATION_NAME} must follow ${WP8D_MIGRATION_NAME}`);
+    assert.ok(wp9Idx > wp8d2Idx, `${WP9_MIGRATION_NAME} must follow ${WP8D2_MIGRATION_NAME}`);
+
+    const appliedMap = new Map();
+    let s0Sql = null;
+    let preWp9Post = null;
+    let postWp9Post = null;
     for (const file of migrationFiles) {
-      await setup.query(await readFile(path.join(MIGRATION_DIR, file), "utf8"));
+      const sql = await readFile(path.join(MIGRATION_DIR, file), "utf8");
+      if (file === S0_T1_C_MIGRATION_NAME) {
+        s0Sql = sql;
+      }
+      if (file === WP9_MIGRATION_NAME) {
+        assert.ok(s0Sql, `${S0_T1_C_MIGRATION_NAME} must precede ${WP9_MIGRATION_NAME}`);
+        preWp9Post = await verifyS0T1CSecurityPostconditions(setup, s0Sql, appliedMap);
+        assert.equal(preWp9Post.ok, true, `Pre-WP9 PG18 S0-T1-C postconditions failed: ${preWp9Post.reason ?? ""}`);
+      }
+      await setup.query(sql);
+      appliedMap.set(file, migrationChecksum(sql));
+      if (file === WP9_MIGRATION_NAME) {
+        postWp9Post = await verifyS0T1CSecurityPostconditions(setup, s0Sql, appliedMap);
+        assert.equal(postWp9Post.ok, true, `Post-WP9 PG18 S0-T1-C postconditions failed: ${postWp9Post.reason ?? ""}`);
+        assert.equal(
+          postWp9Post.details.actualServiceCount,
+          preWp9Post.details.actualServiceCount,
+          "WP9 must add net +0 service_role RPCs on PG18",
+        );
+        assert.equal(postWp9Post.details.exposedClientOrPublicCount, 0);
+        assert.equal(postWp9Post.details.missingOwnerExecCount, 0);
+        assert.equal(postWp9Post.details.unsafeSecdefSearchPathCount, 0);
+        assert.equal(postWp9Post.details.bootstrapExecutorIntact, true);
+      }
     }
+    assert.ok(preWp9Post && postWp9Post, "Both pre-WP9 and post-WP9 PG18 ACL postconditions must be verified");
 
     const { rows: [dates] } = await setup.query(
       "select public.direct_entry_authorization_date()::text as today, (now() at time zone 'Asia/Ho_Chi_Minh')::date::text as vn_today",
@@ -556,18 +602,20 @@ test("WP9 Real PostgreSQL 18 Concurrency: Tier 1->2 Person/Account lock serializ
       );
     }
 
-    // Seed EMP_TRANSFER recruiter & Team A membership valid_from = today - 30
-    await seedRecruiterAndTeam(setup, EMP_TRANSFER, TEAM_A, todayMinus30);
-    for (const cap of RECRUITER_SEED_CAPS) {
+    // Seed EMP_TRANSFER & EMP_ONCE_RESTORE recruiters & Team A memberships valid_from = today - 30
+    for (const recUser of [EMP_TRANSFER, EMP_ONCE_RESTORE]) {
+      await seedRecruiterAndTeam(setup, recUser, TEAM_A, todayMinus30);
+      for (const cap of RECRUITER_SEED_CAPS) {
+        await setup.query(
+          "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1::uuid, $2, $3::date, true)",
+          [recUser.app, cap, todayMinus30],
+        );
+      }
       await setup.query(
-        "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1::uuid, $2, $3::date, true)",
-        [EMP_TRANSFER.app, cap, todayMinus30],
+        "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, is_current) values ($1::uuid, 'own', $2::date, true)",
+        [recUser.app, todayMinus30],
       );
     }
-    await setup.query(
-      "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, is_current) values ($1::uuid, 'own', $2::date, true)",
-      [EMP_TRANSFER.app, todayMinus30],
-    );
 
     // Apply WP5 cutover
     const plan = await runWp5Cutover(setup, { mode: "dry-run" });
@@ -630,6 +678,12 @@ test("WP9 Real PostgreSQL 18 Concurrency: Tier 1->2 Person/Account lock serializ
       code: "EMP-XFER-01",
       fullName: EMP_TRANSFER.name,
       joinedOn: addDaysIso(today, -60),
+      deptId: mktDeptId,
+    });
+    await createLinkedPerson(setup, EMP_ONCE_RESTORE, {
+      code: "EMP-ONCE-R3",
+      fullName: EMP_ONCE_RESTORE.name,
+      joinedOn: "2025-01-01",
       deptId: mktDeptId,
     });
 
@@ -706,6 +760,7 @@ test("WP9 Real PostgreSQL 18 Concurrency: Tier 1->2 Person/Account lock serializ
     const tplRace3 = await createPublishedTemplate(setup, OWNER, "WP9_RACE3_DAILY", "DAILY");
     const tplRace4Once = await createPublishedTemplate(setup, OWNER, "WP9_RACE4_ONCE", "ONCE");
     const tplRace5TeamB = await createPublishedTemplate(setup, OWNER, "WP9_RACE5_TEAMB", "DAILY");
+    const tplRace6OnceRestore = await createPublishedTemplate(setup, OWNER, "WP9_RACE6_ONCE_RESTORE", "ONCE");
 
     // =========================================================================
     // RACE 1: Tier 1 -> Tier 2 Lock Serialization
@@ -1293,6 +1348,124 @@ test("WP9 Real PostgreSQL 18 Concurrency: Tier 1->2 Person/Account lock serializ
       assert.equal(teamBObs.length, 1, `Expected exactly 1 Team B obligation for ${today}, got ${teamBObs.length}`);
       assert.equal(teamBObs[0].period_start_date, today);
       assert.equal(teamBObs[0].snapshot_team_id, TEAM_B);
+    });
+
+    // =========================================================================
+    // RACE 6: R3/P2 ONCE REVOKED -> ACTIVE Restore vs ensure_window(today/today+1),
+    //         work_report_list_my_obligations & Strict READ ONLY nav probe
+    // =========================================================================
+    await t.test("Race 6: R3 ONCE REVOKED->ACTIVE restore vs ensure_window(today/today+1), list_my_obligations & READ ONLY probe", async () => {
+      const onceRestoreAsg = await serviceRpc(setup, "work_report_create_assignment", [
+        OWNER.auth,
+        OWNER.app,
+        tplRace6OnceRestore.template_id,
+        "USER",
+        EMP_ONCE_RESTORE.app,
+        null,
+        null,
+        "ONCE",
+        true,
+        0,
+        "23:59:59",
+        false,
+        today,
+        todayPlus10,
+        nextKey("asg_once_r6"),
+      ]);
+      const { rows: [origOb] } = await observer.query(
+        "select obligation_id, period_key, obligation_status, version from public.work_report_obligations where assignment_id = $1::uuid",
+        [onceRestoreAsg.assignment_id],
+      );
+      assert.equal(origOb.obligation_status, "ACTIVE");
+      assert.equal(origOb.version, 1);
+
+      const revRes = await serviceRpc(setup, "work_report_set_assignment_state", [
+        OWNER.auth,
+        OWNER.app,
+        onceRestoreAsg.assignment_id,
+        1,
+        "REVOKED",
+        nextKey("r6_rev"),
+      ]);
+      assert.equal(revRes.state, "REVOKED");
+      assert.equal(revRes.version, 2);
+
+      const revokedProbe = await serviceRpcReadOnly(r1, "work_report_has_active_obligations", [
+        EMP_ONCE_RESTORE.auth,
+        EMP_ONCE_RESTORE.app,
+      ]);
+      assert.strictEqual(revokedProbe.has_active_obligations, false, "Race 6: READ ONLY probe is false while ONCE is REVOKED");
+
+      // Race reactivation against concurrent ensure_window(today), ensure_window(today+1), list_my_obligations, and READ ONLY probes
+      const race6Outcomes = await Promise.all([
+        asSettled(
+          serviceRpc(w1, "work_report_set_assignment_state", [
+            OWNER.auth,
+            OWNER.app,
+            onceRestoreAsg.assignment_id,
+            2,
+            "ACTIVE",
+            nextKey("r6_act"),
+          ]),
+        ),
+        asSettled(serviceRpc(w2, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, today])),
+        asSettled(serviceRpc(w3, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, todayPlus1])),
+        asSettled(serviceRpc(w4, "work_report_list_my_obligations", [EMP_ONCE_RESTORE.auth, EMP_ONCE_RESTORE.app, null])),
+        asSettled((async () => {
+          for (let i = 0; i < 10; i += 1) {
+            const p = await serviceRpcReadOnly(r1, "work_report_has_active_obligations", [
+              EMP_ONCE_RESTORE.auth,
+              EMP_ONCE_RESTORE.app,
+            ]);
+            assert.equal(typeof p.has_active_obligations, "boolean");
+          }
+          return "r6-ro1-ok";
+        })()),
+        asSettled((async () => {
+          for (let i = 0; i < 10; i += 1) {
+            const p = await serviceRpcReadOnly(r2, "work_report_has_active_obligations", [
+              EMP_ONCE_RESTORE.auth,
+              EMP_ONCE_RESTORE.app,
+            ]);
+            assert.equal(typeof p.has_active_obligations, "boolean");
+          }
+          return "r6-ro2-ok";
+        })()),
+      ]);
+
+      for (const [idx, outcome] of race6Outcomes.entries()) {
+        if (outcome.status === "rejected") {
+          assert.notEqual(outcome.reason?.code, "40P01", `Race 6 worker ${idx + 1} must NEVER deadlock`);
+          assert.notEqual(outcome.reason?.code, "23505", `Race 6 worker ${idx + 1} must NEVER raise 23505`);
+          assert.notEqual(outcome.reason?.code, "25006", `Race 6 worker ${idx + 1} must NEVER fail READ ONLY`);
+          assert.notEqual(outcome.reason?.code, "0A000", `Race 6 worker ${idx + 1} must NEVER raise volatility error`);
+          assert.notEqual(outcome.reason?.code, "55P03", `Race 6 worker ${idx + 1} must NEVER hit lock_timeout`);
+        }
+        assert.equal(
+          outcome.status,
+          "fulfilled",
+          `Race 6 worker ${idx + 1} failed: ${outcome.reason?.code} ${outcome.reason?.message}`,
+        );
+      }
+      assert.equal(race6Outcomes[0].value.state, "ACTIVE");
+      assert.equal(race6Outcomes[0].value.version, 3);
+
+      // Post-settle: exact 1 row, exact original obligation_id, ACTIVE, version = 3, READ ONLY probe = true!
+      const { rows: restoredRows } = await observer.query(
+        "select obligation_id, period_key, obligation_status, version from public.work_report_obligations where assignment_id = $1::uuid",
+        [onceRestoreAsg.assignment_id],
+      );
+      assert.equal(restoredRows.length, 1, `Race 6 must preserve singleton ONCE row (got ${restoredRows.length})`);
+      assert.equal(restoredRows[0].obligation_id, origOb.obligation_id, "Race 6 must restore exact original obligation_id");
+      assert.equal(restoredRows[0].period_key, origOb.period_key);
+      assert.equal(restoredRows[0].obligation_status, "ACTIVE");
+      assert.equal(restoredRows[0].version, 3);
+
+      const postRestoreProbe = await serviceRpcReadOnly(r1, "work_report_has_active_obligations", [
+        EMP_ONCE_RESTORE.auth,
+        EMP_ONCE_RESTORE.app,
+      ]);
+      assert.strictEqual(postRestoreProbe.has_active_obligations, true, "Race 6: READ ONLY probe returns true after restore");
     });
   } finally {
     for (const c of clients) {

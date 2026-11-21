@@ -3,10 +3,11 @@
  * PGlite End-to-End Verification Suite.
  *
  * Covers:
- *   1. Migration #232 hygiene: 0 `@`, 0 literal `SAVEPOINT`, 0 `'40001'`, LF checksum,
- *      atomic rollback zero drift, exact 337 service_role RPCs (+0 net new), 0 client/PUBLIC
- *      grants, STABLE volatility on helpers/probes, and `direct_entry_catalog_bootstrap_executor`
- *      grant preservation on `leave_management__internal_resolve_authority`.
+ *   1. Migration hygiene & relative dependency order: 0 `@`, 0 literal `SAVEPOINT`, 0 `'40001'`,
+ *      LF checksum, atomic rollback zero drift, dynamic S0-T1-C allowlist postconditions (+0 net
+ *      new service_role RPCs relative to applied prefix), 0 client/PUBLIC grants, STABLE volatility
+ *      on helpers/probes, and `direct_entry_catalog_bootstrap_executor` grant preservation on
+ *      `leave_management__internal_resolve_authority`.
  *   2. Attendance Day-Boundary Matrix & Employment Status (UAT-WP9-01..03, D10, R5, DEC-T0-03,
  *      WP9-GAP01..03):
  *      - Before `joined_on` vs on `joined_on` vs in-period (`E_New`, linked retroactively ->
@@ -48,8 +49,10 @@ import { test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 
 import {
+  S0_T1_C_MIGRATION_NAME,
   migrationChecksum,
   migrationSqlForTransaction,
+  verifyS0T1CSecurityPostconditions,
 } from "./lib/migration-validation.mjs";
 import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 import { projectAttendanceMonthlyMatrixReport } from "../src/lib/attendance/attendance-monthly-matrix-contract.ts";
@@ -57,11 +60,17 @@ import {
   describeMatrixDayCell,
   MATRIX_OUT_OF_SCOPE_LABEL,
 } from "../src/lib/attendance/attendance-monthly-matrix-ui-model.ts";
+import {
+  buildAttendanceMonthlyMatrixXlsx,
+  formatMatrixDayCellText,
+} from "../src/lib/attendance/attendance-monthly-matrix-xlsx.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
+const WP7B_MIGRATION_NAME = "20261119180000_wp7b_attendance_org_scope_and_leave_nav_probe.sql";
+const WP8D_MIGRATION_NAME = "20261120140000_wp8d_nav_readonly.sql";
 const WP8D2_MIGRATION_NAME = "20261120170000_wp8d2_work_report_access.sql";
 const WP9_MIGRATION_NAME = "20261121090000_wp9_org_obligations.sql";
 
@@ -316,16 +325,23 @@ async function createLinkedPerson(db, target, { code, fullName, joinedOn, deptId
 }
 
 // ============================================================================
-// TEST 1: Migration #232 Hygiene, Rollback, ACLs, STABLE Probes, Exact 337 RPCs
+// TEST 1: Migration Hygiene, Relative Ordering, Rollback, Dynamic S0-T1-C ACLs (+0 Net)
 // ============================================================================
-test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 service_role RPCs (+0), STABLE probes & bootstrap executor ACL preservation", async () => {
+test("WP9 [1/4]: Migration hygiene, relative dependency order, atomic rollback zero drift, dynamic S0-T1-C ACL postconditions (net +0 service_role RPCs, 0 client/PUBLIC), STABLE probes & bootstrap executor preservation", async () => {
   const { db, migrations } = await createDb({ stopBefore: WP9_MIGRATION_NAME });
   try {
-    assert.ok(migrations.length >= 232, "Migration chain must contain at least 232 migrations through WP9");
-    assert.equal(migrations.findIndex((m) => m.name === WP8D2_MIGRATION_NAME), 230, "WP8D-2 sits at #231");
-    assert.equal(migrations.findIndex((m) => m.name === WP9_MIGRATION_NAME), 231, "WP9 sits at #232 immediately after WP8D-2");
+    const wp7bIdx = migrations.findIndex((m) => m.name === WP7B_MIGRATION_NAME);
+    const wp8dIdx = migrations.findIndex((m) => m.name === WP8D_MIGRATION_NAME);
+    const wp8d2Idx = migrations.findIndex((m) => m.name === WP8D2_MIGRATION_NAME);
+    const wp9Idx = migrations.findIndex((m) => m.name === WP9_MIGRATION_NAME);
+    assert.ok(wp7bIdx >= 0, "WP7B migration must exist");
+    assert.ok(wp8dIdx > wp7bIdx, "WP8D must follow WP7B");
+    assert.ok(wp8d2Idx > wp8dIdx, "WP8D-2 must follow WP8D");
+    assert.ok(wp9Idx > wp8d2Idx, "WP9 must follow WP8D-2");
 
-    const wp9 = migrations.find((m) => m.name === WP9_MIGRATION_NAME);
+    const s0Migration = migrations.find((m) => m.name === S0_T1_C_MIGRATION_NAME);
+    assert.ok(s0Migration, "S0-T1-C ACL allowlist migration must exist");
+    const wp9 = migrations[wp9Idx];
     assert.ok(wp9, "WP9 migration must exist");
     assert.equal(wp9.sql.includes("@"), false, "WP9 migration must contain 0 literal @");
     assert.equal(/savepoint/i.test(wp9.sql), false, "WP9 migration must contain 0 literal SAVEPOINT");
@@ -336,6 +352,21 @@ test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 s
     assert.match(checksum, /^[0-9a-f]{64}$/);
     assert.equal(migrationChecksum(wp9.sql.replace(/\n/g, "\r\n")), checksum, "LF-normalized checksum invariant");
 
+    const beforeAppliedMap = new Map(
+      migrations.slice(0, wp9Idx).map((m) => [m.name, migrationChecksum(m.sql)]),
+    );
+    const beforePost = await verifyS0T1CSecurityPostconditions(
+      db,
+      s0Migration.sql,
+      beforeAppliedMap,
+    );
+    assert.equal(beforePost.ok, true, `Pre-WP9 S0-T1-C postconditions must pass: ${beforePost.reason ?? ""}`);
+    assert.equal(beforePost.details.exposedClientOrPublicCount, 0);
+    assert.equal(beforePost.details.missingOwnerExecCount, 0);
+    assert.equal(beforePost.details.unsafeSecdefSearchPathCount, 0);
+    assert.equal(beforePost.details.bootstrapExecutorIntact, true);
+    assert.equal(beforePost.details.actualServiceCount, beforePost.details.expectedServiceCount);
+
     const { rows: [{ cnt: beforeSrCount }] } = await db.query(
       `select count(*)::int as cnt
          from pg_proc p
@@ -343,7 +374,11 @@ test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 s
         where n.nspname = 'public'
           and has_function_privilege('service_role', p.oid, 'EXECUTE')`,
     );
-    assert.equal(beforeSrCount, 337, "Baseline (#231) must have exact 337 service_role RPCs");
+    assert.equal(
+      beforeSrCount,
+      beforePost.details.actualServiceCount,
+      "Baseline public service_role RPC count must match dynamic S0-T1-C allowlist for applied prefix",
+    );
 
     await db.exec(`
       create table if not exists public.schema_migrations (
@@ -374,6 +409,7 @@ test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 s
         where n.nspname = 'public' and p.proname in (
           'attendance__internal_is_person_inactive_as_of',
           'attendance__internal_is_employee_obligated_on_date',
+          'attendance__internal_is_employee_slot_obligated',
           'work_report__internal_team_on_date',
           'work_report__internal_enforce_once_obligation'
         )`,
@@ -386,8 +422,36 @@ test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 s
     );
     assert.equal(rollbackTrig, 0, "Rolled-back WP9 migration leaves zero new trigger");
 
+    const { rows: [{ cnt: afterRollbackSrCount }] } = await db.query(
+      `select count(*)::int as cnt
+         from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public'
+          and has_function_privilege('service_role', p.oid, 'EXECUTE')`,
+    );
+    assert.equal(afterRollbackSrCount, beforeSrCount, "Rolled-back WP9 migration preserves exact pre-WP9 service_role count");
+
     // Clean apply
     await db.exec(wp9.sql);
+
+    const afterAppliedMap = new Map(beforeAppliedMap);
+    afterAppliedMap.set(wp9.name, checksum);
+    const afterPost = await verifyS0T1CSecurityPostconditions(
+      db,
+      s0Migration.sql,
+      afterAppliedMap,
+    );
+    assert.equal(afterPost.ok, true, `Post-WP9 S0-T1-C postconditions must pass: ${afterPost.reason ?? ""}`);
+    assert.equal(afterPost.details.exposedClientOrPublicCount, 0);
+    assert.equal(afterPost.details.missingOwnerExecCount, 0);
+    assert.equal(afterPost.details.unsafeSecdefSearchPathCount, 0);
+    assert.equal(afterPost.details.bootstrapExecutorIntact, true);
+    assert.equal(afterPost.details.actualServiceCount, afterPost.details.expectedServiceCount);
+    assert.equal(
+      afterPost.details.actualServiceCount,
+      beforePost.details.actualServiceCount,
+      "WP9 adds net +0 service_role RPCs relative to applied prefix",
+    );
 
     const { rows: [{ cnt: afterSrCount }] } = await db.query(
       `select count(*)::int as cnt
@@ -396,7 +460,7 @@ test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 s
         where n.nspname = 'public'
           and has_function_privilege('service_role', p.oid, 'EXECUTE')`,
     );
-    assert.equal(afterSrCount, 337, "WP9 adds +0 new service_role RPCs (exact 337)");
+    assert.equal(afterSrCount, beforeSrCount, "WP9 adds net +0 new service_role RPCs");
 
     const { rows: [{ cnt: exposedClient }] } = await db.query(
       `select count(*)::int as cnt
@@ -411,12 +475,12 @@ test("WP9 [1/4]: Migration #232 hygiene, atomic rollback zero drift, exact 337 s
     );
     assert.equal(exposedClient, 0, "Zero PUBLIC/anon/authenticated EXECUTE grants across public schema");
 
-    // Verify all internal helpers are revoked from service_role/client/PUBLIC & have expected volatility
-    // Verify all 14 internal/trigger WP9 helpers are revoked from service_role/client/PUBLIC & have expected volatility
+    // Verify all 15 internal/trigger WP9 helpers are revoked from service_role/client/PUBLIC & have expected volatility
     const helperChecks = [
       ["public.attendance__internal_is_non_employee_account(uuid,timestamptz)", "s"],
       ["public.attendance__internal_is_person_inactive_as_of(uuid,timestamptz)", "s"],
       ["public.attendance__internal_is_employee_obligated_on_date(uuid,date,date,timestamptz)", "s"],
+      ["public.attendance__internal_is_employee_slot_obligated(uuid,date,timestamptz,date,timestamptz)", "s"],
       ["public.work_report__internal_team_on_date(uuid,date)", "s"],
       ["public.leave_management__internal_resolve_authority(uuid,uuid)", "s"],
       ["public.work_report__internal_is_eligible_assignee(uuid)", "s"],
@@ -591,23 +655,24 @@ test("WP9 [2/4]: Attendance day-boundary matrix (joined_on, INACTIVE pre/on/post
     // E_NEW checks in on join date 2026-10-15
     await seedCheckin(db, E_NEW.app, "2026-10-15", "08:05");
 
-    // E_RESIGNED: real check-ins 01..08, REAL absence on 09, morning check-in on exit day 10 at 08:05
+    // E_RESIGNED: real check-ins 01..08, REAL absence on 09, full morning check-ins on exit day 10 (07:35 & 10:05)
     for (let d = 1; d <= 8; d += 1) {
       await seedCheckin(db, E_RESIGNED.app, `2026-10-${String(d).padStart(2, "0")}`, "08:05");
     }
-    await seedCheckin(db, E_RESIGNED.app, "2026-10-10", "08:05");
+    await seedCheckin(db, E_RESIGNED.app, "2026-10-10", "07:35");
+    await seedCheckin(db, E_RESIGNED.app, "2026-10-10", "10:05");
 
-    // Deactivate E_RESIGNED via canonical RPC, then pin deactivated_at = 2026-10-10 17:00+07 for boundary proof
+    // Deactivate E_RESIGNED via canonical RPC, then pin deactivated_at = 2026-10-10 12:00+07 for noon cutoff proof
     const { rows: [pResVer] } = await db.query(
       "select version from public.organization_persons where person_id = $1::uuid",
       [pResigned.person_id],
     );
     await serviceRpc(db, "org_department_update_person_admin", [
       OWNER.auth, OWNER.app, pResigned.person_id, pResVer.version, "WP9-RES", "Trần Đã Nghỉ Việc", "2026-01-01",
-      "INACTIVE", "Nghỉ việc từ 10/10", nextUuid(), sha256("deact-resigned"),
+      "INACTIVE", "Nghỉ việc từ 10/10 12:00", nextUuid(), sha256("deact-resigned"),
     ]);
     await db.query(
-      "update public.organization_persons set deactivated_at = '2026-10-10 17:00:00+07'::timestamptz where person_id = $1::uuid",
+      "update public.organization_persons set deactivated_at = '2026-10-10 12:00:00+07'::timestamptz where person_id = $1::uuid",
       [pResigned.person_id],
     );
 
@@ -653,8 +718,13 @@ test("WP9 [2/4]: Attendance day-boundary matrix (joined_on, INACTIVE pre/on/post
     assert.equal(rowRes.summary.no_checkin_day_count, 1, "Exact 1 real pre-exit missing day (09/10); ZERO post-exit fake missing");
     assert.equal(rowRes.days.find((x) => x.business_date === "2026-10-09").day_status, "NO_CHECKIN", "Pre-exit real absence 09/10 preserved");
     const day10Res = rowRes.days.find((x) => x.business_date === "2026-10-10");
-    assert.equal(day10Res.day_status, "CHECKED_IN", "Exit day 10/10 morning check-in preserved");
-    assert.equal(day10Res.missing_slot_count, 0, "Exit day 10/10 post-resignation slots have 0 fake MISSING");
+    assert.equal(day10Res.day_status, "CHECKED_IN", "Exit day 10/10 morning check-ins preserved");
+    assert.equal(day10Res.missing_slot_count, 0, "Exit day 10/10 with both AM check-ins before 12:00 has 0 MISSING");
+    assert.deepEqual(
+      day10Res.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+      ["SLOT_1:ON_TIME", "SLOT_2:ON_TIME", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+      "Exit day 10/10 noon cutoff preserves ON_TIME morning slots and exempts post-cutoff PM slots",
+    );
     for (let d = 11; d <= 31; d += 1) {
       const dateStr = `2026-10-${String(d).padStart(2, "0")}`;
       const cell = rowRes.days.find((x) => x.business_date === dateStr);
@@ -833,6 +903,306 @@ test("WP9 [2/4]: Attendance day-boundary matrix (joined_on, INACTIVE pre/on/post
       OWNER.auth, OWNER.app, "2026-10", null, E_ROLE_ISOLATION.app, null, 1, 20,
     ]);
     assert.equal(afterRoleMatrix.pagination.snapshot_token, beforeRoleMatrix.pagination.snapshot_token);
+
+    // (g) R1/P2 Per-Slot Exit-Cutoff Boundary: Matrix + Evaluator + Summary + XLSX Export + Late Check-in + AM Leave
+    const E_EXIT_NOON = { auth: "19000000-0000-4000-8000-000000000031", app: "29000000-0000-4000-8000-000000000031", email: "e.exit.noon@hrpartner.vn", name: "NV Nghỉ 12h00" };
+    const E_EXIT_BOUNDARY = { auth: "19000000-0000-4000-8000-000000000032", app: "29000000-0000-4000-8000-000000000032", email: "e.exit.bound@hrpartner.vn", name: "NV Biên Grace" };
+    const E_EXIT_LATE = { auth: "19000000-0000-4000-8000-000000000033", app: "29000000-0000-4000-8000-000000000033", email: "e.exit.late@hrpartner.vn", name: "NV Đi Muộn Ngày Nghỉ" };
+    const E_EXIT_AM_LEAVE = { auth: "19000000-0000-4000-8000-000000000034", app: "29000000-0000-4000-8000-000000000034", email: "e.exit.amleave@hrpartner.vn", name: "NV Phép Sáng Ngày Nghỉ" };
+    for (const u of [E_EXIT_NOON, E_EXIT_BOUNDARY, E_EXIT_LATE, E_EXIT_AM_LEAVE]) {
+      await seedBaseUser(db, u);
+    }
+    const pExitNoon = await createLinkedPerson(db, E_EXIT_NOON, { code: "WP9-EXNOON", fullName: E_EXIT_NOON.name, joinedOn: null, deptId: mktDept.department_id });
+    const pExitBound = await createLinkedPerson(db, E_EXIT_BOUNDARY, { code: "WP9-EXBND", fullName: E_EXIT_BOUNDARY.name, joinedOn: null, deptId: mktDept.department_id });
+    const pExitLate = await createLinkedPerson(db, E_EXIT_LATE, { code: "WP9-EXLATE", fullName: E_EXIT_LATE.name, joinedOn: "2026-10-01", deptId: mktDept.department_id });
+    const pExitAmLeave = await createLinkedPerson(db, E_EXIT_AM_LEAVE, { code: "WP9-EXAML", fullName: E_EXIT_AM_LEAVE.name, joinedOn: "2026-10-01", deptId: mktDept.department_id });
+
+    // Seed late check-in (08:05 -> SLOT_1 OUT_OF_GRACE) for E_EXIT_LATE and approved AM leave for E_EXIT_AM_LEAVE BEFORE deactivation
+    await seedCheckin(db, E_EXIT_LATE.app, "2026-10-10", "08:05");
+    const amLeaveReq = await serviceRpc(db, "leave_management_create_request", [
+      E_EXIT_AM_LEAVE.auth, E_EXIT_AM_LEAVE.app,
+      JSON.stringify([{ leave_date: "2026-10-10", session_code: "AM", leave_type: "UNPAID" }]),
+      "Nghỉ phép buổi sáng ngày bàn giao", nextKey("am-lv-req"), sha256("am-lv-req"),
+    ]);
+    await serviceRpc(db, "leave_management_decide_request", [
+      OWNER.auth, OWNER.app, amLeaveReq.request.request_id, "APPROVE", amLeaveReq.request.row_version,
+      "Duyệt phép sáng", nextKey("am-lv-app"), sha256("am-lv-app"),
+    ]);
+
+    // Deactivate all 4 via canonical org_department_update_person_admin, then pin local timestamps
+    const deactivateAt = async (person, code, name, joinedOn, tsLocal) => {
+      const { rows: [pv] } = await db.query("select version from public.organization_persons where person_id = $1::uuid", [person.person_id]);
+      await serviceRpc(db, "org_department_update_person_admin", [
+        OWNER.auth, OWNER.app, person.person_id, pv.version, code, name, joinedOn,
+        "INACTIVE", `Ngừng hoạt động ${tsLocal}`, nextUuid(), sha256(`deact:${code}:${tsLocal}`),
+      ]);
+      await db.query("update public.organization_persons set deactivated_at = $2::timestamptz where person_id = $1::uuid", [person.person_id, tsLocal]);
+    };
+    await deactivateAt(pExitNoon, "WP9-EXNOON", E_EXIT_NOON.name, null, "2026-10-10 12:00:00+07");
+    await deactivateAt(pExitBound, "WP9-EXBND", E_EXIT_BOUNDARY.name, null, "2026-10-10 10:15:00+07");
+    await deactivateAt(pExitLate, "WP9-EXLATE", E_EXIT_LATE.name, "2026-10-01", "2026-10-10 12:00:00+07");
+    await deactivateAt(pExitAmLeave, "WP9-EXAML", E_EXIT_AM_LEAVE.name, "2026-10-01", "2026-10-10 12:00:00+07");
+
+    // (g1) T0 Canonical Noon Cutoff (2026-10-10 12:00+07, 0 check-ins, joined_on IS NULL):
+    //      SLOT_1 (07:30+15m=07:45) & SLOT_2 (10:00+15m=10:15) -> MISSING + eligible; SLOT_3..5 -> UPCOMING + not eligible
+    const noonMatrixBefore = projectAttendanceMonthlyMatrixReport(
+      await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_EXIT_NOON.app, null, 1, 20]),
+    );
+    assert.ok(noonMatrixBefore);
+    const noonRow = noonMatrixBefore.items[0];
+    const noonDay10 = noonRow.days.find((d) => d.business_date === "2026-10-10");
+    const noonDay11 = noonRow.days.find((d) => d.business_date === "2026-10-11");
+    assert.equal(noonDay10.day_status, "NO_CHECKIN");
+    assert.equal(noonDay10.missing_slot_count, 2, "R1: noon cutoff preserves exact 2 AM MISSING slots (SLOT_1, SLOT_2)");
+    assert.deepEqual(
+      noonDay10.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+      ["SLOT_1:MISSING", "SLOT_2:MISSING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+    );
+    assert.equal(noonRow.summary.no_checkin_day_count, 10, "R1: 01..10 obligated (10 days), 11..31 exempt (0 fake missing)");
+    assert.equal(noonRow.summary.no_checkin_without_leave_day_count, 10);
+    assert.equal(noonDay11.day_status, "UPCOMING");
+    assert.equal(noonDay11.missing_slot_count, 0);
+
+    const noonEvalBefore = await serviceRpc(db, "attendance_get_my_explanations_overview", [
+      E_EXIT_NOON.auth, E_EXIT_NOON.app, "2026-10-10", 20, 0,
+    ]);
+    assert.deepEqual(
+      noonEvalBefore.day_evaluation.slots.map((s) => `${s.slot_code}:${s.slot_status}:${s.eligible_for_explanation}`),
+      [
+        "SLOT_1:MISSING:true",
+        "SLOT_2:MISSING:true",
+        "SLOT_3:UPCOMING:false",
+        "SLOT_4:UPCOMING:false",
+        "SLOT_5:UPCOMING:false",
+      ],
+      "R1: Explanation evaluator matches matrix per-slot cutoff verbatim",
+    );
+
+    // Pre-cutoff historical slot SLOT_1 allows explanation submit; post-cutoff SLOT_3 rejects PT409!
+    const noonExp1 = await serviceRpc(db, "attendance_submit_explanation", [
+      E_EXIT_NOON.auth, E_EXIT_NOON.app, "2026-10-10", "SLOT_1",
+      "Quên chấm công ca sáng trước khi bàn giao nghỉ việc", nextKey("exp-noon-s1"), sha256("exp-noon-s1"),
+    ]);
+    assert.equal(noonExp1.explanation.status, "PENDING", "R1: Historical pre-cutoff MISSING slot accepts explanation");
+    await assert.rejects(
+      () => serviceRpc(db, "attendance_submit_explanation", [
+        E_EXIT_NOON.auth, E_EXIT_NOON.app, "2026-10-10", "SLOT_3",
+        "Thử giải trình ca chiều sau giờ nghỉ", nextKey("exp-noon-s3"), sha256("exp-noon-s3"),
+      ]),
+      (err) => err?.code === "PT409" && String(err.message).includes("ATTENDANCE_EXPLANATION_SLOT_NOT_ELIGIBLE"),
+      "R1: Post-cutoff slot rejects explanation submit",
+    );
+
+    // Approve SLOT_1 explanation -> Matrix & Evaluator & XLSX export reflect EXPLAINED_APPROVED on SLOT_1, MISSING on SLOT_2, UPCOMING on SLOT_3..5!
+    const noonDecided = await serviceRpc(db, "attendance_decide_explanation", [
+      OWNER.auth, OWNER.app, noonExp1.explanation.explanation_id, "APPROVE",
+      noonExp1.explanation.row_version, "Duyệt giải trình ca sáng", nextKey("dec-noon-s1"), sha256("dec-noon-s1"),
+    ]);
+    assert.equal(noonDecided.explanation.status, "APPROVED");
+
+    const noonMatrixAfter = projectAttendanceMonthlyMatrixReport(
+      await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_EXIT_NOON.app, null, 1, 20]),
+    );
+    const noonDay10After = noonMatrixAfter.items[0].days.find((d) => d.business_date === "2026-10-10");
+    assert.equal(noonDay10After.missing_slot_count, 1, "Approving SLOT_1 reduces missing_slot_count 2 -> 1");
+    assert.deepEqual(
+      noonDay10After.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+      ["SLOT_1:EXPLAINED_APPROVED", "SLOT_2:MISSING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+    );
+    const noonEvalAfter = await serviceRpc(db, "attendance_get_my_explanations_overview", [
+      E_EXIT_NOON.auth, E_EXIT_NOON.app, "2026-10-10", 20, 0,
+    ]);
+    assert.deepEqual(
+      noonEvalAfter.day_evaluation.slots.map((s) => `${s.slot_code}:${s.slot_status}:${s.eligible_for_explanation}`),
+      [
+        "SLOT_1:EXPLAINED_APPROVED:false",
+        "SLOT_2:MISSING:true",
+        "SLOT_3:UPCOMING:false",
+        "SLOT_4:UPCOMING:false",
+        "SLOT_5:UPCOMING:false",
+      ],
+    );
+
+    // Verify UI model & XLSX Export consistency for partial exit day + post-exit day!
+    const noonDay10Text = formatMatrixDayCellText(noonDay10After, { todayBusinessDate: "2026-11-21" });
+    assert.match(noonDay10Text, /Time 1 \(07:30\): Giải trình được duyệt/);
+    assert.match(noonDay10Text, /Time 2 \(10:00\): Chưa có lượt chấm/);
+    assert.match(noonDay10Text, /Time 3 \(13:00\): Ngoài phạm vi \/ Không áp dụng/);
+    assert.equal(/Chưa đến giờ chấm/.test(noonDay10Text), false);
+    const noonXlsxBytes = await buildAttendanceMonthlyMatrixXlsx(noonMatrixAfter, { todayBusinessDate: "2026-11-21" });
+    assert.ok(noonXlsxBytes instanceof Uint8Array && noonXlsxBytes.byteLength > 1000, "XLSX export succeeds on partial exit day");
+
+    // (g2) Exact Grace-End Cutoff Boundary Rule (deactivated_at <= slot_due_at -> UPCOMING; deactivated_at > slot_due_at -> MISSING):
+    //      SLOT_1 due = 07:45:00+07; SLOT_2 due = 10:15:00+07
+    const checkBoundary = async (tsLocal, expectedSlots, expectedMissing, expectedNoCheckinDays, expectDayExempt = false) => {
+      await db.query("update public.organization_persons set deactivated_at = $2::timestamptz where person_id = $1::uuid", [pExitBound.person_id, tsLocal]);
+      const mat = projectAttendanceMonthlyMatrixReport(
+        await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_EXIT_BOUNDARY.app, null, 1, 20]),
+      );
+      const day10 = mat.items[0].days.find((d) => d.business_date === "2026-10-10");
+      assert.deepEqual(
+        day10.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+        expectedSlots,
+        `Matrix slots at cutoff ${tsLocal}`,
+      );
+      assert.equal(day10.missing_slot_count, expectedMissing, `missing_slot_count at cutoff ${tsLocal}`);
+      assert.equal(mat.items[0].summary.no_checkin_day_count, expectedNoCheckinDays, `no_checkin_day_count at cutoff ${tsLocal}`);
+      assert.equal(
+        describeMatrixDayCell(day10, { todayBusinessDate: "2026-11-21" }).isOutOfScopeOrExempt,
+        expectDayExempt,
+        `isOutOfScopeOrExempt at cutoff ${tsLocal}`,
+      );
+      const ev = await serviceRpc(db, "attendance_get_my_explanations_overview", [
+        E_EXIT_BOUNDARY.auth, E_EXIT_BOUNDARY.app, "2026-10-10", 20, 0,
+      ]);
+      assert.deepEqual(
+        ev.day_evaluation.slots.map((s) => `${s.slot_code}:${s.slot_status}:${s.eligible_for_explanation}`),
+        expectedSlots.map((pair) => `${pair}:${pair.endsWith(":MISSING")}`),
+        `Evaluator slots at cutoff ${tsLocal}`,
+      );
+    };
+    await checkBoundary(
+      "2026-10-10 10:15:00+07",
+      ["SLOT_1:MISSING", "SLOT_2:UPCOMING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+      1,
+      10,
+      false,
+    );
+    await checkBoundary(
+      "2026-10-10 10:15:01+07",
+      ["SLOT_1:MISSING", "SLOT_2:MISSING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+      2,
+      10,
+      false,
+    );
+    await checkBoundary(
+      "2026-10-10 07:45:00+07",
+      ["SLOT_1:UPCOMING", "SLOT_2:UPCOMING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+      0,
+      9,
+      true,
+    );
+    await checkBoundary(
+      "2026-10-10 00:00:00+07",
+      ["SLOT_1:UPCOMING", "SLOT_2:UPCOMING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+      0,
+      9,
+      true,
+    );
+
+    // (g3) Late check-in (08:05 -> SLOT_1 OUT_OF_GRACE) before 12:00 exit keeps OUT_OF_GRACE + explanation eligibility + SLOT_2 MISSING + SLOT_3..5 UPCOMING
+    const lateMat = projectAttendanceMonthlyMatrixReport(
+      await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_EXIT_LATE.app, null, 1, 20]),
+    );
+    const lateDay10 = lateMat.items[0].days.find((d) => d.business_date === "2026-10-10");
+    assert.equal(lateDay10.day_status, "CHECKED_IN");
+    assert.equal(lateDay10.missing_slot_count, 1);
+    assert.equal(lateDay10.late_or_early_checkin_count, 1);
+    assert.deepEqual(
+      lateDay10.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+      ["SLOT_1:OUT_OF_GRACE", "SLOT_2:MISSING", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+    );
+    const lateEval = await serviceRpc(db, "attendance_get_my_explanations_overview", [
+      E_EXIT_LATE.auth, E_EXIT_LATE.app, "2026-10-10", 20, 0,
+    ]);
+    assert.deepEqual(
+      lateEval.day_evaluation.slots.map((s) => `${s.slot_code}:${s.slot_status}:${s.eligible_for_explanation}`),
+      [
+        "SLOT_1:OUT_OF_GRACE:true",
+        "SLOT_2:MISSING:true",
+        "SLOT_3:UPCOMING:false",
+        "SLOT_4:UPCOMING:false",
+        "SLOT_5:UPCOMING:false",
+      ],
+    );
+    const lateExp = await serviceRpc(db, "attendance_submit_explanation", [
+      E_EXIT_LATE.auth, E_EXIT_LATE.app, "2026-10-10", "SLOT_1",
+      "Kẹt xe buổi sáng ngày nghỉ việc", nextKey("exp-late-s1"), sha256("exp-late-s1"),
+    ]);
+    assert.equal(lateExp.explanation.status, "PENDING", "Late pre-cutoff check-in stays eligible for explanation");
+
+    // (g4) Approved AM leave on 12:00 exit day covers SLOT_1..2 and leaves 0 missing, excluding 10/10 from no_checkin_without_leave_day_count
+    const amLeaveMat = projectAttendanceMonthlyMatrixReport(
+      await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_EXIT_AM_LEAVE.app, null, 1, 20]),
+    );
+    const amLeaveDay10 = amLeaveMat.items[0].days.find((d) => d.business_date === "2026-10-10");
+    assert.equal(amLeaveDay10.day_status, "APPROVED_LEAVE");
+    assert.equal(amLeaveDay10.missing_slot_count, 0);
+    assert.deepEqual(
+      amLeaveDay10.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+      ["SLOT_1:LEAVE_COVERED", "SLOT_2:LEAVE_COVERED", "SLOT_3:UPCOMING", "SLOT_4:UPCOMING", "SLOT_5:UPCOMING"],
+    );
+    assert.equal(amLeaveMat.items[0].summary.no_checkin_without_leave_day_count, 9, "AM leave on exit day excludes 10/10 from no_checkin_without_leave_day_count");
+    const amLeaveEval = await serviceRpc(db, "attendance_get_my_explanations_overview", [
+      E_EXIT_AM_LEAVE.auth, E_EXIT_AM_LEAVE.app, "2026-10-10", 20, 0,
+    ]);
+    assert.deepEqual(
+      amLeaveEval.day_evaluation.slots.map((s) => `${s.slot_code}:${s.slot_status}:${s.eligible_for_explanation}`),
+      [
+        "SLOT_1:LEAVE_COVERED:false",
+        "SLOT_2:LEAVE_COVERED:false",
+        "SLOT_3:UPCOMING:false",
+        "SLOT_4:UPCOMING:false",
+        "SLOT_5:UPCOMING:false",
+      ],
+    );
+
+    // (g5) Non-monotonic mid-day link transition (INACTIVE P1 -> ACTIVE P2 at 09:00 on 2026-10-10)
+    //      & disabled account with closed link covering day_as_of -> 100% parity between day cells, summary rollup, and eligible_month_users
+    const E_MIDDAY_RELINK = { auth: "19000000-0000-4000-8000-000000000036", app: "29000000-0000-4000-8000-000000000036", email: "e.relink@hrpartner.vn", name: "NV Đổi Hồ Sơ Giữa Ngày" };
+    const E_DIS_CLOSED_LINK = { auth: "19000000-0000-4000-8000-000000000037", app: "29000000-0000-4000-8000-000000000037", email: "e.dis.closedlink@hrpartner.vn", name: "NV Khóa TK Link Đã Đóng" };
+    await seedBaseUser(db, E_MIDDAY_RELINK);
+    await seedBaseUser(db, E_DIS_CLOSED_LINK, { enabled: false });
+
+    const pRelink1 = await createLinkedPerson(db, E_MIDDAY_RELINK, { code: "WP9-RL1", fullName: "Hồ Sơ Cũ", joinedOn: "2026-10-01", deptId: mktDept.department_id });
+    await deactivateAt(pRelink1, "WP9-RL1", "Hồ Sơ Cũ", "2026-10-01", "2026-10-05 12:00:00+07");
+    const { rows: [pRelink2] } = await db.query(
+      `insert into public.organization_persons (employee_code, full_name, joined_on, status, created_by_app_user_id, updated_by_app_user_id)
+       values ('WP9-RL2', 'Hồ Sơ Mới', '2026-10-10', 'ACTIVE', $1::uuid, $1::uuid) returning person_id`,
+      [OWNER.app],
+    );
+    const { rows: [pDisClosed] } = await db.query(
+      `insert into public.organization_persons (employee_code, full_name, joined_on, status, created_by_app_user_id, updated_by_app_user_id)
+       values ('WP9-DCL', 'NV Link Đóng', '2026-10-10', 'ACTIVE', $1::uuid, $1::uuid) returning person_id`,
+      [OWNER.app],
+    );
+    await db.exec("alter table public.organization_account_person_links disable trigger user;");
+    await db.query(
+      `update public.organization_account_person_links
+          set started_at = '2026-10-01 00:00:00+07'::timestamptz,
+              ended_at = '2026-10-10 09:00:00+07'::timestamptz
+        where app_user_id = $1::uuid`,
+      [E_MIDDAY_RELINK.app],
+    );
+    await db.query(
+      `insert into public.organization_account_person_links (app_user_id, person_id, started_at, ended_at, created_by_app_user_id, reason)
+       values ($1::uuid, $2::uuid, '2026-10-10 09:00:00+07'::timestamptz, null, $3::uuid, 'Relink mid-day'),
+              ($4::uuid, $5::uuid, '2026-10-10 09:00:00+07'::timestamptz, '2026-10-11 00:00:00+07'::timestamptz, $3::uuid, 'Closed link covering day_as_of')`,
+      [E_MIDDAY_RELINK.app, pRelink2.person_id, OWNER.app, E_DIS_CLOSED_LINK.app, pDisClosed.person_id],
+    );
+    await db.exec("alter table public.organization_account_person_links enable trigger user;");
+
+    const relinkMat = projectAttendanceMonthlyMatrixReport(
+      await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_MIDDAY_RELINK.app, null, 1, 20]),
+    );
+    assert.ok(relinkMat && relinkMat.items.length === 1);
+    const relinkRow = relinkMat.items[0];
+    const relinkDay10 = relinkRow.days.find((d) => d.business_date === "2026-10-10");
+    assert.equal(relinkDay10.day_status, "NO_CHECKIN");
+    assert.equal(relinkDay10.missing_slot_count, 4, "Mid-day relink at 09:00 leaves SLOT_1 exempt and SLOT_2..5 MISSING");
+    assert.deepEqual(
+      relinkDay10.slots.map((s) => `${s.slot_code}:${s.slot_status}`),
+      ["SLOT_1:UPCOMING", "SLOT_2:MISSING", "SLOT_3:MISSING", "SLOT_4:MISSING", "SLOT_5:MISSING"],
+    );
+    const relinkNoCheckinCells = relinkRow.days.filter((d) => d.day_status === "NO_CHECKIN").length;
+    assert.equal(relinkRow.summary.no_checkin_day_count, relinkNoCheckinCells, "Summary no_checkin_day_count must match rendered NO_CHECKIN day cells (27)");
+    assert.equal(relinkRow.summary.no_checkin_day_count, 27);
+
+    const disClosedMat = projectAttendanceMonthlyMatrixReport(
+      await serviceRpc(db, "attendance_monthly_matrix_report", [OWNER.auth, OWNER.app, "2026-10", null, E_DIS_CLOSED_LINK.app, null, 1, 20]),
+    );
+    assert.equal(disClosedMat.items.length, 1, "Disabled account with closed Person link covering day_as_of stays included in eligible_month_users");
+    assert.equal(disClosedMat.items[0].days.find((d) => d.business_date === "2026-10-10").day_status, "NO_CHECKIN");
 
     assert.ok(pNew && pDisabledOnly && pMissingDate && pConflict && pRoleIso);
   } finally {
@@ -1439,6 +1809,174 @@ test("WP9 [4/4]: Work Reports as-of team transfer (zero retroactive Team B OVERD
       [onceAsgn1.assignment_id, E_ONCE_EMP.app],
     );
     assert.deepEqual(onceExemptRows.map((r) => r.obligation_status), ["EXEMPTED"], "EXEMPTED ONCE obligation preserved with 0 duplicates");
+
+    // 3b. R3/P2: Same-assignment ONCE REVOKED -> ACTIVE restores EXACT original unsubmitted CANCELLED
+    //     obligation_id (same-day AND next-day), keeps READ ONLY nav probe parity, preserves submitted
+    //     & EXEMPTED rows without creating any duplicate 2nd row!
+    const TEAM_C = "49000000-0000-4000-8000-000000000003";
+    await db.query(
+      "insert into public.teams (team_id, code, display_name, active) values ($1::uuid, 'WP9_TEAM_C', 'Đội Kiểm Thử ONCE', true)",
+      [TEAM_C],
+    );
+    const E_ONCE_RESTORE = { auth: "19000000-0000-4000-8000-000000000035", app: "29000000-0000-4000-8000-000000000035", rec: "39000000-0000-4000-8000-000000000035", email: "e.once.restore@hrpartner.vn", name: "NV Khôi Phục ONCE" };
+    await seedBaseUser(db, E_ONCE_RESTORE);
+    await linkRecruiterAndTeam(db, E_ONCE_RESTORE, TEAM_C, "2026-01-01");
+
+    // (i) Same-day USER/ONCE: ACTIVE -> REVOKED -> ACTIVE (T0 canonical repro)
+    const tplOnceSameDay = await createPublishedTemplate(db, OWNER, "WP9_ONCE_R3_SAME", "ONCE Khôi Phục Cùng Ngày", "ONCE");
+    const onceSameAsgn = await serviceRpc(db, "work_report_create_assignment", [
+      OWNER.auth, OWNER.app, tplOnceSameDay.template_id, "USER", E_ONCE_RESTORE.app, null, null,
+      "ONCE", true, 0, "18:00:00", false, todayVn, dPlus1, nextKey("r3-same-create"),
+    ]);
+    const { rows: [sameOb1] } = await db.query(
+      "select obligation_id, period_key, obligation_status, version from public.work_report_obligations where assignment_id = $1::uuid",
+      [onceSameAsgn.assignment_id],
+    );
+    assert.equal(sameOb1.obligation_status, "ACTIVE");
+    assert.equal(sameOb1.version, 1);
+
+    const sameRevoked = await serviceRpc(db, "work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, onceSameAsgn.assignment_id, 1, "REVOKED", nextKey("r3-same-rev"),
+    ]);
+    assert.equal(sameRevoked.state, "REVOKED");
+    assert.equal(sameRevoked.version, 2);
+    const { rows: [sameOb2] } = await db.query(
+      "select obligation_id, obligation_status, version from public.work_report_obligations where assignment_id = $1::uuid",
+      [onceSameAsgn.assignment_id],
+    );
+    assert.equal(sameOb2.obligation_id, sameOb1.obligation_id);
+    assert.equal(sameOb2.obligation_status, "CANCELLED");
+    assert.equal(sameOb2.version, 2);
+    const probeWhileRevoked = await serviceRpc(
+      db,
+      "work_report_has_active_obligations",
+      [E_ONCE_RESTORE.auth, E_ONCE_RESTORE.app],
+      { readOnly: true },
+    );
+    assert.strictEqual(probeWhileRevoked.has_active_obligations, false, "R3: READ ONLY probe is false while ONCE is REVOKED/CANCELLED");
+
+    const sameRestored = await serviceRpc(db, "work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, onceSameAsgn.assignment_id, 2, "ACTIVE", nextKey("r3-same-act"),
+    ]);
+    assert.equal(sameRestored.state, "ACTIVE");
+    assert.equal(sameRestored.version, 3);
+    const { rows: sameOb3Rows } = await db.query(
+      "select obligation_id, period_key, obligation_status, version, snapshot_team_id from public.work_report_obligations where assignment_id = $1::uuid",
+      [onceSameAsgn.assignment_id],
+    );
+    assert.equal(sameOb3Rows.length, 1, "R3: Same-day REVOKED->ACTIVE keeps singleton (1 row)");
+    assert.equal(sameOb3Rows[0].obligation_id, sameOb1.obligation_id, "R3: Exact original obligation_id restored");
+    assert.equal(sameOb3Rows[0].obligation_status, "ACTIVE", "R3: Restored obligation is ACTIVE");
+    assert.equal(sameOb3Rows[0].version, 3, "R3: Restored obligation version advances 2 -> 3");
+    assert.equal(sameOb3Rows[0].snapshot_team_id, TEAM_C);
+
+    await serviceRpc(db, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, todayVn]);
+    await serviceRpc(db, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, dPlus1]);
+    await serviceRpc(db, "work_report_list_my_obligations", [E_ONCE_RESTORE.auth, E_ONCE_RESTORE.app, null]);
+    const { rows: sameObAfterEnsure } = await db.query(
+      "select obligation_id, obligation_status from public.work_report_obligations where assignment_id = $1::uuid",
+      [onceSameAsgn.assignment_id],
+    );
+    assert.deepEqual(
+      sameObAfterEnsure,
+      [{ obligation_id: sameOb1.obligation_id, obligation_status: "ACTIVE" }],
+      "R3: Subsequent ensure_window(today/today+1) and list_my_obligations create 0 duplicates",
+    );
+    const countsBeforeRoProbe = await countWrTables(db);
+    const probeAfterRestore = await serviceRpc(
+      db,
+      "work_report_has_active_obligations",
+      [E_ONCE_RESTORE.auth, E_ONCE_RESTORE.app],
+      { readOnly: true },
+    );
+    assert.strictEqual(probeAfterRestore.has_active_obligations, true, "R3: READ ONLY probe returns true after restore");
+    assert.deepEqual(await countWrTables(db), countsBeforeRoProbe, "R3: READ ONLY probe performs 0 writes");
+
+    // (ii) Next-day ONCE restore: materialized on dMinus1 (ONCE-dMinus1), REVOKED, then reactivated on todayVn ->
+    //      restores EXACT original ONCE-dMinus1 row with 0 duplicate ONCE-todayVn row!
+    const tplOnceNextDay = await createPublishedTemplate(db, OWNER, "WP9_ONCE_R3_NEXT", "ONCE Khôi Phục Hôm Sau", "ONCE");
+    const onceNextAsgn = await serviceRpc(db, "work_report_create_assignment", [
+      OWNER.auth, OWNER.app, tplOnceNextDay.template_id, "USER", E_ONCE_RESTORE.app, null, null,
+      "ONCE", true, 0, "18:00:00", false, dMinus1, dPlus1, nextKey("r3-next-create"),
+    ]);
+    // Re-key the materialized row to dMinus1 to simulate Day-1 creation prior to Day-2 reactivation
+    const { rows: [nextObOrig] } = await db.query(
+      `update public.work_report_obligations
+          set period_key = $2,
+              period_start_date = $3::date,
+              period_end_date = $3::date
+        where assignment_id = $1::uuid
+        returning obligation_id, period_key`,
+      [onceNextAsgn.assignment_id, `ONCE-${dMinus1}`, dMinus1],
+    );
+    await serviceRpc(db, "work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, onceNextAsgn.assignment_id, 1, "REVOKED", nextKey("r3-next-rev"),
+    ]);
+    await serviceRpc(db, "work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, onceNextAsgn.assignment_id, 2, "ACTIVE", nextKey("r3-next-act"),
+    ]);
+    await serviceRpc(db, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, dPlus1]);
+    await serviceRpc(db, "work_report_list_my_obligations", [E_ONCE_RESTORE.auth, E_ONCE_RESTORE.app, null]);
+    const { rows: nextObRows } = await db.query(
+      "select obligation_id, period_key, obligation_status, version, snapshot_team_id from public.work_report_obligations where assignment_id = $1::uuid",
+      [onceNextAsgn.assignment_id],
+    );
+    assert.equal(nextObRows.length, 1, "R3: Next-day REVOKED->ACTIVE restores singleton (0 duplicate ONCE-todayVn)");
+    assert.equal(nextObRows[0].obligation_id, nextObOrig.obligation_id);
+    assert.equal(nextObRows[0].period_key, `ONCE-${dMinus1}`);
+    assert.equal(nextObRows[0].obligation_status, "ACTIVE");
+    assert.equal(nextObRows[0].version, 3);
+    assert.equal(nextObRows[0].snapshot_team_id, TEAM_C);
+
+    // (iii) Submitted ONCE across REVOKED -> ACTIVE keeps exact 1 submitted row and 0 duplicates
+    const tplOnceSub = await createPublishedTemplate(db, OWNER, "WP9_ONCE_R3_SUB", "ONCE Đã Nộp", "ONCE");
+    const onceSubAsgn = await serviceRpc(db, "work_report_create_assignment", [
+      OWNER.auth, OWNER.app, tplOnceSub.template_id, "USER", E_ONCE_RESTORE.app, null, null,
+      "ONCE", true, 0, "18:00:00", false, todayVn, dPlus1, nextKey("r3-sub-create"),
+    ]);
+    const { rows: [subObOrig] } = await db.query(
+      "select obligation_id from public.work_report_obligations where assignment_id = $1::uuid",
+      [onceSubAsgn.assignment_id],
+    );
+    await serviceRpc(db, "work_report_submit", [
+      E_ONCE_RESTORE.auth, E_ONCE_RESTORE.app, subObOrig.obligation_id,
+      JSON.stringify({ calls_made: 9, interested_candidates: 3, workers_started: 1, notes: null }), null, nextKey("r3-sub-submit"),
+    ]);
+    await serviceRpc(db, "work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, onceSubAsgn.assignment_id, 1, "REVOKED", nextKey("r3-sub-rev"),
+    ]);
+    await serviceRpc(db, "work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, onceSubAsgn.assignment_id, 2, "ACTIVE", nextKey("r3-sub-act"),
+    ]);
+    await serviceRpc(db, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, dPlus1]);
+    await serviceRpc(db, "work_report_list_my_obligations", [E_ONCE_RESTORE.auth, E_ONCE_RESTORE.app, null]);
+    const { rows: subObAfter } = await db.query(
+      `select o.obligation_id, o.obligation_status, s.first_submitted_at is not null as is_submitted
+         from public.work_report_obligations o
+         left join public.work_report_submissions s on s.obligation_id = o.obligation_id
+        where o.assignment_id = $1::uuid`,
+      [onceSubAsgn.assignment_id],
+    );
+    assert.deepEqual(
+      subObAfter,
+      [{ obligation_id: subObOrig.obligation_id, obligation_status: "ACTIVE", is_submitted: true }],
+      "R3: Submitted ONCE across REVOKED->ACTIVE keeps exact 1 submitted row and 0 duplicates",
+    );
+
+    // (iv) EXEMPTED ONCE across REVOKED -> ACTIVE stays EXEMPTED with 0 duplicates
+    await serviceRpc(db, "work_report_set_assignment_state", [OWNER.auth, OWNER.app, onceAsgn1.assignment_id, 3, "REVOKED", nextKey("once-ex-rev")]);
+    await serviceRpc(db, "work_report_set_assignment_state", [OWNER.auth, OWNER.app, onceAsgn1.assignment_id, 4, "ACTIVE", nextKey("once-ex-act")]);
+    await serviceRpc(db, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, dPlus1]);
+    await serviceRpc(db, "work_report_list_my_obligations", [E_ONCE_EMP.auth, E_ONCE_EMP.app, null]);
+    const { rows: onceExemptAfterRevokeReactivate } = await db.query(
+      "select obligation_id, obligation_status from public.work_report_obligations where assignment_id = $1::uuid and assignee_app_user_id = $2::uuid",
+      [onceAsgn1.assignment_id, E_ONCE_EMP.app],
+    );
+    assert.deepEqual(
+      onceExemptAfterRevokeReactivate,
+      [{ obligation_id: onceRows1[0].obligation_id, obligation_status: "EXEMPTED" }],
+      "R3: EXEMPTED ONCE stays EXEMPTED across REVOKED->ACTIVE with 0 duplicates",
+    );
 
     // Independent replacement ONCE after revoking an unsubmitted CANCELLED ONCE -> ensure_window reactivates cleanly!
     const tplOnceRepl = await createPublishedTemplate(db, OWNER, "WP9_ONCE_REPL", "Đột xuất thay thế", "ONCE");

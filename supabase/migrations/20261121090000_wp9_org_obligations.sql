@@ -1,11 +1,11 @@
 -- ============================================================================
 -- WP9: Org Obligations (S6) — Attendance & Work Reports
--- Append-only migration #232 (baseline: 231 migrations, 337 service_role RPCs).
+-- Append-only migration following WP8D-2 (+0 net new service_role RPCs).
 --
 -- Scope (ponytail minimal):
---   1. Shared temporal obligation / employment-status helpers (3 new internal
---      helpers, revoked from public/anon/authenticated/service_role -> +0 new
---      service_role RPCs):
+--   1. Shared temporal obligation / employment-status helpers (5 new internal/
+--      trigger helpers, revoked from public/anon/authenticated/service_role ->
+--      +0 net new service_role RPCs):
 --      - attendance__internal_is_non_employee_account: temporal D-WP7B-03 check
 --        so later Person deactivation never retroactively alters prior dates.
 --      - attendance__internal_is_person_inactive_as_of: authoritative INACTIVE
@@ -15,7 +15,13 @@
 --        from account_type, unconflicted legacy shared, evidenced joined_on,
 --        and Person deactivation (NEVER infers start date from created_at,
 --        link.started_at, or disable timestamp).
+--      - attendance__internal_is_employee_slot_obligated: per-slot exit-cutoff
+--        evaluator (deactivated_at <= slot_due_at -> exempt/UPCOMING;
+--        deactivated_at > slot_due_at -> obligated/MISSING) shared by monthly
+--        matrix and explanation evaluator.
 --      - work_report__internal_team_on_date: as-of verified active team lookup.
+--      - work_report__internal_enforce_once_obligation: singleton ONCE trigger
+--        preserving same-key unsubmitted CANCELLED reactivation in-place.
 --   2. Attendance & Leave Explanations:
 --      - attendance_monthly_matrix_report: per-day obligation across ALL/TEAM/
 --        DEPARTMENT scopes, R5/D10 retention for disabled active Persons
@@ -279,6 +285,114 @@ end;
 $$;
 
 revoke all on function public.attendance__internal_is_employee_obligated_on_date(uuid, date, date, timestamptz)
+  from public, anon, authenticated, service_role;
+
+-- R1/P2 shared per-slot obligation evaluator:
+-- Locked cutoff rule for INACTIVE Person (`deactivated_at` vs `p_slot_due_at`):
+--   slot_due_at = (business_date + target_time + grace_after_minutes) AT TIME ZONE 'Asia/Ho_Chi_Minh'
+--   - If `deactivated_at <= slot_due_at`: slot is NOT obligated (exempt / UPCOMING; cutoff occurred
+--     before or at the end of grace, before the slot could legally transition to MISSING at t > slot_due_at).
+--   - If `deactivated_at > slot_due_at` (`slot_due_at < deactivated_at`): slot IS obligated (already
+--     past grace while employee was still ACTIVE -> preserves real MISSING & explanation eligibility).
+--   - Preserves D10 (enabled=false != resigned), DEC-T0-03 (no start date from created_at/link.started_at),
+--     unlinked NORMAL accounts, and Person without joined_on.
+create or replace function public.attendance__internal_is_employee_slot_obligated(
+  p_app_user_id uuid,
+  p_business_date date,
+  p_slot_due_at timestamptz,
+  p_today_vn date default null,
+  p_now timestamptz default null
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_now timestamptz := coalesce(p_now, pg_catalog.clock_timestamp());
+  v_today_vn date := coalesce(p_today_vn, (v_now at time zone 'Asia/Ho_Chi_Minh')::date);
+  v_day_as_of timestamptz;
+  v_check_at timestamptz;
+  v_joined_on date;
+  v_person_status text;
+  v_deactivated_at timestamptz;
+begin
+  if p_app_user_id is null or p_business_date is null or p_slot_due_at is null then
+    return false;
+  end if;
+
+  if not exists (
+    select 1
+      from public.direct_entry_app_users u
+     where u.app_user_id = p_app_user_id
+  ) then
+    return false;
+  end if;
+
+  v_day_as_of := public.attendance__internal_day_as_of(p_business_date, v_today_vn, v_now);
+  v_check_at := least(v_day_as_of, p_slot_due_at);
+
+  if public.attendance__internal_is_non_employee_account(p_app_user_id, v_check_at) then
+    return false;
+  end if;
+
+  select op.joined_on, op.status, op.deactivated_at
+    into v_joined_on, v_person_status, v_deactivated_at
+    from public.organization_account_person_links l
+    join public.organization_persons op
+      on op.person_id = l.person_id
+   where l.app_user_id = p_app_user_id
+     and l.started_at <= v_check_at
+     and (l.ended_at is null or (l.ended_at > l.started_at and v_check_at < l.ended_at))
+   order by l.started_at desc, l.link_id desc
+   limit 1;
+
+  if not found then
+    select op.joined_on, op.status, op.deactivated_at
+      into v_joined_on, v_person_status, v_deactivated_at
+      from public.organization_account_person_links l
+      join public.organization_persons op
+        on op.person_id = l.person_id
+     where l.app_user_id = p_app_user_id
+       and l.started_at <= v_day_as_of
+       and (l.ended_at is null or (l.ended_at > l.started_at and v_day_as_of < l.ended_at))
+     order by l.started_at desc, l.link_id desc
+     limit 1;
+  end if;
+
+  if not found then
+    select op.joined_on, op.status, op.deactivated_at
+      into v_joined_on, v_person_status, v_deactivated_at
+      from public.organization_account_person_links l
+      join public.organization_persons op
+        on op.person_id = l.person_id
+     where l.app_user_id = p_app_user_id
+       and l.ended_at is null
+     order by l.started_at desc, l.link_id desc
+     limit 1;
+  end if;
+
+  if not found then
+    -- Unlinked NORMAL account is NEVER auto-excluded (S6 / DEC-T0-03).
+    return true;
+  end if;
+
+  if v_joined_on is not null and p_business_date < v_joined_on then
+    return false;
+  end if;
+
+  if v_person_status = 'INACTIVE'
+     and v_deactivated_at is not null
+     and v_deactivated_at <= p_slot_due_at then
+    return false;
+  end if;
+
+  return true;
+end;
+$$;
+
+revoke all on function public.attendance__internal_is_employee_slot_obligated(uuid, date, timestamptz, date, timestamptz)
   from public, anon, authenticated, service_role;
 
 create or replace function public.work_report__internal_team_on_date(
@@ -645,6 +759,72 @@ begin
       extract(day from cal.d)::integer as day_of_month
     from generate_series(v_month_start::timestamp, v_month_end::timestamp, interval '1 day') as cal(d)
   ),
+  profile_day_policies as materialized (
+    select
+      pr.profile_id,
+      pr.profile_code,
+      pr.display_name as profile_name,
+      pr.is_default,
+      cal.business_date,
+      cal.day_of_month,
+      pol.version as policy_version,
+      pol.slots as policy_slots
+    from public.attendance_slot_policy_profiles pr
+    cross join month_calendar_days cal
+    join lateral (
+      select p.*
+      from public.attendance_slot_policy_versions p
+      where p.profile_id = pr.profile_id
+      order by
+        (p.effective_from_date <= cal.business_date) desc,
+        case when p.effective_from_date <= cal.business_date then p.effective_from_date end desc nulls last,
+        case when p.effective_from_date <= cal.business_date then p.version end desc nulls last,
+        p.version asc
+      limit 1
+    ) pol on true
+  ),
+  profile_day_slot_defs as materialized (
+    select
+      pdp.profile_id,
+      pdp.profile_code,
+      pdp.profile_name,
+      pdp.is_default,
+      pdp.business_date,
+      pdp.day_of_month,
+      pdp.policy_version,
+      (slot_elem->>'slot_index')::integer as slot_index,
+      slot_elem->>'slot_code' as slot_code,
+      coalesce(
+        nullif(btrim(coalesce(slot_elem->>'slot_label', '')), ''),
+        'Time ' || (slot_elem->>'slot_index')
+      ) as slot_label,
+      slot_elem->>'session_code' as session_code,
+      slot_elem->>'target_time' as target_time,
+      (
+        split_part(slot_elem->>'target_time', ':', 1)::integer * 60
+        + split_part(slot_elem->>'target_time', ':', 2)::integer
+      ) as target_minute,
+      (slot_elem->>'grace_before_minutes')::integer as grace_before_minutes,
+      (slot_elem->>'grace_after_minutes')::integer as grace_after_minutes,
+      (
+        (
+          pdp.business_date
+          + (slot_elem->>'target_time')::time
+          + make_interval(mins => (slot_elem->>'grace_after_minutes')::integer)
+        ) at time zone 'Asia/Ho_Chi_Minh'
+      ) as slot_due_at,
+      (
+        pdp.business_date < v_today_vn
+        or (
+          pdp.business_date = v_today_vn
+          and v_now_vn > pdp.business_date
+            + (slot_elem->>'target_time')::time
+            + make_interval(mins => (slot_elem->>'grace_after_minutes')::integer)
+        )
+      ) as is_due
+    from profile_day_policies pdp
+    cross join lateral jsonb_array_elements(pdp.policy_slots) as slot_elem
+  ),
   user_scoped_days as materialized (
     -- For scoped viewers, exact per-day in-scope set derived strictly from verified historical memberships.
     -- For scope_kind = 'all', kept empty and bypassed cleanly below.
@@ -677,18 +857,61 @@ begin
          where usd.app_user_id = u.app_user_id
        )
   ),
+  scoped_month_slot_assignments as materialized (
+    select
+      a.assignment_id,
+      a.app_user_id,
+      a.profile_id,
+      a.valid_from,
+      a.valid_to,
+      a.assigned_at
+    from public.attendance_slot_policy_assignments a
+    join scoped_users su
+      on su.app_user_id = a.app_user_id
+    where not a.superseded_same_day
+      and a.valid_from <= v_month_end
+      and (a.valid_to is null or a.valid_to >= v_month_start)
+  ),
   user_month_day_obligations as materialized (
+    -- A day has attendance obligation iff at least one slot of the employee's effective policy
+    -- on that day is obligated (evaluated directly per slot with no monotonicity shortcut).
     select
       su.app_user_id,
       cal.business_date,
-      public.attendance__internal_is_employee_obligated_on_date(
-        su.app_user_id,
-        cal.business_date,
-        v_today_vn,
-        v_now
-      ) as is_obligated
+      (ob_eval.obligated_slot_count > 0) as is_obligated,
+      ob_eval.obligated_slot_count,
+      ob_eval.first_obligated_slot_due_at
     from scoped_users su
     cross join month_calendar_days cal
+    cross join lateral (
+      select coalesce(
+        (
+          select smsa.profile_id
+          from scoped_month_slot_assignments smsa
+          where smsa.app_user_id = su.app_user_id
+            and smsa.valid_from <= cal.business_date
+            and (smsa.valid_to is null or cal.business_date <= smsa.valid_to)
+          order by smsa.valid_from desc, smsa.assigned_at desc, smsa.assignment_id desc
+          limit 1
+        ),
+        v_default_profile_id
+      ) as profile_id
+    ) eff_prof
+    cross join lateral (
+      select
+        count(*)::integer as obligated_slot_count,
+        min(s_cnt.slot_due_at) as first_obligated_slot_due_at
+      from profile_day_slot_defs s_cnt
+      where s_cnt.profile_id = eff_prof.profile_id
+        and s_cnt.business_date = cal.business_date
+        and public.attendance__internal_is_employee_slot_obligated(
+          su.app_user_id,
+          cal.business_date,
+          s_cnt.slot_due_at,
+          v_today_vn,
+          v_now
+        )
+    ) ob_eval
     where v_scope_kind = 'all'
        or exists (
          select 1
@@ -735,6 +958,18 @@ begin
                         l.started_at <= public.attendance__internal_day_as_of(udo.business_date, v_today_vn, v_now)
                         and l.ended_at > l.started_at
                         and public.attendance__internal_day_as_of(udo.business_date, v_today_vn, v_now) < l.ended_at
+                      )
+                      or (
+                        udo.first_obligated_slot_due_at is not null
+                        and l.started_at <= least(
+                          public.attendance__internal_day_as_of(udo.business_date, v_today_vn, v_now),
+                          udo.first_obligated_slot_due_at
+                        )
+                        and l.ended_at > l.started_at
+                        and least(
+                          public.attendance__internal_day_as_of(udo.business_date, v_today_vn, v_now),
+                          udo.first_obligated_slot_due_at
+                        ) < l.ended_at
                       )
                     )
                 )
@@ -939,65 +1174,6 @@ begin
     ) as employee_options
     from month_candidate_users m
   ),
-  profile_day_policies as materialized (
-    select
-      pr.profile_id,
-      pr.profile_code,
-      pr.display_name as profile_name,
-      pr.is_default,
-      cal.business_date,
-      cal.day_of_month,
-      pol.version as policy_version,
-      pol.slots as policy_slots
-    from public.attendance_slot_policy_profiles pr
-    cross join month_calendar_days cal
-    join lateral (
-      select p.*
-      from public.attendance_slot_policy_versions p
-      where p.profile_id = pr.profile_id
-      order by
-        (p.effective_from_date <= cal.business_date) desc,
-        case when p.effective_from_date <= cal.business_date then p.effective_from_date end desc nulls last,
-        case when p.effective_from_date <= cal.business_date then p.version end desc nulls last,
-        p.version asc
-      limit 1
-    ) pol on true
-  ),
-  profile_day_slot_defs as materialized (
-    select
-      pdp.profile_id,
-      pdp.profile_code,
-      pdp.profile_name,
-      pdp.is_default,
-      pdp.business_date,
-      pdp.day_of_month,
-      pdp.policy_version,
-      (slot_elem->>'slot_index')::integer as slot_index,
-      slot_elem->>'slot_code' as slot_code,
-      coalesce(
-        nullif(btrim(coalesce(slot_elem->>'slot_label', '')), ''),
-        'Time ' || (slot_elem->>'slot_index')
-      ) as slot_label,
-      slot_elem->>'session_code' as session_code,
-      slot_elem->>'target_time' as target_time,
-      (
-        split_part(slot_elem->>'target_time', ':', 1)::integer * 60
-        + split_part(slot_elem->>'target_time', ':', 2)::integer
-      ) as target_minute,
-      (slot_elem->>'grace_before_minutes')::integer as grace_before_minutes,
-      (slot_elem->>'grace_after_minutes')::integer as grace_after_minutes,
-      (
-        pdp.business_date < v_today_vn
-        or (
-          pdp.business_date = v_today_vn
-          and v_now_vn > pdp.business_date
-            + (slot_elem->>'target_time')::time
-            + make_interval(mins => (slot_elem->>'grace_after_minutes')::integer)
-        )
-      ) as is_due
-    from profile_day_policies pdp
-    cross join lateral jsonb_array_elements(pdp.policy_slots) as slot_elem
-  ),
   candidate_employees as materialized (
     select
       m.app_user_id,
@@ -1060,6 +1236,7 @@ begin
       cal.business_date,
       cal.day_of_month,
       coalesce(udo.is_obligated, false) as is_obligated,
+      coalesce(udo.obligated_slot_count, 0) as obligated_slot_count,
       (
         v_scope_kind = 'all'
         or exists (
@@ -1083,12 +1260,9 @@ begin
       a.valid_from,
       a.valid_to,
       a.assigned_at
-    from public.attendance_slot_policy_assignments a
+    from scoped_month_slot_assignments a
     join candidate_employees ce
       on ce.app_user_id = a.app_user_id
-    where not a.superseded_same_day
-      and a.valid_from <= v_month_end
-      and (a.valid_to is null or a.valid_to >= v_month_start)
   ),
   employee_day_profile_ids as materialized (
     -- Out-of-scope days strictly use DEFAULT profile so custom profile assignments never leak.
@@ -1097,6 +1271,7 @@ begin
       eds.business_date,
       eds.is_in_scope,
       eds.is_obligated,
+      eds.obligated_slot_count,
       case
         when eds.is_in_scope then
           coalesce(
@@ -1122,6 +1297,7 @@ begin
       pdp.day_of_month,
       edpi.is_in_scope,
       edpi.is_obligated,
+      edpi.obligated_slot_count,
       pdp.profile_id,
       pdp.profile_code,
       pdp.profile_name,
@@ -1772,6 +1948,7 @@ begin
                 'd', edp2.business_date,
                 'sc', edp2.is_in_scope,
                 'ob', edp2.is_obligated,
+                'os', edp2.obligated_slot_count,
                 'pr', edp2.profile_id,
                 'pv', edp2.policy_version,
                 'sl', edp2.policy_slots
@@ -1847,7 +2024,7 @@ begin
       edp.business_date,
       count(*) filter (
         where edp.is_in_scope = true
-          and edp.is_obligated = true
+          and slot_ob.is_slot_obligated = true
           and mds.is_due
           and coalesce(dsc.checkin_count, 0) = 0
           and not (
@@ -1902,7 +2079,7 @@ begin
                   else coalesce(dl.pm_covered, false)
                 end
               ) then 'LEAVE_COVERED'
-              when not edp.is_obligated then 'UPCOMING'
+              when not slot_ob.is_slot_obligated then 'UPCOMING'
               when not mds.is_due then 'UPCOMING'
               else 'MISSING'
             end,
@@ -1936,6 +2113,15 @@ begin
     join profile_day_slot_defs mds
       on mds.profile_id = edp.profile_id
      and mds.business_date = edp.business_date
+    cross join lateral (
+      select public.attendance__internal_is_employee_slot_obligated(
+        edp.app_user_id,
+        edp.business_date,
+        mds.slot_due_at,
+        v_today_vn,
+        v_now
+      ) as is_slot_obligated
+    ) slot_ob
     left join daily_leaves dl
       on dl.app_user_id = edp.app_user_id
      and dl.business_date = edp.business_date
@@ -3661,7 +3847,6 @@ declare
   v_now timestamptz := pg_catalog.clock_timestamp();
   v_now_local timestamp without time zone := v_now at time zone 'Asia/Ho_Chi_Minh';
   v_today_local date := v_now_local::date;
-  v_is_obligated boolean;
   v_resolved record;
   v_slots jsonb;
 begin
@@ -3669,13 +3854,6 @@ begin
     raise exception 'ATTENDANCE_EXPLANATION_QUERY_INVALID'
       using errcode = '22023';
   end if;
-
-  v_is_obligated := public.attendance__internal_is_employee_obligated_on_date(
-    p_app_user_id,
-    p_business_date,
-    v_today_local,
-    v_now
-  );
 
   select *
     into v_resolved
@@ -3700,6 +3878,26 @@ begin
       ) as target_minute,
       (slot_elem->>'grace_before_minutes')::integer as grace_before_minutes,
       (slot_elem->>'grace_after_minutes')::integer as grace_after_minutes,
+      (
+        (
+          p_business_date
+          + (slot_elem->>'target_time')::time
+          + make_interval(mins => (slot_elem->>'grace_after_minutes')::integer)
+        ) at time zone 'Asia/Ho_Chi_Minh'
+      ) as slot_due_at,
+      public.attendance__internal_is_employee_slot_obligated(
+        p_app_user_id,
+        p_business_date,
+        (
+          (
+            p_business_date
+            + (slot_elem->>'target_time')::time
+            + make_interval(mins => (slot_elem->>'grace_after_minutes')::integer)
+          ) at time zone 'Asia/Ho_Chi_Minh'
+        ),
+        v_today_local,
+        v_now
+      ) as is_slot_obligated,
       (
         p_business_date < v_today_local
         or (
@@ -3813,6 +4011,7 @@ begin
       ec.assigned_slot_index as slot_index,
       count(*)::integer as checkin_count,
       count(*) filter (where ec.deviation_status <> 'ON_TIME')::integer as out_of_grace_count,
+      min(ec.captured_at) as first_captured_at,
       jsonb_agg(
         jsonb_build_object(
           'checkin_id', ec.checkin_id,
@@ -3936,19 +4135,26 @@ begin
                 else lc.pm_covered
               end
             ) then 'LEAVE_COVERED'
-            when not v_is_obligated then 'UPCOMING'
+            when not sd.is_slot_obligated then 'UPCOMING'
             when not sd.is_due then 'UPCOMING'
             else 'MISSING'
           end
         ),
         'eligible_for_explanation', (
-          v_is_obligated
-          and sd.is_due
+          sd.is_due
           and coalesce(se.status, '') not in ('PENDING', 'APPROVED')
           and (
-            (coalesce(sc.checkin_count, 0) > 0 and coalesce(sc.out_of_grace_count, 0) > 0)
+            (
+              coalesce(sc.checkin_count, 0) > 0
+              and coalesce(sc.out_of_grace_count, 0) > 0
+              and (
+                sd.is_slot_obligated
+                or not public.attendance__internal_is_non_employee_account(p_app_user_id, sc.first_captured_at)
+              )
+            )
             or (
-              coalesce(sc.checkin_count, 0) = 0
+              sd.is_slot_obligated
+              and coalesce(sc.checkin_count, 0) = 0
               and not (
                 case
                   when sd.session_code = 'AM' then lc.am_covered
@@ -4529,26 +4735,29 @@ begin
     select d.*,
            case
              when a.target_kind = 'TEAM' then a.target_team_id
-             else (
-               select public.work_report__internal_team_on_date(p_app_user_id, gs::date)
-                 from pg_catalog.generate_series(
-                   greatest(d.period_start_date, v_window_start, a.effective_from)::timestamp,
-                   least(d.period_end_date, p_business_date, coalesce(a.effective_to, p_business_date))::timestamp,
-                   interval '1 day'
-                 ) gs
-                where public.attendance__internal_is_employee_obligated_on_date(
-                        p_app_user_id,
-                        gs::date,
-                        v_today_vn,
-                        v_now
-                      )
-                  and (
-                    a.target_kind <> 'GROUP'
-                    or gm_self.created_at <= a.created_at
-                    or (gm_self.created_at at time zone 'Asia/Ho_Chi_Minh')::date <= gs::date
-                  )
-                order by gs desc
-                limit 1
+             else coalesce(
+               (
+                 select public.work_report__internal_team_on_date(p_app_user_id, gs::date)
+                   from pg_catalog.generate_series(
+                     greatest(d.period_start_date, v_window_start, a.effective_from)::timestamp,
+                     least(d.period_end_date, p_business_date, coalesce(a.effective_to, p_business_date))::timestamp,
+                     interval '1 day'
+                   ) gs
+                  where public.attendance__internal_is_employee_obligated_on_date(
+                          p_app_user_id,
+                          gs::date,
+                          v_today_vn,
+                          v_now
+                        )
+                    and (
+                      a.target_kind <> 'GROUP'
+                      or gm_self.created_at <= a.created_at
+                      or (gm_self.created_at at time zone 'Asia/Ho_Chi_Minh')::date <= gs::date
+                    )
+                  order by gs desc
+                  limit 1
+               ),
+               public.work_report__internal_team_on_date(p_app_user_id, d.period_start_date)
              )
            end as row_team_id
       from public.work_report__internal_actor_materialization_candidates(
@@ -4805,6 +5014,15 @@ begin
                  from public.work_report_obligations o_once
                 where o_once.assignment_id = c.assignment_id
                   and o_once.assignee_app_user_id = c.assignee_id
+                  and (
+                    o_once.obligation_status <> 'CANCELLED'
+                    or exists (
+                      select 1
+                        from public.work_report_submissions s_once
+                       where s_once.obligation_id = o_once.obligation_id
+                         and s_once.first_submitted_at is not null
+                    )
+                  )
              )
            )
        and (
@@ -4825,18 +5043,67 @@ begin
            )
   ),
   materialized as (
-    select a.*,
-           p.period_key,
-           p.period_start_date,
-           p.period_end_date,
+    select a.assignment_id,
+           a.template_id,
+           a.template_version_id,
+           a.target_kind,
+           a.target_user_id,
+           a.target_team_id,
+           a.target_group_id,
+           a.frequency,
+           a.is_mandatory,
+           a.due_day_offset,
+           a.due_time_local,
+           a.exclude_sundays,
+           a.effective_from,
+           a.effective_to,
+           a.assigned_by_user_id,
+           a.state,
+           a.is_current,
+           a.version,
+           a.created_at,
+           a.updated_at,
+           a.assignee_id,
+           case
+             when a.frequency = 'ONCE' and o_cancel.period_start_date is not null then
+               case
+                 when a.target_kind = 'TEAM' then a.target_team_id
+                 else public.work_report__internal_team_on_date(a.assignee_id, o_cancel.period_start_date)
+               end
+             else a.team_id
+           end as team_id,
+           a.snapshot_group_id,
+           a.snapshot_group_name,
+           coalesce(o_cancel.period_key, p.period_key) as period_key,
+           coalesce(o_cancel.period_start_date, p.period_start_date) as period_start_date,
+           coalesce(o_cancel.period_end_date, p.period_end_date) as period_end_date,
            public.work_report_due_at(
-             p.period_end_date,
+             coalesce(o_cancel.period_end_date, p.period_end_date),
              a.due_day_offset,
              a.due_time_local,
              a.exclude_sundays
            ) as due_at
       from authorized a
       cross join lateral public.work_report_period(a.frequency, p_business_date) p
+      left join lateral (
+        select o_c.period_key,
+               o_c.period_start_date,
+               o_c.period_end_date
+          from public.work_report_obligations o_c
+         where a.frequency = 'ONCE'
+           and o_c.assignment_id = a.assignment_id
+           and o_c.assignee_app_user_id = a.assignee_id
+           and o_c.period_type = 'ONCE'
+           and o_c.obligation_status = 'CANCELLED'
+           and not exists (
+             select 1
+               from public.work_report_submissions s_c
+              where s_c.obligation_id = o_c.obligation_id
+                and s_c.first_submitted_at is not null
+           )
+         order by o_c.period_start_date asc, o_c.obligation_id asc
+         limit 1
+      ) o_cancel on true
   ),
   deduplicated as (
     select distinct on (m.template_id, m.assignee_id, m.period_key)
@@ -5078,6 +5345,15 @@ begin
                  from public.work_report_obligations o_once
                 where o_once.assignment_id = c.assignment_id
                   and o_once.assignee_app_user_id = c.assignee_id
+                  and (
+                    o_once.obligation_status <> 'CANCELLED'
+                    or exists (
+                      select 1
+                        from public.work_report_submissions s_once
+                       where s_once.obligation_id = o_once.obligation_id
+                         and s_once.first_submitted_at is not null
+                    )
+                  )
              )
            )
        and (
@@ -5098,18 +5374,67 @@ begin
        )
   ),
   materialized as (
-    select a.*,
-           p.period_key,
-           p.period_start_date,
-           p.period_end_date,
+    select a.assignment_id,
+           a.template_id,
+           a.template_version_id,
+           a.target_kind,
+           a.target_user_id,
+           a.target_team_id,
+           a.target_group_id,
+           a.frequency,
+           a.is_mandatory,
+           a.due_day_offset,
+           a.due_time_local,
+           a.exclude_sundays,
+           a.effective_from,
+           a.effective_to,
+           a.assigned_by_user_id,
+           a.state,
+           a.is_current,
+           a.version,
+           a.created_at,
+           a.updated_at,
+           a.assignee_id,
+           case
+             when a.frequency = 'ONCE' and o_cancel.period_start_date is not null then
+               case
+                 when a.target_kind = 'TEAM' then a.target_team_id
+                 else public.work_report__internal_team_on_date(a.assignee_id, o_cancel.period_start_date)
+               end
+             else a.team_id
+           end as team_id,
+           a.snapshot_group_id,
+           a.snapshot_group_name,
+           coalesce(o_cancel.period_key, p.period_key) as period_key,
+           coalesce(o_cancel.period_start_date, p.period_start_date) as period_start_date,
+           coalesce(o_cancel.period_end_date, p.period_end_date) as period_end_date,
            public.work_report_due_at(
-             p.period_end_date,
+             coalesce(o_cancel.period_end_date, p.period_end_date),
              a.due_day_offset,
              a.due_time_local,
              a.exclude_sundays
            ) as due_at
       from authorized a
       cross join lateral public.work_report_period(a.frequency, p_business_date) p
+      left join lateral (
+        select o_c.period_key,
+               o_c.period_start_date,
+               o_c.period_end_date
+          from public.work_report_obligations o_c
+         where a.frequency = 'ONCE'
+           and o_c.assignment_id = a.assignment_id
+           and o_c.assignee_app_user_id = a.assignee_id
+           and o_c.period_type = 'ONCE'
+           and o_c.obligation_status = 'CANCELLED'
+           and not exists (
+             select 1
+               from public.work_report_submissions s_c
+              where s_c.obligation_id = o_c.obligation_id
+                and s_c.first_submitted_at is not null
+           )
+         order by o_c.period_start_date asc, o_c.obligation_id asc
+         limit 1
+      ) o_cancel on true
   ),
   deduplicated as (
     select distinct on (m.template_id, m.assignee_id, m.period_key)
@@ -7716,6 +8041,21 @@ begin
      where o.assignment_id = new.assignment_id
        and o.assignee_app_user_id = new.assignee_app_user_id
        and o.period_type = 'ONCE'
+       and (
+         -- Block duplicate ONCE inserts when an ACTIVE, EXEMPTED, or already-submitted row exists,
+         -- OR when attempting to insert a different (template_id, period_key) while a CANCELLED row
+         -- for this assignment already exists. Same-key unsubmitted CANCELLED rows pass through to
+         -- ON CONFLICT DO UPDATE to restore the original obligation_id in place (R3/P2).
+         o.obligation_status <> 'CANCELLED'
+         or exists (
+           select 1
+             from public.work_report_submissions s
+            where s.obligation_id = o.obligation_id
+              and s.first_submitted_at is not null
+         )
+         or o.template_id is distinct from new.template_id
+         or o.period_key is distinct from new.period_key
+       )
   ) then
     return null;
   end if;
@@ -7748,6 +8088,7 @@ declare
     'public.attendance__internal_is_non_employee_account(uuid, timestamptz)',
     'public.attendance__internal_is_person_inactive_as_of(uuid, timestamptz)',
     'public.attendance__internal_is_employee_obligated_on_date(uuid, date, date, timestamptz)',
+    'public.attendance__internal_is_employee_slot_obligated(uuid, date, timestamptz, date, timestamptz)',
     'public.work_report__internal_team_on_date(uuid, date)',
     'public.leave_management__internal_resolve_authority(uuid, uuid)',
     'public.work_report__internal_is_eligible_assignee(uuid)',
@@ -7829,6 +8170,7 @@ declare
     'public.attendance__internal_is_non_employee_account(uuid,timestamptz)',
     'public.attendance__internal_is_person_inactive_as_of(uuid,timestamptz)',
     'public.attendance__internal_is_employee_obligated_on_date(uuid,date,date,timestamptz)',
+    'public.attendance__internal_is_employee_slot_obligated(uuid,date,timestamptz,date,timestamptz)',
     'public.work_report__internal_team_on_date(uuid,date)',
     'public.leave_management__internal_resolve_authority(uuid,uuid)',
     'public.work_report__internal_is_eligible_assignee(uuid)',
@@ -7867,6 +8209,7 @@ declare
     'attendance__internal_is_non_employee_account',
     'attendance__internal_is_person_inactive_as_of',
     'attendance__internal_is_employee_obligated_on_date',
+    'attendance__internal_is_employee_slot_obligated',
     'work_report__internal_team_on_date',
     'leave_management__internal_resolve_authority',
     'work_report__internal_is_eligible_assignee',
@@ -7901,6 +8244,7 @@ declare
     'public.attendance__internal_is_non_employee_account(uuid,timestamptz)',
     'public.attendance__internal_is_person_inactive_as_of(uuid,timestamptz)',
     'public.attendance__internal_is_employee_obligated_on_date(uuid,date,date,timestamptz)',
+    'public.attendance__internal_is_employee_slot_obligated(uuid,date,timestamptz,date,timestamptz)',
     'public.work_report__internal_team_on_date(uuid,date)',
     'public.work_report__internal_is_eligible_assignee(uuid)',
     'public.work_report__internal_enforce_once_obligation()'
