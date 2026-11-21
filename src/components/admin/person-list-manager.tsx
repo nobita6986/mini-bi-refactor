@@ -830,7 +830,7 @@ export function PersonListManager({
             />
           }
         >
-          <table className={DATA_TABLE_CLASS}>
+          <table className={`r22-card-table ${DATA_TABLE_CLASS}`}>
             <thead className={DATA_TABLE_HEAD_CLASS}>
               <tr>
                 <th scope="col" className={DATA_TABLE_TH_CLASS}>
