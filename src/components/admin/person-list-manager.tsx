@@ -40,6 +40,7 @@ import {
   type PersonLinkState,
 } from "@/lib/admin/person-org-ui-model";
 import {
+  clearVerifiedCheckpoint,
   getBrowserOrigin,
   getBrowserSessionStorage,
   readVerifiedCheckpoint,
@@ -113,6 +114,7 @@ export function PersonListManager({
 
   const [stepperMode, setStepperMode] = useState<ProvisionStepperMode | null>(null);
   const [pendingCheckpoint, setPendingCheckpoint] = useState<ProvisionCheckpointV2 | null>(null);
+  const [corruptCheckpointMessage, setCorruptCheckpointMessage] = useState<string | null>(null);
   const [checkpointTick, setCheckpointTick] = useState(0);
 
   const workspaceGuard = useWp4WorkspaceGuard();
@@ -130,30 +132,55 @@ export function PersonListManager({
     setCheckpointTick((value) => value + 1);
   }, []);
 
+  const syncCheckpointStateNow = useCallback((): boolean => {
+    if (!checkpointActorScope) {
+      setPendingCheckpoint(null);
+      setCorruptCheckpointMessage(null);
+      return false;
+    }
+    const result = readVerifiedCheckpoint({
+      storage: resolveStorage(),
+      expectedOrigin: resolveOrigin(),
+      expectedActorScope: checkpointActorScope,
+    });
+    if (result.kind === "valid") {
+      setPendingCheckpoint(result.checkpoint);
+      setCorruptCheckpointMessage(null);
+      return true;
+    }
+    if (result.kind === "corrupt") {
+      setPendingCheckpoint(null);
+      setCorruptCheckpointMessage(result.message);
+      return true;
+    }
+    // For `foreign_actor_or_origin` or `none`, `readVerifiedCheckpoint` leaves storage untouched.
+    setPendingCheckpoint(null);
+    setCorruptCheckpointMessage(null);
+    return false;
+  }, [checkpointActorScope, resolveOrigin, resolveStorage]);
+
   useEffect(() => {
     let cancelled = false;
     void Promise.resolve().then(() => {
       if (cancelled) return;
-      if (!checkpointActorScope) {
-        setPendingCheckpoint(null);
-        return;
-      }
-      const result = readVerifiedCheckpoint({
-        storage: resolveStorage(),
-        expectedOrigin: resolveOrigin(),
-        expectedActorScope: checkpointActorScope,
-      });
-      if (result.kind === "valid") {
-        setPendingCheckpoint(result.checkpoint);
-      } else {
-        // For `foreign_actor_or_origin`, `readVerifiedCheckpoint` leaves storage untouched.
-        setPendingCheckpoint(null);
-      }
+      syncCheckpointStateNow();
     });
     return () => {
       cancelled = true;
     };
-  }, [checkpointActorScope, checkpointTick, resolveOrigin, resolveStorage]);
+  }, [checkpointTick, syncCheckpointStateNow]);
+
+  const handleClearCorruptCheckpoint = useCallback(() => {
+    if (!checkpointActorScope) return;
+    clearVerifiedCheckpoint({
+      storage: resolveStorage(),
+      expectedOrigin: resolveOrigin(),
+      expectedActorScope: checkpointActorScope,
+      forceCorruptCleanup: true,
+      corruptOnly: true,
+    });
+    refreshCheckpointBanner();
+  }, [checkpointActorScope, refreshCheckpointBanner, resolveOrigin, resolveStorage]);
 
   const handleSessionLost = useCallback(
     (message: string, unauthenticated = false) => {
@@ -163,6 +190,7 @@ export function PersonListManager({
       setDepartments([]);
       setStepperMode(null);
       setPendingCheckpoint(null);
+      setCorruptCheckpointMessage(null);
       setListState({ kind: "denied", message, unauthenticated });
     },
     [workspaceGuard],
@@ -333,9 +361,24 @@ export function PersonListManager({
     setReloadToken((value) => value + 1);
   }, []);
 
+  const hasBlockingCheckpoint = pendingCheckpoint !== null || corruptCheckpointMessage !== null;
+
   const openCreateStepper = () => {
-    if (listState.kind === "denied" || stepperMode !== null) return;
+    if (listState.kind === "denied" || stepperMode !== null || hasBlockingCheckpoint) return;
+    if (syncCheckpointStateNow()) return;
     setStepperMode({ kind: "create-person" });
+  };
+
+  const openLoginForExistingPerson = (person: {
+    person_id: string;
+    employee_code: string;
+    full_name: string;
+    version: number;
+    recruiter_id: string | null;
+  }) => {
+    if (listState.kind === "denied" || stepperMode !== null || hasBlockingCheckpoint) return;
+    if (syncCheckpointStateNow()) return;
+    setStepperMode({ kind: "open-login-existing", person });
   };
 
   const applySearch = (event: FormEvent) => {
@@ -386,7 +429,7 @@ export function PersonListManager({
               variant="primary"
               size="md"
               onClick={openCreateStepper}
-              disabled={listState.kind === "denied" || stepperMode !== null}
+              disabled={listState.kind === "denied" || stepperMode !== null || hasBlockingCheckpoint}
             >
               + Thêm nhân viên
             </Button>
@@ -447,6 +490,11 @@ export function PersonListManager({
               ) —{" "}
               {summarizeCheckpointStep(pendingCheckpoint)}
             </p>
+            <p className="text-xs">
+              Nút <strong>+ Thêm nhân viên</strong> và <strong>Mở đăng nhập</strong> tạm khóa để
+              bảo toàn dữ liệu đối chiếu. Hãy bấm <strong>Tiếp tục / Đối chiếu</strong> để hoàn tất
+              hoặc xác nhận hủy bản nháp cũ trước khi mở luồng mới.
+            </p>
             <div>
               <Button
                 variant="primary"
@@ -457,6 +505,31 @@ export function PersonListManager({
                 }
               >
                 Tiếp tục / Đối chiếu
+              </Button>
+            </div>
+          </div>
+        </Alert>
+      ) : null}
+
+      {corruptCheckpointMessage && !pendingCheckpoint && listState.kind !== "denied" ? (
+        <Alert
+          tone="warning"
+          role="alert"
+          title="Bản nháp phục hồi trong bộ nhớ phiên không hợp lệ"
+        >
+          <div className="space-y-2">
+            <p>{corruptCheckpointMessage}</p>
+            <p className="text-xs">
+              Hệ thống không tự ghi đè bản nháp lỗi. Sau khi đối chiếu thủ công, hãy bấm nút bên
+              dưới để xóa bản nháp lỗi và mở lại thao tác tạo mới.
+            </p>
+            <div>
+              <Button
+                variant="danger-outline"
+                size="sm"
+                onClick={handleClearCorruptCheckpoint}
+              >
+                Đã đối chiếu thủ công · Xóa bản nháp lỗi
               </Button>
             </div>
           </div>
@@ -643,7 +716,12 @@ export function PersonListManager({
               description="Thử thay đổi bộ lọc tìm kiếm hoặc thêm nhân viên mới."
             />
             <div className="flex justify-center">
-              <Button variant="primary" size="md" onClick={openCreateStepper}>
+              <Button
+                variant="primary"
+                size="md"
+                onClick={openCreateStepper}
+                disabled={listState.kind === "denied" || stepperMode !== null || hasBlockingCheckpoint}
+              >
                 + Thêm nhân viên
               </Button>
             </div>
@@ -780,17 +858,14 @@ export function PersonListManager({
                           <Button
                             variant="soft"
                             size="sm"
-                            disabled={stepperMode !== null}
+                            disabled={stepperMode !== null || hasBlockingCheckpoint}
                             onClick={() =>
-                              setStepperMode({
-                                kind: "open-login-existing",
-                                person: {
-                                  person_id: person.person_id,
-                                  employee_code: person.employee_code,
-                                  full_name: person.full_name,
-                                  version: person.version,
-                                  recruiter_id: person.recruiter_id,
-                                },
+                              openLoginForExistingPerson({
+                                person_id: person.person_id,
+                                employee_code: person.employee_code,
+                                full_name: person.full_name,
+                                version: person.version,
+                                recruiter_id: person.recruiter_id,
                               })
                             }
                           >

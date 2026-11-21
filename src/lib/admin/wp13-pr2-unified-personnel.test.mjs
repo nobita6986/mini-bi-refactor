@@ -680,8 +680,11 @@ const {
   PROVISION_CHECKPOINT_STORAGE_KEY,
   classifyProvisionStep2Response,
   clearVerifiedCheckpoint,
+  getProvisionCheckpointStorageKey,
+  parseProvisionCheckpointV2,
   persistAndVerifyCheckpoint,
   readVerifiedCheckpoint,
+  resolveNextStep4AccountVersion,
 } = repoRequire("./src/lib/admin/provision-checkpoint-v2.ts");
 const {
   buildAccountListQuery,
@@ -716,6 +719,8 @@ const { EffectiveAccessWorkspace } = repoRequire(
 
 const ACTOR_A_SCOPE = computeCheckpointActorScope(ADMIN_A_ID);
 const ACTOR_B_SCOPE = computeCheckpointActorScope(ADMIN_B_ID);
+const ACTOR_A_STORAGE_KEY = getProvisionCheckpointStorageKey(ACTOR_A_SCOPE);
+const ACTOR_B_STORAGE_KEY = getProvisionCheckpointStorageKey(ACTOR_B_SCOPE);
 
 beforeEach(() => {
   notifications.success.length = 0;
@@ -820,13 +825,14 @@ test("Checkpoint V2 rejects secrets, fails closed on storage quota/readback mism
   assert.equal(sRes.ok, false);
   assert.equal(storage.store.size, 0);
 
-  // Valid write + read-back passes; zero forbidden keys serialized
+  // Valid write + read-back passes onto actor-scoped key; zero forbidden keys serialized
   const okRes = persistAndVerifyCheckpoint(validCp, storage);
   assert.equal(okRes.ok, true);
-  const rawJson = storage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY);
+  const rawJson = storage.store.get(ACTOR_A_STORAGE_KEY);
   assert.ok(rawJson);
   assert.doesNotMatch(rawJson, /password|auth_subject|access_token|refresh_token|jwt/i);
   assert.equal(rawJson.includes(ADMIN_A_ID), false);
+  assert.equal(ACTOR_A_STORAGE_KEY.includes(ADMIN_A_ID), false);
 
   // Admin B cannot read OR clear Admin A's checkpoint!
   const readByB = readVerifiedCheckpoint({
@@ -834,7 +840,7 @@ test("Checkpoint V2 rejects secrets, fails closed on storage quota/readback mism
     expectedActorScope: ACTOR_B_SCOPE,
     storage,
   });
-  assert.equal(readByB.kind, "foreign_actor_or_origin");
+  assert.equal(readByB.kind, "none");
   clearVerifiedCheckpoint({
     expectedOrigin: ORIGIN,
     expectedActorScope: ACTOR_B_SCOPE,
@@ -855,6 +861,19 @@ test("Checkpoint V2 rejects secrets, fails closed on storage quota/readback mism
     storage,
   });
   assert.equal(readWrongOrigin.kind, "foreign_actor_or_origin");
+
+  // Backward-compatible legacy shared key also enforces foreign_actor_or_origin & refuses B's clear!
+  const legacyStorage = makeMemoryStorage();
+  legacyStorage.setItem(PROVISION_CHECKPOINT_STORAGE_KEY, JSON.stringify(validCp));
+  assert.equal(
+    readVerifiedCheckpoint({ expectedOrigin: ORIGIN, expectedActorScope: ACTOR_B_SCOPE, storage: legacyStorage }).kind,
+    "foreign_actor_or_origin",
+  );
+  clearVerifiedCheckpoint({ expectedOrigin: ORIGIN, expectedActorScope: ACTOR_B_SCOPE, storage: legacyStorage });
+  assert.equal(
+    readVerifiedCheckpoint({ expectedOrigin: ORIGIN, expectedActorScope: ACTOR_A_SCOPE, storage: legacyStorage }).kind,
+    "valid",
+  );
 });
 
 test("Step 2 response classifier rejects malformed 200 and accepts strict FinalizeCreate & PR #13 fallback", () => {
@@ -1038,7 +1057,7 @@ test("Happy path: Create employee WITH login + optional role executes Person -> 
   await stepper.flush();
 
   // Checkpoint MUST already exist in storage right before/during Step 1 and contain ZERO passwords!
-  const cpBeforeStep1Done = storage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY);
+  const cpBeforeStep1Done = storage.store.get(ACTOR_A_STORAGE_KEY);
   assert.ok(cpBeforeStep1Done);
   assert.equal(cpBeforeStep1Done.includes("TempPass!123"), false);
 
@@ -1073,6 +1092,7 @@ test("Happy path: Create employee WITH login + optional role executes Person -> 
   await stepper.flush();
 
   // Checkpoint cleared after full completion & success toast emitted
+  assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
   assert.equal(storage.store.has(PROVISION_CHECKPOINT_STORAGE_KEY), false);
   assert.equal(notifications.success.length >= 1, true);
 });
@@ -1124,7 +1144,7 @@ test("Fault recovery: Step 1 disconnect -> reload -> Admin B sees NO banner -> A
   });
   await plB.flush();
   assert.equal(maybeButton(plB, "Tiếp tục / Đối chiếu"), null);
-  assert.equal(storage.store.has(PROVISION_CHECKPOINT_STORAGE_KEY), true);
+  assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), true);
   plB.unmount();
 
   // Admin A reloads page -> sees resume banner!
@@ -1176,7 +1196,7 @@ test("Fault recovery: Step 1 disconnect -> reload -> Admin B sees NO banner -> A
 
   // Password inputs must now be hidden (0 password needed for reconcile) & storage has zero secret
   assert.equal(maybeNode(stepperA2, (n) => n.props?.id === "provision-password"), null);
-  assert.equal(storage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY).includes("PassWord#999"), false);
+  assert.equal(storage.store.get(ACTOR_A_STORAGE_KEY).includes("PassWord#999"), false);
 
   // Trigger reconcile -> calls POST /api/admin/access/accounts/intents/[id]/reconcile (0 second POST /accounts!)
   const createAccountCountBeforeReconcile = requests.filter(
@@ -1208,6 +1228,7 @@ test("Fault recovery: Step 1 disconnect -> reload -> Admin B sees NO banner -> A
     link: { employee_code: "NS-501", full_name: "Phạm Thị Bình" },
   }));
   await stepperA2.flush();
+  assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
   assert.equal(storage.store.has(PROVISION_CHECKPOINT_STORAGE_KEY), false);
 });
 
@@ -1250,7 +1271,7 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
   await stepper1.flush();
 
   // Password must NEVER be in storage
-  assert.equal(storage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY).includes("InitPass!11"), false);
+  assert.equal(storage.store.get(ACTOR_A_STORAGE_KEY).includes("InitPass!11"), false);
 
   // Full reload (unmount & remount)
   stepper1.unmount();
@@ -1381,6 +1402,7 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
 
   respond(roleReq2Retry, 201, makeAssignRoleEnvelope("ADMIN", 5, "80000000-0000-4000-8000-000000000011"));
   await stepper2.flush();
+  assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
   assert.equal(storage.store.has(PROVISION_CHECKPOINT_STORAGE_KEY), false);
 });
 
@@ -2099,6 +2121,541 @@ test("Ponytail regressions (P1 #4, #6, #7, #8 & P2 #10, #11): SpecialDialog lock
   assert.match(personDetailPage, /hasPairedFullAdminAuthority/);
   assert.match(accountsPage, /key=\{`\$\{initialTab\}:\$\{initialView\}:\$\{initialAccountRef \?\? ""\}`\}/);
   assert.match(personnelPage, /key=\{initialRecruiterId \?\? "all"\}/);
+});
+
+test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritten or cleared by fresh flow from Admin A (List/Detail/Stepper) OR Admin B (scoped & legacy keys), and A still resumes exact K_person/snapshot", async () => {
+  const originalFlowId = "90000000-0000-4000-8000-000000000777";
+  const originalKPerson = "91000000-0000-4000-8000-000000000777";
+  const makeUnresolvedFlowA = () => ({
+    schema_version: 2,
+    client_flow_id: originalFlowId,
+    env_origin: ORIGIN,
+    actor_scope: ACTOR_A_SCOPE,
+    flow_kind: "CREATE_EMPLOYEE_WITH_LOGIN",
+    updated_at: AS_OF,
+    step1_person: {
+      status: "UNCERTAIN",
+      idempotency_key: originalKPerson,
+      payload_snapshot: {
+        employee_code: "NS-ORIG-A",
+        full_name: "Nguyễn Nguyên Bản A",
+        joined_on: "2026-01-10",
+        initial_department_ref: null,
+        reason: "Tiếp nhận gốc Admin A",
+      },
+      committed_person_id: null,
+      committed_person_version: null,
+      existing_employee_code: null,
+      existing_full_name: null,
+      existing_recruiter_id: null,
+    },
+    step2_account: {
+      status: "IDLE",
+      idempotency_key: "92000000-0000-4000-8000-000000000777",
+      non_secret_snapshot: { login_id: "orig.a", display_name: "Nguyễn Nguyên Bản A", reason: "Tiếp nhận gốc Admin A" },
+      intent_id: null,
+      intent_state: null,
+      reconcile_idempotency_key: null,
+      committed_account_ref: null,
+      committed_account_version: null,
+    },
+    step3_link: {
+      status: "IDLE",
+      idempotency_key: "93000000-0000-4000-8000-000000000777",
+      payload_snapshot: null,
+      post_link_account_version: null,
+      post_link_person_version: null,
+    },
+    step4_roles: [],
+  });
+
+  // Test BOTH storage layouts: (1) new actor-scoped key AND (2) legacy shared PROVISION_CHECKPOINT_STORAGE_KEY
+  for (const seedMode of ["scoped", "legacy"]) {
+    const storage = makeMemoryStorage();
+    const originalA = makeUnresolvedFlowA();
+    const expectedKey = seedMode === "scoped" ? ACTOR_A_STORAGE_KEY : PROVISION_CHECKPOINT_STORAGE_KEY;
+    if (seedMode === "scoped") {
+      assert.equal(persistAndVerifyCheckpoint(originalA, storage).ok, true);
+    } else {
+      storage.setItem(PROVISION_CHECKPOINT_STORAGE_KEY, JSON.stringify(originalA));
+    }
+    const originalBytes = storage.store.get(expectedKey);
+    assert.ok(originalBytes);
+
+    // 1) SAME ACTOR A on PersonListManager: '+ Thêm nhân viên' and row 'Mở đăng nhập' MUST be disabled & blocked!
+    const plA = mount(PersonListManager, {
+      checkpointActorScope: ACTOR_A_SCOPE,
+      canManageGlobalRoles: true,
+      storage,
+      originOverride: ORIGIN,
+    });
+    await plA.flush();
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
+    respond(
+      findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")),
+      200,
+      makePersonListEnvelope([makePersonSummary({ active_account_link: null })]),
+    );
+    await plA.flush();
+
+    const addBtnA = findButton(plA, "+ Thêm nhân viên");
+    const quickOpenBtnA = findButton(plA, "Mở đăng nhập");
+    assert.equal(addBtnA.props.disabled, true, `[${seedMode}] + Thêm nhân viên must be disabled while checkpoint active`);
+    assert.equal(quickOpenBtnA.props.disabled, true, `[${seedMode}] Mở đăng nhập must be disabled while checkpoint active`);
+    addBtnA.props.onClick();
+    quickOpenBtnA.props.onClick();
+    await plA.flush();
+    assert.equal(storage.store.get(expectedKey), originalBytes);
+    plA.unmount();
+
+    // 2) SAME ACTOR A on PersonDetailManager: Block 2 'Mở tài khoản đăng nhập' MUST be disabled & blocked!
+    const pdA = mount(PersonDetailManager, {
+      personId: PERSON_ID,
+      checkpointActorScope: ACTOR_A_SCOPE,
+      canManageGlobalRoles: true,
+      storage,
+      originOverride: ORIGIN,
+    });
+    await pdA.flush();
+    respond(
+      findLastRequest((r) => r.url === `/api/admin/organization/persons/${PERSON_ID}` && r.method === "GET"),
+      200,
+      { ok: true, authorization_date: AUTH_DATE, as_of: AS_OF, person: makePersonDetail({ active_account_link: null }) },
+    );
+    await pdA.flush();
+    const detailOpenBtn = findButton(pdA, "Mở tài khoản đăng nhập");
+    assert.equal(detailOpenBtn.props.disabled, true, `[${seedMode}] Detail Mở tài khoản đăng nhập must be disabled`);
+    detailOpenBtn.props.onClick();
+    await pdA.flush();
+    assert.equal(storage.store.get(expectedKey), originalBytes);
+    pdA.unmount();
+
+    // 3) SAME ACTOR A direct stepper bypass in fresh create-person mode: persist MUST fail closed with 0 POST!
+    const postsBeforeBypass = requests.filter((r) => r.method === "POST").length;
+    const directStepper = mount(AccountProvisionAndLinkStepper, {
+      open: true,
+      mode: { kind: "create-person" },
+      checkpointActorScope: ACTOR_A_SCOPE,
+      workspaceGuard: {
+        getEpoch: () => 1,
+        isActive: () => true,
+        trackController: () => ({ epoch: 1, controller: new AbortController(), release: () => {} }),
+        invalidateSession: () => {},
+      },
+      canManageGlobalRoles: true,
+      storage,
+      originOverride: ORIGIN,
+      onClose: () => {},
+      onCompleted: () => {},
+      onSessionLost: () => {},
+    });
+    await directStepper.flush();
+    findNode(directStepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-BYPASS" } });
+    findNode(directStepper, (n) => n.props?.id === "create-person-full-name").props.onChange({ target: { value: "Bypass Người" } });
+    findNode(directStepper, (n) => n.props?.id === "create-person-reason").props.onChange({ target: { value: "Thử ghi đè cùng actor" } });
+    await directStepper.flush();
+    findNode(directStepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+    await directStepper.flush();
+    assert.equal(
+      requests.filter((r) => r.method === "POST").length,
+      postsBeforeBypass,
+      `[${seedMode}] Direct fresh stepper bypass for same actor must dispatch 0 POST`,
+    );
+    assert.equal(storage.store.get(expectedKey), originalBytes);
+    assert.equal(textOf(directStepper.tree).includes("Tiếp tục / Đối chiếu"), true);
+    directStepper.unmount();
+
+    // 4) Stale/mismatched client_flow_id clear MUST NOT delete Admin A's checkpoint!
+    clearVerifiedCheckpoint({
+      expectedOrigin: ORIGIN,
+      expectedActorScope: ACTOR_A_SCOPE,
+      expectedClientFlowId: "90000000-0000-4000-8000-000000000999",
+      storage,
+    });
+    assert.equal(storage.store.get(expectedKey), originalBytes);
+
+    // 5) OTHER ACTOR B on the SAME tab: B sees NO banner for A, creates & finishes a brand new employee,
+    //    and Admin A's checkpoint stays 100% byte-for-byte intact BOTH during B's POST and after B completes!
+    const plB = mount(PersonListManager, {
+      checkpointActorScope: ACTOR_B_SCOPE,
+      canManageGlobalRoles: true,
+      storage,
+      originOverride: ORIGIN,
+    });
+    await plB.flush();
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+    await plB.flush();
+    assert.equal(maybeButton(plB, "Tiếp tục / Đối chiếu"), null);
+    const addBtnB = findButton(plB, "+ Thêm nhân viên");
+    assert.equal(Boolean(addBtnB.props.disabled), false);
+    addBtnB.props.onClick();
+    await plB.flush();
+    const stepperB = await syncChildFromTree(plB, AccountProvisionAndLinkStepper, null);
+    findNode(stepperB, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-B-202" } });
+    findNode(stepperB, (n) => n.props?.id === "create-person-full-name").props.onChange({ target: { value: "Nhân Viên Của B" } });
+    findNode(stepperB, (n) => n.props?.id === "create-person-reason").props.onChange({ target: { value: "Admin B tạo mới độc lập" } });
+    await stepperB.flush();
+    findNode(stepperB, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+    await stepperB.flush();
+
+    // During Admin B's in-flight POST: B wrote ONLY to ACTOR_B_STORAGE_KEY; A's key is 100% untouched!
+    assert.equal(storage.store.has(ACTOR_B_STORAGE_KEY), true);
+    assert.equal(storage.store.get(expectedKey), originalBytes);
+
+    const postB = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/organization/persons");
+    assert.ok(postB);
+    respond(postB, 201, {
+      ok: true,
+      replayed: false,
+      person: makePersonDetail({ person_id: "40000000-0000-4000-8000-000000000202", employee_code: "NS-B-202", full_name: "Nhân Viên Của B" }),
+    });
+    await stepperB.flush();
+    await plB.flush();
+
+    // After Admin B finishes: B's scoped key is cleared, A's checkpoint is STILL 100% byte-for-byte intact!
+    assert.equal(storage.store.has(ACTOR_B_STORAGE_KEY), false);
+    assert.equal(storage.store.get(expectedKey), originalBytes);
+    stepperB.unmount();
+    plB.unmount();
+
+    // 6) Admin A returns on the same storage -> recovers EXACT originalFlowId, originalKPerson, and snapshot!
+    const plA2 = mount(PersonListManager, {
+      checkpointActorScope: ACTOR_A_SCOPE,
+      canManageGlobalRoles: true,
+      storage,
+      originOverride: ORIGIN,
+    });
+    await plA2.flush();
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+    await plA2.flush();
+    // EmptyState '+ Thêm nhân viên' button MUST ALSO be disabled while blocking checkpoint exists!
+    const allAddButtonsEmpty = collectNodes(plA2.tree).filter(
+      (n) => typeof n.props?.onClick === "function" && textOf(n).trim() === "+ Thêm nhân viên",
+    );
+    assert.equal(allAddButtonsEmpty.length, 2, "Expected both header and EmptyState + Thêm nhân viên buttons");
+    for (const btn of allAddButtonsEmpty) {
+      assert.equal(btn.props.disabled, true, `[${seedMode}] Every + Thêm nhân viên button (incl. EmptyState) must be disabled`);
+    }
+
+    findButton(plA2, "Tiếp tục / Đối chiếu").props.onClick();
+    await plA2.flush();
+    const stepperA2 = await syncChildFromTree(plA2, AccountProvisionAndLinkStepper, null);
+    findNode(stepperA2, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+    await stepperA2.flush();
+    const replayA = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/organization/persons");
+    assert.equal(replayA.options.headers["Idempotency-Key"], originalKPerson);
+    assert.equal(JSON.parse(replayA.options.body).employee_code, "NS-ORIG-A");
+    stepperA2.unmount();
+    plA2.unmount();
+  }
+
+  // 7) Residual-hardening checks:
+  //    (a) Explicit expectedClientFlowId: null or non-UUID MUST fail closed (never wildcard-delete valid checkpoints!)
+  //    (b) Corrupt scopedKey(A) + valid legacyKey(A): corrupt cleanup removes ONLY corrupt scopedKey & reveals valid legacy checkpoint!
+  //    (c) Corrupt legacyKey when scopedKey(A) is empty: persistAndVerifyCheckpoint fails closed with ACTIVE_CHECKPOINT_CONFLICT!
+  const mixedStorage = makeMemoryStorage();
+  const validLegacyA = makeUnresolvedFlowA();
+  const validLegacyBytes = JSON.stringify(validLegacyA);
+  mixedStorage.setItem(PROVISION_CHECKPOINT_STORAGE_KEY, validLegacyBytes);
+  mixedStorage.setItem(ACTOR_A_STORAGE_KEY, "{corrupt-scoped-json");
+
+  clearVerifiedCheckpoint({ expectedOrigin: ORIGIN, expectedActorScope: ACTOR_A_SCOPE, expectedClientFlowId: null, storage: mixedStorage });
+  clearVerifiedCheckpoint({ expectedOrigin: ORIGIN, expectedActorScope: ACTOR_A_SCOPE, expectedClientFlowId: "not-a-uuid", storage: mixedStorage });
+  assert.equal(mixedStorage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY), validLegacyBytes);
+
+  const plCorrupt = mount(PersonListManager, {
+    checkpointActorScope: ACTOR_A_SCOPE,
+    canManageGlobalRoles: true,
+    storage: mixedStorage,
+    originOverride: ORIGIN,
+  });
+  await plCorrupt.flush();
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  await plCorrupt.flush();
+  findButton(plCorrupt, "Đã đối chiếu thủ công · Xóa bản nháp lỗi").props.onClick();
+  await plCorrupt.flush();
+  // Corrupt scoped entry removed; unseen valid legacy checkpoint preserved & now surfaced for resume!
+  assert.equal(mixedStorage.store.has(ACTOR_A_STORAGE_KEY), false);
+  assert.equal(mixedStorage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY), validLegacyBytes);
+  assert.ok(maybeButton(plCorrupt, "Tiếp tục / Đối chiếu"));
+  plCorrupt.unmount();
+
+  const corruptLegacyStorage = makeMemoryStorage();
+  corruptLegacyStorage.setItem(PROVISION_CHECKPOINT_STORAGE_KEY, "{corrupt-legacy");
+  const blockedOnCorruptLegacy = persistAndVerifyCheckpoint(makeUnresolvedFlowA(), corruptLegacyStorage);
+  assert.equal(blockedOnCorruptLegacy.ok, false);
+  assert.equal(blockedOnCorruptLegacy.reason, "ACTIVE_CHECKPOINT_CONFLICT");
+});
+
+test("PR27-R2/P2 regression: committed Step 4 role version survives storage quota + reload (and legacy checkpoints + 409 reload), while dispatched UNCERTAIN roles keep exact frozen version/key", async () => {
+  const makeTwoRolesCheckpoint = () => ({
+    schema_version: 2,
+    client_flow_id: "90000000-0000-4000-8000-000000000888",
+    env_origin: ORIGIN,
+    actor_scope: ACTOR_A_SCOPE,
+    flow_kind: "CREATE_EMPLOYEE_WITH_LOGIN",
+    updated_at: AS_OF,
+    step1_person: {
+      status: "COMMITTED",
+      idempotency_key: "91000000-0000-4000-8000-000000000888",
+      payload_snapshot: {
+        employee_code: "NS-101",
+        full_name: "Nguyễn Văn An",
+        joined_on: "2026-01-10",
+        initial_department_ref: null,
+        reason: "Tiếp nhận mới",
+      },
+      committed_person_id: PERSON_ID,
+      committed_person_version: 1,
+      existing_employee_code: "NS-101",
+      existing_full_name: "Nguyễn Văn An",
+      existing_recruiter_id: null,
+    },
+    step2_account: {
+      status: "COMMITTED",
+      idempotency_key: "92000000-0000-4000-8000-000000000888",
+      non_secret_snapshot: { login_id: "an.nv", display_name: "Nguyễn Văn An", reason: "Tiếp nhận mới" },
+      intent_id: INTENT_ID,
+      intent_state: "APPLIED",
+      reconcile_idempotency_key: null,
+      committed_account_ref: ACCOUNT_ID,
+      committed_account_version: 1,
+    },
+    step3_link: {
+      status: "COMMITTED",
+      idempotency_key: "93000000-0000-4000-8000-000000000888",
+      payload_snapshot: {
+        person_id: PERSON_ID,
+        account_ref: ACCOUNT_ID,
+        expected_account_version: 1,
+        expected_person_version: 1,
+        confirmed_recruiter_id: null,
+        reason: "Tiếp nhận mới",
+      },
+      post_link_account_version: 2,
+      post_link_person_version: 2,
+    },
+    step4_roles: [
+      {
+        role_code: "RECRUITER",
+        status: "IDLE",
+        idempotency_key: "94000000-0000-4000-8000-000000000881",
+        payload_snapshot: null,
+      },
+      {
+        role_code: "ADMIN",
+        status: "IDLE",
+        idempotency_key: "94000000-0000-4000-8000-000000000882",
+        payload_snapshot: null,
+      },
+    ],
+  });
+
+  const resumeWithServerAccountVersion = async (storage, accountVersion) => {
+    const pl = mount(PersonListManager, {
+      checkpointActorScope: ACTOR_A_SCOPE,
+      canManageGlobalRoles: true,
+      storage,
+      originOverride: ORIGIN,
+    });
+    await pl.flush();
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+    await pl.flush();
+    findButton(pl, "Tiếp tục / Đối chiếu").props.onClick();
+    await pl.flush();
+    const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+    const verify = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`);
+    assert.ok(verify);
+    respond(verify, 200, {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      as_of: AS_OF,
+      person: makePersonDetail({
+        version: 2,
+        active_account_link: {
+          link_id: LINK_ID,
+          account_ref: ACCOUNT_ID,
+          login_id: "an.nv",
+          display_name: "Nguyễn Văn An",
+          enabled: true,
+          account_version: accountVersion,
+          started_at: AS_OF,
+          source_kind: "ADMIN_MUTATION",
+          evidence_date: null,
+          version: 1,
+        },
+      }),
+    });
+    await stepper.flush();
+    return { pl, stepper };
+  };
+
+  // (a) Exact T0 quota scenario: Role 1 commits v3 -> persist Role 1 COMMITTED succeeds ->
+  //     QuotaExceededError right when persisting Role 2 IN_FLIGHT -> reload -> Role 2 sends expected_version = 3!
+  let failSecondRoleSnapshot = false;
+  const storage = makeMemoryStorage({
+    setItem(key, value, store) {
+      const candidate = JSON.parse(value);
+      if (
+        failSecondRoleSnapshot &&
+        candidate.step4_roles[0]?.status === "COMMITTED" &&
+        candidate.step4_roles[1]?.status === "IN_FLIGHT"
+      ) {
+        throw new DOMException("quota for second role snapshot", "QuotaExceededError");
+      }
+      store.set(key, String(value));
+    },
+  });
+  assert.equal(persistAndVerifyCheckpoint(makeTwoRolesCheckpoint(), storage).ok, true);
+
+  const run1 = await resumeWithServerAccountVersion(storage, 2);
+  findNode(run1.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run1.stepper.flush();
+
+  const role1Req = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  assert.equal(JSON.parse(role1Req.options.body).role_code, "RECRUITER");
+  assert.equal(JSON.parse(role1Req.options.body).expected_version, 2);
+
+  failSecondRoleSnapshot = true;
+  respond(role1Req, 201, makeAssignRoleEnvelope("RECRUITER", 3));
+  await run1.stepper.flush();
+
+  // Role 1 persisted as COMMITTED WITH committed_account_version = 3; Role 2 blocked before POST!
+  const storedMid = readVerifiedCheckpoint({ expectedOrigin: ORIGIN, expectedActorScope: ACTOR_A_SCOPE, storage });
+  assert.equal(storedMid.kind, "valid");
+  assert.equal(storedMid.checkpoint.step4_roles[0].status, "COMMITTED");
+  assert.equal(storedMid.checkpoint.step4_roles[0].committed_account_version, 3);
+  assert.equal(storedMid.checkpoint.step4_roles[1].status, "IDLE");
+  assert.equal(storedMid.checkpoint.step4_roles[1].payload_snapshot, null);
+  assert.equal(requests.filter((r) => r.method === "POST" && r.url.endsWith("/roles")).length, 1);
+
+  run1.stepper.unmount();
+  run1.pl.unmount();
+  failSecondRoleSnapshot = false;
+
+  // Reload & resume -> 0 repeat of Person/Account/Link/RECRUITER; ADMIN MUST send expected_version = 3!
+  const run2 = await resumeWithServerAccountVersion(storage, 3);
+  findNode(run2.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run2.stepper.flush();
+
+  const role2Req = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  const role2Body = JSON.parse(role2Req.options.body);
+  assert.equal(role2Body.role_code, "ADMIN");
+  assert.equal(role2Body.expected_version, 3);
+  assert.equal(
+    requests.filter((r) => r.method === "POST" && r.url.endsWith("/roles") && JSON.parse(r.options.body).role_code === "RECRUITER").length,
+    1,
+    "RECRUITER must only be posted once",
+  );
+  assert.equal(requests.some((r) => r.method === "POST" && (r.url === "/api/admin/organization/persons" || r.url === "/api/admin/access/accounts" || r.url.includes("/person-link"))), false);
+
+  // (b) Step 4 409 VERSION_CONFLICT -> explicit reload fetches authoritative v4 & rotates IDLE key cleanly
+  const rejectedRole2Key = role2Req.options.headers["Idempotency-Key"];
+  respond(role2Req, 409, {
+    ok: false,
+    error: {
+      code: "VERSION_CONFLICT",
+      message: "Phiên bản tài khoản vừa thay đổi.",
+      current_version: 4,
+    },
+  });
+  await run2.stepper.flush();
+  findButton(run2.stepper, "Tải lại phiên bản tài khoản mới nhất").props.onClick();
+  await run2.stepper.flush();
+  const reloadAccountReq = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}`);
+  assert.ok(reloadAccountReq);
+  respond(reloadAccountReq, 200, { ok: true, account: makeAccount({ version: 4 }) });
+  await run2.stepper.flush();
+
+  // Even if the browser reloads AGAIN after 409 reload before clicking Submit, rotated key + v4 MUST survive!
+  run2.stepper.unmount();
+  run2.pl.unmount();
+  const run2Reloaded = await resumeWithServerAccountVersion(storage, 4);
+  findNode(run2Reloaded.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run2Reloaded.stepper.flush();
+  const role2AfterReload = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  assert.equal(JSON.parse(role2AfterReload.options.body).role_code, "ADMIN");
+  assert.equal(JSON.parse(role2AfterReload.options.body).expected_version, 4);
+  assert.notEqual(role2AfterReload.options.headers["Idempotency-Key"], rejectedRole2Key);
+  respond(role2AfterReload, 201, makeAssignRoleEnvelope("ADMIN", 5));
+  await run2Reloaded.stepper.flush();
+  assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
+  run2Reloaded.stepper.unmount();
+  run2Reloaded.pl.unmount();
+
+  // (b2) Same-session retry WITHOUT reload after Role 1 commits v3 and quota fails on Role 2 IN_FLIGHT -> sends v3!
+  let failOnceQuota = false;
+  const sameSessionStorage = makeMemoryStorage({
+    setItem(key, value, store) {
+      const candidate = JSON.parse(value);
+      if (
+        failOnceQuota &&
+        candidate.step4_roles[0]?.status === "COMMITTED" &&
+        candidate.step4_roles[1]?.status === "IN_FLIGHT"
+      ) {
+        throw new DOMException("transient quota", "QuotaExceededError");
+      }
+      store.set(key, String(value));
+    },
+  });
+  assert.equal(persistAndVerifyCheckpoint(makeTwoRolesCheckpoint(), sameSessionStorage).ok, true);
+  const runSameSession = await resumeWithServerAccountVersion(sameSessionStorage, 2);
+  findNode(runSameSession.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await runSameSession.stepper.flush();
+  failOnceQuota = true;
+  respond(findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles")), 201, makeAssignRoleEnvelope("RECRUITER", 3));
+  await runSameSession.stepper.flush();
+  // Free space and click Submit in the SAME session without reloading!
+  failOnceQuota = false;
+  findNode(runSameSession.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await runSameSession.stepper.flush();
+  const sameSessionRole2 = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  assert.equal(JSON.parse(sameSessionRole2.options.body).role_code, "ADMIN");
+  assert.equal(JSON.parse(sameSessionRole2.options.body).expected_version, 3);
+  respond(sameSessionRole2, 201, makeAssignRoleEnvelope("ADMIN", 4));
+  await runSameSession.stepper.flush();
+  assert.equal(sameSessionStorage.store.has(ACTOR_A_STORAGE_KEY), false);
+  runSameSession.stepper.unmount();
+  runSameSession.pl.unmount();
+
+  // (c) Pure helper & legacy 4-key checkpoint compatibility: NEVER reuses obsolete post_link_account_version or guesses +1!
+  const legacyCp = makeTwoRolesCheckpoint();
+  legacyCp.step4_roles[0].status = "COMMITTED"; // legacy 4-key object without committed_account_version!
+  const parsedLegacy = parseProvisionCheckpointV2(legacyCp);
+  assert.ok(parsedLegacy);
+  assert.equal(parsedLegacy.step4_roles[0].committed_account_version, null);
+  assert.equal(resolveNextStep4AccountVersion(parsedLegacy, null), null, "Must NOT fall back to obsolete link version or guess +1");
+  assert.equal(resolveNextStep4AccountVersion(parsedLegacy, 3), 3, "Must adopt verified server version 3");
+
+  // (d) Already-dispatched Role 2 UNCERTAIN (503) MUST keep exact frozen expected_version & idempotency_key even if server moved ahead!
+  const uncertainStorage = makeMemoryStorage();
+  const uncertainCp = makeTwoRolesCheckpoint();
+  uncertainCp.step4_roles[0] = {
+    ...uncertainCp.step4_roles[0],
+    status: "COMMITTED",
+    committed_account_version: 3,
+  };
+  const frozenRole2Key = "94000000-0000-4000-8000-000000000882";
+  uncertainCp.step4_roles[1] = {
+    role_code: "ADMIN",
+    status: "UNCERTAIN",
+    idempotency_key: frozenRole2Key,
+    payload_snapshot: { role_code: "ADMIN", expected_version: 3, reason: "Tiếp nhận mới" },
+    committed_account_version: null,
+  };
+  assert.equal(persistAndVerifyCheckpoint(uncertainCp, uncertainStorage).ok, true);
+  const runUncertain = await resumeWithServerAccountVersion(uncertainStorage, 5);
+  findNode(runUncertain.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await runUncertain.stepper.flush();
+  const uncertainReplay = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  assert.equal(uncertainReplay.options.headers["Idempotency-Key"], frozenRole2Key);
+  assert.equal(JSON.parse(uncertainReplay.options.body).expected_version, 3, "Dispatched UNCERTAIN role MUST replay exact frozen expected_version without masking OCC");
+  runUncertain.stepper.unmount();
+  runUncertain.pl.unmount();
 });
 
 // ============================================================================

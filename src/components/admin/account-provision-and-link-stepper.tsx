@@ -40,6 +40,7 @@ import {
   getBrowserOrigin,
   getBrowserSessionStorage,
   persistAndVerifyCheckpoint,
+  resolveNextStep4AccountVersion,
   type CheckpointStorageLike,
   type ProvisionCheckpointV2,
   type ProvisionStep4Role,
@@ -209,6 +210,8 @@ export function AccountProvisionAndLinkStepper({
   const [step3VersionConflict, setStep3VersionConflict] = useState(false);
   const [step3HardBlocked, setStep3HardBlocked] = useState(false);
   const [step4PartialFailure, setStep4PartialFailure] = useState<string | null>(null);
+  const [step4VersionConflict, setStep4VersionConflict] = useState(false);
+  const [verifiedStep4AccountVersion, setVerifiedStep4AccountVersion] = useState<number | null>(null);
 
   const clearRamPasswords = useCallback(() => {
     setPassword("");
@@ -245,6 +248,8 @@ export function AccountProvisionAndLinkStepper({
         setStep3VersionConflict(false);
         setStep3HardBlocked(false);
         setStep4PartialFailure(null);
+        setStep4VersionConflict(false);
+        setVerifiedStep4AccountVersion(null);
         clearRamPasswords();
         return;
       }
@@ -258,6 +263,8 @@ export function AccountProvisionAndLinkStepper({
       setStep3VersionConflict(false);
       setStep3HardBlocked(false);
       setStep4PartialFailure(null);
+      setStep4VersionConflict(false);
+      setVerifiedStep4AccountVersion(null);
       clearRamPasswords();
 
       if (mode.kind === "create-person") {
@@ -404,6 +411,14 @@ export function AccountProvisionAndLinkStepper({
             return;
           }
         }
+        // Always capture authoritative account_version when person is already linked to the committed account (PR27-R2/P2).
+        if (
+          projected.person.active_account_link &&
+          cp.step2_account.committed_account_ref &&
+          projected.person.active_account_link.account_ref === cp.step2_account.committed_account_ref
+        ) {
+          setVerifiedStep4AccountVersion(projected.person.active_account_link.account_version);
+        }
         // If person is already linked to the committed account on server & no remaining roles -> clean finish!
         if (
           projected.person.active_account_link &&
@@ -426,6 +441,7 @@ export function AccountProvisionAndLinkStepper({
             clearVerifiedCheckpoint({
               expectedOrigin: resolveOrigin(),
               expectedActorScope: checkpointActorScope,
+              expectedClientFlowId: cp.client_flow_id,
               storage: resolveStorage(),
             });
             onCheckpointChangedRef.current?.();
@@ -491,9 +507,15 @@ export function AccountProvisionAndLinkStepper({
     (nextCp: ProvisionCheckpointV2): ProvisionCheckpointV2 | null => {
       const res = persistAndVerifyCheckpoint(nextCp, resolveStorage());
       if (!res.ok) {
+        if (res.reason === "ACTIVE_CHECKPOINT_CONFLICT") {
+          onCheckpointChangedRef.current?.();
+        }
         setFeedback({
-          tone: "error",
-          title: "Không thể lưu checkpoint phục hồi trước khi gửi",
+          tone: res.reason === "ACTIVE_CHECKPOINT_CONFLICT" ? "warning" : "error",
+          title:
+            res.reason === "ACTIVE_CHECKPOINT_CONFLICT"
+              ? "Đang có tiến trình chưa hoàn tất trong phiên hiện tại"
+              : "Không thể lưu checkpoint phục hồi trước khi gửi",
           message: res.message,
         });
         return null;
@@ -506,11 +528,16 @@ export function AccountProvisionAndLinkStepper({
   );
 
   const finishAndClearCheckpoint = useCallback(
-    (result: { personId: string; accountRef: string | null; openedLogin: boolean }, toast: string) => {
+    (
+      result: { personId: string; accountRef: string | null; openedLogin: boolean },
+      toast: string,
+      clientFlowId: string,
+    ) => {
       clearRamPasswords();
       clearVerifiedCheckpoint({
         expectedOrigin: resolveOrigin(),
         expectedActorScope: checkpointActorScope,
+        expectedClientFlowId: clientFlowId,
         storage: resolveStorage(),
       });
       onCheckpointChangedRef.current?.();
@@ -531,7 +558,7 @@ export function AccountProvisionAndLinkStepper({
   const runStep4Roles = useCallback(
     async (
       baseCp: ProvisionCheckpointV2,
-      startAccountVersion: number,
+      startAccountVersion: number | null,
       callerEpoch: number,
     ): Promise<void> => {
       let currentCp = baseCp;
@@ -544,8 +571,29 @@ export function AccountProvisionAndLinkStepper({
         const roleEntry = currentCp.step4_roles[idx];
         if (!roleEntry || roleEntry.status === "COMMITTED") continue;
 
-        const frozenExpectedVersion =
-          roleEntry.payload_snapshot?.expected_version ?? currentAccountVersion;
+        // Already-dispatched UNCERTAIN/IN_FLIGHT roles MUST replay their exact frozen
+        // payload_snapshot (expected_version + idempotency_key) without masking OCC.
+        const isDispatchedReplay =
+          (roleEntry.status === "IN_FLIGHT" || roleEntry.status === "UNCERTAIN") &&
+          roleEntry.payload_snapshot !== null;
+        const frozenExpectedVersion = isDispatchedReplay
+          ? roleEntry.payload_snapshot!.expected_version
+          : currentAccountVersion;
+
+        if (frozenExpectedVersion === null) {
+          setStep4VersionConflict(true);
+          setStep4PartialFailure(
+            "Chưa xác định được phiên bản tài khoản hiện hành sau các vai trò đã cấp trước đó.",
+          );
+          setFeedback({
+            tone: "warning",
+            title: "Cần tải lại phiên bản tài khoản mới nhất trước khi cấp vai trò tiếp theo",
+            message:
+              "Vai trò trước đó đã được cấp nhưng chưa có phiên bản tài khoản xác nhận mới nhất. Hãy bấm \"Tải lại phiên bản tài khoản mới nhất\" để lấy đúng phiên bản từ máy chủ (không tự suy diễn phiên bản).",
+          });
+          return;
+        }
+
         const frozenReason =
           roleEntry.payload_snapshot?.reason ??
           (currentCp.step1_person.payload_snapshot?.reason ||
@@ -649,6 +697,33 @@ export function AccountProvisionAndLinkStepper({
             return;
           }
 
+          if (outcome.kind === "version-conflict") {
+            // Deterministic 409 OCC: transition rejected role back to IDLE and require explicit authoritative reload.
+            const settledRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
+              i === idx
+                ? {
+                    ...r,
+                    status: "IDLE",
+                    payload_snapshot: null,
+                    committed_account_version: null,
+                  }
+                : r,
+            );
+            persistCpOrReport({
+              ...currentCp,
+              updated_at: nowIso(),
+              step4_roles: settledRoles,
+            });
+            setStep4VersionConflict(true);
+            setStep4PartialFailure(outcome.message);
+            setFeedback({
+              tone: "warning",
+              title: `Xung đột phiên bản tài khoản khi cấp vai trò ${roleEntry.role_code} (409)`,
+              message: `${outcome.message} Bấm "Tải lại phiên bản tài khoản mới nhất" để đối chiếu và tiếp tục, hoặc đóng hộp thoại để mở Hồ sơ nhân viên.`,
+            });
+            return;
+          }
+
           if (outcome.kind !== "applied") {
             // Transition deterministic failure out of IN_FLIGHT -> IDLE (and clear stale payload_snapshot so retry cannot replay stale expected_version).
             const settledRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
@@ -668,9 +743,17 @@ export function AccountProvisionAndLinkStepper({
             return;
           }
 
+          // Persist the authoritative server-returned account_version alongside COMMITTED (PR27-R2/P2).
           currentAccountVersion = outcome.result.account_version;
+          setVerifiedStep4AccountVersion(outcome.result.account_version);
           const committedRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
-            i === idx ? { ...r, status: "COMMITTED" } : r,
+            i === idx
+              ? {
+                  ...r,
+                  status: "COMMITTED",
+                  committed_account_version: outcome.result.account_version,
+                }
+              : r,
           );
           const afterRoleCp = persistCpOrReport({
             ...currentCp,
@@ -705,6 +788,7 @@ export function AccountProvisionAndLinkStepper({
       finishAndClearCheckpoint(
         { personId, accountRef, openedLogin: true },
         "Đã hoàn tất mở tài khoản, liên kết hồ sơ nhân viên và cấp vai trò.",
+        currentCp.client_flow_id,
       );
     },
     [finishAndClearCheckpoint, handleSessionLossInside, persistCpOrReport, workspaceGuard],
@@ -939,6 +1023,7 @@ export function AccountProvisionAndLinkStepper({
             committedCp.flow_kind === "OPEN_LOGIN_FOR_EXISTING_EMPLOYEE"
               ? "Đã mở tài khoản đăng nhập và liên kết vào hồ sơ nhân viên."
               : "Đã tạo hồ sơ nhân viên, mở tài khoản đăng nhập và liên kết hoàn tất.",
+            committedCp.client_flow_id,
           );
           return;
         }
@@ -1344,6 +1429,7 @@ export function AccountProvisionAndLinkStepper({
         clearVerifiedCheckpoint({
           expectedOrigin: resolveOrigin(),
           expectedActorScope: checkpointActorScope,
+          expectedClientFlowId: baseCp.client_flow_id,
           storage: resolveStorage(),
         });
         setCheckpoint(null);
@@ -1414,6 +1500,7 @@ export function AccountProvisionAndLinkStepper({
           clearVerifiedCheckpoint({
             expectedOrigin: resolveOrigin(),
             expectedActorScope: checkpointActorScope,
+            expectedClientFlowId: baseCp.client_flow_id,
             storage: resolveStorage(),
           });
           setCheckpoint(null);
@@ -1448,6 +1535,7 @@ export function AccountProvisionAndLinkStepper({
             outcome.replayed
               ? "Đã đối chiếu: hồ sơ nhân viên đã được tạo trước đó."
               : "Đã tạo hồ sơ nhân viên mới.",
+            afterStep1Cp.client_flow_id,
           );
           return;
         }
@@ -1884,10 +1972,11 @@ export function AccountProvisionAndLinkStepper({
 
       // B4: Step 4 Roles pending/uncertain
       if (checkpoint.step4_roles.some((r) => r.status !== "COMMITTED")) {
-        const startVersion =
-          checkpoint.step3_link.post_link_account_version ??
-          checkpoint.step2_account.committed_account_version ??
-          1;
+        if (step4VersionConflict) return;
+        const startVersion = resolveNextStep4AccountVersion(
+          checkpoint,
+          verifiedStep4AccountVersion,
+        );
         setStep4PartialFailure(null);
         await runStep4Roles(checkpoint, startVersion, callerEpoch);
       }
@@ -1960,9 +2049,11 @@ export function AccountProvisionAndLinkStepper({
           finishAndClearCheckpoint(
             { personId, accountRef, openedLogin: true },
             "Đã xác minh trên máy chủ: tài khoản và hồ sơ nhân viên đã được liên kết.",
+            syncedCp.client_flow_id,
           );
           return;
         }
+        setVerifiedStep4AccountVersion(projectedA.version);
         setFeedback({
           tone: "info",
           title: "Đã xác minh liên kết trên máy chủ",
@@ -2008,14 +2099,98 @@ export function AccountProvisionAndLinkStepper({
     }
   };
 
+  // Explicit server version reload ONLY for Step 4 409 VERSION_CONFLICT or missing legacy committed role version (PR27-R2/P2)
+  const handleStep4ReloadAccountVersion = async () => {
+    if (!checkpoint || busy || inFlightRef.current) return;
+    const accountRef = checkpoint.step2_account.committed_account_ref;
+    if (!accountRef) return;
+
+    const callerEpoch = workspaceGuard.getEpoch();
+    const tracked = workspaceGuard.trackController();
+    inFlightRef.current = true;
+    setBusy(true);
+    try {
+      const aResp = await fetch(`/api/admin/access/accounts/${encodeURIComponent(accountRef)}`, {
+        method: "GET",
+        cache: "no-store",
+        signal: tracked.controller.signal,
+        headers: { Accept: "application/json" },
+      });
+      if (!mountedRef.current || !workspaceGuard.isActive(callerEpoch, tracked.controller)) {
+        return;
+      }
+      if (aResp.status === 401 || aResp.status === 403) {
+        handleSessionLossInside("Phiên đăng nhập không còn hợp lệ.", aResp.status === 401);
+        return;
+      }
+      const aJson: unknown = await aResp.json().catch(() => null);
+      const projectedA = aResp.status === 200 ? projectAccountItem(aJson) : null;
+      if (!projectedA) {
+        setFeedback({
+          tone: "warning",
+          title: "Không tải được phiên bản tài khoản mới nhất",
+          message: "Vui lòng thử tải lại hoặc đóng hộp thoại để mở Hồ sơ nhân viên và cấp vai trò thủ công.",
+        });
+        return;
+      }
+
+      // Rotate idempotency_key ONLY for deterministically-rejected IDLE roles (never COMMITTED/UNCERTAIN/IN_FLIGHT!).
+      const refreshedRoles: ProvisionStep4Role[] = checkpoint.step4_roles.map((r) =>
+        r.status === "IDLE" && r.payload_snapshot === null
+          ? { ...r, idempotency_key: newRoleMutationIdempotencyKey() }
+          : r,
+      );
+      const refreshedCp = persistCpOrReport({
+        ...checkpoint,
+        updated_at: nowIso(),
+        step4_roles: refreshedRoles,
+      });
+      if (refreshedCp) {
+        setVerifiedStep4AccountVersion(projectedA.version);
+        setStep4VersionConflict(false);
+        setStep4PartialFailure(null);
+        setFeedback({
+          tone: "info",
+          title: `Đã cập nhật phiên bản tài khoản mới nhất (v${projectedA.version})`,
+          message: "Hãy bấm \"Tiếp tục cấp vai trò còn lại\" để gán các vai trò chưa cấp với phiên bản hiện hành.",
+        });
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (!mountedRef.current || !workspaceGuard.isActive(callerEpoch)) return;
+      setFeedback({
+        tone: "warning",
+        title: "Mất kết nối khi tải phiên bản tài khoản mới nhất",
+        message: "Vui lòng thử tải lại hoặc đóng hộp thoại để kiểm tra trên Hồ sơ nhân viên.",
+      });
+    } finally {
+      tracked.release();
+      inFlightRef.current = false;
+      if (mountedRef.current && workspaceGuard.isActive(callerEpoch)) {
+        setBusy(false);
+      }
+    }
+  };
+
   const handleDiscardLocalCheckpoint = () => {
     clearRamPasswords();
-    clearVerifiedCheckpoint({
-      expectedOrigin: resolveOrigin(),
-      expectedActorScope: checkpointActorScope,
-      storage: resolveStorage(),
-      forceCorruptCleanup: true,
-    });
+    if (checkpoint) {
+      clearVerifiedCheckpoint({
+        expectedOrigin: resolveOrigin(),
+        expectedActorScope: checkpointActorScope,
+        expectedClientFlowId: checkpoint.client_flow_id,
+        storage: resolveStorage(),
+        forceCorruptCleanup: true,
+      });
+    } else {
+      clearVerifiedCheckpoint({
+        expectedOrigin: resolveOrigin(),
+        expectedActorScope: checkpointActorScope,
+        storage: resolveStorage(),
+        forceCorruptCleanup: true,
+        corruptOnly: true,
+      });
+    }
     onCheckpointChangedRef.current?.();
     onClose();
   };
@@ -2063,6 +2238,7 @@ export function AccountProvisionAndLinkStepper({
       !step3VersionConflict &&
       !mismatchConfirmRequired &&
       !step4PartialFailure &&
+      !step4VersionConflict &&
       !resumeServerError);
 
   const step1Locked =
@@ -2133,10 +2309,11 @@ export function AccountProvisionAndLinkStepper({
       onOpenChange={(nextOpen) => {
         if (!nextOpen && !isCloseDisabled) {
           clearRamPasswords();
-          if (step4PartialFailure && committedPersonId) {
+          if (step4PartialFailure && committedPersonId && checkpoint) {
             clearVerifiedCheckpoint({
               expectedOrigin: resolveOrigin(),
               expectedActorScope: checkpointActorScope,
+              expectedClientFlowId: checkpoint.client_flow_id,
               storage: resolveStorage(),
             });
             onCheckpointChangedRef.current?.();
@@ -2506,6 +2683,19 @@ export function AccountProvisionAndLinkStepper({
                 </Button>
               </div>
             ) : null}
+            {step4VersionConflict ? (
+              <div className="mt-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void handleStep4ReloadAccountVersion()}
+                >
+                  Tải lại phiên bản tài khoản mới nhất
+                </Button>
+              </div>
+            ) : null}
             {step3HardBlocked || needsPasswordReentryForFrozenStep2 ? (
               <div className="mt-2 flex flex-wrap gap-2">
                 <Link
@@ -2542,10 +2732,11 @@ export function AccountProvisionAndLinkStepper({
               onClick={() => {
                 if (!isCloseDisabled) {
                   clearRamPasswords();
-                  if (step4PartialFailure && committedPersonId) {
+                  if (step4PartialFailure && committedPersonId && checkpoint) {
                     clearVerifiedCheckpoint({
                       expectedOrigin: resolveOrigin(),
                       expectedActorScope: checkpointActorScope,
+                      expectedClientFlowId: checkpoint.client_flow_id,
                       storage: resolveStorage(),
                     });
                     onCheckpointChangedRef.current?.();
@@ -2556,7 +2747,7 @@ export function AccountProvisionAndLinkStepper({
             >
               {step4PartialFailure && committedPersonId ? "Đóng & Mở hồ sơ" : "Hủy"}
             </Button>
-            {!resumeServerError && !step3HardBlocked && !step3VersionConflict ? (
+            {!resumeServerError && !step3HardBlocked && !step3VersionConflict && !step4VersionConflict ? (
               <Button
                 type="submit"
                 variant="primary"

@@ -65,6 +65,7 @@ import {
 } from "@/lib/admin/person-org-ui-model";
 import { projectPersonnelItem } from "@/lib/admin/personnel-catalog-model";
 import {
+  clearVerifiedCheckpoint,
   getBrowserOrigin,
   getBrowserSessionStorage,
   readVerifiedCheckpoint,
@@ -242,33 +243,60 @@ export function PersonDetailManager({
     setResetPasswordConfirm("");
   }, []);
 
+  const [corruptCheckpointMessage, setCorruptCheckpointMessage] = useState<string | null>(null);
+
   const refreshCheckpointBanner = useCallback(() => {
     setCheckpointTick((v) => v + 1);
   }, []);
+
+  const syncCheckpointStateNow = useCallback((): boolean => {
+    if (!checkpointActorScope) {
+      setPendingCheckpoint(null);
+      setCorruptCheckpointMessage(null);
+      return false;
+    }
+    const result = readVerifiedCheckpoint({
+      storage: resolveStorage(),
+      expectedOrigin: resolveOrigin(),
+      expectedActorScope: checkpointActorScope,
+    });
+    if (result.kind === "valid") {
+      setPendingCheckpoint(result.checkpoint);
+      setCorruptCheckpointMessage(null);
+      return true;
+    }
+    if (result.kind === "corrupt") {
+      setPendingCheckpoint(null);
+      setCorruptCheckpointMessage(result.message);
+      return true;
+    }
+    setPendingCheckpoint(null);
+    setCorruptCheckpointMessage(null);
+    return false;
+  }, [checkpointActorScope, resolveOrigin, resolveStorage]);
 
   useEffect(() => {
     let cancelled = false;
     void Promise.resolve().then(() => {
       if (cancelled) return;
-      if (!checkpointActorScope) {
-        setPendingCheckpoint(null);
-        return;
-      }
-      const result = readVerifiedCheckpoint({
-        storage: resolveStorage(),
-        expectedOrigin: resolveOrigin(),
-        expectedActorScope: checkpointActorScope,
-      });
-      if (result.kind === "valid") {
-        setPendingCheckpoint(result.checkpoint);
-      } else {
-        setPendingCheckpoint(null);
-      }
+      syncCheckpointStateNow();
     });
     return () => {
       cancelled = true;
     };
-  }, [checkpointActorScope, checkpointTick, resolveOrigin, resolveStorage]);
+  }, [checkpointTick, syncCheckpointStateNow]);
+
+  const handleClearCorruptCheckpoint = useCallback(() => {
+    if (!checkpointActorScope) return;
+    clearVerifiedCheckpoint({
+      storage: resolveStorage(),
+      expectedOrigin: resolveOrigin(),
+      expectedActorScope: checkpointActorScope,
+      forceCorruptCleanup: true,
+      corruptOnly: true,
+    });
+    refreshCheckpointBanner();
+  }, [checkpointActorScope, refreshCheckpointBanner, resolveOrigin, resolveStorage]);
 
   // Clear RAM-only passwords & synchronous in-flight guard on unmount.
   useEffect(() => {
@@ -290,6 +318,7 @@ export function PersonDetailManager({
       setDialog(null);
       setStepperMode(null);
       setPendingCheckpoint(null);
+      setCorruptCheckpointMessage(null);
       setPendingIntent(null);
       setUncertainInspected(false);
       setConflictMsg(null);
@@ -1367,7 +1396,8 @@ export function PersonDetailManager({
                   pendingCheckpoint.step1_person.payload_snapshot?.employee_code ??
                   "—"}
               </span>
-              ) đang có tiến trình chưa hoàn tất.
+              ) đang có tiến trình chưa hoàn tất. Hãy hoàn tất hoặc xác nhận hủy bản nháp cũ trước
+              khi mở luồng tài khoản mới.
             </p>
             <div>
               <Button
@@ -1379,6 +1409,27 @@ export function PersonDetailManager({
                 }
               >
                 Tiếp tục / Đối chiếu
+              </Button>
+            </div>
+          </div>
+        </Alert>
+      ) : null}
+
+      {corruptCheckpointMessage && !pendingCheckpoint && state.kind !== "denied" ? (
+        <Alert
+          tone="warning"
+          role="alert"
+          title="Bản nháp phục hồi trong bộ nhớ phiên không hợp lệ"
+        >
+          <div className="space-y-2">
+            <p>{corruptCheckpointMessage}</p>
+            <div>
+              <Button
+                variant="danger-outline"
+                size="sm"
+                onClick={handleClearCorruptCheckpoint}
+              >
+                Đã đối chiếu thủ công · Xóa bản nháp lỗi
               </Button>
             </div>
           </div>
@@ -1820,8 +1871,22 @@ export function PersonDetailManager({
                       <Button
                         variant="primary"
                         size="sm"
-                        disabled={isDialogLocked || stepperMode !== null}
-                        onClick={() =>
+                        disabled={
+                          isDialogLocked ||
+                          stepperMode !== null ||
+                          pendingCheckpoint !== null ||
+                          corruptCheckpointMessage !== null
+                        }
+                        onClick={() => {
+                          if (
+                            isDialogLocked ||
+                            stepperMode !== null ||
+                            pendingCheckpoint !== null ||
+                            corruptCheckpointMessage !== null
+                          ) {
+                            return;
+                          }
+                          if (syncCheckpointStateNow()) return;
                           setStepperMode({
                             kind: "open-login-existing",
                             person: {
@@ -1831,11 +1896,17 @@ export function PersonDetailManager({
                               version: person.version,
                               recruiter_id: person.recruiter_id,
                             },
-                          })
-                        }
+                          });
+                        }}
                       >
                         Mở tài khoản đăng nhập
                       </Button>
+                      {pendingCheckpoint !== null || corruptCheckpointMessage !== null ? (
+                        <p className="text-xs text-amber-700 dark:text-amber-300">
+                          Đang có tiến trình chưa hoàn tất ở đầu trang. Hãy bấm{" "}
+                          <strong>Tiếp tục / Đối chiếu</strong> trước khi mở tài khoản mới.
+                        </p>
+                      ) : null}
                       <p className="text-xs text-muted">
                         Cần đối chiếu ghép với một tài khoản cũ chưa liên kết?{" "}
                         <Link

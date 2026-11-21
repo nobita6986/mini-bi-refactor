@@ -29,6 +29,18 @@ export const PROVISION_CHECKPOINT_SCHEMA_VERSION = 2 as const;
 
 const OPAQUE_ACTOR_SCOPE_RE = /^act_[a-f0-9]{24}$/;
 
+/**
+ * Derives the per-actor opaque storage key (`hrp_bi_wp13_provision_checkpoint_v2:act_<24 hex>`)
+ * so switching admins within the same browser tab can NEVER overwrite or delete another
+ * admin's unresolved checkpoint, while containing zero raw identity or secret data.
+ */
+export function getProvisionCheckpointStorageKey(actorScope: string): string {
+  if (!OPAQUE_ACTOR_SCOPE_RE.test(actorScope)) {
+    throw new Error("Invalid opaque actor scope for Checkpoint V2 storage key");
+  }
+  return `${PROVISION_CHECKPOINT_STORAGE_KEY}:${actorScope}`;
+}
+
 const FORBIDDEN_PERSISTENCE_KEYS = new Set([
   "password",
   "password_confirm",
@@ -144,6 +156,11 @@ export type ProvisionStep4Role = {
   status: ProvisionStep4Status;
   idempotency_key: string;
   payload_snapshot: ProvisionStep4RoleSnapshot | null;
+  /**
+   * Authoritative account version returned by the server when this role committed.
+   * Optional on legacy V2 checkpoints (normalized to `null` on parse).
+   */
+  committed_account_version?: number | null;
 };
 
 export type ProvisionCheckpointV2 = {
@@ -167,7 +184,16 @@ export type CheckpointStorageLike = {
 
 export type PersistCheckpointResult =
   | { ok: true; checkpoint: ProvisionCheckpointV2 }
-  | { ok: false; reason: "INVALID_CHECKPOINT" | "STORAGE_UNAVAILABLE" | "WRITE_ERROR" | "READBACK_MISMATCH"; message: string };
+  | {
+      ok: false;
+      reason:
+        | "INVALID_CHECKPOINT"
+        | "STORAGE_UNAVAILABLE"
+        | "ACTIVE_CHECKPOINT_CONFLICT"
+        | "WRITE_ERROR"
+        | "READBACK_MISMATCH";
+      message: string;
+    };
 
 export type ReadCheckpointResult =
   | { kind: "none" }
@@ -473,10 +499,21 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
   if (!Array.isArray(raw.step4_roles)) return null;
   const step4Roles: ProvisionStep4Role[] = [];
   for (const item of raw.step4_roles) {
-    if (
-      !isRecord(item) ||
-      !hasExactKeys(item, ["role_code", "status", "idempotency_key", "payload_snapshot"])
-    ) {
+    if (!isRecord(item)) return null;
+    const isLegacy4Key = hasExactKeys(item, [
+      "role_code",
+      "status",
+      "idempotency_key",
+      "payload_snapshot",
+    ]);
+    const isExtended5Key = hasExactKeys(item, [
+      "role_code",
+      "status",
+      "idempotency_key",
+      "payload_snapshot",
+      "committed_account_version",
+    ]);
+    if (!isLegacy4Key && !isExtended5Key) {
       return null;
     }
     if (
@@ -492,6 +529,10 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
       return null;
     }
     if (typeof item.idempotency_key !== "string" || !isUuid(item.idempotency_key)) {
+      return null;
+    }
+    const committedAccountVersion = isExtended5Key ? item.committed_account_version : null;
+    if (!isNullablePositiveInt(committedAccountVersion)) {
       return null;
     }
     let rolePayload: ProvisionStep4RoleSnapshot | null = null;
@@ -520,6 +561,7 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
       status: item.status as ProvisionStep4Status,
       idempotency_key: item.idempotency_key.toLowerCase(),
       payload_snapshot: rolePayload,
+      committed_account_version: committedAccountVersion,
     });
   }
 
@@ -581,11 +623,89 @@ export function getBrowserOrigin(): string {
   return "http://localhost";
 }
 
+function parseStoredCheckpointRaw(raw: string): ProvisionCheckpointV2 | null {
+  try {
+    return parseProvisionCheckpointV2(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Writes the sanitized Checkpoint V2 to storage AND immediately reads back and
- * verifies key fields before returning `{ ok: true }`.
+ * Resolves the authoritative expected account version for the next UNDISPATCHED
+ * (`IDLE`) Step 4 role mutation.
  *
- * Caller MUST abort before dispatching ANY HTTP mutation if `ok === false`.
+ * Invariants (PR27-R2/P2):
+ * - NEVER falls back to obsolete `post_link_account_version` once any earlier
+ *   Step 4 role has already committed, and NEVER guesses `version + 1`.
+ * - Uses confirmed `committed_account_version` returned by committed Step 4
+ *   role mutations and/or authoritative `verifiedServerAccountVersion` from
+ *   server verification.
+ * - Returns `null` if a prior role is `COMMITTED` without any recorded version
+ *   AND no verified server version is available, forcing explicit server reload.
+ * - Callers MUST NOT use this for already-dispatched `UNCERTAIN`/`IN_FLIGHT`
+ *   roles that have a frozen `payload_snapshot` (those must replay verbatim).
+ */
+export function resolveNextStep4AccountVersion(
+  checkpoint: ProvisionCheckpointV2,
+  verifiedServerAccountVersion?: number | null,
+): number | null {
+  const serverVersion =
+    typeof verifiedServerAccountVersion === "number" &&
+    Number.isSafeInteger(verifiedServerAccountVersion) &&
+    verifiedServerAccountVersion >= 1
+      ? verifiedServerAccountVersion
+      : null;
+
+  let hasCommittedRole = false;
+  let hasCommittedWithoutVersion = false;
+  let maxCommittedRoleVersion: number | null = null;
+  for (const role of checkpoint.step4_roles) {
+    if (role.status === "COMMITTED") {
+      hasCommittedRole = true;
+      if (
+        typeof role.committed_account_version === "number" &&
+        Number.isSafeInteger(role.committed_account_version) &&
+        role.committed_account_version >= 1
+      ) {
+        maxCommittedRoleVersion =
+          maxCommittedRoleVersion === null
+            ? role.committed_account_version
+            : Math.max(maxCommittedRoleVersion, role.committed_account_version);
+      } else {
+        hasCommittedWithoutVersion = true;
+      }
+    }
+  }
+
+  if (hasCommittedRole) {
+    if ((maxCommittedRoleVersion === null || hasCommittedWithoutVersion) && serverVersion === null) {
+      return null;
+    }
+    return Math.max(maxCommittedRoleVersion ?? 0, serverVersion ?? 0);
+  }
+
+  const baseVersion =
+    checkpoint.step3_link.post_link_account_version ??
+    checkpoint.step2_account.committed_account_version ??
+    null;
+  const best = Math.max(serverVersion ?? 0, baseVersion ?? 0);
+  return best >= 1 ? best : null;
+}
+
+/**
+ * Writes the sanitized Checkpoint V2 to the actor-scoped storage key AND
+ * immediately reads back and verifies key fields before returning `{ ok: true }`.
+ *
+ * Guard invariants (PR27-R1/P1):
+ * - Stores under `hrp_bi_wp13_provision_checkpoint_v2:<actor_scope>` so Admin B
+ *   can NEVER overwrite or clear Admin A's checkpoint (whether on A's scoped key
+ *   or on the legacy shared key `PROVISION_CHECKPOINT_STORAGE_KEY`).
+ * - Blocks writes (`ACTIVE_CHECKPOINT_CONFLICT`) if the SAME actor already has
+ *   an unresolved checkpoint with a DIFFERENT `client_flow_id` (on either the
+ *   actor's scoped key or the legacy shared key) or a corrupt entry on the
+ *   actor's scoped key.
+ * - Caller MUST abort before dispatching ANY HTTP mutation if `ok === false`.
  */
 export function persistAndVerifyCheckpoint(
   checkpoint: ProvisionCheckpointV2,
@@ -608,9 +728,85 @@ export function persistAndVerifyCheckpoint(
         "Trình duyệt không hỗ trợ hoặc đang chặn bộ nhớ phiên (sessionStorage). Hệ thống đã dừng trước khi gửi yêu cầu để tránh mất khả năng phục hồi khi rớt mạng.",
     };
   }
+
+  const targetKey = getProvisionCheckpointStorageKey(sanitized.actor_scope);
+  let shouldMigrateLegacyKey = false;
+
+  // Pre-write protection: never silently overwrite another flow for the same actor
+  // or a corrupt/foreign entry occupying the actor's scoped slot.
+  try {
+    const existingScopedRaw = storage.getItem(targetKey);
+    if (existingScopedRaw !== null) {
+      const existingScoped = parseStoredCheckpointRaw(existingScopedRaw);
+      if (!existingScoped) {
+        return {
+          ok: false,
+          reason: "ACTIVE_CHECKPOINT_CONFLICT",
+          message:
+            "Phát hiện bản nháp phục hồi bị lỗi trong bộ nhớ phiên. Hệ thống không tự ghi đè; hãy xóa bản nháp lỗi hoặc đối chiếu thủ công trước khi tạo mới.",
+        };
+      }
+      if (
+        existingScoped.env_origin !== sanitized.env_origin ||
+        existingScoped.actor_scope !== sanitized.actor_scope
+      ) {
+        return {
+          ok: false,
+          reason: "ACTIVE_CHECKPOINT_CONFLICT",
+          message:
+            "Phát hiện checkpoint không khớp ngữ cảnh phiên hiện tại. Hệ thống không tự ghi đè dữ liệu phục hồi.",
+        };
+      }
+      if (existingScoped.client_flow_id !== sanitized.client_flow_id) {
+        return {
+          ok: false,
+          reason: "ACTIVE_CHECKPOINT_CONFLICT",
+          message:
+            "Bạn đang có một tiến trình thêm nhân viên / mở đăng nhập chưa hoàn tất trong phiên này. Hãy bấm \"Tiếp tục / Đối chiếu\" để hoàn tất hoặc xác nhận hủy tiến trình cũ trước khi mở luồng mới.",
+        };
+      }
+    }
+
+    // Also guard against an unresolved or corrupt legacy-key V2 checkpoint when scoped slot is empty / same actor.
+    const existingLegacyRaw = storage.getItem(PROVISION_CHECKPOINT_STORAGE_KEY);
+    if (existingLegacyRaw !== null) {
+      const existingLegacy = parseStoredCheckpointRaw(existingLegacyRaw);
+      if (!existingLegacy) {
+        if (existingScopedRaw === null) {
+          return {
+            ok: false,
+            reason: "ACTIVE_CHECKPOINT_CONFLICT",
+            message:
+              "Phát hiện bản nháp phục hồi bị lỗi trong bộ nhớ phiên. Hệ thống không tự ghi đè; hãy xóa bản nháp lỗi hoặc đối chiếu thủ công trước khi tạo mới.",
+          };
+        }
+      } else if (
+        existingLegacy.env_origin === sanitized.env_origin &&
+        existingLegacy.actor_scope === sanitized.actor_scope
+      ) {
+        if (existingLegacy.client_flow_id !== sanitized.client_flow_id) {
+          return {
+            ok: false,
+            reason: "ACTIVE_CHECKPOINT_CONFLICT",
+            message:
+              "Bạn đang có một tiến trình thêm nhân viên / mở đăng nhập chưa hoàn tất trong phiên này. Hãy bấm \"Tiếp tục / Đối chiếu\" để hoàn tất hoặc xác nhận hủy tiến trình cũ trước khi mở luồng mới.",
+          };
+        }
+        shouldMigrateLegacyKey = true;
+      }
+    }
+  } catch {
+    return {
+      ok: false,
+      reason: "WRITE_ERROR",
+      message:
+        "Không thể kiểm tra checkpoint hiện hữu trong bộ nhớ phiên trước khi ghi. Đã chặn gửi yêu cầu lên máy chủ (0 thay đổi được ghi).",
+    };
+  }
+
   const serialized = JSON.stringify(sanitized);
   try {
-    storage.setItem(PROVISION_CHECKPOINT_STORAGE_KEY, serialized);
+    storage.setItem(targetKey, serialized);
   } catch {
     return {
       ok: false,
@@ -622,7 +818,7 @@ export function persistAndVerifyCheckpoint(
 
   let readBackRaw: string | null = null;
   try {
-    readBackRaw = storage.getItem(PROVISION_CHECKPOINT_STORAGE_KEY);
+    readBackRaw = storage.getItem(targetKey);
   } catch {
     return {
       ok: false,
@@ -641,12 +837,7 @@ export function persistAndVerifyCheckpoint(
     };
   }
 
-  let parsedBack: ProvisionCheckpointV2 | null = null;
-  try {
-    parsedBack = parseProvisionCheckpointV2(JSON.parse(readBackRaw));
-  } catch {
-    parsedBack = null;
-  }
+  const parsedBack = parseStoredCheckpointRaw(readBackRaw);
 
   const matches =
     parsedBack !== null &&
@@ -668,7 +859,9 @@ export function persistAndVerifyCheckpoint(
       (role, index) =>
         role.role_code === sanitized.step4_roles[index]?.role_code &&
         role.status === sanitized.step4_roles[index]?.status &&
-        role.idempotency_key === sanitized.step4_roles[index]?.idempotency_key,
+        role.idempotency_key === sanitized.step4_roles[index]?.idempotency_key &&
+        (role.committed_account_version ?? null) ===
+          (sanitized.step4_roles[index]?.committed_account_version ?? null),
     );
 
   if (!parsedBack || !matches) {
@@ -680,13 +873,68 @@ export function persistAndVerifyCheckpoint(
     };
   }
 
+  // Safely clean up the migrated legacy key ONLY after scoped read-back verified
+  // and ONLY if legacy key still belongs to this exact actor + client_flow_id.
+  if (shouldMigrateLegacyKey) {
+    try {
+      const legacyCheckRaw = storage.getItem(PROVISION_CHECKPOINT_STORAGE_KEY);
+      if (legacyCheckRaw !== null) {
+        const legacyCheck = parseStoredCheckpointRaw(legacyCheckRaw);
+        if (
+          legacyCheck &&
+          legacyCheck.env_origin === sanitized.env_origin &&
+          legacyCheck.actor_scope === sanitized.actor_scope &&
+          legacyCheck.client_flow_id === sanitized.client_flow_id
+        ) {
+          storage.removeItem(PROVISION_CHECKPOINT_STORAGE_KEY);
+        }
+      }
+    } catch {
+      // Ignore cleanup errors; scoped key is already verified.
+    }
+  }
+
   return { ok: true, checkpoint: parsedBack };
+}
+
+function verifyStoredCheckpointRaw(
+  raw: string,
+  expectedOrigin: string,
+  expectedActorScope: string,
+): Exclude<ReadCheckpointResult, { kind: "none" }> {
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return {
+      kind: "corrupt",
+      message:
+        "Dữ liệu checkpoint trong bộ nhớ phiên không hợp lệ. Vui lòng đối chiếu thủ công tại danh sách Nhân sự / Đối chiếu dữ liệu cũ.",
+    };
+  }
+
+  const parsed = parseProvisionCheckpointV2(json);
+  if (!parsed) {
+    return {
+      kind: "corrupt",
+      message:
+        "Checkpoint trong bộ nhớ phiên sai cấu trúc hoặc chứa trường không hợp lệ. Hệ thống không tự chạy tiếp; hãy đối chiếu thủ công.",
+    };
+  }
+
+  if (parsed.env_origin !== expectedOrigin || parsed.actor_scope !== expectedActorScope) {
+    return { kind: "foreign_actor_or_origin" };
+  }
+
+  return { kind: "valid", checkpoint: parsed };
 }
 
 /**
  * Reads and verifies a stored Checkpoint V2 against BOTH current origin AND
  * server-computed opaque `actor_scope`.
  *
+ * Checks the actor-scoped storage key first, then falls back to the legacy
+ * shared key for backward compatibility with pre-scoped V2 checkpoints.
  * Foreign actor or origin checkpoints return `{ kind: "foreign_actor_or_origin" }`
  * so Admin B NEVER sees, replays, or deletes Admin A's checkpoint.
  */
@@ -701,63 +949,123 @@ export function readVerifiedCheckpoint(input: {
   const storage = input.storage !== undefined ? input.storage : getBrowserSessionStorage();
   if (!storage) return { kind: "none" };
 
-  let raw: string | null = null;
+  const scopedKey = getProvisionCheckpointStorageKey(input.expectedActorScope);
+  let scopedRaw: string | null = null;
   try {
-    raw = storage.getItem(PROVISION_CHECKPOINT_STORAGE_KEY);
+    scopedRaw = storage.getItem(scopedKey);
   } catch {
     return {
       kind: "corrupt",
       message: "Không thể đọc bộ nhớ phiên để kiểm tra tiến trình dở dang.",
     };
   }
-  if (!raw) return { kind: "none" };
+  if (scopedRaw !== null) {
+    return verifyStoredCheckpointRaw(scopedRaw, input.expectedOrigin, input.expectedActorScope);
+  }
 
-  let json: unknown;
+  // Backward-compatible read of legacy shared key (never mutates foreign entries).
+  let legacyRaw: string | null = null;
   try {
-    json = JSON.parse(raw);
+    legacyRaw = storage.getItem(PROVISION_CHECKPOINT_STORAGE_KEY);
   } catch {
     return {
       kind: "corrupt",
-      message: "Dữ liệu checkpoint trong bộ nhớ phiên không hợp lệ. Vui lòng đối chiếu thủ công tại danh sách Nhân sự / Đối chiếu dữ liệu cũ.",
+      message: "Không thể đọc bộ nhớ phiên để kiểm tra tiến trình dở dang.",
     };
   }
+  if (legacyRaw === null) return { kind: "none" };
 
-  const parsed = parseProvisionCheckpointV2(json);
-  if (!parsed) {
-    return {
-      kind: "corrupt",
-      message: "Checkpoint trong bộ nhớ phiên sai cấu trúc hoặc chứa trường không hợp lệ. Hệ thống không tự chạy tiếp; hãy đối chiếu thủ công.",
-    };
-  }
-
-  if (parsed.env_origin !== input.expectedOrigin || parsed.actor_scope !== input.expectedActorScope) {
-    return { kind: "foreign_actor_or_origin" };
-  }
-
-  return { kind: "valid", checkpoint: parsed };
+  return verifyStoredCheckpointRaw(legacyRaw, input.expectedOrigin, input.expectedActorScope);
 }
 
 /**
  * Removes stored checkpoint ONLY if it belongs to the current origin + actor_scope
- * (or if `forceCorruptCleanup` is explicitly passed for a corrupt entry).
- * Never deletes another admin's valid checkpoint.
+ * (AND matches `expectedClientFlowId` when provided) or if `forceCorruptCleanup`
+ * is explicitly passed for a corrupt entry.
+ *
+ * Never deletes another admin's valid checkpoint or a different unresolved flow
+ * owned by the same admin (PR27-R1/P1).
  */
 export function clearVerifiedCheckpoint(input: {
   expectedOrigin: string;
   expectedActorScope: string;
+  expectedClientFlowId?: string | null;
   storage?: CheckpointStorageLike | null;
   forceCorruptCleanup?: boolean;
+  /**
+   * When `true`, ONLY removes corrupt entries and NEVER removes any valid checkpoint
+   * (protecting an unseen valid legacy checkpoint when cleaning a corrupt scoped slot).
+   */
+  corruptOnly?: boolean;
 }): void {
+  if (!isValidOpaqueActorScope(input.expectedActorScope) || !isNonEmptyString(input.expectedOrigin)) {
+    return;
+  }
   const storage = input.storage !== undefined ? input.storage : getBrowserSessionStorage();
   if (!storage) return;
-  const current = readVerifiedCheckpoint(input);
-  if (current.kind === "valid" || (current.kind === "corrupt" && input.forceCorruptCleanup)) {
+
+  // Fail closed when expectedClientFlowId is explicitly supplied as null or an invalid UUID:
+  // never fall back to wildcard deletion of a valid checkpoint!
+  const hasExplicitFlowFilter = input.expectedClientFlowId !== undefined;
+  const validExpectedFlowId =
+    typeof input.expectedClientFlowId === "string" && isUuid(input.expectedClientFlowId)
+      ? input.expectedClientFlowId.toLowerCase()
+      : null;
+  const canClearValid =
+    !input.corruptOnly && (!hasExplicitFlowFilter || validExpectedFlowId !== null);
+
+  const tryClearKey = (key: string, allowCorruptCleanup: boolean): boolean => {
+    let raw: string | null = null;
     try {
-      storage.removeItem(PROVISION_CHECKPOINT_STORAGE_KEY);
+      raw = storage.getItem(key);
     } catch {
-      // ignore storage cleanup errors
+      return false;
     }
+    if (raw === null) return false;
+    const verdict = verifyStoredCheckpointRaw(raw, input.expectedOrigin, input.expectedActorScope);
+    if (verdict.kind === "valid") {
+      if (!canClearValid) {
+        return false;
+      }
+      if (validExpectedFlowId && verdict.checkpoint.client_flow_id !== validExpectedFlowId) {
+        return false;
+      }
+      try {
+        storage.removeItem(key);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (verdict.kind === "corrupt" && allowCorruptCleanup) {
+      try {
+        storage.removeItem(key);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
+
+  const scopedKey = getProvisionCheckpointStorageKey(input.expectedActorScope);
+  let scopedHadEntry = false;
+  try {
+    scopedHadEntry = storage.getItem(scopedKey) !== null;
+  } catch {
+    scopedHadEntry = false;
   }
+
+  tryClearKey(scopedKey, Boolean(input.forceCorruptCleanup || input.corruptOnly));
+  // If corruptOnly cleaned a corrupt scoped slot, do NOT touch legacy key so any valid legacy checkpoint surfaces safely!
+  if (input.corruptOnly && scopedHadEntry) {
+    return;
+  }
+  // Clean legacy key ONLY for this actor (+ matching flow ID), or corrupt legacy entry when scoped slot is empty.
+  tryClearKey(
+    PROVISION_CHECKPOINT_STORAGE_KEY,
+    Boolean(input.forceCorruptCleanup || input.corruptOnly) && !scopedHadEntry,
+  );
 }
 
 export type VerifiedCreateAccountApplied = {
