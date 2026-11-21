@@ -129,7 +129,7 @@ function addDaysIso(isoDate, deltaDays) {
 let cachedMigrations = null;
 async function loadMigrations() {
   if (cachedMigrations) return cachedMigrations;
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   cachedMigrations = await Promise.all(
     names.map(async (name) => ({
       name,

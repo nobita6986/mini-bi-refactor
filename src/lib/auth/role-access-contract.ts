@@ -1,4 +1,3 @@
-import { ACCOUNT_TYPES, type AccountType } from "../direct-entry/app-user-access-contract.ts";
 import { isUuid } from "../http/direct-entry-api-guard.ts";
 import {
   CAPABILITIES,
@@ -10,9 +9,7 @@ import {
 } from "./direct-entry-v2.ts";
 
 export {
-  ACCOUNT_TYPES,
   CAPABILITIES,
-  type AccountType,
   type AuthzScopeKind,
   type Capability,
   type EffectiveGrantSourceType,
@@ -167,7 +164,6 @@ export type AccountsSummaryItem = {
   login_id: string | null;
   display_name: string | null;
   enabled: boolean;
-  account_type: AccountType;
   authz_managed: boolean;
   version: number;
   person: AccountPersonSummary | null;
@@ -194,7 +190,6 @@ export type AccountAccessHeader = {
   login_id: string | null;
   display_name: string | null;
   enabled: boolean;
-  account_type: AccountType;
   authz_managed: boolean;
   version: number;
   person: AccountPersonSummary | null;
@@ -330,7 +325,6 @@ export const ROLE_ACCESS_ERROR_CODES = [
   "ACCOUNT_DISABLED",
   "ROLE_ALREADY_ASSIGNED",
   "ROLE_ASSIGNMENT_ALREADY_ENDED",
-  "ACCOUNT_TYPE_ROLE_FORBIDDEN",
   "PAYLOAD_TOO_LARGE",
   "AUTHZ_UNAVAILABLE",
 ] as const;
@@ -612,7 +606,6 @@ const ROLE_SOURCE_KIND_SET = new Set<string>(AUTHZ_ROLE_SOURCE_KINDS);
 const DIRECT_EXCEPTION_SOURCE_KIND_SET = new Set<string>(AUTHZ_DIRECT_EXCEPTION_SOURCE_KINDS);
 const CONTEXTUAL_TARGET_KIND_SET = new Set<string>(CONTEXTUAL_TARGET_KINDS);
 const INACTIVE_REASON_SET = new Set<string>(ASSIGNMENT_INACTIVE_REASONS);
-const ACCOUNT_TYPE_SET = new Set<string>(ACCOUNT_TYPES);
 
 const FORBIDDEN_AUTHORITY_EXACT_NORMALIZED = new Set<string>([
   "isprotected",
@@ -1400,7 +1393,6 @@ function projectAccountsSummaryItem(value: unknown): AccountsSummaryItem | null 
       "login_id",
       "display_name",
       "enabled",
-      "account_type",
       "authz_managed",
       "version",
       "person",
@@ -1418,8 +1410,6 @@ function projectAccountsSummaryItem(value: unknown): AccountsSummaryItem | null 
     !isNullableLoginId(value.login_id) ||
     !isNullableDisplayName(value.display_name) ||
     typeof value.enabled !== "boolean" ||
-    typeof value.account_type !== "string" ||
-    !ACCOUNT_TYPE_SET.has(value.account_type) ||
     typeof value.authz_managed !== "boolean" ||
     !isSafePositiveInt(value.version)
   ) {
@@ -1462,7 +1452,6 @@ function projectAccountsSummaryItem(value: unknown): AccountsSummaryItem | null 
     login_id: value.login_id,
     display_name: value.display_name,
     enabled: value.enabled,
-    account_type: value.account_type as AccountType,
     authz_managed: value.authz_managed,
     version: value.version,
     person,
@@ -1933,7 +1922,6 @@ function projectAccountAccessHeader(value: unknown): AccountAccessHeader | null 
       "login_id",
       "display_name",
       "enabled",
-      "account_type",
       "authz_managed",
       "version",
       "person",
@@ -1946,8 +1934,6 @@ function projectAccountAccessHeader(value: unknown): AccountAccessHeader | null 
     !isNullableLoginId(value.login_id) ||
     !isNullableDisplayName(value.display_name) ||
     typeof value.enabled !== "boolean" ||
-    typeof value.account_type !== "string" ||
-    !ACCOUNT_TYPE_SET.has(value.account_type) ||
     typeof value.authz_managed !== "boolean" ||
     !isSafePositiveInt(value.version)
   ) {
@@ -1961,7 +1947,6 @@ function projectAccountAccessHeader(value: unknown): AccountAccessHeader | null 
     login_id: value.login_id,
     display_name: value.display_name,
     enabled: value.enabled,
-    account_type: value.account_type as AccountType,
     authz_managed: value.authz_managed,
     version: value.version,
     person,

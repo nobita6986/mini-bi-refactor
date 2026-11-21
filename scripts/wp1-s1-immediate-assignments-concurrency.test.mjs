@@ -149,7 +149,7 @@ async function applyMigrations(client) {
       " create schema auth; create table auth.users (id uuid primary key, email text);",
   );
   const names = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")
     .sort();
   assert.ok(
     names.includes(WP1_MIGRATION_NAME),

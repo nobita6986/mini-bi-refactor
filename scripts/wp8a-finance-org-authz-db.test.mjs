@@ -229,7 +229,7 @@ function stripOuterTransaction(sql) {
 }
 
 async function loadMigrations() {
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   return Promise.all(
     names.map(async (name) => ({
       name,

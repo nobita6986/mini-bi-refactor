@@ -200,7 +200,6 @@
           "login_id": "owner_canonical",
           "display_name": "Canonical Owner",
           "enabled": true,
-          "account_type": "NORMAL",
           "authz_managed": true,
           "version": 4,
           "person": {
@@ -232,7 +231,6 @@
           "login_id": "minh_admin",
           "display_name": "Nguyen Minh",
           "enabled": true,
-          "account_type": "NORMAL",
           "authz_managed": true,
           "version": 3,
           "person": {
@@ -273,7 +271,6 @@
           "login_id": "suspended_staff",
           "display_name": "Tran Van Tam",
           "enabled": false,
-          "account_type": "NORMAL",
           "authz_managed": true,
           "version": 6,
           "person": null,
@@ -303,7 +300,6 @@
           "login_id": "owner_canonical",
           "display_name": "Canonical Owner",
           "enabled": true,
-          "account_type": "NORMAL",
           "authz_managed": true,
           "version": 4,
           "person": {
@@ -380,7 +376,6 @@
           "login_id": "minh_admin",
           "display_name": "Nguyen Minh",
           "enabled": true,
-          "account_type": "NORMAL",
           "authz_managed": true,
           "version": 3,
           "person": {
@@ -506,7 +501,6 @@
           "login_id": "suspended_staff",
           "display_name": "Tran Van Tam",
           "enabled": false,
-          "account_type": "NORMAL",
           "authz_managed": true,
           "version": 6,
           "person": null

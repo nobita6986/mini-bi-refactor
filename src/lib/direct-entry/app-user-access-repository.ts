@@ -1,8 +1,6 @@
 import "server-only";
 
 import type {
-  AccountLinkStateFilter,
-  AccountTypeFilter,
   ExistingAccount,
   ExistingAccountList,
 } from "./app-user-access-contract.ts";
@@ -19,8 +17,6 @@ export type AccountListRepositoryInput = AccountActorRef & {
   enabled: "all" | "true" | "false";
   page: number;
   page_size: number;
-  account_type?: AccountTypeFilter;
-  link_state?: AccountLinkStateFilter;
 };
 export type AccountAccessOutcome<T> =
   | { ok: true; data: T }
@@ -92,18 +88,9 @@ export function createAccountAccessRepository(rpc?: Rpc): AccountAccessRepositor
 
   return {
     listAccounts(input) {
-      const accountType = input.account_type ?? "all";
-      const linkState = input.link_state ?? "all";
-      if (accountType === "all" && linkState === "all") {
-        return read("direct_entry_list_app_users_admin", {
-          p_auth_subject: input.auth_subject, p_app_user_id: input.app_user_id,
-          p_search: input.search, p_enabled: input.enabled, p_page: input.page, p_page_size: input.page_size,
-        }, projectExistingAccountList);
-      }
-      return read("direct_entry_list_app_users_filtered_admin", {
+      return read("direct_entry_list_app_users_admin", {
         p_auth_subject: input.auth_subject, p_app_user_id: input.app_user_id,
         p_search: input.search, p_enabled: input.enabled, p_page: input.page, p_page_size: input.page_size,
-        p_account_type: accountType, p_link_state: linkState,
       }, projectExistingAccountList);
     },
     getAccount(input) {

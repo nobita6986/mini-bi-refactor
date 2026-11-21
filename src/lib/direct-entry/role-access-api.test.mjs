@@ -121,7 +121,6 @@ test("role-access-repository classifies all SQLSTATE and token errors determinis
     "ACCOUNT_DISABLED",
     "ROLE_ALREADY_ASSIGNED",
     "ROLE_ASSIGNMENT_ALREADY_ENDED",
-    "ACCOUNT_TYPE_ROLE_FORBIDDEN",
   ]) {
     const mapped = classifyRoleAccessSqlError({ code: "PT409", message: token });
     assert.equal(mapped.status, 409, token);

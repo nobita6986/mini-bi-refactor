@@ -711,8 +711,8 @@ test("Detailed Matrix (5): Ephemeral PGlite DB integration for direct_entry_repo
 
     // Configure leave profile for USER_REC with work_start_date = 2025-02-15
     await db.query(
-      "insert into public.leave_employee_profiles (app_user_id, employment_status, work_start_date, is_shared_non_employee) values " +
-        "($1, 'OFFICIAL', '2025-02-15', false), ($2, 'UNCONFIGURED', null, false)",
+      "insert into public.leave_employee_profiles (app_user_id, employment_status, work_start_date) values " +
+        "($1, 'OFFICIAL', '2025-02-15'), ($2, 'UNCONFIGURED', null)",
       [USER_REC, USER_UNCONFIG],
     );
 

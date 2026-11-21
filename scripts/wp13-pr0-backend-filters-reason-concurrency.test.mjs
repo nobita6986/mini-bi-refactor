@@ -194,7 +194,7 @@ test("WP13 PR-0 Backend real PG18 concurrency, lock-order & dynamic S0-T1-C veri
         + " create schema auth; create table auth.users (id uuid primary key, email text);",
     );
 
-    const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql")).sort();
+    const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
     const wp13Idx = names.indexOf(WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME);
     assert.ok(wp13Idx > 0, "WP13 PR-0 migration is present in migration chain");
     const s0Sql = await readFile(path.join(MIGRATION_DIR, S0_T1_C_MIGRATION_NAME), "utf8");

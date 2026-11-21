@@ -72,14 +72,13 @@ test("request parsers reject forbidden authority/scope fields, SYSTEM_ADMIN crea
     value: { department_id: DEPT_ID, include_inactive: true },
   });
 
-  // Forbidden client keys (is_protected, scope_kind, project_id, account_type, is_system_admin)
+  // Forbidden client keys (is_protected, scope_kind, scope_template, assignment_mode, project_id, is_system_admin)
   for (const forbidden of [
     { is_protected: true },
     { scope_kind: "ALL" },
     { scope_template: "ALL" },
     { assignment_mode: "GLOBAL" },
     { project_id: "proj-1" },
-    { account_type: "NORMAL" },
     { is_system_admin: true },
   ]) {
     const res = parseCreateGroupBody({

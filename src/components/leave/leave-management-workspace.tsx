@@ -1258,7 +1258,6 @@ export function LeaveManagementWorkspace({
         body: JSON.stringify({
           operation: "UPSERT_EMPLOYEE_PROFILE",
           target_app_user_id: editingEmployee.account.app_user_id,
-          is_shared_non_employee: false,
           employment_status: profileStatus,
           unit_kind: profileUnitKind,
           work_start_date: profileWorkStartDate.trim() || null,

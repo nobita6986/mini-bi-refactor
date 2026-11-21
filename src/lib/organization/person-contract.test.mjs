@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   computeCreatePersonFingerprint,
   computeLinkAccountPersonFingerprint,
-  computeSetAccountTypeFingerprint,
   computeTransferPersonDepartmentFingerprint,
   computeUnlinkAccountPersonFingerprint,
   computeUpdatePersonFingerprint,
@@ -14,7 +13,6 @@ import {
   parseGetPersonParams,
   parseLinkAccountPersonBody,
   parseListPersonsQuery,
-  parseSetAccountTypeBody,
   parseTransferPersonDepartmentBody,
   parseUnlinkAccountPersonBody,
   parseUpdatePersonBody,
@@ -22,7 +20,6 @@ import {
   projectLinkAccountPersonResponse,
   projectListPersonsResponse,
   projectMutatePersonResponse,
-  projectSetAccountTypeResponse,
   projectTransferPersonDepartmentResponse,
   projectUnlinkAccountPersonResponse,
 } from "./person-contract.ts";
@@ -203,11 +200,12 @@ test("organization mutation parsers enforce employee_code, idempotency, paired a
   }
 
   for (const field of ["role", "capabilities", "app_user_id", "auth_subject"]) {
-    const res = parseSetAccountTypeBody(
+    const res = parseLinkAccountPersonBody(
       {
-        account_type: "SHARED",
+        person_id: PERSON_ID,
         expected_account_version: 1,
-        reason: "Classify",
+        expected_person_version: 2,
+        reason: "Link",
         idempotency_key: IDEMP_KEY,
         [field]: "full_admin",
       },
@@ -295,20 +293,6 @@ test("organization fingerprints isolate operation and target cleanly and error t
   assert.equal(
     computeTransferPersonDepartmentFingerprint(ACTOR_ID, PERSON_ID, transferBody).length,
     64,
-  );
-
-  const typeBody = parseSetAccountTypeBody(
-    {
-      account_type: "SERVICE",
-      expected_account_version: 1,
-      reason: "Classify",
-      idempotency_key: IDEMP_KEY,
-    },
-    IDEMP_KEY,
-  ).value;
-  assert.notEqual(
-    computeSetAccountTypeFingerprint(ACTOR_ID, ACCOUNT_ID, typeBody),
-    computeSetAccountTypeFingerprint(ACTOR_ID, PERSON_ID, typeBody),
   );
 
   const linkBody = parseLinkAccountPersonBody(
@@ -454,12 +438,6 @@ test("strict response projectors accept canonical WP3 shapes and fail closed on 
         started_at: "2026-11-13T04:00:00.000Z",
         ended_at: null,
       },
-    }),
-  );
-  assert.ok(
-    projectSetAccountTypeResponse({
-      replayed: false,
-      account: { account_ref: ACCOUNT_ID, account_type: "SHARED", version: 2 },
     }),
   );
   assert.ok(

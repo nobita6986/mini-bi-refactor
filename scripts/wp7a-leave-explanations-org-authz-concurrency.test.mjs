@@ -224,7 +224,7 @@ test("WP7A real PostgreSQL concurrency: org HEAD/transfer vs Leave/Explanations,
       "create role anon; create role authenticated; create role service_role;" +
         " create schema auth; create table auth.users (id uuid primary key, email text);",
     );
-    const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
     assert.ok(names.includes("20261119120000_wp7a_leave_explanations_org_authz.sql"));
     for (const name of names) {
       await setup.query(await readFile(path.join(MIGRATION_DIR, name), "utf8"));

@@ -681,7 +681,6 @@ function makeAccount(overrides = {}) {
     login_id: "an.nv",
     enabled: true,
     version: 1,
-    account_type: "NORMAL",
     active_person_link: null,
     ...overrides,
   };
@@ -758,7 +757,6 @@ function makeEffectiveAccessEnvelope(overrides = {}) {
       login_id: "an.nv",
       display_name: "Nguyễn Văn An",
       enabled: true,
-      account_type: "NORMAL",
       authz_managed: true,
       version: overrides.version ?? 2,
       person: {
@@ -826,8 +824,6 @@ const {
 } = repoRequire("./src/lib/admin/provision-checkpoint-v2.ts");
 const {
   buildAccountListQuery,
-  parseAccountManagementView,
-  resolveAccountViewFilters,
 } = repoRequire("./src/lib/admin/account-access-model.ts");
 const {
   ADMIN_SECTIONS,
@@ -1043,42 +1039,19 @@ test("Step 2 response classifier rejects malformed 200 and accepts strict Finali
   assert.equal(okFallback.account.replayed, true);
 });
 
-test("Account view filters map ?view=special and ?view=unlinked strictly to PR-0 API params without leaking UI params", () => {
-  assert.equal(parseAccountManagementView("special"), "special");
-  assert.equal(parseAccountManagementView("unlinked"), "unlinked");
-  assert.equal(parseAccountManagementView("unknown"), "all");
-  assert.equal(parseAccountManagementView(undefined), "all");
-
-  const specialParams = buildAccountListQuery({
-    search: "",
-    enabled: "all",
-    page: 2,
-    ...resolveAccountViewFilters("special"),
-  });
-  assert.equal(specialParams.get("account_type"), "SPECIAL");
-  assert.equal(specialParams.has("link_state"), false);
-  assert.equal(specialParams.has("view"), false);
-  assert.equal(specialParams.get("page"), "2");
-
-  const unlinkedParams = buildAccountListQuery({
+test("PR #28: buildAccountListQuery builds bounded clean query without account_type or link_state", () => {
+  const params = buildAccountListQuery({
     search: "an",
     enabled: "true",
-    page: 1,
-    ...resolveAccountViewFilters("unlinked"),
+    page: 2,
   });
-  assert.equal(unlinkedParams.get("account_type"), "NORMAL");
-  assert.equal(unlinkedParams.get("link_state"), "unlinked");
-  assert.equal(unlinkedParams.has("view"), false);
-  assert.equal(unlinkedParams.has("tab"), false);
-
-  const allParams = buildAccountListQuery({
-    search: "",
-    enabled: "all",
-    page: 1,
-    ...resolveAccountViewFilters("all"),
-  });
-  assert.equal(allParams.has("account_type"), false);
-  assert.equal(allParams.has("link_state"), false);
+  assert.equal(params.get("search"), "an");
+  assert.equal(params.get("enabled"), "true");
+  assert.equal(params.get("page"), "2");
+  assert.equal(params.has("account_type"), false);
+  assert.equal(params.has("link_state"), false);
+  assert.equal(params.has("view"), false);
+  assert.equal(params.has("tab"), false);
 });
 
 test("AdminSubnav §5.2 order renames Nhân sự, drops standalone accounts, keeps teams, and highlights Nhân sự on /admin/access/accounts", () => {

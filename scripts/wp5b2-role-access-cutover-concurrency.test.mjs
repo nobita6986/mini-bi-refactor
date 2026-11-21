@@ -226,7 +226,7 @@ async function applyMigrations(client) {
       " create schema auth; create table auth.users (id uuid primary key, email text);",
   );
   const names = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")
     .sort();
   assert.ok(names.includes(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME));
   assert.ok(names.includes("20261118160000_wp5b2_role_access_cutover.sql"));

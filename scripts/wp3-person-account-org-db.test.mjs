@@ -3,6 +3,7 @@
  * & Department HEAD — Database & Backfill Test Suite (TM-01..TM-11, TM-13..TM-18).
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -21,11 +22,25 @@ import { parsePatchAdminConfigBody } from "../src/lib/leave/leave-contract.ts";
 import {
   computeCreatePersonFingerprint,
   computeLinkAccountPersonFingerprint,
-  computeSetAccountTypeFingerprint,
   computeTransferPersonDepartmentFingerprint,
   computeUnlinkAccountPersonFingerprint,
   computeUpdatePersonFingerprint,
 } from "../src/lib/organization/person-contract.ts";
+
+function computeSetAccountTypeFingerprint(actorAppUserId, accountRef, body) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        op: "ACCOUNT_TYPE_UPDATED",
+        actor: actorAppUserId.toLowerCase(),
+        account: accountRef.toLowerCase(),
+        account_type: body.account_type,
+        expected_account_version: body.expected_account_version,
+        reason: body.reason,
+      }),
+    )
+    .digest("hex");
+}
 import {
   WP3B_BACKFILL_SCHEMA_VERSION,
   computeBackfillManifestFingerprint,
@@ -138,7 +153,7 @@ async function createMigratedWp3Database() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   await db.exec("alter table auth.users add column email text;");
-  const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   assert.ok(names.includes(WP3B_PERSON_ACCOUNT_ORG_MIGRATION_NAME));
   for (const name of names) {
     const sql = await readFile(path.join(MIGRATION_DIR, name), "utf8");
@@ -1408,7 +1423,6 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
     {
       operation: "UPSERT_EMPLOYEE_PROFILE",
       target_app_user_id: USER_ACCT.app,
-      is_shared_non_employee: false,
       employment_status: "OFFICIAL",
       unit_kind: "IT",
       work_start_date: "2025-05-01",
@@ -1429,7 +1443,7 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
         FULL_ADMIN.auth,
         FULL_ADMIN.app,
         badLeaveReq.data.target_app_user_id,
-        badLeaveReq.data.is_shared_non_employee,
+        false,
         badLeaveReq.data.employment_status,
         badLeaveReq.data.unit_kind,
         badLeaveReq.data.work_start_date,
@@ -1449,7 +1463,6 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
     {
       operation: "UPSERT_EMPLOYEE_PROFILE",
       target_app_user_id: USER_ACCT.app,
-      is_shared_non_employee: false,
       employment_status: "OFFICIAL",
       unit_kind: "MARKETING",
       work_start_date: "2025-05-01",
@@ -1469,7 +1482,7 @@ test("TM-05, TM-06 & TM-09: Leave guard/sync, ACCOUNTING legacy RPC parity, 3-wa
       FULL_ADMIN.auth,
       FULL_ADMIN.app,
       okLeaveReq.data.target_app_user_id,
-      okLeaveReq.data.is_shared_non_employee,
+      false,
       okLeaveReq.data.employment_status,
       okLeaveReq.data.unit_kind,
       okLeaveReq.data.work_start_date,
@@ -2245,7 +2258,6 @@ test("WP3B P1-2 Fix: Org sync never overwrites leave_employee_profiles.work_star
     {
       operation: "UPSERT_EMPLOYEE_PROFILE",
       target_app_user_id: USER_A.app,
-      is_shared_non_employee: false,
       employment_status: "OFFICIAL",
       unit_kind: "MARKETING",
       work_start_date: "2020-01-01",
@@ -2265,7 +2277,7 @@ test("WP3B P1-2 Fix: Org sync never overwrites leave_employee_profiles.work_star
       FULL_ADMIN.auth,
       FULL_ADMIN.app,
       upsertReq.data.target_app_user_id,
-      upsertReq.data.is_shared_non_employee,
+      false,
       upsertReq.data.employment_status,
       upsertReq.data.unit_kind,
       upsertReq.data.work_start_date,

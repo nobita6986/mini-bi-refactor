@@ -110,7 +110,6 @@ export type LeaveAccountProjection = {
 
 export type LeaveAuthorityProjection = {
   app_user_id: string;
-  is_shared_non_employee?: boolean;
   is_full_admin: boolean;
   is_bod: boolean;
   is_hr_operator: boolean;
@@ -325,7 +324,6 @@ export type LeaveModuleGrantProjection = {
 
 export type LeaveEmployeeProfileProjection = {
   app_user_id: string;
-  is_shared_non_employee?: boolean;
   employment_status: LeaveEmploymentStatus;
   unit_kind: LeaveUnitKind;
   work_start_date: string | null;

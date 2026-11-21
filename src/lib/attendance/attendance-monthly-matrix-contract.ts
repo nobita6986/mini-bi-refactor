@@ -627,7 +627,6 @@ export type AttendanceMyExplanationsOverviewProjection = {
     app_user_id: string;
     can_submit_explanation: boolean;
     can_approve_explanations: boolean;
-    is_shared_non_employee: boolean;
     is_full_admin: boolean;
     is_bod: boolean;
   };
@@ -5367,14 +5366,12 @@ export function projectAttendanceMyExplanationsOverview(
       "app_user_id",
       "can_submit_explanation",
       "can_approve_explanations",
-      "is_shared_non_employee",
       "is_full_admin",
       "is_bod",
     ]) ||
     !isUuidString(value.viewer.app_user_id) ||
     typeof value.viewer.can_submit_explanation !== "boolean" ||
     typeof value.viewer.can_approve_explanations !== "boolean" ||
-    typeof value.viewer.is_shared_non_employee !== "boolean" ||
     typeof value.viewer.is_full_admin !== "boolean" ||
     typeof value.viewer.is_bod !== "boolean"
   ) {
@@ -5500,7 +5497,6 @@ export function projectAttendanceMyExplanationsOverview(
       app_user_id: value.viewer.app_user_id.toLowerCase(),
       can_submit_explanation: value.viewer.can_submit_explanation,
       can_approve_explanations: value.viewer.can_approve_explanations,
-      is_shared_non_employee: value.viewer.is_shared_non_employee,
       is_full_admin: value.viewer.is_full_admin,
       is_bod: value.viewer.is_bod,
     },

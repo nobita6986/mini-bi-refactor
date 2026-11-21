@@ -215,12 +215,12 @@ function makeFullAdminSession(actor) {
   });
 }
 
-async function seedBaseUser(db, user, { enabled = true, accountType = "NORMAL" } = {}) {
+async function seedBaseUser(db, user, { enabled = true } = {}) {
   await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [user.auth, user.email]);
   await db.query(
-    `insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled, account_type)
-     values ($1::uuid, $2::uuid, $3, $4, $5)`,
-    [user.app, user.auth, user.name, enabled, accountType],
+    `insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled)
+     values ($1::uuid, $2::uuid, $3, $4)`,
+    [user.app, user.auth, user.name, enabled],
   );
 }
 

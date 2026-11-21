@@ -64,14 +64,12 @@ test("R2 migration #83 is append-only and read RPC ACL/projection is exact", asy
   assert.deepEqual(Object.keys(result).sort(), ["accounts", "enabled", "page", "page_size", "search", "total"]);
   assert.deepEqual(Object.keys(result.accounts[0]).sort(), [
     "account_ref",
-    "account_type",
     "active_person_link",
     "display_name",
     "enabled",
     "login_id",
     "version",
   ]);
-  assert.equal(result.accounts[0].account_type, "NORMAL");
   assert.equal(result.accounts[0].active_person_link, null);
   assert.equal(result.accounts[0].display_name, "Accounting");
   assert.equal(result.accounts[0].login_id, "accounting");
@@ -107,14 +105,12 @@ test("R2 list filters, bounds, stable order and detail are Full-Admin-only", asy
   const detail = (await rows(database, "select public.direct_entry_get_app_user_admin($1::uuid,$2::uuid,$3::uuid) as result", [ADMIN_AUTH, ADMIN_APP, TARGET_APP]))[0].result;
   assert.deepEqual(Object.keys(detail).sort(), [
     "account_ref",
-    "account_type",
     "active_person_link",
     "display_name",
     "enabled",
     "login_id",
     "version",
   ]);
-  assert.equal(detail.account_type, "NORMAL");
   assert.equal(detail.active_person_link, null);
   await denied(rpc(database, "direct_entry_list_app_users_admin", [ACCOUNTING_AUTH, ACCOUNTING_APP, null, "all", 1, 25]));
   await denied(rpc(database, "direct_entry_list_app_users_admin", [DISABLED_ADMIN_AUTH, DISABLED_ADMIN_APP, null, "all", 1, 25]));

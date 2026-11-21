@@ -304,7 +304,6 @@ export type PatchAdminConfigInput =
   | {
       operation: "UPSERT_EMPLOYEE_PROFILE";
       target_app_user_id: string;
-      is_shared_non_employee: boolean;
       employment_status: LeaveEmploymentStatus;
       unit_kind: LeaveUnitKind;
       work_start_date: string | null;
@@ -930,7 +929,6 @@ export function parsePatchAdminConfigBody(
       return { ok: false, code: "LEAVE_PROFILE_INVALID" };
     }
     const targetAppUserId = body.target_app_user_id.trim().toLowerCase();
-    const isShared = Boolean(body.is_shared_non_employee);
     const empStatus =
       typeof body.employment_status === "string"
         ? body.employment_status.trim().toUpperCase()
@@ -987,7 +985,6 @@ export function parsePatchAdminConfigBody(
     const request_fingerprint = sha256Hex({
       op: "UPSERT_EMPLOYEE_PROFILE",
       target_app_user_id: targetAppUserId,
-      is_shared_non_employee: isShared,
       employment_status: empStatus,
       unit_kind: unitKind,
       work_start_date: workStartDate,
@@ -1003,7 +1000,6 @@ export function parsePatchAdminConfigBody(
       data: {
         operation: "UPSERT_EMPLOYEE_PROFILE",
         target_app_user_id: targetAppUserId,
-        is_shared_non_employee: isShared,
         employment_status: empStatus as LeaveEmploymentStatus,
         unit_kind: unitKind as LeaveUnitKind,
         work_start_date: workStartDate,

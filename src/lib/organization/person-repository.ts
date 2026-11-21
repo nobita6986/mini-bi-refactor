@@ -6,10 +6,8 @@ import {
   projectLinkAccountPersonResponse,
   projectListPersonsResponse,
   projectMutatePersonResponse,
-  projectSetAccountTypeResponse,
   projectTransferPersonDepartmentResponse,
   projectUnlinkAccountPersonResponse,
-  type AccountType,
   type GetPersonRpcProjection,
   type LinkAccountPersonRpcProjection,
   type ListPersonsRpcProjection,
@@ -18,7 +16,6 @@ import {
   type PersonFilterStatus,
   type PersonLinkState,
   type PersonStatus,
-  type SetAccountTypeRpcProjection,
   type TransferPersonDepartmentRpcProjection,
   type UnlinkAccountPersonRpcProjection,
 } from "./person-contract.ts";
@@ -86,15 +83,6 @@ export type TransferPersonDepartmentInput = OrganizationActorRef & {
   request_fingerprint: string;
 };
 
-export type SetAccountTypeInput = OrganizationActorRef & {
-  account_ref: string;
-  account_type: AccountType;
-  expected_account_version: number;
-  reason: string;
-  idempotency_key: string;
-  request_fingerprint: string;
-};
-
 export type LinkAccountPersonInput = OrganizationActorRef & {
   account_ref: string;
   person_id: string;
@@ -128,7 +116,6 @@ export type OrganizationRepository = {
   transferPersonDepartment(
     input: TransferPersonDepartmentInput,
   ): Promise<OrgRepoResult<TransferPersonDepartmentRpcProjection>>;
-  setAccountType(input: SetAccountTypeInput): Promise<OrgRepoResult<SetAccountTypeRpcProjection>>;
   linkAccountPerson(
     input: LinkAccountPersonInput,
   ): Promise<OrgRepoResult<LinkAccountPersonRpcProjection>>;
@@ -339,34 +326,6 @@ export function createServiceOrganizationRepository(
         return { ok: true, data: projected };
       } catch {
         console.error("[organization-admin] transfer person department RPC failed");
-        return { ok: false, code: "ORG_UNAVAILABLE" };
-      }
-    },
-
-    async setAccountType(input) {
-      try {
-        resolvedRpc ??= serviceRoleRpc();
-        const result = await resolvedRpc("org_department_set_account_type_admin", {
-          p_auth_subject: input.auth_subject,
-          p_app_user_id: input.app_user_id,
-          p_target_app_user_id: input.account_ref,
-          p_account_type: input.account_type,
-          p_expected_account_version: input.expected_account_version,
-          p_reason: input.reason,
-          p_idempotency_key: input.idempotency_key,
-          p_request_fingerprint: input.request_fingerprint,
-        });
-        if (result.error) {
-          return { ok: false, code: classifyOrganizationRpcError(result.error) };
-        }
-        const projected = projectSetAccountTypeResponse(result.data);
-        if (!projected) {
-          console.error("[organization-admin] set account type returned non-canonical projection");
-          return { ok: false, code: "ORG_UNAVAILABLE" };
-        }
-        return { ok: true, data: projected };
-      } catch {
-        console.error("[organization-admin] set account type RPC failed");
         return { ok: false, code: "ORG_UNAVAILABLE" };
       }
     },

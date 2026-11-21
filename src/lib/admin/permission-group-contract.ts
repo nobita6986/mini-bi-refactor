@@ -348,7 +348,6 @@ const FORBIDDEN_CLIENT_KEYS = new Set([
   "scope_template",
   "assignment_mode",
   "project_id",
-  "account_type",
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -16,7 +16,6 @@ import {
 } from "../departments/department-contract.ts";
 import { newIdempotencyKey } from "../direct-entry/project-operations-model.ts";
 import {
-  ACCOUNT_TYPES,
   CONTROL_CHAR_PATTERN,
   DEFAULT_ORG_PAGE_SIZE,
   EMPLOYEE_CODE_MAX_LENGTH,
@@ -47,7 +46,6 @@ import {
   projectListPersonsResponse,
   projectMutatePersonResponse,
   projectTransferPersonDepartmentResponse,
-  type AccountType,
   type CreatePersonBody,
   type GetPersonRpcProjection,
   type ListPersonsQuery,
@@ -70,7 +68,6 @@ import {
 } from "../organization/person-contract.ts";
 
 export {
-  ACCOUNT_TYPES,
   DEFAULT_ORG_PAGE_SIZE,
   EMPLOYEE_CODE_MAX_LENGTH,
   EMPLOYEE_CODE_MIN_LENGTH,
@@ -87,7 +84,6 @@ export {
   REASON_MIN_LENGTH,
   SEARCH_MAX_LENGTH,
   organizationErrorStatus,
-  type AccountType,
   type DepartmentPersonMemberMutationProjection,
   type GetPersonRpcProjection,
   type ListPersonsQuery,
@@ -228,21 +224,6 @@ export function formatPersonSourceKind(
         : "Đối chiếu chứng từ";
     case "BACKFILL_CURRENT_STATE_ONLY":
       return "Khởi tạo hiện trạng";
-  }
-}
-
-export function accountTypeLabel(accountType: AccountType): {
-  label: string;
-  shortLabel: string;
-  tone: BadgeTone;
-} {
-  switch (accountType) {
-    case "NORMAL":
-      return { label: "Cá nhân (NORMAL)", shortLabel: "Cá nhân", tone: "info" };
-    case "SHARED":
-      return { label: "Dùng chung (SHARED)", shortLabel: "Dùng chung", tone: "warning" };
-    case "SERVICE":
-      return { label: "Dịch vụ (SERVICE)", shortLabel: "Dịch vụ", tone: "neutral" };
   }
 }
 
@@ -619,8 +600,6 @@ export function messageForOrgErrorCode(code: string | null, status: number): str
       return "Nhân sự đang thuộc một phòng ban khác. Vui lòng dùng thao tác Chuyển phòng ban thay vì gán mới.";
     case "SAME_TARGET_DEPARTMENT":
       return "Phòng ban đích đang trùng với phòng ban hiện hành của nhân sự.";
-    case "ACCOUNT_TYPE_LINK_FORBIDDEN":
-      return "Tài khoản phân loại Dùng chung (SHARED) hoặc Dịch vụ (SERVICE) không được liên kết hồ sơ nhân sự nội bộ.";
     case "ACCOUNT_OR_PERSON_ALREADY_LINKED":
       return "Tài khoản hoặc hồ sơ nhân sự đã có liên kết hiệu lực với đối tượng khác. Hãy tải lại dữ liệu mới nhất.";
     case "RECRUITER_IDENTITY_CONFLICT":

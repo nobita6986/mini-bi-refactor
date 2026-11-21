@@ -10,7 +10,6 @@ import {
 import {
   computeCreatePersonFingerprint,
   computeLinkAccountPersonFingerprint,
-  computeSetAccountTypeFingerprint,
   computeTransferPersonDepartmentFingerprint,
   computeUnlinkAccountPersonFingerprint,
   computeUpdatePersonFingerprint,
@@ -19,7 +18,6 @@ import {
   parseGetPersonParams,
   parseLinkAccountPersonBody,
   parseListPersonsQuery,
-  parseSetAccountTypeBody,
   parseTransferPersonDepartmentBody,
   parseUnlinkAccountPersonBody,
   parseUpdatePersonBody,
@@ -463,51 +461,6 @@ export async function transferPersonDepartmentAdmin(
       person_version: saved.data.person_version,
       closed_membership: saved.data.closed_membership,
       active_membership: saved.data.active_membership,
-    },
-    200,
-  );
-}
-
-export async function setAccountTypeAdmin(
-  request: Request,
-  accountRef: string,
-  enabledFlag: string | undefined,
-  dependencies: OrganizationAdminApiDependencies,
-): Promise<Response> {
-  const prep = await prepareOrganizationMutation(request, enabledFlag, dependencies);
-  if (!prep.ok) return prep.response;
-
-  const parsedAccountRef = parseUuidPathWithEmptyQuery(accountRef, prep.url, "accountRef");
-  if (!parsedAccountRef.ok) return orgError(parsedAccountRef.code);
-
-  const parsedBody = parseSetAccountTypeBody(
-    prep.body,
-    request.headers.get("idempotency-key"),
-  );
-  if (!parsedBody.ok) return orgError(parsedBody.code);
-
-  const fingerprint = computeSetAccountTypeFingerprint(
-    prep.actor.app_user_id,
-    parsedAccountRef.value,
-    parsedBody.value,
-  );
-  const saved = await dependencies.repository.setAccountType({
-    auth_subject: prep.actor.auth_subject,
-    app_user_id: prep.actor.app_user_id,
-    account_ref: parsedAccountRef.value,
-    account_type: parsedBody.value.account_type,
-    expected_account_version: parsedBody.value.expected_account_version,
-    reason: parsedBody.value.reason,
-    idempotency_key: parsedBody.value.idempotency_key,
-    request_fingerprint: fingerprint,
-  });
-  if (!saved.ok) return orgError(saved.code);
-
-  return noStoreJson(
-    {
-      ok: true,
-      replayed: saved.data.replayed,
-      account: saved.data.account,
     },
     200,
   );

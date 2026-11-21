@@ -121,7 +121,7 @@ let cachedMigrations = null;
 async function loadMigrations() {
   if (cachedMigrations) return cachedMigrations;
   const names = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")
     .sort();
   cachedMigrations = await Promise.all(
     names.map(async (name) => {
@@ -534,32 +534,53 @@ test("2. GAP-BE-03: Accounts server-side filter before pagination (SQL + API + r
     );
 
     const trace = [];
-    const repo = createAccountAccessRepository(createPgliteNamedRpc(db, trace));
-    const ownerDeps = { resolveSession: sessionFor(OWNER), repository: repo };
+    const rpcCall = createPgliteNamedRpc(db, trace);
+    const repo = createAccountAccessRepository(rpcCall);
 
     async function fetchAllPages(queryString, pageSize = 2) {
+      const params = new URLSearchParams(queryString);
+      const accountType = params.get("account_type") ?? "all";
+      const linkState = params.get("link_state") ?? "all";
+      const enabled = params.get("enabled") ?? "all";
+      const search = params.get("search") ?? null;
+      const isFiltered = accountType !== "all" || linkState !== "all";
       const collected = [];
       let total = null;
       let page = 1;
       while (true) {
-        const sep = queryString ? `${queryString}&` : "";
-        const res = await listAccounts(
-          new Request(`https://app.test/api/admin/access/accounts?${sep}page=${page}&page_size=${pageSize}`),
-          "true",
-          ownerDeps,
-        );
-        assert.equal(res.status, 200, `${queryString} page=${page}`);
-        const body = await res.json();
-        assert.equal(body.ok, true);
+        const rpcName = isFiltered
+          ? "direct_entry_list_app_users_filtered_admin"
+          : "direct_entry_list_app_users_admin";
+        const rpcArgs = isFiltered
+          ? {
+              p_auth_subject: OWNER.auth,
+              p_app_user_id: OWNER.app,
+              p_search: search,
+              p_enabled: enabled,
+              p_page: page,
+              p_page_size: pageSize,
+              p_account_type: accountType,
+              p_link_state: linkState,
+            }
+          : {
+              p_auth_subject: OWNER.auth,
+              p_app_user_id: OWNER.app,
+              p_search: search,
+              p_enabled: enabled,
+              p_page: page,
+              p_page_size: pageSize,
+            };
+        const { data: list, error } = await rpcCall(rpcName, rpcArgs);
+        assert.equal(error, null, `${queryString} page=${page}: ${error?.message}`);
         assert.deepEqual(
-          Object.keys(body.list).sort(),
+          Object.keys(list).sort(),
           ["accounts", "enabled", "page", "page_size", "search", "total"],
           "exact 6-key response envelope preserved",
         );
-        if (total === null) total = body.list.total;
-        assert.equal(body.list.total, total, "total stays stable across pages");
-        collected.push(...body.list.accounts);
-        if (collected.length >= total || body.list.accounts.length === 0) break;
+        if (total === null) total = list.total;
+        assert.equal(list.total, total, "total stays stable across pages");
+        collected.push(...list.accounts);
+        if (collected.length >= total || list.accounts.length === 0) break;
         page += 1;
         assert.ok(page <= 20, "pagination loop terminates");
       }
@@ -654,15 +675,23 @@ test("2. GAP-BE-03: Accounts server-side filter before pagination (SQL + API + r
       );
     }
 
-    // RBAC: HR_OPERATOR & RECRUITER denied (42501 / HTTP 403 ACCOUNT_DENIED); disabled admin denied
+    // RBAC: HR_OPERATOR & RECRUITER & disabled admin denied (42501) on historical filtered SQL RPC
     for (const deniedActor of [HR_OP, REC_ACTOR, DISABLED_ADMIN]) {
-      const deniedRes = await listAccounts(
-        new Request("https://app.test/api/admin/access/accounts?account_type=SPECIAL"),
-        "true",
-        { resolveSession: sessionFor(deniedActor), repository: repo },
+      await expectServiceError(
+        db,
+        "select public.direct_entry_list_app_users_filtered_admin($1::uuid, $2::uuid, null, 'all', 1, 25, 'SPECIAL', 'all')",
+        [deniedActor.auth, deniedActor.app],
+        "42501",
       );
-      assert.deepEqual([deniedRes.status, await deniedRes.json()], [403, { ok: false, code: "ACCOUNT_DENIED" }]);
     }
+
+    // Post-PR28 HTTP handler rejects retired account_type query param with 400 ACCOUNT_INVALID
+    const retiredParamRes = await listAccounts(
+      new Request("https://app.test/api/admin/access/accounts?account_type=SPECIAL"),
+      "true",
+      { resolveSession: sessionFor(OWNER), repository: repo },
+    );
+    assert.deepEqual([retiredParamRes.status, await retiredParamRes.json()], [400, { ok: false, code: "ACCOUNT_INVALID" }]);
   } finally {
     await db.close();
   }

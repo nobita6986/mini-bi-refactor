@@ -574,7 +574,6 @@ function makeAccount(overrides = {}) {
     login_id: "annv",
     enabled: true,
     version: 2,
-    account_type: "NORMAL",
     active_person_link: null,
     ...overrides,
   };

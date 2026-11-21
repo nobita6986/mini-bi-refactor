@@ -929,19 +929,17 @@ test("Opening balance apply contract preserves expected snapshot metadata, maps 
   assert.equal(staleJson.code, "LEAVE_OPENING_PREVIEW_STALE");
 });
 
-test("WP7B R7: leave repository getActorAccess calls leave_management_get_actor_access and enforces strict 6-key boolean projection", async () => {
+test("WP7B R7 / PR #28: leave repository getActorAccess calls leave_management_get_actor_access and enforces strict 5-key boolean projection", async () => {
   const capturedCalls = [];
   const validEmployeePayload = {
     can_access: true,
-    is_shared_non_employee: false,
     can_submit_request: true,
     can_approve_requests: false,
     can_manage_config: false,
     can_view_monthly_report: false,
   };
-  const sharedAccountPayload = {
+  const restrictedAccountPayload = {
     can_access: false,
-    is_shared_non_employee: true,
     can_submit_request: false,
     can_approve_requests: false,
     can_manage_config: false,
@@ -967,20 +965,21 @@ test("WP7B R7: leave repository getActorAccess calls leave_management_get_actor_
     },
   ]);
 
-  const repoShared = createLeaveRepository(async () => ({
-    data: sharedAccountPayload,
+  const repoRestricted = createLeaveRepository(async () => ({
+    data: restrictedAccountPayload,
     error: null,
   }));
-  const sharedOutcome = await repoShared.getActorAccess({
+  const restrictedOutcome = await repoRestricted.getActorAccess({
     auth_subject: ACTOR_AUTH,
     app_user_id: ACTOR_APP,
   });
-  assert.deepEqual(sharedOutcome, { ok: true, data: sharedAccountPayload });
+  assert.deepEqual(restrictedOutcome, { ok: true, data: restrictedAccountPayload });
 
-  // Strict 6-key boolean projection rejects extra keys, missing keys, non-booleans, arrays, and RPC errors
+  // Strict 5-key boolean projection rejects extra keys, missing keys, non-booleans, arrays, and RPC errors
   for (const malformed of [
     { ...validEmployeePayload, extra_field: true },
-    { can_access: true, is_shared_non_employee: false },
+    { ...validEmployeePayload, is_shared_non_employee: false },
+    { can_access: true },
     { ...validEmployeePayload, can_access: "true" },
     [validEmployeePayload],
     null,
