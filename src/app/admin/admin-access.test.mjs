@@ -55,6 +55,7 @@ test("both Admin URL surfaces resolve actor server-side and use explicit access 
   const personnelPage = readFileSync(new URL("./catalog/personnel/page.tsx", import.meta.url), "utf8");
   const vendorPage = readFileSync(new URL("./catalog/vendors/page.tsx", import.meta.url), "utf8");
   assert.match(layout, /resolveActorForRequest\(\)/);
+  assert.match(layout, /resolveNavActorForAppShell\(\{\s*directEntryEnabled,\s*adminNavigationEnabled:\s*true,?\s*\}\)/);
   assert.match(layout, /decideAdminAreaAccess/);
   assert.match(layout, /mx-auto w-full max-w-7xl px-4 py-6 sm:px-6/);
   assert.doesNotMatch(layout, /max-w-6xl/);
@@ -64,14 +65,16 @@ test("both Admin URL surfaces resolve actor server-side and use explicit access 
   assert.match(personnelPage, /decidePersonnelCatalogPageAccess/);
   assert.match(vendorPage, /resolveActorForRequest\(\)/);
   assert.match(vendorPage, /decideVendorCatalogPageAccess/);
-  assert.doesNotMatch(layout + adminPage + personnelPage + vendorPage, /DIRECT_ENTRY_UI_ENABLED/);
+  // Admin page/catalog access gates stay completely decoupled from DIRECT_ENTRY_UI_ENABLED.
+  assert.doesNotMatch(adminPage + personnelPage + vendorPage, /DIRECT_ENTRY_UI_ENABLED/);
 });
 
-test("/admin preserves its server gate then redirects straight to Personnel", () => {
+test("/admin preserves its server gate then redirects via resolveAdminLandingPath (WP13 M2)", () => {
   const adminPage = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
   assert.match(adminPage, /resolveActorForRequest\(\)/);
   assert.match(adminPage, /decideAdminAreaAccess\(\{ actor \}\)/);
-  assert.match(adminPage, /case "ALLOW":\s*redirect\("\/admin\/catalog\/personnel"\)/);
+  assert.match(adminPage, /resolveAdminLandingPath\(actor\)/);
+  assert.match(adminPage, /redirect\(target\)/);
   assert.doesNotMatch(adminPage, /useEffect|useRouter/);
   assert.doesNotMatch(adminPage, /<h1[^>]*>Quản trị|Mở danh mục nhân sự|CardHeader|<Card/);
 });

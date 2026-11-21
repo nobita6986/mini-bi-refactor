@@ -9,6 +9,7 @@ import {
   hasPairedCapability,
   type ActorResolution,
 } from "./direct-entry-v2.ts";
+import { decideSessionPageAccess } from "./session-page-access.ts";
 import type { NavActorProjection, NavCapabilityPredicate } from "../navigation/registry-capability.ts";
 import {
   adminAreaNavPredicate,
@@ -61,6 +62,32 @@ export function decideAdminAreaAccess(input: {
     actor: input.actor,
     allowed: adminPanelNavPredicate,
   });
+}
+
+export type AdminLandingPath =
+  | "/admin/organization/persons"
+  | "/admin/catalog/personnel"
+  | "/admin/attendance"
+  | "/admin/worker-edit-history";
+
+/**
+ * WP13 M2: Resolves the canonical default landing page for `/admin` strictly from
+ * real server-resolved capabilities/guards (zero email/role-label hardcoding, zero
+ * redirect loops — every target URL's page gate matches the predicate that chose it):
+ * 1) Full Admin -> `/admin/organization/persons`
+ * 2) Catalog / HR Operator -> `/admin/catalog/personnel`
+ * 3) Attendance Report viewer (BoD / Team Leader / Department Head) -> `/admin/attendance`
+ * 4) `worker_edit_history_view`-only -> `/admin/worker-edit-history`
+ */
+export function resolveAdminLandingPath(
+  actor: ActorResolution | null,
+): AdminLandingPath | null {
+  if (!actor?.ok) return null;
+  if (adminSecurityNavPredicate(actor.actor)) return "/admin/organization/persons";
+  if (adminAreaNavPredicate(actor.actor)) return "/admin/catalog/personnel";
+  if (attendanceReportNavPredicate(actor.actor)) return "/admin/attendance";
+  if (workerEditHistoryNavPredicate(actor.actor)) return "/admin/worker-edit-history";
+  return null;
 }
 
 /** Separate direct-URL gate for the implemented Personnel catalog page. */
@@ -233,6 +260,21 @@ export function decideWorkerOperationsPageAccess(input: {
 }
 
 export type WorkReportAssignmentAccessStatus = "allowed" | "denied" | "unavailable";
+
+/**
+ * WP13 M3: Session gate for personal Work Reports pages (`/work-reports` and
+ * `/work-reports/my-reports`). Enforces feature flag and valid authenticated
+ * session (redirecting anonymous to login and fail-closing disabled/unmapped/
+ * unavailable actors) without requiring active obligations so authenticated
+ * users can still view their own History even after active obligations end.
+ */
+export function decidePersonalWorkReportsPageAccess(input: {
+  enabledFlag: string | undefined;
+  actor: ActorResolution | null;
+}): Exclude<DirectEntryPageDecision, "ACCESS_DENIED"> {
+  if (input.enabledFlag !== "true") return "NOT_FOUND";
+  return decideSessionPageAccess(input.actor);
+}
 
 export function decideWorkReportsPageAccess(input: {
   actor: ActorResolution | null;

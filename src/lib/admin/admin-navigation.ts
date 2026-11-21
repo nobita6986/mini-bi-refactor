@@ -20,7 +20,7 @@ export type AdminSectionMenuItem =
   | {
       readonly id: "recruitment";
       readonly type: "group";
-      readonly label: "Tuyển dụng";
+      readonly label: "Danh mục tuyển dụng";
       readonly sections: readonly AdminSection[];
     };
 
@@ -58,7 +58,7 @@ export function groupAdminSections(sections: readonly AdminSection[]): AdminSect
   const recruitmentSections = sections.filter((section) => RECRUITMENT_SECTION_IDS.has(section.id));
   return [
     ...(recruitmentSections.length > 0
-      ? [{ type: "group" as const, id: "recruitment" as const, label: "Tuyển dụng" as const, sections: recruitmentSections }]
+      ? [{ type: "group" as const, id: "recruitment" as const, label: "Danh mục tuyển dụng" as const, sections: recruitmentSections }]
       : []),
     ...sections
       .filter((section) => !RECRUITMENT_SECTION_IDS.has(section.id))

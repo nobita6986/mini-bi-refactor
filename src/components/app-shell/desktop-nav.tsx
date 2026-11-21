@@ -18,7 +18,12 @@ import { usePathname } from "next/navigation";
 import { Building2, CalendarDays, ChevronDown, ClipboardList, FileDiff, Landmark, LayoutDashboard, NotebookPen, ShieldCheck, Users } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
-import { findEntryByPath, groupNavEntries, type NavGroupId, type NavMenuEntry } from "@/lib/navigation/registry";
+import {
+  findActiveNavEntry,
+  groupNavEntries,
+  type NavGroupId,
+  type NavMenuEntry,
+} from "@/lib/navigation/registry";
 import { cn } from "@/lib/utils";
 
 type DesktopNavItem = NavMenuEntry;
@@ -30,9 +35,7 @@ const NAV_ICONS: Record<string, typeof LayoutDashboard> = {
   "worker-operations": Users,
   "change-requests": FileDiff,
   "work-reports": NotebookPen,
-  "work-report-assignments": ClipboardList,
-  "work-report-reviews": ClipboardList,
-  "work-report-analytics": NotebookPen,
+  "work-report-management": ClipboardList,
   "attendance-report": CalendarDays,
   finance: Landmark,
   leave: CalendarDays,
@@ -44,6 +47,7 @@ const NAV_ICONS: Record<string, typeof LayoutDashboard> = {
 
 const GROUP_ICONS: Record<NavGroupId, typeof LayoutDashboard> = {
   "my-work": ClipboardList,
+  "finance": Landmark,
   "management": ShieldCheck,
 };
 
@@ -53,7 +57,7 @@ export function DesktopNav({
   items: ReadonlyArray<DesktopNavItem>;
 }) {
   const pathname = usePathname();
-  const active = findEntryByPath(pathname);
+  const active = findActiveNavEntry(pathname, items);
   return (
     <nav aria-label="Điều hướng chính" className="ml-2 hidden items-center gap-1 md:flex">
       {groupNavEntries(items).map((item) => {

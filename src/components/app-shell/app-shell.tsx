@@ -36,7 +36,11 @@ import Image from "next/image";
 import { connection } from "next/server";
 
 import { ThemeSelector } from "@/components/dashboard/theme-selector";
-import { filterEntriesForActor } from "@/lib/navigation/registry";
+import {
+  filterEntriesForActor,
+  projectNavMenuEntries,
+  type NavMenuEntry,
+} from "@/lib/navigation/registry";
 import {
   decideNavEntryVisibility,
   type NavActorProjection,
@@ -50,9 +54,7 @@ import { UserSessionControl } from "./user-session-control";
 
 const WORK_REPORTS_NAV_ENTRY_IDS = new Set([
   "work-reports",
-  "work-report-assignments",
-  "work-report-reviews",
-  "work-report-analytics",
+  "work-report-management",
 ]);
 
 /**
@@ -118,14 +120,23 @@ export async function AppShell({
         entryVisibleInViewport: entry.visibility.mobile,
       }),
   });
+  const desktopMenuItems = projectNavMenuEntries(desktopItems, actor);
+  const mobileMenuItems = projectNavMenuEntries(mobileItems, actor);
+  const activeLabelItems: ReadonlyArray<Pick<NavMenuEntry, "id" | "label">> = Array.from(
+    new Map(
+      [...desktopMenuItems, ...mobileMenuItems].map((item) => [
+        item.id,
+        { id: item.id, label: item.label },
+      ]),
+    ).values(),
+  );
+
   return (
     <div className="flex min-h-full flex-1 flex-col">
       <header className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur print:hidden">
         <div className="mx-auto flex min-h-14 w-full max-w-6xl flex-wrap items-center gap-3 px-4 py-2 sm:px-6">
           {/* Mobile: hamburger trigger */}
-          <MobileNav
-            items={mobileItems.map(({ id, label, path, group }) => ({ id, label, path, group }))}
-          />
+          <MobileNav items={mobileMenuItems} />
 
           {/* Logo HR Partner */}
           <Link
@@ -137,9 +148,7 @@ export async function AppShell({
           </Link>
 
           {/* Desktop nav — ẩn trên mobile */}
-          <DesktopNav
-            items={desktopItems.map(({ id, label, path, group }) => ({ id, label, path, group }))}
-          />
+          <DesktopNav items={desktopMenuItems} />
 
           {/* Spacer */}
           <div className="flex-1" />
@@ -159,8 +168,8 @@ export async function AppShell({
           </div>
         </div>
 
-        {/* Active page label — phụ trợ a11y cho screen-reader */}
-        <ActivePageLabel />
+        {/* Active page label — phụ trợ a11y cho screen-reader (A2: chỉ đọc từ danh sách đã lọc) */}
+        <ActivePageLabel items={activeLabelItems} />
       </header>
 
       <main className="flex-1">{children}</main>

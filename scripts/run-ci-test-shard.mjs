@@ -136,6 +136,7 @@ const TEST_WEIGHTS = {
   "test:wp8d2-work-report-access": 14.0,
   "test:wp9-org-obligations": 14.0,
   "test:ai-reports-retirement": 10.0,
+  "test:wp13-pr1-navigation": 2.0,
 };
 
 const target = process.argv[2];

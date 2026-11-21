@@ -362,11 +362,11 @@ export function VendorFinanceGovernanceView() {
               Báo cáo công nợ tháng
             </Link>
             <Link
-              href="/admin/departments/accounting"
+              href="/admin/departments"
               className={buttonClasses({ variant: "secondary", size: "md" })}
             >
               <Building2 className="h-4 w-4" aria-hidden="true" />
-              Phòng Kế toán
+              Phòng ban
             </Link>
             <Button
               type="button"
@@ -520,9 +520,9 @@ export function VendorFinanceGovernanceView() {
 
         {paData && paData.eligible_accountants.length === 0 ? (
           <Alert tone="warning" title="Chưa có thành viên đang hiệu lực trong Phòng Kế toán">
-            Để phân công kế toán phụ trách dự án, vui lòng thêm thành viên vào{" "}
-            <Link href="/admin/departments/accounting" className="font-semibold underline">
-              Phòng Kế toán
+            Để phân công kế toán phụ trách dự án, vui lòng thêm thành viên vào Phòng Kế toán tại{" "}
+            <Link href="/admin/departments" className="font-semibold underline">
+              Phòng ban
             </Link>{" "}
             trước.
           </Alert>

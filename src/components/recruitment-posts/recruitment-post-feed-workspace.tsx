@@ -5,7 +5,7 @@ import {
   useRouter as readNextAppRouter,
   useSearchParams,
 } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { Button } from "@/components/ui/button";
@@ -125,6 +125,7 @@ export type RecruitmentPostExportErrorState = {
 
 export type RecruitmentPostFeedWorkspaceInitialTestState = {
   readonly activeTab?: RecruitmentPostFeedTab;
+  readonly loadedTab?: RecruitmentPostFeedTab | null;
   readonly filters?: RecruitmentPostFeedFilterState;
   readonly dataState?: RecruitmentPostDataState;
   readonly accessLoss?: RecruitmentPostAccessLossKind | null;
@@ -150,9 +151,11 @@ export function RecruitmentPostFeedWorkspace({
 } = {}) {
   const router = getOptionalAppRouter();
   const searchParams = useSearchParams();
+  const hasLiveSearchParams =
+    searchParams !== null && initialStateForTest?.activeTab === undefined;
   const searchTabParam = searchParams?.get("tab");
 
-  const [activeTab, setActiveTab] = useState<RecruitmentPostFeedTab>(() => {
+  const [localTab, setLocalTab] = useState<RecruitmentPostFeedTab>(() => {
     if (initialStateForTest?.activeTab) {
       return initialStateForTest.activeTab;
     }
@@ -161,6 +164,21 @@ export function RecruitmentPostFeedWorkspace({
     }
     return parseRecruitmentPostFeedTab(searchTabParam);
   });
+  const activeTab: RecruitmentPostFeedTab = hasLiveSearchParams
+    ? parseRecruitmentPostFeedTab(searchTabParam)
+    : localTab;
+  const [loadedTab, setLoadedTab] = useState<RecruitmentPostFeedTab | null>(
+    () => {
+      if (initialStateForTest) {
+        return initialStateForTest.loadedTab !== undefined
+          ? initialStateForTest.loadedTab
+          : activeTab;
+      }
+      return null;
+    },
+  );
+  const [isTabTransitionPending, startTabTransition] = useTransition();
+  const isTabMismatch = loadedTab !== activeTab;
   const [filters, setFilters] = useState<RecruitmentPostFeedFilterState>(
     () => initialStateForTest?.filters ?? EMPTY_RECRUITMENT_POST_FILTERS,
   );
@@ -302,32 +320,48 @@ export function RecruitmentPostFeedWorkspace({
     mine: null,
   });
 
+  const showFeedLoading =
+    initialLoading || isTabMismatch || isTabTransitionPending;
+
   const handleSelectTab = useCallback(
     (nextTab: RecruitmentPostFeedTab, focusButton = false) => {
       if (focusButton) {
         tabButtonRefs.current[nextTab]?.focus();
       }
+      if (hasLiveSearchParams) {
+        if (nextTab === activeTab && !isTabTransitionPending) return;
+        const href = buildRecruitmentPostFeedTabHref(nextTab);
+        startTabTransition(() => {
+          if (router) {
+            router.push(href, { scroll: false });
+          } else if (
+            typeof window !== "undefined" &&
+            window.history?.pushState
+          ) {
+            window.history.pushState(null, "", href);
+          }
+        });
+        return;
+      }
       if (nextTab === activeTab) return;
       getRequestTracker(feedTrackerRef).cancelAll();
       getRequestTracker(detailTrackerRef).cancelAll();
       setDetailLoading(false);
+      setLoadingMore(false);
       setWithdrawTarget(null);
       setWithdrawSuccessBanner(null);
       setExportError(null);
       setFeedError(null);
       setLoadMoreError(null);
-      setDataState((prev) =>
-        clearRecruitmentPostFeedItemsPreservingContext(prev),
-      );
-      setActiveTab(nextTab);
+      setLocalTab(nextTab);
       const href = buildRecruitmentPostFeedTabHref(nextTab);
       if (router) {
-        router.replace(href, { scroll: false });
-      } else if (typeof window !== "undefined" && window.history?.replaceState) {
-        window.history.replaceState(null, "", href);
+        router.push(href, { scroll: false });
+      } else if (typeof window !== "undefined" && window.history?.pushState) {
+        window.history.pushState(null, "", href);
       }
     },
-    [activeTab, router],
+    [activeTab, hasLiveSearchParams, isTabTransitionPending, router],
   );
 
   const handleTabKeyDown = useCallback(
@@ -376,11 +410,15 @@ export function RecruitmentPostFeedWorkspace({
     ) => {
       getRequestTracker(detailTrackerRef).cancelAll();
       setDetailLoading(false);
+      setWithdrawTarget(null);
+      setWithdrawSuccessBanner(null);
+      setExportError(null);
 
       if (tab === "published") {
         const validation = validateRecruitmentPostFeedFilters(activeFilters);
         if (!validation.ok) {
           getRequestTracker(feedTrackerRef).cancelAll();
+          setLoadedTab(tab);
           setInitialLoading(false);
           setLoadingMore(false);
           setFeedError(validation.message);
@@ -434,6 +472,7 @@ export function RecruitmentPostFeedWorkspace({
         }
 
         if (outcome.kind === "error") {
+          setLoadedTab(tab);
           setInitialLoading(false);
           setFeedError(outcome.message);
           setDataState((prev) =>
@@ -443,6 +482,7 @@ export function RecruitmentPostFeedWorkspace({
         }
 
         setAccessLoss(null);
+        setLoadedTab(tab);
         setInitialLoading(false);
         setFeedError(null);
         setDataState((prev) =>
@@ -450,6 +490,7 @@ export function RecruitmentPostFeedWorkspace({
         );
       } catch (error) {
         if (isAbortError(error) || !ticket.isCurrent()) return;
+        setLoadedTab(tab);
         setInitialLoading(false);
         setFeedError(
           recruitmentPostErrorMessage("RECRUITMENT_POST_UNAVAILABLE"),
@@ -464,7 +505,7 @@ export function RecruitmentPostFeedWorkspace({
 
   const handleLoadMore = useCallback(async () => {
     if (
-      initialLoading ||
+      showFeedLoading ||
       loadingMore ||
       !dataState.hasMore ||
       !dataState.nextCursor ||
@@ -551,7 +592,7 @@ export function RecruitmentPostFeedWorkspace({
     dataState.snapshotToken,
     filters,
     handleAccessRevoked,
-    initialLoading,
+    showFeedLoading,
     loadingMore,
   ]);
 
@@ -1227,7 +1268,7 @@ export function RecruitmentPostFeedWorkspace({
           </StatusBanner>
         ) : null}
 
-        {feedError ? (
+        {!isTabMismatch && !isTabTransitionPending && feedError ? (
           <StatusBanner
             tone="error"
             title="Không thể tải danh sách tin tuyển dụng"
@@ -1277,7 +1318,7 @@ export function RecruitmentPostFeedWorkspace({
           </StatusBanner>
         ) : null}
 
-        {initialLoading ? (
+        {showFeedLoading ? (
           <div
             role="status"
             aria-live="polite"
@@ -1288,7 +1329,7 @@ export function RecruitmentPostFeedWorkspace({
           </div>
         ) : null}
 
-        {!initialLoading && !feedError && cardViewModels.length === 0 ? (
+        {!showFeedLoading && !feedError && cardViewModels.length === 0 ? (
           <div
             role="status"
             aria-live="polite"
@@ -1317,7 +1358,7 @@ export function RecruitmentPostFeedWorkspace({
           </div>
         ) : null}
 
-        {!initialLoading && cardViewModels.length > 0 ? (
+        {!showFeedLoading && cardViewModels.length > 0 ? (
           <div className="space-y-4">
             <div
               data-testid="recruitment-posts-list"

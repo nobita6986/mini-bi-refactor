@@ -1,12 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useRouter as readNextAppRouter,
+  useSearchParams,
+} from "next/navigation";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
 import { StatusBanner } from "@/components/ui/status-banner";
+import {
+  buildWorkReportAssignmentTabHref,
+  parseWorkReportAssignmentTab,
+  type WorkReportAssignmentSubTab,
+} from "@/lib/work-reports/assignment-tab-model";
 import type {
   WorkReportAssignmentAuditItem,
   WorkReportAssignmentProgressItem,
@@ -14,6 +23,14 @@ import type {
   WorkReportEligibleGroupUser,
   WorkReportGroupItem,
 } from "@/lib/work-reports/assignment-repository";
+
+function getOptionalAppRouter() {
+  try {
+    return readNextAppRouter();
+  } catch {
+    return null;
+  }
+}
 
 type Template = {
   template_id: string;
@@ -36,9 +53,19 @@ const controlClass =
   "min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
-export function AssignmentManager() {
+export function AssignmentManager({
+  initialSubView = "assignments",
+}: {
+  initialSubView?: WorkReportAssignmentSubTab;
+} = {}) {
   const notify = useNotify();
-  const [activeSubView, setActiveSubView] = useState<"assignments" | "groups">("assignments");
+  const router = getOptionalAppRouter();
+  const searchParams = useSearchParams();
+  const [localSubView, setLocalSubView] = useState<WorkReportAssignmentSubTab>(initialSubView);
+  const activeSubView: WorkReportAssignmentSubTab =
+    searchParams !== null
+      ? parseWorkReportAssignmentTab(searchParams.get("tab"))
+      : localSubView;
   const [showCreateForm, setShowCreateForm] = useState(true);
   const [confirmingCreate, setConfirmingCreate] = useState(false);
   const [stateFilter, setStateFilter] = useState<"ACTIVE" | "PAUSED" | "REVOKED">("ACTIVE");
@@ -80,33 +107,16 @@ export function AssignmentManager() {
   const [trackingBusy, setTrackingBusy] = useState(false);
   const templatesLoaded = loadedTeamId === teamId;
 
-  useEffect(() => {
-    const syncFromLocation = () => {
-      if (typeof window === "undefined") return;
-      const params = new URLSearchParams(window.location.search);
-      setActiveSubView(params.get("tab") === "groups" ? "groups" : "assignments");
-    };
-    syncFromLocation();
-    const handleTabEvent = (event: Event) => {
-      const detail = (event as CustomEvent<"assignments" | "groups">).detail;
-      if (detail === "assignments" || detail === "groups") {
-        setActiveSubView(detail);
-      }
-    };
-    window.addEventListener("popstate", syncFromLocation);
-    window.addEventListener("work-reports:assignment-tab", handleTabEvent);
-    return () => {
-      window.removeEventListener("popstate", syncFromLocation);
-      window.removeEventListener("work-reports:assignment-tab", handleTabEvent);
-    };
-  }, []);
-
-  function switchSubView(next: "assignments" | "groups") {
-    setActiveSubView(next);
-    if (typeof window !== "undefined") {
-      const href = next === "groups" ? "/work-reports/assignments?tab=groups" : "/work-reports/assignments";
-      window.history.replaceState(null, "", href);
-      window.dispatchEvent(new CustomEvent("work-reports:assignment-tab", { detail: next }));
+  function switchSubView(next: WorkReportAssignmentSubTab) {
+    if (next === activeSubView) return;
+    if (searchParams === null) {
+      setLocalSubView(next);
+    }
+    const href = buildWorkReportAssignmentTabHref(next);
+    if (router) {
+      router.push(href, { scroll: false });
+    } else if (typeof window !== "undefined" && window.history?.pushState) {
+      window.history.pushState(null, "", href);
     }
   }
 
@@ -676,6 +686,7 @@ export function AssignmentManager() {
             type="button"
             variant={activeSubView === "assignments" ? "primary" : "secondary"}
             size="sm"
+            aria-pressed={activeSubView === "assignments"}
             onClick={() => switchSubView("assignments")}
           >
             Đợt giao ({assignments.length})
@@ -684,6 +695,7 @@ export function AssignmentManager() {
             type="button"
             variant={activeSubView === "groups" ? "primary" : "secondary"}
             size="sm"
+            aria-pressed={activeSubView === "groups"}
             onClick={() => switchSubView("groups")}
           >
             Nhóm nhận báo cáo ({groups.length})
@@ -1301,7 +1313,7 @@ export function AssignmentManager() {
       ) : null}
 
       <FormDialog
-        open={revokeConfirmAssignment !== null}
+        open={revokeConfirmAssignment !== null && (activeSubView === "assignments" || trackingBusy)}
         onOpenChange={(open) => {
           if (!open && !trackingBusy) {
             setRevokeConfirmAssignment(null);
@@ -1352,7 +1364,7 @@ export function AssignmentManager() {
       </FormDialog>
 
       <FormDialog
-        open={groupEditor !== null}
+        open={groupEditor !== null && (activeSubView === "groups" || groupBusy)}
         onOpenChange={(open) => {
           if (!open && !groupBusy) {
             setGroupEditor(null);

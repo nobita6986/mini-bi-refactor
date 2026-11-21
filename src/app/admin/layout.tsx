@@ -8,11 +8,11 @@ import { AdminSubnav } from "@/components/admin/admin-subnav";
 import { AppShell } from "@/components/app-shell/app-shell";
 import { decideAdminAreaAccess } from "@/lib/auth/direct-entry-page-access";
 import { visibleAdminSections } from "@/lib/admin/admin-navigation";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import { isDirectEntryUiEnabled } from "@/lib/direct-entry/ui-model";
 import {
-  hasActiveDepartmentHeadRole,
-  type NavActorProjection,
-} from "@/lib/navigation/registry-capability";
+  resolveActorForRequest,
+  resolveNavActorForAppShell,
+} from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
@@ -20,21 +20,22 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   await connection();
   const actor = await resolveActorForRequest().catch(() => null);
   const decision = decideAdminAreaAccess({ actor });
-  const navActor: NavActorProjection | null = actor?.ok
-    ? {
-        capabilities: actor.actor.capabilities,
-        scopes: actor.actor.scopes.map((scope) => ({ kind: scope.kind })),
-        ...(actor.actor.effective_grants !== undefined
-          ? { effective_grants: actor.actor.effective_grants }
-          : {}),
-        hasAttendanceDepartmentHeadAccess: hasActiveDepartmentHeadRole(actor.actor),
-      }
-    : null;
+  if (decision === "REDIRECT_LOGIN") {
+    redirect("/login?next=/admin");
+  }
+
+  // WP13 M1: reuse the full request-scoped `resolveNavActorForAppShell` projection
+  // (sharing React.cache with `resolveActorForRequest`) so top-level AppShell items
+  // never disappear inside `/admin/*`. Admin area access itself remains decoupled
+  // from `DIRECT_ENTRY_UI_ENABLED`.
+  const directEntryEnabled = isDirectEntryUiEnabled(process.env.DIRECT_ENTRY_UI_ENABLED);
+  const navActor = await resolveNavActorForAppShell({
+    directEntryEnabled,
+    adminNavigationEnabled: true,
+  }).catch(() => null);
 
   let content: ReactNode;
   switch (decision) {
-    case "REDIRECT_LOGIN":
-      redirect("/login?next=/admin");
     case "ACCOUNT_UNAVAILABLE":
       content = <AccountUnavailable />;
       break;

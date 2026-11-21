@@ -28,6 +28,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import {
+  resolveWorkReportManagementPath,
+  type NavActorProjection,
+} from "./registry-capability.ts";
+
 /** Trạng thái vòng đời của một nav entry. */
 export type NavStatus = "current" | "planned";
 
@@ -61,6 +66,7 @@ export type NavCapability =
   | "worker_operations"
   | "change_requests"
   | "work_reports"
+  | "work_report_management"
   | "work_report_assignments"
   | "work_report_reviews"
   | "work_report_analytics"
@@ -78,10 +84,11 @@ export type NavVisibility = {
   mobile: boolean;
 };
 
-export type NavGroupId = "my-work" | "management";
+export type NavGroupId = "my-work" | "finance" | "management";
 
 export const NAV_GROUP_LABELS: Readonly<Record<NavGroupId, string>> = {
   "my-work": "Công việc của tôi",
+  "finance": "Tài chính",
   "management": "Quản trị",
 };
 
@@ -91,8 +98,12 @@ export type NavEntry = {
   id: string;
   /** Nhãn hiển thị (tiếng Việt). */
   label: string;
-  /** Path trong App Router (e.g. "/dashboard"). */
+  /** Path mặc định trong App Router (e.g. "/dashboard"). */
   path: string;
+  /** Các path chỉ khớp chính xác (không khớp nhánh con bất kỳ). */
+  exactPaths?: readonly string[];
+  /** Các nhánh path sở hữu bởi entry này (khớp chính xác hoặc prefix + "/"). Mặc định [path]. */
+  matchPaths?: readonly string[];
   /** Mô tả ngắn cho a11y / tooltip. */
   description: string;
   /** Icon component từ lucide-react. */
@@ -205,6 +216,8 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     id: "work-reports",
     label: "Báo cáo của tôi",
     path: "/work-reports",
+    exactPaths: ["/work-reports"],
+    matchPaths: ["/work-reports/my-reports"],
     description:
       "Tạo, nộp và tra cứu báo cáo công việc được giao theo capability và resource scope do server xác nhận.",
     icon: NotebookPen,
@@ -226,18 +239,6 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     visibility: { desktop: true, mobile: true },
   },
   {
-    id: "salary-advances",
-    label: "Ứng lương",
-    path: "/salary-advances",
-    description:
-      "Tạo đề nghị ứng lương cho người lao động thuộc dự án, xử lý phê duyệt/từ chối và đối chiếu ảnh NLĐ nhận tiền mặt theo phân quyền máy chủ.",
-    icon: Landmark,
-    status: "current",
-    capability: "salary_advances",
-    group: "my-work",
-    visibility: { desktop: true, mobile: true },
-  },
-  {
     id: "recruitment-posts",
     label: "Tin tuyển dụng",
     path: "/recruitment-posts",
@@ -251,13 +252,26 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
   },
   {
     id: "finance",
-    label: "Tài chính",
+    label: "Công nợ Vendor",
     path: "/finance",
     description:
       "Theo dõi công nợ, tạm ứng, sổ cái, đối soát và chứng từ tài chính Vendor theo quyền được máy chủ xác nhận.",
     icon: Landmark,
     status: "current",
     capability: "finance",
+    group: "finance",
+    visibility: { desktop: true, mobile: true },
+  },
+  {
+    id: "salary-advances",
+    label: "Ứng lương",
+    path: "/salary-advances",
+    description:
+      "Tạo đề nghị ứng lương cho người lao động thuộc dự án, xử lý phê duyệt/từ chối và đối chiếu ảnh NLĐ nhận tiền mặt theo phân quyền máy chủ.",
+    icon: Landmark,
+    status: "current",
+    capability: "salary_advances",
+    group: "finance",
     visibility: { desktop: true, mobile: true },
   },
   {
@@ -288,40 +302,23 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     visibility: { desktop: true, mobile: true },
   },
   {
-    id: "work-report-assignments",
-    label: "Quản lý/Giao báo cáo",
+    id: "work-report-management",
+    label: "Quản lý báo cáo",
     path: "/work-reports/assignments",
+    matchPaths: [
+      "/work-reports/assignments",
+      "/work-reports/reviews",
+      "/work-reports/analytics",
+      "/work-reports/templates",
+      "/work-reports/delegations",
+    ],
     description:
-      "Tạo đợt giao báo cáo, quản lý nhóm người nhận và theo dõi tiến độ từng thành viên trong phạm vi được cấp quyền.",
+      "Giao việc, duyệt, theo dõi, quản lý mẫu và ủy quyền báo cáo công việc theo quyền được cấp.",
     icon: ClipboardList,
     status: "current",
-    capability: "work_report_assignments",
+    capability: "work_report_management",
     group: "management",
     visibility: { desktop: true, mobile: true },
-  },
-  {
-    id: "work-report-reviews",
-    label: "Cần duyệt báo cáo",
-    path: "/work-reports/reviews",
-    description:
-      "Mở hàng đợi báo cáo đang chờ duyệt theo quyền review và phạm vi hiệu lực do máy chủ chiếu.",
-    icon: ClipboardList,
-    status: "current",
-    capability: "work_report_reviews",
-    group: "management",
-    visibility: { desktop: false, mobile: false },
-  },
-  {
-    id: "work-report-analytics",
-    label: "Theo dõi báo cáo",
-    path: "/work-reports/analytics",
-    description:
-      "Theo dõi tổng quan tiến độ, chỉ tiêu KPI và danh sách bài nộp trong phạm vi được cấp quyền.",
-    icon: NotebookPen,
-    status: "current",
-    capability: "work_report_analytics",
-    group: "management",
-    visibility: { desktop: false, mobile: false },
   },
   {
     id: "attendance-report",
@@ -409,21 +406,78 @@ export function filterEntriesForActor(input: {
 }
 
 /**
- * Tìm entry theo path — dùng cho highlight "active" trong App Shell.
- * Exact match thang; neu khong co, tra entry co path la prefix dai nhat
- * (de /direct-entry/projects highlight "Dự án", khong phai "Nhập liệu").
- * Tra undefined neu path khong thuoc registry (vd. landing page `/`).
+ * Chuyển danh sách NavEntry đã lọc thành payload serializable tối thiểu truyền xuống Client Nav,
+ * đồng thời áp đích động W1 cho mục `work-report-management`.
+ * Không bao giờ gửi grants, source IDs, capabilities, scopes hay PII xuống client.
  */
-export function findEntryByPath(path: string): NavEntry | undefined {
-  for (const entry of CURRENT_NAV_ENTRIES) {
-    if (path === entry.path) return entry;
+export function projectNavMenuEntries(
+  entries: readonly NavEntry[],
+  actor: NavActorProjection | null,
+): NavMenuEntry[] {
+  const workReportManagementPath = resolveWorkReportManagementPath(actor);
+  return entries.map(({ id, label, path, group }) => ({
+    id,
+    label,
+    path:
+      id === "work-report-management" && workReportManagementPath
+        ? workReportManagementPath
+        : path,
+    group,
+  }));
+}
+
+function normalizeMatchPathname(rawPath: string): string {
+  const withoutHash = rawPath.split("#")[0] ?? rawPath;
+  const withoutQuery = withoutHash.split("?")[0] ?? withoutHash;
+  if (withoutQuery.length > 1 && withoutQuery.endsWith("/")) {
+    return withoutQuery.slice(0, -1);
   }
-  let best: NavEntry | undefined;
+  return withoutQuery;
+}
+
+/**
+ * Tìm entry sở hữu path theo quy tắc cụ thể nhất trên toàn registry (A1/A2 bước 1):
+ * - Khớp chính xác (`exactPaths` hoặc `matchPaths` / `[path]`) thắng trước.
+ * - Nếu không có khớp chính xác, chọn entry có prefix trong `matchPaths ?? [path]`
+ *   dài nhất (khớp `prefix + "/"`).
+ * - Entry có `exactPaths` chỉ khớp chính xác các path đó (vd. `/work-reports` chỉ khớp
+ *   trang cá nhân, không bao trọn nhánh quản lý `/work-reports/templates` hay `/delegations`).
+ */
+export function findEntryByPath(rawPath: string): NavEntry | undefined {
+  const path = normalizeMatchPathname(rawPath);
   for (const entry of CURRENT_NAV_ENTRIES) {
-    if (path.startsWith(entry.path + "/") &&
-        (!best || entry.path.length > best.path.length)) {
-      best = entry;
+    if (entry.exactPaths?.includes(path)) return entry;
+    const branchPaths = entry.matchPaths ?? (entry.exactPaths ? [] : [entry.path]);
+    if (branchPaths.includes(path)) return entry;
+  }
+  let best: { entry: NavEntry; prefixLength: number } | undefined;
+  for (const entry of CURRENT_NAV_ENTRIES) {
+    const branchPaths = entry.matchPaths ?? (entry.exactPaths ? [] : [entry.path]);
+    for (const prefix of branchPaths) {
+      if (
+        path.startsWith(prefix + "/") &&
+        (!best || prefix.length > best.prefixLength)
+      ) {
+        best = { entry, prefixLength: prefix.length };
+      }
     }
   }
-  return best;
+  return best?.entry;
+}
+
+/**
+ * Shared A1/A2 matcher dùng chung cho DesktopNav, MobileNav và ActivePageLabel:
+ * 1) Xác định mục sở hữu thực sự của `pathname` theo nhánh cụ thể nhất trên registry.
+ * 2) Chỉ trả về mục active nếu mục sở hữu đó nằm trong danh sách `visibleItems` đã lọc.
+ * Khi mục sở hữu bị ẩn/không có quyền, trả về `undefined` — KHÔNG để prefix ngắn hơn
+ * tô nhầm mục khác và KHÔNG lộ nhãn mục ẩn trong ActivePageLabel.
+ */
+export function findActiveNavEntry<T extends Pick<NavMenuEntry, "id">>(
+  pathname: string | null | undefined,
+  visibleItems: readonly T[],
+): T | undefined {
+  if (!pathname) return undefined;
+  const owner = findEntryByPath(pathname);
+  if (!owner) return undefined;
+  return visibleItems.find((item) => item.id === owner.id);
 }

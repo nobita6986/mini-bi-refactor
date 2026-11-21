@@ -492,7 +492,7 @@ test("filterEntriesForActor: owner (đủ 3 admin) + viewport=mobile → các kh
       "project-operations",
       "recruitment-posts",
       "salary-advances",
-      "work-report-assignments",
+      "work-report-management",
       "work-reports",
       "worker-operations",
     ]);
@@ -537,9 +537,7 @@ test("CURRENT_NAV_ENTRIES giữ nguyên một registry duy nhất (không tạo 
       "project-operations",
       "recruitment-posts",
       "salary-advances",
-      "work-report-analytics",
-      "work-report-assignments",
-      "work-report-reviews",
+      "work-report-management",
       "work-reports",
       "worker-operations",
     ],
@@ -628,7 +626,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
       label: "Quản trị",
       children: [
         "project-operations",
-        "work-report-assignments",
+        "work-report-management",
         "attendance-report",
       ],
     },
@@ -654,40 +652,45 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     {
       id: "management",
       label: "Quản trị",
-      children: ["work-report-assignments"],
+      children: ["work-report-management"],
     },
   ]);
   assert.equal(departmentHeadMenu.ids.includes("attendance-report"), false, "Trưởng phòng without team_manager_assign must not see /admin/attendance");
   assert.equal(departmentHeadMenu.ids.includes("admin"), false, "Trưởng phòng must not see /admin without admin_area");
   assert.equal(departmentHeadMenu.ids.includes("project-operations"), false);
 
-  // 4a. BoD (executive reader + reviewer + finance view): sees attendance, salary-advances and finance, not hidden report menu actions.
+  // 4a. BoD (executive reader + reviewer + finance view): sees Tài chính group (Công nợ Vendor + Ứng lương) and Quản lý báo cáo (analytics) + Báo cáo chấm công.
   const bodActor = {
     ...makeActor(["entry_privileged_edit", "report_analytics_view", "report_view", "change_review", "vendor_finance_view"], all),
     hasLeaveManagementAccess: true,
     hasLeaveAdminAccess: true,
   };
   const bodMenu = projectMenuForBothViewports(bodActor);
-  assert.deepEqual(bodMenu.topLevelIds, ["dashboard", "group:my-work", "finance", "group:management"]);
+  assert.deepEqual(bodMenu.topLevelIds, ["dashboard", "group:my-work", "group:finance", "group:management"]);
   assert.deepEqual(bodMenu.groups, [
     {
       id: "my-work",
       label: "Công việc của tôi",
-      children: ["worker-operations", "work-reports", "leave", "salary-advances", "recruitment-posts"],
+      children: ["worker-operations", "work-reports", "leave", "recruitment-posts"],
+    },
+    {
+      id: "finance",
+      label: "Tài chính",
+      children: ["finance", "salary-advances"],
     },
     {
       id: "management",
       label: "Quản trị",
-      children: ["leave-admin", "attendance-report"],
+      children: ["leave-admin", "work-report-management", "attendance-report"],
     },
   ]);
   assert.equal(bodMenu.ids.includes("attendance-report"), true, "BoD sees Báo cáo chấm công");
   assert.equal(bodMenu.ids.includes("admin"), false, "BoD without catalog/full-admin does not see duplicate /admin link");
 
-  // 4b. Full Admin: thấy đầy đủ Công việc của tôi, toàn bộ nhóm Quản trị (gồm Quản trị hệ thống /admin) và Tài chính.
+  // 4b. Full Admin: thấy đầy đủ 4 nhóm Tổng quan → Công việc của tôi → Tài chính → Quản trị.
   const fullAdmin = makeActor(["entry_admin", "recruiter_master_manage", "team_master_manage"], all);
   const fullAdminMenu = projectMenuForBothViewports(fullAdmin);
-  assert.deepEqual(fullAdminMenu.topLevelIds, ["dashboard", "group:my-work", "finance", "group:management"]);
+  assert.deepEqual(fullAdminMenu.topLevelIds, ["dashboard", "group:my-work", "group:finance", "group:management"]);
   assert.deepEqual(fullAdminMenu.groups, [
     {
       id: "my-work",
@@ -697,8 +700,15 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
         "worker-operations",
         "work-reports",
         "leave",
-        "salary-advances",
         "recruitment-posts",
+      ],
+    },
+    {
+      id: "finance",
+      label: "Tài chính",
+      children: [
+        "finance",
+        "salary-advances",
       ],
     },
     {
@@ -707,14 +717,14 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
       children: [
         "project-operations",
         "leave-admin",
-        "work-report-assignments",
+        "work-report-management",
         "attendance-report",
         "admin",
       ],
     },
   ]);
 
-  // 5. Kế toán (Accounting): thấy Tổng quan, Công việc của tôi (Nghỉ phép của tôi, Tin tuyển dụng), Quản trị (Quản trị hệ thống cho danh mục được cấp) và Tài chính.
+  // 5. Kế toán (Accounting): thấy Tổng quan, Công việc của tôi, Tài chính (chỉ Công nợ Vendor), Quản trị (Quản trị hệ thống).
   const accountingActor = {
     ...makeActor(["catalog_master_manage"], all),
     hasVendorFinanceAccess: true,
@@ -722,12 +732,17 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     hasLeaveManagementAccess: true,
   };
   const accountingMenu = projectMenuForBothViewports(accountingActor);
-  assert.deepEqual(accountingMenu.topLevelIds, ["dashboard", "group:my-work", "finance", "group:management"]);
+  assert.deepEqual(accountingMenu.topLevelIds, ["dashboard", "group:my-work", "group:finance", "group:management"]);
   assert.deepEqual(accountingMenu.groups, [
     {
       id: "my-work",
       label: "Công việc của tôi",
       children: ["leave", "recruitment-posts"],
+    },
+    {
+      id: "finance",
+      label: "Tài chính",
+      children: ["finance"],
     },
     {
       id: "management",
