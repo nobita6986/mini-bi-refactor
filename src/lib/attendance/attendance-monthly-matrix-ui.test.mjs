@@ -2466,7 +2466,51 @@ test("WP7B D-WP7B-02: out-of-scope past UPCOMING cell presentation vs true futur
   assert.equal(detailFutureRow.getCell(5).value, "Chưa đến giờ chấm");
   assert.match(String(detailFutureRow.getCell(8).value), /Chưa đến giờ chấm/);
 
-  // 6. MatrixDayCell UI component wires getCurrentVnBusinessDate() and compact muted slate pill
+  // 6. Past partial exit day (e.g. Person INACTIVE at 12:00 -> SLOT_1..2 MISSING, SLOT_3..5 UPCOMING)
+  //    keeps day red/NO_CHECKIN with missingSlotCount=2 while past post-cutoff UPCOMING slots render
+  //    MATRIX_OUT_OF_SCOPE_LABEL ("—") instead of "Chưa đến giờ chấm" in UI & XLSX!
+  const partialExitSlots = evaluateAttendanceDaySlots({
+    policy: DEFAULT_ATTENDANCE_SLOT_POLICY,
+    checkins: [],
+    approved_leaves: [],
+  }).slots.map((slot, idx) => ({
+    ...slot,
+    slot_status: idx < 2 ? "MISSING" : "UPCOMING",
+  }));
+  const pastPartialExitCell = makeDayCell({
+    business_date: "2026-10-10",
+    day_of_month: 10,
+    day_status: "NO_CHECKIN",
+    missing_slot_count: 2,
+    slots: partialExitSlots,
+  });
+  const partialExitPres = describeMatrixDayCell(pastPartialExitCell, {
+    todayBusinessDate: "2026-10-15",
+  });
+  assert.equal(partialExitPres.isOutOfScopeOrExempt, false);
+  assert.equal(partialExitPres.dayStatus, "NO_CHECKIN");
+  assert.equal(partialExitPres.missingSlotCount, 2);
+  assert.equal(partialExitPres.tone, "red");
+  assert.equal(partialExitPres.isRedHighlight, true);
+  assert.equal(partialExitPres.slots[0].slotStatus, "MISSING");
+  assert.equal(partialExitPres.slots[0].isMissingHighlight, true);
+  assert.equal(partialExitPres.slots[1].slotStatus, "MISSING");
+  assert.equal(partialExitPres.slots[1].isMissingHighlight, true);
+  for (let i = 2; i < 5; i += 1) {
+    assert.equal(partialExitPres.slots[i].slotStatus, "UPCOMING");
+    assert.equal(partialExitPres.slots[i].isMissingHighlight, false);
+    assert.equal(partialExitPres.slots[i].statusLabel, "—");
+    assert.equal(partialExitPres.slots[i].summaryText, MATRIX_OUT_OF_SCOPE_LABEL);
+  }
+  const partialExitText = formatMatrixDayCellText(pastPartialExitCell, {
+    todayBusinessDate: "2026-10-15",
+  });
+  assert.match(partialExitText, /Time 1 \(07:30\): Chưa có lượt chấm/);
+  assert.match(partialExitText, /Time 2 \(10:00\): Chưa có lượt chấm/);
+  assert.match(partialExitText, /Time 3 \(13:00\): Ngoài phạm vi \/ Không áp dụng/);
+  assert.equal(/Chưa đến giờ chấm/.test(partialExitText), false);
+
+  // 7. MatrixDayCell UI component wires getCurrentVnBusinessDate() and compact muted slate pill
   const matrixDayCellBlock =
     matrixPanelSource.match(/function MatrixDayCell[\s\S]*?\n}\n/)?.[0] ?? "";
   assert.match(matrixDayCellBlock, /todayBusinessDate:\s*getCurrentVnBusinessDate\(\)/);

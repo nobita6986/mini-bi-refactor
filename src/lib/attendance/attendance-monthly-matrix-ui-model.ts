@@ -910,9 +910,13 @@ export function describeMatrixDayCell(
       slotStatusLabel = resolveSessionLeaveCoverageLabel(slot.session_code, leaveBadges);
       summaryText = slotStatusLabel;
     } else if (slot.slot_status === "UPCOMING") {
+      const isPastExemptSlot =
+        isOutOfScopeOrExempt ||
+        (typeof options?.todayBusinessDate === "string" &&
+          cell.business_date < options.todayBusinessDate);
       tone = "sky";
-      slotStatusLabel = isOutOfScopeOrExempt ? "—" : "Chưa đến giờ chấm";
-      summaryText = isOutOfScopeOrExempt ? MATRIX_OUT_OF_SCOPE_LABEL : slotStatusLabel;
+      slotStatusLabel = isPastExemptSlot ? "—" : "Chưa đến giờ chấm";
+      summaryText = isPastExemptSlot ? MATRIX_OUT_OF_SCOPE_LABEL : slotStatusLabel;
     } else {
       tone = "red";
       slotStatusLabel = MATRIX_MISSING_SLOT_LABEL;
