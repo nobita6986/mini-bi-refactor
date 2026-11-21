@@ -17,7 +17,7 @@ const {
 const { isDirectEntryUiEnabled } = await import("../direct-entry/ui-model.ts");
 
 test("CURRENT_NAV_ENTRIES chứa các entry hiện hành trong một registry", () => {
-  assert.equal(CURRENT_NAV_ENTRIES.length, 16, "phải có đúng 16 entries current");
+  assert.equal(CURRENT_NAV_ENTRIES.length, 14, "phải có đúng 14 entries current sau WP13 N1");
   const ids = CURRENT_NAV_ENTRIES.map((e) => e.id).sort();
   assert.deepEqual(
     ids,
@@ -33,9 +33,7 @@ test("CURRENT_NAV_ENTRIES chứa các entry hiện hành trong một registry", 
       "project-operations",
       "recruitment-posts",
       "salary-advances",
-      "work-report-analytics",
-      "work-report-assignments",
-      "work-report-reviews",
+      "work-report-management",
       "work-reports",
       "worker-operations",
     ],
@@ -43,7 +41,7 @@ test("CURRENT_NAV_ENTRIES chứa các entry hiện hành trong một registry", 
   );
 });
 
-test("Global IA nav groups separate 'Công việc của tôi' and 'Quản trị', and omit empty groups", () => {
+test("Global IA nav groups enforce Tổng quan → Công việc của tôi → Tài chính → Quản trị, and omit empty groups", () => {
   const menu = groupNavEntries(entriesForViewport("desktop", true).map(({ id, label, path, group }) => ({
     id, label, path, group,
   })));
@@ -60,8 +58,15 @@ test("Global IA nav groups separate 'Công việc của tôi' and 'Quản trị'
         "worker-operations",
         "work-reports",
         "leave",
-        "salary-advances",
         "recruitment-posts",
+      ],
+    },
+    {
+      id: "finance",
+      label: "Tài chính",
+      children: [
+        "finance",
+        "salary-advances",
       ],
     },
     {
@@ -70,7 +75,7 @@ test("Global IA nav groups separate 'Công việc của tôi' and 'Quản trị'
       children: [
         "project-operations",
         "leave-admin",
-        "work-report-assignments",
+        "work-report-management",
         "attendance-report",
         "admin",
       ],
@@ -78,7 +83,7 @@ test("Global IA nav groups separate 'Công việc của tôi' and 'Quản trị'
   ]);
   assert.deepEqual(
     menu.map((item) => item.type === "entry" ? item.entry.id : `group:${item.id}`),
-    ["dashboard", "group:my-work", "finance", "group:management"],
+    ["dashboard", "group:my-work", "group:finance", "group:management"],
   );
   const dashboardOnly = CURRENT_NAV_ENTRIES.filter((entry) => entry.id === "dashboard")
     .map(({ id, label, path, group }) => ({ id, label, path, group }));
@@ -132,32 +137,21 @@ test("Change Requests giữ route nhưng ẩn khỏi menu desktop và mobile", (
   assert.equal(entriesForViewport("mobile", true).some((item) => item.id === "change-requests"), false);
 });
 
-test("Work Report review route remains registered but its global menu entry is temporarily hidden", () => {
-  const entry = CURRENT_NAV_ENTRIES.find((item) => item.id === "work-report-reviews");
-  assert.ok(entry);
-  assert.equal(entry?.label, "Cần duyệt báo cáo");
-  assert.equal(entry?.path, "/work-reports/reviews");
-  assert.equal(entry?.group, "management");
-  assert.equal(entry?.capability, "work_report_reviews");
-  assert.deepEqual(entry?.visibility, { desktop: false, mobile: false });
-});
-
-test("Work Report assignments, analytics, and Attendance Report entries point to their canonical routes in 'management'", () => {
-  const assignments = CURRENT_NAV_ENTRIES.find((item) => item.id === "work-report-assignments");
-  assert.ok(assignments);
-  assert.equal(assignments?.label, "Quản lý/Giao báo cáo");
-  assert.equal(assignments?.path, "/work-reports/assignments");
-  assert.equal(assignments?.group, "management");
-  assert.equal(assignments?.capability, "work_report_assignments");
-  assert.deepEqual(assignments?.visibility, { desktop: true, mobile: true });
-
-  const analytics = CURRENT_NAV_ENTRIES.find((item) => item.id === "work-report-analytics");
-  assert.ok(analytics);
-  assert.equal(analytics?.label, "Theo dõi báo cáo");
-  assert.equal(analytics?.path, "/work-reports/analytics");
-  assert.equal(analytics?.group, "management");
-  assert.equal(analytics?.capability, "work_report_analytics");
-  assert.deepEqual(analytics?.visibility, { desktop: false, mobile: false });
+test("Work Report management unifies the 5 management routes under 'Quản lý báo cáo' and Attendance Report points to /admin/attendance in 'management'", () => {
+  const management = CURRENT_NAV_ENTRIES.find((item) => item.id === "work-report-management");
+  assert.ok(management);
+  assert.equal(management?.label, "Quản lý báo cáo");
+  assert.equal(management?.path, "/work-reports/assignments");
+  assert.equal(management?.group, "management");
+  assert.equal(management?.capability, "work_report_management");
+  assert.deepEqual(management?.visibility, { desktop: true, mobile: true });
+  assert.deepEqual(management?.matchPaths, [
+    "/work-reports/assignments",
+    "/work-reports/reviews",
+    "/work-reports/analytics",
+    "/work-reports/templates",
+    "/work-reports/delegations",
+  ]);
 
   const attendance = CURRENT_NAV_ENTRIES.find((item) => item.id === "attendance-report");
   assert.ok(attendance);
@@ -168,11 +162,12 @@ test("Work Report assignments, analytics, and Attendance Report entries point to
   assert.equal(findEntryByPath("/admin/attendance")?.id, "attendance-report");
 });
 
-test("Vendor Finance nav entry points to /finance and highlights all /finance/** child routes", () => {
+test("Finance group entries Công nợ Vendor (/finance) and Ứng lương (/salary-advances) belong to 'finance' and highlight child routes", () => {
   const entry = CURRENT_NAV_ENTRIES.find((item) => item.id === "finance");
   assert.ok(entry);
-  assert.equal(entry?.label, "Tài chính");
+  assert.equal(entry?.label, "Công nợ Vendor");
   assert.equal(entry?.path, "/finance");
+  assert.equal(entry?.group, "finance");
   assert.equal(entry?.capability, "finance");
   assert.deepEqual(entry?.visibility, { desktop: true, mobile: true });
   for (const childPath of [
@@ -184,6 +179,12 @@ test("Vendor Finance nav entry points to /finance and highlights all /finance/**
   ]) {
     assert.equal(findEntryByPath(childPath)?.id, "finance", childPath);
   }
+  const salaryAdvances = CURRENT_NAV_ENTRIES.find((item) => item.id === "salary-advances");
+  assert.ok(salaryAdvances);
+  assert.equal(salaryAdvances?.label, "Ứng lương");
+  assert.equal(salaryAdvances?.path, "/salary-advances");
+  assert.equal(salaryAdvances?.group, "finance");
+  assert.equal(salaryAdvances?.capability, "salary_advances");
 });
 
 test("Desktop viewport theo feature flag, luôn giữ Dashboard và không có Pipeline Check", () => {
@@ -197,11 +198,11 @@ test("Desktop viewport theo feature flag, luôn giữ Dashboard và không có P
       "dashboard",
       "work-reports",
       "leave",
-      "salary-advances",
       "recruitment-posts",
       "finance",
+      "salary-advances",
       "leave-admin",
-      "work-report-assignments",
+      "work-report-management",
       "attendance-report",
       "admin",
     ],
@@ -219,11 +220,11 @@ test("Mobile viewport theo feature flag, luôn giữ Dashboard và không có Pi
       "dashboard",
       "work-reports",
       "leave",
-      "salary-advances",
       "recruitment-posts",
       "finance",
+      "salary-advances",
       "leave-admin",
-      "work-report-assignments",
+      "work-report-management",
       "attendance-report",
       "admin",
     ],
@@ -236,11 +237,11 @@ test("feature flag Direct Entry chỉ mở với giá trị chính xác true", (
     "dashboard",
     "work-reports",
     "leave",
-    "salary-advances",
     "recruitment-posts",
     "finance",
+    "salary-advances",
     "leave-admin",
-    "work-report-assignments",
+    "work-report-management",
     "attendance-report",
     "admin",
   ];
@@ -293,6 +294,7 @@ test("registry: mỗi entry có id ổn định, label, path, icon, status, capa
         "admin_area",
         "attendance_report",
         "work_reports",
+        "work_report_management",
         "work_report_assignments",
         "work_report_reviews",
         "work_report_analytics",
@@ -352,16 +354,17 @@ test("findEntryByPath('/direct-entry') trả về direct-entry entry", () => {
   assert.equal(entry?.id, "direct-entry");
 });
 
-test("findEntryByPath('/work-reports') trả về Work Reports entry và route con resolve đúng entry dài nhất", () => {
-  const entry = findEntryByPath("/work-reports");
-  assert.equal(entry?.id, "work-reports");
+test("findEntryByPath('/work-reports') tách biệt 2 trang cá nhân với 5 nhánh quản lý báo cáo", () => {
+  assert.equal(findEntryByPath("/work-reports")?.id, "work-reports");
   assert.equal(findEntryByPath("/work-reports/my-reports")?.id, "work-reports");
-  assert.equal(findEntryByPath("/work-reports/assignments")?.id, "work-report-assignments");
-  assert.equal(findEntryByPath("/work-reports/assignments/detail")?.id, "work-report-assignments");
-  assert.equal(findEntryByPath("/work-reports/reviews")?.id, "work-report-reviews");
-  assert.equal(findEntryByPath("/work-reports/reviews/obligation-1")?.id, "work-report-reviews");
-  assert.equal(findEntryByPath("/work-reports/analytics")?.id, "work-report-analytics");
-  assert.equal(findEntryByPath("/work-reports/analytics/detail")?.id, "work-report-analytics");
+  assert.equal(findEntryByPath("/work-reports/assignments")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/assignments/detail")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/reviews")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/reviews/obligation-1")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/analytics")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/analytics/detail")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/templates")?.id, "work-report-management");
+  assert.equal(findEntryByPath("/work-reports/delegations")?.id, "work-report-management");
   assert.equal(findEntryByPath("/leave")?.id, "leave");
   assert.equal(findEntryByPath("/salary-advances")?.id, "salary-advances");
   assert.equal(findEntryByPath("/recruitment-posts")?.id, "recruitment-posts");

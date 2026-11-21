@@ -31,11 +31,13 @@ const monthlyReportView = read("./vendor-finance-monthly-report-view.tsx");
 const governanceView = read("./vendor-finance-governance-view.tsx");
 const documentCss = read("./vendor-finance-document.module.css");
 
-test("Navigation & AppShell register Tài chính (/finance) with server capability predicate, feature gate, and print-hidden header", () => {
+test("Navigation & AppShell register Tài chính group with Công nợ Vendor (/finance), server capability predicate, feature gate, and print-hidden header", () => {
+  assert.match(navRegistry, /"finance":\s*"Tài chính"/);
   assert.match(navRegistry, /id:\s*"finance"/);
-  assert.match(navRegistry, /label:\s*"Tài chính"/);
+  assert.match(navRegistry, /label:\s*"Công nợ Vendor"/);
   assert.match(navRegistry, /path:\s*"\/finance"/);
   assert.match(navRegistry, /capability:\s*"finance"/);
+  assert.match(navRegistry, /group:\s*"finance"/);
   assert.match(desktopNav, /finance:\s*Landmark/);
   assert.match(mobileNav, /finance:\s*Landmark/);
   assert.match(appShell, /entry\.id !== "finance" \|\| vendorFinanceEnabled/);

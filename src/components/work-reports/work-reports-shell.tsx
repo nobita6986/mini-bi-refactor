@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import {
   workReportAnalyticsPredicate,
@@ -117,7 +117,9 @@ export function WorkReportsShell({
   return (
     <PageShell>
       <PageHeader eyebrow="Báo cáo công việc" title={title} description={description} />
-      <WorkReportsModuleNav active={active} links={buildWorkReportsNavLinks(actor)} />
+      <Suspense fallback={null}>
+        <WorkReportsModuleNav active={active} links={buildWorkReportsNavLinks(actor)} />
+      </Suspense>
       {children}
     </PageShell>
   );

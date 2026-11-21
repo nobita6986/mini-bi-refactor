@@ -415,15 +415,53 @@ export const workReportDelegationPredicate: NavCapabilityPredicate = (actor) =>
   hasNavAllCapability(actor, "report_delegate") ||
   hasNavTeamCapability(actor, "report_delegate");
 
+/**
+ * WP13 W1: Canonical priority order for the single top-level "Quản lý báo cáo"
+ * management destination. Priority #3 uses `analytics || view` to match
+ * `decideWorkReportAnalyticsPageAccess` while keeping internal Analytics and
+ * Submissions tabs/guards strictly independent (`view`-only mounts Submissions only).
+ */
+export const WORK_REPORT_MANAGEMENT_DESTINATIONS: ReadonlyArray<{
+  readonly path:
+    | "/work-reports/assignments"
+    | "/work-reports/reviews"
+    | "/work-reports/analytics"
+    | "/work-reports/templates"
+    | "/work-reports/delegations";
+  readonly predicate: NavCapabilityPredicate;
+}> = [
+  { path: "/work-reports/assignments", predicate: workReportAssignmentPredicate },
+  { path: "/work-reports/reviews", predicate: workReportReviewPredicate },
+  {
+    path: "/work-reports/analytics",
+    predicate: (actor) =>
+      workReportAnalyticsPredicate(actor) || workReportViewPredicate(actor),
+  },
+  { path: "/work-reports/templates", predicate: workReportTemplateManagePredicate },
+  { path: "/work-reports/delegations", predicate: workReportDelegationPredicate },
+];
+
+export type WorkReportManagementPath =
+  (typeof WORK_REPORT_MANAGEMENT_DESTINATIONS)[number]["path"];
+
+/** Resolves the first authorized Work Reports management URL in W1 priority order, or null when none allowed. */
+export function resolveWorkReportManagementPath(
+  actor: NavActorProjection | null,
+): WorkReportManagementPath | null {
+  if (!actor) return null;
+  for (const destination of WORK_REPORT_MANAGEMENT_DESTINATIONS) {
+    if (destination.predicate(actor)) return destination.path;
+  }
+  return null;
+}
+
+export const workReportManagementNavPredicate: NavCapabilityPredicate = (actor) =>
+  resolveWorkReportManagementPath(actor) !== null;
+
 /** Staff access is projected by the server from an active obligation, never inferred from role/title. */
 export const workReportsNavPredicate: NavCapabilityPredicate = (actor) =>
   actor.hasWorkReportObligations === true ||
-  workReportTemplateManagePredicate(actor) ||
-  workReportAssignmentPredicate(actor) ||
-  workReportViewPredicate(actor) ||
-  workReportAnalyticsPredicate(actor) ||
-  workReportReviewPredicate(actor) ||
-  workReportDelegationPredicate(actor);
+  workReportManagementNavPredicate(actor);
 
 function hasNavTeamCapability(actor: NavActorProjection, capability: Capability): boolean {
   if (actor.effective_grants !== undefined) {
@@ -534,6 +572,7 @@ export const NAV_CAPABILITY_PREDICATES: Readonly<Record<string, NavCapabilityPre
   worker_operations: workerOperationsNavPredicate,
   change_requests: changeRequestsNavPredicate,
   work_reports: workReportsNavPredicate,
+  work_report_management: workReportManagementNavPredicate,
   work_report_assignments: workReportAssignmentPredicate,
   work_report_reviews: workReportReviewPredicate,
   work_report_analytics: workReportAnalyticsPredicate,

@@ -9,12 +9,19 @@ import {
   resolveWorkReportAssignmentAccessForRequest,
   resolveWorkReportShellActorForRequest,
 } from "@/lib/navigation/resolve-nav-actor";
+import { parseWorkReportAssignmentTab } from "@/lib/work-reports/assignment-tab-model";
 
 export const dynamic = "force-dynamic";
 
-export default async function WorkReportAssignmentsPage() {
+export default async function WorkReportAssignmentsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+} = {}) {
   const enabled = process.env.WORK_REPORTS_API_ENABLED === "true";
   if (!enabled) notFound();
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const initialSubView = parseWorkReportAssignmentTab(resolvedSearchParams?.tab);
   const actor = await resolveActorForRequest().catch(() => null);
   const assignmentAccess = actor?.ok
     ? await resolveWorkReportAssignmentAccessForRequest()
@@ -45,11 +52,11 @@ export default async function WorkReportAssignmentsPage() {
       return (
         <WorkReportsShell
           actor={shellActor}
-          active="assignments"
+          active={initialSubView}
           title="Đợt giao & Nhóm nhận báo cáo"
           description="Tạo đợt giao báo cáo, quản lý nhóm người nhận và theo dõi tiến độ từng thành viên."
         >
-          <AssignmentManager />
+          <AssignmentManager initialSubView={initialSubView} />
         </WorkReportsShell>
       );
     }

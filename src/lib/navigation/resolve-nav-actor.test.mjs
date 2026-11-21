@@ -233,14 +233,15 @@ test("WP7B D-WP7B-01: server projection builders project minimal hasAttendanceDe
   assert.match(navProjectionBlock, /hasAttendanceDepartmentHeadAccess\?:\s*boolean;/);
   assert.doesNotMatch(navProjectionBlock, /assigned_roles/);
 
-  // All 4 server projection builders derive the boolean via hasActiveDepartmentHeadRole(...)
+  // Server projection builders derive the boolean via hasActiveDepartmentHeadRole(...)
+  // and AdminLayout delegates to resolveNavActorForAppShell (WP13 M1).
   assert.match(
     resolveNavActor,
     /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\.actor\)/,
   );
   assert.match(
     adminLayout,
-    /hasAttendanceDepartmentHeadAccess:\s*hasActiveDepartmentHeadRole\(actor\.actor\)/,
+    /resolveNavActorForAppShell\(\{\s*directEntryEnabled,\s*adminNavigationEnabled:\s*true,?\s*\}\)/,
   );
   assert.match(
     reportApi,

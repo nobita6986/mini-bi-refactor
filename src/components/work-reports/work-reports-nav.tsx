@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { parseWorkReportAssignmentTab } from "@/lib/work-reports/assignment-tab-model";
 
 export type WorkReportsActiveKey =
   | "my"
@@ -61,35 +61,17 @@ export function WorkReportsModuleNav({
   links?: readonly WorkReportsNavLink[];
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const baseActive = activeProp ?? resolveActiveKeyFromPathname(pathname);
-  const [assignmentSubTab, setAssignmentSubTab] = useState<"assignments" | "groups">(
-    baseActive === "groups" ? "groups" : "assignments",
-  );
-
-  useEffect(() => {
-    if (baseActive !== "assignments" && baseActive !== "groups") return;
-    const syncFromLocation = () => {
-      if (typeof window === "undefined") return;
-      const params = new URLSearchParams(window.location.search);
-      setAssignmentSubTab(params.get("tab") === "groups" ? "groups" : "assignments");
-    };
-    syncFromLocation();
-    const handleTabEvent = (event: Event) => {
-      const detail = (event as CustomEvent<"assignments" | "groups">).detail;
-      if (detail === "assignments" || detail === "groups") {
-        setAssignmentSubTab(detail);
-      }
-    };
-    window.addEventListener("popstate", syncFromLocation);
-    window.addEventListener("work-reports:assignment-tab", handleTabEvent);
-    return () => {
-      window.removeEventListener("popstate", syncFromLocation);
-      window.removeEventListener("work-reports:assignment-tab", handleTabEvent);
-    };
-  }, [baseActive]);
 
   const effectiveActiveKey: WorkReportsActiveKey =
-    baseActive === "assignments" || baseActive === "groups" ? assignmentSubTab : baseActive;
+    baseActive === "assignments" || baseActive === "groups"
+      ? searchParams !== null
+        ? parseWorkReportAssignmentTab(searchParams.get("tab"))
+        : baseActive === "groups"
+          ? "groups"
+          : "assignments"
+      : baseActive;
 
   const isTopItemActive = (item: WorkReportsNavLink) =>
     item.matchKeys
@@ -132,26 +114,13 @@ export function WorkReportsModuleNav({
         >
           {subLinks.map((sub) => {
             const isSubActive = sub.activeKey === effectiveActiveKey;
-            const isAssignmentSwitch =
-              (baseActive === "assignments" || baseActive === "groups") &&
-              (sub.activeKey === "assignments" || sub.activeKey === "groups");
 
             return (
               <Link
                 key={sub.activeKey}
                 href={sub.href}
+                scroll={false}
                 aria-current={isSubActive ? "page" : undefined}
-                onClick={(event) => {
-                  if (isAssignmentSwitch && typeof window !== "undefined") {
-                    event.preventDefault();
-                    const nextKey = sub.activeKey as "assignments" | "groups";
-                    setAssignmentSubTab(nextKey);
-                    window.history.replaceState(null, "", sub.href);
-                    window.dispatchEvent(
-                      new CustomEvent("work-reports:assignment-tab", { detail: nextKey }),
-                    );
-                  }
-                }}
                 className={cn(
                   "inline-flex min-h-11 sm:min-h-8 items-center rounded-lg px-3 py-1 text-xs font-medium transition-[color,background-color,transform] duration-[var(--ui-motion-hover,160ms)] active:scale-[0.99] motion-reduce:transition-none motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                   isSubActive

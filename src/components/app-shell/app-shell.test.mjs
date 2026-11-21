@@ -58,12 +58,14 @@ test("app-shell lọc nav theo feature flag + capability predicate tại request
   assert.match(appShellSource, /WORK_REPORTS_NAV_ENTRY_IDS\.has\(entry\.id\)/);
   assert.match(
     appShellSource,
-    /new Set\(\[\s*"work-reports",\s*"work-report-assignments",\s*"work-report-reviews",\s*"work-report-analytics",?\s*\]\)/,
+    /new Set\(\[\s*"work-reports",\s*"work-report-management",?\s*\]\)/,
   );
-  assert.match(appShellSource, /<DesktopNav\s+items=\{desktopItems/);
-  assert.match(appShellSource, /items=\{mobileItems\.map\(/);
-  // F6: active label duoc tinh client-side, khong con currentPath server.
-  assert.match(appShellSource, /<ActivePageLabel \/>/);
+  assert.match(appShellSource, /projectNavMenuEntries\(desktopItems,\s*actor\)/);
+  assert.match(appShellSource, /projectNavMenuEntries\(mobileItems,\s*actor\)/);
+  assert.match(appShellSource, /<DesktopNav items=\{desktopMenuItems\} \/>/);
+  assert.match(appShellSource, /<MobileNav items=\{mobileMenuItems\} \/>/);
+  // F6 + A2: active label duoc tinh client-side tu danh sach da loc, khong con currentPath server.
+  assert.match(appShellSource, /<ActivePageLabel items=\{activeLabelItems\} \/>/);
   assert.ok(!/currentPath/.test(appShellSource), "AppShell khong con nhan currentPath");
 });
 
@@ -166,10 +168,10 @@ test("mobile-nav.tsx: không dùng localStorage / console.log / API key", () => 
   }
 });
 
-test("desktop-nav.tsx: là Client Component dùng usePathname + findEntryByPath (F6)", () => {
+test("desktop-nav.tsx: là Client Component dùng usePathname + shared findActiveNavEntry (A1)", () => {
   assert.ok(desktopNavSource.includes('"use client"'), "desktop-nav.tsx phải là Client Component");
   assert.ok(desktopNavSource.includes("usePathname"), "dùng usePathname de tinh active");
-  assert.ok(desktopNavSource.includes("findEntryByPath"), "dùng findEntryByPath longest-prefix");
+  assert.ok(desktopNavSource.includes("findActiveNavEntry"), "dùng shared findActiveNavEntry (A1)");
 });
 
 test("desktop-nav.tsx: dùng next/link và có nav landmark", () => {
@@ -199,13 +201,12 @@ test("desktop-nav nhận các entry đã filter từ AppShell, không tự quy�
 });
 
 test("desktop nav client boundary only receives serializable fields; icons stay local", () => {
-  assert.match(
-    appShellSource,
-    /<DesktopNav\s+items=\{desktopItems\.map\(\(\{ id, label, path, group \}\) => \(\{ id, label, path, group \}\)\)\}\s*\/>/
-  );
-  assert.ok(!desktopNavSource.includes("NavEntry"), "client nav must not accept registry entries with component icons");
+  assert.match(appShellSource, /const desktopMenuItems = projectNavMenuEntries\(desktopItems,\s*actor\)/);
+  assert.match(appShellSource, /<DesktopNav items=\{desktopMenuItems\} \/>/);
+  assert.doesNotMatch(desktopNavSource, /\bNavEntry\b/, "client nav must not accept registry entries with component icons");
   assert.ok(desktopNavSource.includes('"project-operations": Building2'));
   assert.ok(desktopNavSource.includes('"direct-entry": ClipboardList'));
+  assert.ok(desktopNavSource.includes('"finance": Landmark'), "desktop group icon for Tài chính");
 });
 
 test("desktop/mobile nav have a local icon for every current registry entry", () => {
@@ -217,12 +218,12 @@ test("desktop/mobile nav have a local icon for every current registry entry", ()
   }
 });
 
-test("mobile-nav nhận danh sách server-filtered, dùng usePathname, không đọc env", () => {
+test("mobile-nav nhận danh sách server-filtered, dùng usePathname + shared findActiveNavEntry, không đọc env", () => {
   assert.ok(mobileNavSource.includes("items: ReadonlyArray<MobileNavItem>"));
   assert.ok(!mobileNavSource.includes("entriesForViewport"));
   assert.ok(!mobileNavSource.includes("process.env"));
-  // F6: mobile chi import findEntryByPath cho active detection, khong tu filter.
-  assert.ok(mobileNavSource.includes("findEntryByPath"));
+  // A1: mobile dùng chung findActiveNavEntry với DesktopNav và ActivePageLabel.
+  assert.ok(mobileNavSource.includes("findActiveNavEntry"));
   assert.ok(mobileNavSource.includes("usePathname"));
   assert.ok(mobileNavSource.includes('"project-operations": Building2'), "mobile co icon cho Dự án");
   assert.ok(!mobileNavSource.includes("Pipeline check"));

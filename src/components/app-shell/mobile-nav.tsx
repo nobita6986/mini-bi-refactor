@@ -24,7 +24,11 @@ import { usePathname } from "next/navigation";
 import { Dialog } from "radix-ui";
 import { Building2, CalendarDays, ClipboardList, FileDiff, Landmark, LayoutDashboard, Menu, NotebookPen, ShieldCheck, Users, X } from "lucide-react";
 
-import { findEntryByPath, groupNavEntries, type NavMenuEntry } from "@/lib/navigation/registry";
+import {
+  findActiveNavEntry,
+  groupNavEntries,
+  type NavMenuEntry,
+} from "@/lib/navigation/registry";
 import { cn } from "@/lib/utils";
 import { ThemeSelector } from "@/components/dashboard/theme-selector";
 
@@ -37,9 +41,7 @@ const NAV_ICONS: Record<string, typeof LayoutDashboard> = {
   "worker-operations": Users,
   "change-requests": FileDiff,
   "work-reports": NotebookPen,
-  "work-report-assignments": ClipboardList,
-  "work-report-reviews": ClipboardList,
-  "work-report-analytics": NotebookPen,
+  "work-report-management": ClipboardList,
   "attendance-report": CalendarDays,
   finance: Landmark,
   leave: CalendarDays,
@@ -58,7 +60,7 @@ export function MobileNav({
   const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const pathname = usePathname();
-  const active = findEntryByPath(pathname);
+  const active = findActiveNavEntry(pathname, items);
   const renderEntry = (entry: MobileNavItem) => {
     const Icon = NAV_ICONS[entry.id];
     if (!Icon) throw new Error(`Missing mobile navigation icon for "${entry.id}"`);

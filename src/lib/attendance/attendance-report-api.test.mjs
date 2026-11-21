@@ -483,8 +483,8 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
     new URL("../../app/admin/page.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(adminRootSource, /!adminAreaNavPredicate\(actor\.actor\)/);
-  assert.match(adminRootSource, /redirect\("\/admin\/attendance"\)/);
+  assert.match(adminRootSource, /resolveAdminLandingPath\(actor\)/);
+  assert.match(adminRootSource, /redirect\(target\)/);
 });
 
 test("GET /api/admin/attendance/report allows Full Admin, canonical BoD & canonical Team Leader and denies unauthorized roles before RPC", async () => {
