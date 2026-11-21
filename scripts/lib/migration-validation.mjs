@@ -472,6 +472,16 @@ export const PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES = Object.freeze([
   "public.org_department_list_user_directory_admin(uuid, uuid, text, text, text, text, uuid, timestamp with time zone, integer, integer)",
   "public.org_department_get_user_directory_entry_admin(uuid, uuid, uuid, uuid, timestamp with time zone)",
 ]);
+export const PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME =
+  "20261121150000_pr28_permission_groups_foundation.sql";
+export const PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_authz_list_groups_admin(uuid, uuid, uuid, boolean)",
+  "public.direct_entry_authz_create_group_admin(uuid, uuid, text, text, text, uuid, uuid, text[], jsonb, text, uuid, text)",
+  "public.direct_entry_authz_update_group_admin(uuid, uuid, uuid, integer, text, text, uuid, uuid, boolean, text[], jsonb, text, uuid, text)",
+  "public.direct_entry_authz_assign_group_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
+  "public.direct_entry_authz_remove_group_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
+  "public.direct_entry_authz_get_account_groups_admin(uuid, uuid, uuid)",
+]);
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
   "20261121090000_retire_ai_reports_and_provider_config.sql";
 export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
@@ -800,6 +810,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     pr28UnifiedUserDirectoryReaderApplied: has(
       PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME,
     ),
+    pr28PermissionGroupsFoundationApplied: has(
+      PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME,
+    ),
   };
 }
 
@@ -873,6 +886,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     retireAiReportsApplied = false,
     wp13Pr0BackendFiltersOptionalReasonApplied = false,
     pr28UnifiedUserDirectoryReaderApplied = false,
+    pr28PermissionGroupsFoundationApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1024,6 +1038,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(pr28UnifiedUserDirectoryReaderApplied
       ? PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES
+      : []),
+    ...(pr28PermissionGroupsFoundationApplied
+      ? PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES
       : []),
   ];
 }
