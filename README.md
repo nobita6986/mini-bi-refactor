@@ -147,8 +147,7 @@ Các route từng nằm sau Basic Auth giờ tự bảo vệ:
 | `/direct-entry` | `direct-entry-page-access` (flag + actor + capability) |
 | `/pipeline-check` | Chuyển hướng server-side về `/dashboard`; không fetch dữ liệu |
 | `/api/direct-entry/*` | Actor/capability/CSRF guard hiện hành |
-| `/api/ai/*` | `guardApiSession()` (401/403 sanitized) + feature flag + CSRF/origin hiện hành |
-| `/api/ai/worker/run` | `checkWorkerToken` (endpoint máy-với-máy, có token riêng) |
+| `/api/ai/*`, `/api/ai/worker/run` | Đã gỡ bỏ hoàn toàn (trả `404` theo Next.js App Router) |
 
 `/api/reporting/*` không tồn tại trong repo này; dữ liệu reporting được đọc server-side trong
 `/dashboard` và giờ nằm sau guard session ở trên.

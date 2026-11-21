@@ -123,6 +123,8 @@ import {
   WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
   WP8D_NAV_READONLY_MIGRATION_NAME,
   WP8D_NAV_READONLY_RPC_SIGNATURES,
+  RETIRE_AI_REPORTS_MIGRATION_NAME,
+  RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
   OFFBOARDING_REPORT_RPC_SIGNATURES,
   migrationChecksum,
@@ -550,7 +552,23 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
       assert.equal(ledgerCountAfter[0]?.total, names.length, "ledger reaches every migration source entry after applying the pending tail");
 
       const expectedSignatures = [...migration.matchAll(/^\s+'(public\.[^']+)'[,]?$/gm)]
-        .map((match) => match[1]);
+        .map((match) => match[1])
+        .filter((sig) => !RETIRED_AI_REPORTS_RPC_SIGNATURES.includes(sig));
+      const retireAiMigration = await readFile(
+        path.join(MIGRATION_DIR, RETIRE_AI_REPORTS_MIGRATION_NAME),
+        "utf8",
+      );
+      const retireAiNormalized = retireAiMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of RETIRED_AI_REPORTS_RPC_SIGNATURES) {
+        assert.ok(
+          retireAiNormalized.includes(`drop function ${sig.toLowerCase()} restrict;`),
+          `AI retirement migration explicitly drops ${sig} with RESTRICT`,
+        );
+      }
       const r1_2Migration = await readFile(path.join(MIGRATION_DIR, R1_2_MIGRATION), "utf8");
       const r1_2Normalized = r1_2Migration.replace(/\s+/g, " ")
         .replace(/\(\s+/g, "(").replace(/\s+\)/g, ")").toLowerCase();
@@ -1828,11 +1846,16 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         await client.query("reset role");
       }
 
-      // A representative allowlisted server RPC returns a constant and reads no application rows.
+      // A representative allowlisted server RPC executes cleanly with zero application rows.
       await client.query("set role service_role");
-      const capability = await client.query("select public.ai_report_review_capability() as value");
+      const feed = await client.query("select public.recruitment_post_public_feed_v1() as value");
       await client.query("reset role");
-      assert.equal(capability.rows[0].value.ok, true, "service_role can still call an allowlisted server RPC");
+      assert.equal(feed.rows[0].value.schema_version, 1, "service_role can still call an allowlisted server RPC");
+      const { rows: remainingRetired } = await client.query(
+        "select signature from unnest($1::text[]) as signatures(signature) where pg_catalog.to_regprocedure(signature) is not null",
+        [RETIRED_AI_REPORTS_RPC_SIGNATURES],
+      );
+      assert.deepEqual(remainingRetired, [], "all retired AI RPC signatures are absent after retirement migration");
 
       // WF-01 regression on ephemeral native PostgreSQL:
       // 1. Verify catalog invariants for direct_entry_workforce_reporting_scoped (SECURITY DEFINER, owner privileges
@@ -2321,7 +2344,7 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           + " create table public.s0_t1c_immutable_probe(id integer primary key);"
           + " insert into public.s0_t1c_immutable_probe values (1);"
           + " create trigger s0_t1c_immutable_before_update before update or delete on public.s0_t1c_immutable_probe"
-          + " for each row execute function public.ai_report_audit_immutable();"
+          + " for each row execute function public.direct_entry_reject_immutable_change();"
           + " grant select, update, delete on public.s0_t1c_immutable_probe to service_role;",
       );
       await client.query("set role service_role");
@@ -2334,7 +2357,7 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
       await client.query("set role service_role");
       await assert.rejects(
         client.query("update public.s0_t1c_immutable_probe set id=1 where id=1"),
-        (error) => error?.code === "P0001" && error.message.includes("append-only"),
+        (error) => error?.code === "55000" && error.message.includes("append-only"),
         "the immutable trigger still rejects a mutation without direct function EXECUTE",
       );
       await client.query("reset role");

@@ -22,10 +22,6 @@ import {
   hasPairedFullAdmin,
 } from "../src/lib/auth/direct-entry-v2.ts";
 import { canManageTeamLeadersFromActor } from "../src/lib/auth/direct-entry-page-access.ts";
-import { guardAiSettingsAdminActor } from "../src/lib/ai-config/server/route-helpers.mjs";
-import { keyringFromEnvironment } from "../src/lib/ai-config/crypto-envelope.ts";
-import { createProviderConfigStoreCore } from "../src/lib/ai-config/store-core.ts";
-import { saveProviderConfig } from "../src/lib/ai-config/settings-service.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
 
@@ -297,23 +293,6 @@ function buildProbeBriefPayload(projectId, industrialParkId) {
       require_other_documents: false,
       other_documents_text: null,
     },
-  };
-}
-
-function buildValidAiEnvelope(configId, version, profile, url, model) {
-  return {
-    envelope_version: 2,
-    algorithm: "aes-256-gcm",
-    key_id: "k1",
-    config_id: configId,
-    provider_profile: profile,
-    config_version: version,
-    api_base_url: url,
-    model,
-    iv: Buffer.alloc(12, 1).toString("base64"),
-    ciphertext: Buffer.from("encrypted-fixture-payload").toString("base64"),
-    authentication_tag: Buffer.alloc(16, 2).toString("base64"),
-    created_at: "2026-11-18T16:00:00.000Z",
   };
 }
 
@@ -820,14 +799,6 @@ test("5. Owner disable/re-enable + pre-WP5 disabled non-resurrection + idempoten
     (err) => err?.code === "42501" && err.message.includes("reporting actor unavailable"),
   );
 
-  const validEnv = buildValidAiEnvelope("pilot", 1, "openai", "https://api.openai.com/v1", "gpt-4o-mini");
-  const { rows: [{ res: disabledOwnerAi }] } = await db.query(
-    "select public.ai_provider_config_save('pilot', null, 'openai', 'https://api.openai.com/v1', 'api.openai.com', 'gpt-4o-mini', $1::jsonb, $2, $3, 'config_created') as res",
-    [JSON.stringify(validEnv), "a".repeat(16), OWNER.app],
-  );
-  assert.equal(disabledOwnerAi.ok, false);
-  assert.equal(disabledOwnerAi.code, "AI_FORBIDDEN");
-
   // Re-enable Owner -> restores 21 ADMIN grants
   await db.query(
     "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4, 'Re-enable canonical Owner', $5)",
@@ -1074,197 +1045,16 @@ test("7. R3 Work Reports delegation: template-scoped (T1 allowed, T2 denied), 0 
   );
 });
 
-test("8. AI Settings OD-WP5-04: 5 RPCs & TS guards enforce UUID Full Admin and reject 'pilot-admin'/HR_OP/collision", async () => {
-  const envV1 = buildValidAiEnvelope("pilot", 1, "openai", "https://api.openai.com/v1", "gpt-4o-mini");
-
-  // Save as Full Admin OWNER UUID
-  const { rows: [{ res: saved }] } = await db.query(
-    "select public.ai_provider_config_save('pilot', null, 'openai', 'https://api.openai.com/v1', 'api.openai.com', 'gpt-4o-mini', $1::jsonb, $2, $3, 'config_created') as res",
-    [JSON.stringify(envV1), "b".repeat(16), OWNER.app],
+test("8. AI Settings / AI Reports retired: ai_provider_configs and ai_provider_config_* RPCs are absent", async () => {
+  const { rows: aiTables } = await db.query(
+    "select tablename from pg_tables where schemaname = 'public' and (tablename like 'ai_provider_config%' or tablename like 'ai_report%') order by 1",
   );
-  assert.equal(saved.ok, true);
-  assert.equal(saved.config.version, 1);
+  assert.deepEqual(aiTables, []);
 
-  const { rows: [cfgRow] } = await db.query(
-    "select created_by_ref, updated_by_ref from public.ai_provider_configs where config_id = 'pilot' and version = 1",
+  const { rows: aiProcs } = await db.query(
+    "select proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and (p.proname like 'ai_provider_config%' or p.proname like 'ai_report%') order by 1",
   );
-  assert.equal(cfgRow.created_by_ref, OWNER.app);
-  assert.equal(cfgRow.updated_by_ref, OWNER.app);
-
-  // Negative checks across all 5 mutating AI RPCs
-  const invalidActors = ["pilot-admin", HR_OP.app, COLLISION.app];
-  for (const badActor of invalidActors) {
-    const { rows: [{ res: rSave }] } = await db.query(
-      "select public.ai_provider_config_save('pilot', 1, 'openai', 'https://api.openai.com/v1', 'api.openai.com', 'gpt-4o-mini', $1::jsonb, $2, $3, 'credential_rotated') as res",
-      [JSON.stringify(buildValidAiEnvelope("pilot", 2, "openai", "https://api.openai.com/v1", "gpt-4o-mini")), "c".repeat(16), badActor],
-    );
-    assert.deepEqual({ ok: rSave.ok, code: rSave.code }, { ok: false, code: "AI_FORBIDDEN" });
-
-    const { rows: [{ res: rTest }] } = await db.query(
-      "select public.ai_provider_config_test_result('pilot', 1, true, 'ok', $1) as res",
-      [badActor],
-    );
-    assert.deepEqual({ ok: rTest.ok, code: rTest.code }, { ok: false, code: "AI_FORBIDDEN" });
-
-    const { rows: [{ res: rAct }] } = await db.query(
-      "select public.ai_provider_config_activate('pilot', 1, $1) as res",
-      [badActor],
-    );
-    assert.deepEqual({ ok: rAct.ok, code: rAct.code }, { ok: false, code: "AI_FORBIDDEN" });
-
-    const { rows: [{ res: rDis }] } = await db.query(
-      "select public.ai_provider_config_disable('pilot', 1, $1) as res",
-      [badActor],
-    );
-    assert.deepEqual({ ok: rDis.ok, code: rDis.code }, { ok: false, code: "AI_FORBIDDEN" });
-
-    const { rows: [{ res: rRej }] } = await db.query(
-      "select public.ai_provider_config_rejected('pilot', 1, $1, 'bad_input') as res",
-      [badActor],
-    );
-    assert.deepEqual({ ok: rRej.ok, code: rRej.code }, { ok: false, code: "AI_FORBIDDEN" });
-  }
-
-  // Happy lifecycle under valid Full Admin UUID (NGATTT)
-  const { rows: [{ res: testOk }] } = await db.query(
-    "select public.ai_provider_config_test_result('pilot', 1, true, 'ok', $1) as res",
-    [NGATTT.app],
-  );
-  assert.equal(testOk.ok, true);
-  assert.equal(testOk.config.status, "verified");
-
-  const { rows: [{ res: actOk }] } = await db.query(
-    "select public.ai_provider_config_activate('pilot', 1, $1) as res",
-    [NGATTT.app],
-  );
-  assert.equal(actOk.ok, true);
-  assert.equal(actOk.config.status, "active");
-
-  const { rows: [{ res: disOk }] } = await db.query(
-    "select public.ai_provider_config_disable('pilot', 1, $1) as res",
-    [OWNER.app],
-  );
-  assert.equal(disOk.ok, true);
-  assert.equal(disOk.config.status, "disabled");
-
-  // TypeScript route-helpers + store-core + settings-service parity with SQL
-  const { rows: [{ payload: hrCtx }] } = await db.query(
-    "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
-    [HR_OP.auth],
-  );
-  const guardHr = guardAiSettingsAdminActor(hrCtx);
-  assert.equal(guardHr.ok, false);
-  assert.equal(guardHr.response.status, 403);
-  assert.equal((await guardHr.response.json()).code, "AI_FORBIDDEN");
-
-  const guardNonUuid = guardAiSettingsAdminActor({ app_user_id: "pilot-admin", effective_grants: [] });
-  assert.equal(guardNonUuid.ok, false);
-  assert.equal(guardNonUuid.response.status, 403);
-
-  const { rows: [{ payload: ownerCtx }] } = await db.query(
-    "select public.direct_entry_resolve_actor_context($1::uuid) as payload",
-    [OWNER.auth],
-  );
-  const guardOwner = guardAiSettingsAdminActor(ownerCtx);
-  assert.deepEqual(guardOwner, { ok: true, actor_ref: OWNER.app });
-
-  const keyring = keyringFromEnvironment({
-    AI_SETTINGS_ENABLED: "true",
-    AI_CONFIG_ACTIVE_KEY_ID: "k1",
-    AI_CONFIG_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
-  });
-  const pgliteStore = createProviderConfigStoreCore({
-    config_id: "pilot-provider",
-    keyring: () => ({ ok: true, keyring }),
-    rpc: async (name, params) => {
-      if (name === "ai_provider_config_current") {
-        const { rows: [{ res }] } = await db.query(
-          "select public.ai_provider_config_current($1) as res",
-          [params.p_config_id],
-        );
-        return { data: res, error: null };
-      }
-      if (name === "ai_provider_config_version") {
-        const { rows: [{ res }] } = await db.query(
-          "select public.ai_provider_config_version($1, $2) as res",
-          [params.p_config_id, params.p_version],
-        );
-        return { data: res, error: null };
-      }
-      if (name === "ai_provider_config_save") {
-        const { rows: [{ res }] } = await db.query(
-          "select public.ai_provider_config_save($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10) as res",
-          [
-            params.p_config_id,
-            params.p_expected_version,
-            params.p_provider_profile,
-            params.p_api_base_url,
-            params.p_sanitized_host,
-            params.p_model,
-            JSON.stringify(params.p_envelope),
-            params.p_key_fingerprint,
-            params.p_actor_ref,
-            params.p_action,
-          ],
-        );
-        return { data: res, error: null };
-      }
-      throw new Error(`Unexpected RPC in cutover test: ${name}`);
-    },
-  });
-  const tsSaveRejected = await saveProviderConfig({
-    store: pgliteStore,
-    keyring,
-    url_policy: { environment: "production", nodeEnv: "production", allowedHosts: ["api.openai.com"] },
-    actor: HR_OP.app,
-    body: {
-      provider_profile: "openai-compatible",
-      api_url: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
-      api_key: "sk-wp5b2-synthetic-key-value",
-      expected_version: null,
-    },
-  });
-  assert.equal(tsSaveRejected.ok, false);
-  assert.equal(tsSaveRejected.code, "AI_FORBIDDEN");
-
-  const tsSavePilotRejected = await saveProviderConfig({
-    store: pgliteStore,
-    keyring,
-    url_policy: { environment: "production", nodeEnv: "production", allowedHosts: ["api.openai.com"] },
-    actor: "pilot-admin",
-    body: {
-      provider_profile: "openai-compatible",
-      api_url: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
-      api_key: "sk-wp5b2-synthetic-key-value",
-      expected_version: null,
-    },
-  });
-  assert.equal(tsSavePilotRejected.ok, false);
-  assert.equal(tsSavePilotRejected.code, "AI_FORBIDDEN");
-
-  const tsSaveOwnerOk = await saveProviderConfig({
-    store: pgliteStore,
-    keyring,
-    url_policy: { environment: "production", nodeEnv: "production", allowedHosts: ["api.openai.com"] },
-    actor: OWNER.app,
-    body: {
-      provider_profile: "openai-compatible",
-      api_url: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
-      api_key: "sk-wp5b2-synthetic-key-value",
-      expected_version: null,
-    },
-  });
-  assert.equal(tsSaveOwnerOk.ok, true);
-  assert.equal(tsSaveOwnerOk.config.version, 1);
-
-  const flagSrc = await readFile(path.resolve("src/lib/ai-config/settings-flag.ts"), "utf8");
-  const settingsSrc = await readFile(path.resolve("src/lib/ai-config/server/settings.mjs"), "utf8");
-  assert.equal(flagSrc.includes("PILOT_ACTOR_REF"), false);
-  assert.equal(settingsSrc.includes("PILOT_ACTOR_REF"), false);
-  assert.equal(settingsSrc.includes("ACTOR_UUID_RE") && settingsSrc.includes("AI_FORBIDDEN"), true);
+  assert.deepEqual(aiProcs, []);
 });
 
 test("9. Post-cutover create_personnel & link_recruiter set authz_managed=true + EMPLOYEE_BASE + RECRUITER and preserve invariants", async () => {

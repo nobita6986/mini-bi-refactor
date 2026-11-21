@@ -460,6 +460,32 @@ export const WP8D_NAV_READONLY_MIGRATION_NAME =
 export const WP8D_NAV_READONLY_RPC_SIGNATURES = Object.freeze([
   "public.work_report_has_active_obligations(uuid, uuid)",
 ]);
+export const RETIRE_AI_REPORTS_MIGRATION_NAME =
+  "20261121090000_retire_ai_reports_and_provider_config.sql";
+export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
+  "public.ai_provider_config_activate(text, integer, text)",
+  "public.ai_provider_config_active()",
+  "public.ai_provider_config_current(text)",
+  "public.ai_provider_config_disable(text, integer, text)",
+  "public.ai_provider_config_rejected(text, integer, text, text)",
+  "public.ai_provider_config_save(text, integer, text, text, text, text, jsonb, text, text, text)",
+  "public.ai_provider_config_test_result(text, integer, boolean, text, text)",
+  "public.ai_provider_config_version(text, integer)",
+  "public.ai_report_approve_revision(uuid, integer, text)",
+  "public.ai_report_claim(text, integer, integer)",
+  "public.ai_report_complete(uuid, uuid, jsonb, jsonb)",
+  "public.ai_report_enqueue(text, jsonb, jsonb, text, text, text, text, jsonb, text, text, text, text, text, text, text, integer, text, integer)",
+  "public.ai_report_fail(uuid, uuid, text, text, timestamptz, text)",
+  "public.ai_report_history(text, text, integer)",
+  "public.ai_report_mark_stage(uuid, uuid, text)",
+  "public.ai_report_policy_context(text, integer)",
+  "public.ai_report_record_usage(jsonb)",
+  "public.ai_report_recover_stale(integer)",
+  "public.ai_report_regenerate(uuid, text, text)",
+  "public.ai_report_reject_revision(uuid, integer, text, text)",
+  "public.ai_report_review_capability()",
+  "public.ai_report_status(uuid)",
+]);
 export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_list_templates(uuid, uuid)",
   "public.work_report_get_template(uuid, uuid, uuid)",
@@ -755,6 +781,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     wp5b1RoleEffectiveAccessApplied: has(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME),
     wp7bAttendanceOrgScopeApplied: has(WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME),
     wp8dNavReadonlyApplied: has(WP8D_NAV_READONLY_MIGRATION_NAME),
+    retireAiReportsApplied: has(RETIRE_AI_REPORTS_MIGRATION_NAME),
   };
 }
 
@@ -825,12 +852,16 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     wp5b1RoleEffectiveAccessApplied = false,
     wp7bAttendanceOrgScopeApplied = false,
     wp8dNavReadonlyApplied = false,
+    retireAiReportsApplied = false,
   } = flags ?? {};
 
-  const baseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
-  if (baseAllowlist.length === 0) {
+  const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
+  if (rawBaseAllowlist.length === 0) {
     return [];
   }
+  const baseAllowlist = retireAiReportsApplied
+    ? rawBaseAllowlist.filter((sig) => !RETIRED_AI_REPORTS_RPC_SIGNATURES.includes(sig))
+    : rawBaseAllowlist;
 
   return [
     ...baseAllowlist,
