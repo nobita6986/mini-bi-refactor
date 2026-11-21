@@ -656,6 +656,7 @@ export function AccountProvisionAndLinkStepper({
 
       let currentCp = baseCp;
       let recruiterId = step5.committed_recruiter_id;
+      let recruiterVersion = step5.committed_recruiter_version ?? null;
 
       // 5a: Create personnel/recruiter profile from account if not yet committed
       if (!recruiterId) {
@@ -722,14 +723,23 @@ export function AccountProvisionAndLinkStepper({
               : recObj && typeof recObj.id === "string"
                 ? recObj.id
                 : null;
+          const extractedRecruiterVersion =
+            recObj &&
+            typeof recObj.version === "number" &&
+            Number.isSafeInteger(recObj.version) &&
+            recObj.version >= 1
+              ? recObj.version
+              : null;
           if ((response.status === 200 || response.status === 201) && extractedRecruiterId) {
             recruiterId = extractedRecruiterId.toLowerCase();
+            recruiterVersion = extractedRecruiterVersion ?? 1;
             const updated = persistCpOrReport({
               ...currentCp,
               updated_at: nowIso(),
               step5_recruiter: {
                 ...currentCp.step5_recruiter!,
                 committed_recruiter_id: recruiterId,
+                committed_recruiter_version: recruiterVersion,
                 status: currentCp.step5_recruiter!.team_id ? "IDLE" : "COMMITTED",
               },
             });
@@ -794,7 +804,7 @@ export function AccountProvisionAndLinkStepper({
         const tracked = workspaceGuard.trackController();
         try {
           const response = await fetch(
-            `/api/admin/catalog/personnel/${encodeURIComponent(recruiterId)}/team-memberships`,
+            `/api/admin/catalog/personnel/${encodeURIComponent(recruiterId)}/team-memberships/${encodeURIComponent(teamId)}`,
             {
               method: "POST",
               cache: "no-store",
@@ -805,7 +815,7 @@ export function AccountProvisionAndLinkStepper({
                 "Idempotency-Key": key5b,
               },
               body: JSON.stringify({
-                team_id: teamId,
+                expected_version: recruiterVersion ?? 1,
                 reason: "Xếp tổ đội tuyển dụng khi tạo người dùng mới",
                 idempotency_key: key5b,
               }),
@@ -896,7 +906,7 @@ export function AccountProvisionAndLinkStepper({
         if (frozenExpectedVersion === null) {
           setStep4VersionConflict(true);
           setStep4PartialFailure(
-            "Chưa có phiên bản tài khoản mới nhất sau nhóm quyền đã lưu trước đó.",
+            "Chưa có dữ liệu tài khoản mới nhất sau nhóm quyền đã lưu trước đó.",
           );
           setFeedback({
             tone: "warning",
@@ -955,7 +965,6 @@ export function AccountProvisionAndLinkStepper({
                 group_id: groupEntry.group_id,
                 expected_account_version: frozenExpectedVersion,
                 reason: safeReason,
-                idempotency_key: groupEntry.idempotency_key,
               }),
             },
           );
@@ -974,10 +983,10 @@ export function AccountProvisionAndLinkStepper({
           ) {
             return;
           }
-          const outcome = classifyPermissionGroupMutationResponse<{ account_version?: number }>(
-            response.status,
-            rawJson,
-          );
+          const outcome = classifyPermissionGroupMutationResponse<{
+            account_version?: number;
+            membership?: { account_version?: number };
+          }>(response.status, rawJson);
 
           if (outcome.kind === "session-lost") {
             handleSessionLossInside(outcome.message, outcome.unauthenticated);
@@ -1024,9 +1033,11 @@ export function AccountProvisionAndLinkStepper({
             return;
           }
 
+          const resolvedVersion =
+            outcome.data?.membership?.account_version ?? outcome.data?.account_version;
           const nextVersion =
-            typeof outcome.data?.account_version === "number" && outcome.data.account_version >= 1
-              ? outcome.data.account_version
+            typeof resolvedVersion === "number" && resolvedVersion >= 1
+              ? resolvedVersion
               : null;
           currentAccountVersion = nextVersion;
           if (nextVersion !== null) setVerifiedStep4AccountVersion(nextVersion);
@@ -1105,13 +1116,13 @@ export function AccountProvisionAndLinkStepper({
         if (frozenExpectedVersion === null) {
           setStep4VersionConflict(true);
           setStep4PartialFailure(
-            "Chưa xác định được phiên bản tài khoản hiện hành sau các vai trò đã cấp trước đó.",
+            "Chưa xác định được dữ liệu tài khoản hiện hành sau các vai trò đã cấp trước đó.",
           );
           setFeedback({
             tone: "warning",
-            title: "Cần tải lại phiên bản tài khoản mới nhất trước khi cấp vai trò tiếp theo",
+            title: "Cần tải lại dữ liệu tài khoản mới nhất trước khi tiếp tục",
             message:
-              "Vai trò trước đó đã được cấp nhưng chưa có phiên bản tài khoản xác nhận mới nhất. Hãy bấm \"Tải lại phiên bản tài khoản mới nhất\" để lấy đúng phiên bản từ máy chủ (không tự suy diễn phiên bản).",
+              "Vai trò trước đó đã được cấp nhưng chưa có dữ liệu tài khoản xác nhận mới nhất. Hãy bấm \"Tải lại dữ liệu tài khoản mới nhất\" để lấy trạng thái mới nhất từ máy chủ.",
           });
           return;
         }
@@ -1240,8 +1251,8 @@ export function AccountProvisionAndLinkStepper({
             setStep4PartialFailure(outcome.message);
             setFeedback({
               tone: "warning",
-              title: `Xung đột phiên bản tài khoản khi cấp vai trò ${roleEntry.role_code} (409)`,
-              message: `${outcome.message} Bấm "Tải lại phiên bản tài khoản mới nhất" để đối chiếu và tiếp tục, hoặc đóng hộp thoại để mở Hồ sơ nhân viên.`,
+              title: `Dữ liệu tài khoản vừa thay đổi khi cập nhật nhóm quyền (${roleEntry.role_code})`,
+              message: `${outcome.message} Bấm "Tải lại dữ liệu tài khoản mới nhất" để đối chiếu và tiếp tục, hoặc đóng hộp thoại để mở hồ sơ người dùng.`,
             });
             return;
           }
@@ -2727,8 +2738,8 @@ export function AccountProvisionAndLinkStepper({
       if (!projectedA) {
         setFeedback({
           tone: "warning",
-          title: "Không tải được phiên bản tài khoản mới nhất",
-          message: "Vui lòng thử tải lại hoặc đóng hộp thoại để mở Hồ sơ nhân viên và cấp vai trò thủ công.",
+          title: "Không tải được dữ liệu tài khoản mới nhất",
+          message: "Vui lòng thử tải lại hoặc đóng hộp thoại để mở hồ sơ người dùng và xếp nhóm quyền thủ công.",
         });
         return;
       }
@@ -2765,8 +2776,8 @@ export function AccountProvisionAndLinkStepper({
       if (!mountedRef.current || !workspaceGuard.isActive(callerEpoch)) return;
       setFeedback({
         tone: "warning",
-        title: "Mất kết nối khi tải phiên bản tài khoản mới nhất",
-        message: "Vui lòng thử tải lại hoặc đóng hộp thoại để kiểm tra trên Hồ sơ nhân viên.",
+        title: "Mất kết nối khi tải dữ liệu tài khoản mới nhất",
+        message: "Vui lòng thử tải lại hoặc đóng hộp thoại để kiểm tra trên hồ sơ người dùng.",
       });
     } finally {
       tracked.release();

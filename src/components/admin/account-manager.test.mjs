@@ -47,7 +47,7 @@ test("PR #28: legacy technical admin UI screens & account classification route a
 });
 
 test("PR #28: AccountDirectoryDetailManager handles lock/unlock, edit display name, reset password, and groups with strict OCC & idempotency", () => {
-  assert.match(accountDetailSource, /\/api\/admin\/organization\/user-directory\/entry\?account_ref=/);
+  assert.match(accountDetailSource, /\/api\/admin\/organization\/user-directory\/detail\?account_ref=/);
   assert.match(accountDetailSource, /\/api\/admin\/access\/accounts\/\$\{encodeURIComponent\(account\.account_ref\)\}\/\$\{action\}/);
   assert.match(accountDetailSource, /\/api\/admin\/access\/accounts\/\$\{encodeURIComponent\(account\.account_ref\)\}\/display-name/);
   assert.match(accountDetailSource, /\/api\/admin\/access\/accounts\/\$\{encodeURIComponent\(account\.account_ref\)\}\/reset-password/);

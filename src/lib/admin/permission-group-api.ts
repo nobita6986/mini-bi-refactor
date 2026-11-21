@@ -2,6 +2,7 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
+import { isSameOriginAuthRequest } from "../auth/same-origin-auth-request.ts";
 import { failJson, isUuid, noStoreJson } from "../http/direct-entry-api-guard.ts";
 import {
   adminAuthorityNavPredicate,
@@ -17,6 +18,8 @@ import {
   type PermissionGroupErrorCode,
 } from "./permission-group-contract.ts";
 import type { PermissionGroupRepository } from "./permission-group-repository.ts";
+
+const MAX_JSON_BODY_BYTES = 8192;
 
 const DISALLOWED_AUTHORITY_HEADERS = [
   "x-app-user-id",
@@ -49,6 +52,54 @@ function hasDisallowedAuthorityHeaders(request: Request): boolean {
     if (request.headers.get(h) !== null) return true;
   }
   return false;
+}
+
+function checkSameOriginMutation(request: Request): Response | null {
+  return isSameOriginAuthRequest(request) ? null : groupError("CSRF_REJECTED");
+}
+
+async function readBoundedJsonBody(
+  request: Request,
+): Promise<{ ok: true; value: unknown } | { ok: false; response: Response }> {
+  const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
+  if (contentType !== "application/json") {
+    return { ok: false, response: groupError("CONTENT_TYPE_INVALID") };
+  }
+  const contentLength = request.headers.get("content-length");
+  if (
+    contentLength !== null &&
+    (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_JSON_BODY_BYTES)
+  ) {
+    return { ok: false, response: groupError("BODY_TOO_LARGE") };
+  }
+  if (!request.body) {
+    return { ok: false, response: groupError("INVALID_JSON") };
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_JSON_BODY_BYTES) {
+        await reader.cancel();
+        return { ok: false, response: groupError("BODY_TOO_LARGE") };
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    return { ok: true, value: parsed };
+  } catch {
+    return { ok: false, response: groupError("INVALID_JSON") };
+  }
 }
 
 function readIdempotencyKey(request: Request): string | null {
@@ -116,6 +167,9 @@ export async function listPermissionGroupsAdmin(
   if (gate) return gate;
   if (hasDisallowedAuthorityHeaders(request)) return groupError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
 
+  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
+  if (!actor.ok) return actor.response;
+
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(request.url);
@@ -124,9 +178,6 @@ export async function listPermissionGroupsAdmin(
   }
   const query = parseListGroupsQuery(parsedUrl.searchParams);
   if (!query.ok) return groupError(query.code);
-
-  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
-  if (!actor.ok) return actor.response;
 
   const res = await dependencies.repository.listGroups(actor, query.value);
   if (!res.ok) return groupError(res.code, res.current_version);
@@ -141,21 +192,19 @@ export async function createPermissionGroupAdmin(
   const gate = featureGate(enabledFlag);
   if (gate) return gate;
   if (hasDisallowedAuthorityHeaders(request)) return groupError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
+  const csrf = checkSameOriginMutation(request);
+  if (csrf) return csrf;
+
+  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
+  if (!actor.ok) return actor.response;
 
   const idempotencyKey = readIdempotencyKey(request);
   if (!idempotencyKey) return groupError("IDEMPOTENCY_KEY_REQUIRED");
 
-  let rawBody: unknown;
-  try {
-    rawBody = await request.json();
-  } catch {
-    return groupError("AUTHZ_VALIDATION_ERROR");
-  }
-  const body = parseCreateGroupBody(rawBody);
+  const rawBody = await readBoundedJsonBody(request);
+  if (!rawBody.ok) return rawBody.response;
+  const body = parseCreateGroupBody(rawBody.value);
   if (!body.ok) return groupError(body.code);
-
-  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
-  if (!actor.ok) return actor.response;
 
   const requestHash = hashPayload({ op: "CREATE_GROUP", ...body.value });
   const res = await dependencies.repository.createGroup(actor, body.value, idempotencyKey, requestHash);
@@ -172,6 +221,11 @@ export async function updatePermissionGroupAdmin(
   const gate = featureGate(enabledFlag);
   if (gate) return gate;
   if (hasDisallowedAuthorityHeaders(request)) return groupError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
+  const csrf = checkSameOriginMutation(request);
+  if (csrf) return csrf;
+
+  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
+  if (!actor.ok) return actor.response;
 
   if (!isUuid(groupId)) return groupError("AUTHZ_VALIDATION_ERROR");
   const normalizedGroupId = groupId.trim().toLowerCase();
@@ -179,17 +233,10 @@ export async function updatePermissionGroupAdmin(
   const idempotencyKey = readIdempotencyKey(request);
   if (!idempotencyKey) return groupError("IDEMPOTENCY_KEY_REQUIRED");
 
-  let rawBody: unknown;
-  try {
-    rawBody = await request.json();
-  } catch {
-    return groupError("AUTHZ_VALIDATION_ERROR");
-  }
-  const body = parseUpdateGroupBody(rawBody);
+  const rawBody = await readBoundedJsonBody(request);
+  if (!rawBody.ok) return rawBody.response;
+  const body = parseUpdateGroupBody(rawBody.value);
   if (!body.ok) return groupError(body.code);
-
-  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
-  if (!actor.ok) return actor.response;
 
   const requestHash = hashPayload({ op: "UPDATE_GROUP", group_id: normalizedGroupId, ...body.value });
   const res = await dependencies.repository.updateGroup(actor, normalizedGroupId, body.value, idempotencyKey, requestHash);
@@ -207,11 +254,11 @@ export async function getAccountGroupsAdmin(
   if (gate) return gate;
   if (hasDisallowedAuthorityHeaders(request)) return groupError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
 
-  if (!isUuid(accountRef)) return groupError("AUTHZ_VALIDATION_ERROR");
-  const normalizedAccountRef = accountRef.trim().toLowerCase();
-
   const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
   if (!actor.ok) return actor.response;
+
+  if (!isUuid(accountRef)) return groupError("AUTHZ_VALIDATION_ERROR");
+  const normalizedAccountRef = accountRef.trim().toLowerCase();
 
   const res = await dependencies.repository.getAccountGroups(actor, normalizedAccountRef);
   if (!res.ok) return groupError(res.code, res.current_version);
@@ -227,6 +274,11 @@ export async function assignAccountGroupAdmin(
   const gate = featureGate(enabledFlag);
   if (gate) return gate;
   if (hasDisallowedAuthorityHeaders(request)) return groupError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
+  const csrf = checkSameOriginMutation(request);
+  if (csrf) return csrf;
+
+  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
+  if (!actor.ok) return actor.response;
 
   if (!isUuid(accountRef)) return groupError("AUTHZ_VALIDATION_ERROR");
   const normalizedAccountRef = accountRef.trim().toLowerCase();
@@ -234,17 +286,10 @@ export async function assignAccountGroupAdmin(
   const idempotencyKey = readIdempotencyKey(request);
   if (!idempotencyKey) return groupError("IDEMPOTENCY_KEY_REQUIRED");
 
-  let rawBody: unknown;
-  try {
-    rawBody = await request.json();
-  } catch {
-    return groupError("AUTHZ_VALIDATION_ERROR");
-  }
-  const body = parseAssignGroupMemberBody(rawBody);
+  const rawBody = await readBoundedJsonBody(request);
+  if (!rawBody.ok) return rawBody.response;
+  const body = parseAssignGroupMemberBody(rawBody.value);
   if (!body.ok) return groupError(body.code);
-
-  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
-  if (!actor.ok) return actor.response;
 
   const requestHash = hashPayload({ op: "ASSIGN_GROUP_MEMBER", account_ref: normalizedAccountRef, ...body.value });
   const res = await dependencies.repository.assignGroupMember(
@@ -268,6 +313,11 @@ export async function removeAccountGroupAdmin(
   const gate = featureGate(enabledFlag);
   if (gate) return gate;
   if (hasDisallowedAuthorityHeaders(request)) return groupError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
+  const csrf = checkSameOriginMutation(request);
+  if (csrf) return csrf;
+
+  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
+  if (!actor.ok) return actor.response;
 
   if (!isUuid(accountRef) || !isUuid(membershipId)) return groupError("AUTHZ_VALIDATION_ERROR");
   const normalizedAccountRef = accountRef.trim().toLowerCase();
@@ -276,17 +326,10 @@ export async function removeAccountGroupAdmin(
   const idempotencyKey = readIdempotencyKey(request);
   if (!idempotencyKey) return groupError("IDEMPOTENCY_KEY_REQUIRED");
 
-  let rawBody: unknown;
-  try {
-    rawBody = await request.json();
-  } catch {
-    return groupError("AUTHZ_VALIDATION_ERROR");
-  }
-  const body = parseRemoveGroupMemberBody(rawBody);
+  const rawBody = await readBoundedJsonBody(request);
+  if (!rawBody.ok) return rawBody.response;
+  const body = parseRemoveGroupMemberBody(rawBody.value);
   if (!body.ok) return groupError(body.code);
-
-  const actor = await resolveVerifiedFullAdminActor(dependencies.resolveSession);
-  if (!actor.ok) return actor.response;
 
   const requestHash = hashPayload({
     op: "REMOVE_GROUP_MEMBER",

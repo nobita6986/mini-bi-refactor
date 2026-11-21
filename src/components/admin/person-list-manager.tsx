@@ -87,8 +87,18 @@ function summarizePendingStep(cp: ProvisionCheckpointV2): string {
   if (cp.step3_link.status !== "COMMITTED" && cp.step3_link.status !== "SKIPPED") {
     return "Bước gắn tài khoản vào hồ sơ nhân viên đang chờ hoàn tất.";
   }
-  if (cp.step4_roles.some((item) => item.status !== "COMMITTED")) {
+  if (
+    (cp.step4_groups ?? []).some((item) => item.status !== "COMMITTED") ||
+    cp.step4_roles.some((item) => item.status !== "COMMITTED")
+  ) {
     return "Bước xếp nhóm quyền khởi tạo còn mục chưa hoàn tất.";
+  }
+  if (
+    cp.step5_recruiter?.enabled &&
+    cp.step5_recruiter.status !== "COMMITTED" &&
+    cp.step5_recruiter.status !== "SKIPPED"
+  ) {
+    return "Bước kích hoạt tuyển dụng / xếp tổ đội còn đang chờ hoàn tất.";
   }
   return "Đang chờ hoàn tất bước cuối cùng với máy chủ.";
 }

@@ -279,9 +279,15 @@ export function classifyPermissionGroupMutationResponse<T = unknown>(
 
   if (status === 200 || status === 201) {
     if (isRecord(payload) && payload.ok === true) {
+      const nestedGroup = isRecord(payload.group) ? payload.group : null;
+      const nestedMembership = isRecord(payload.membership) ? payload.membership : null;
+      const replayed =
+        payload.replayed === true ||
+        nestedGroup?.replayed === true ||
+        nestedMembership?.replayed === true;
       return {
         kind: "applied",
-        replayed: payload.replayed === true,
+        replayed,
         data: payload as T,
       };
     }

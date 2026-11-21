@@ -119,7 +119,7 @@ export function AccountDirectoryDetailManager({
       setState({ kind: "loading" });
       try {
         const response = await fetch(
-          `/api/admin/organization/user-directory/entry?account_ref=${encodeURIComponent(accountRef)}`,
+          `/api/admin/organization/user-directory/detail?account_ref=${encodeURIComponent(accountRef)}`,
           {
             method: "GET",
             cache: "no-store",
@@ -231,7 +231,7 @@ export function AccountDirectoryDetailManager({
       const response = await fetch(
         `/api/admin/access/accounts/${encodeURIComponent(account.account_ref)}/display-name`,
         {
-          method: "PATCH",
+          method: "POST",
           cache: "no-store",
           signal: tracked.controller.signal,
           headers: {

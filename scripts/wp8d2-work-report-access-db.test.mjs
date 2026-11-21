@@ -97,7 +97,9 @@ const nextKey = (prefix) => `wp8d2_${prefix}_${keySeq++}`;
 const nextUuid = () => `98d20000-0000-4000-8000-${(keySeq++).toString(16).padStart(12, "0")}`;
 
 async function loadMigrations() {
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR))
+    .filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")
+    .sort();
   return Promise.all(
     names.map(async (name) => ({
       name,

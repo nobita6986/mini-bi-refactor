@@ -972,10 +972,24 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
         return [actorKey, legacyCtx];
       }),
     );
+    const stripRetiredLeaveSharedFlag = (authorities) =>
+      Object.fromEntries(
+        Object.entries(authorities).map(([actorKey, auth]) => {
+          const { is_shared_non_employee: _legacyShared, ...rest } = auth;
+          return [actorKey, rest];
+        }),
+      );
     assert.deepEqual(
-      { ...postForwardSnapshot, actorContexts: normalizedForwardActorContexts },
-      preWp1Snapshot,
-      "Post-WP1 migrations (including WP5B-1) must preserve pre-existing actor context fields, leave authorities, and raw tables identically",
+      {
+        ...postForwardSnapshot,
+        actorContexts: normalizedForwardActorContexts,
+        leaveAuthorities: stripRetiredLeaveSharedFlag(postForwardSnapshot.leaveAuthorities),
+      },
+      {
+        ...preWp1Snapshot,
+        leaveAuthorities: stripRetiredLeaveSharedFlag(preWp1Snapshot.leaveAuthorities),
+      },
+      "Post-WP1 migrations (including WP5B-1 & PR #28) must preserve pre-existing actor context fields, leave authorities, and raw tables identically",
     );
 
     // 6. Verify RPC Future-Date AND Past-Date Rejection (`ERRCODE = '22023'`) across all WP1 RPCs

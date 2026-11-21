@@ -23,6 +23,11 @@ import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
+const SAME_ORIGIN_JSON = {
+  host: "bi.local",
+  origin: "https://bi.local",
+  "content-type": "application/json",
+};
 
 let seq = 1;
 function nextUuid() {
@@ -310,7 +315,7 @@ test("1. Migration #236 hygiene, atomic rollback, dynamic S0-T1-C allowlist (+6 
     assert.equal(byCode.get("SYSTEM_ADMIN")?.dept_key, "MANAGEMENT_BOD");
     assert.equal(byCode.get("HR_CATALOG_OPERATOR")?.cap_count, 5);
     assert.equal(byCode.get("RECRUITER_OPERATIONS")?.cap_count, 7);
-    assert.equal(byCode.get("ACCOUNTING_OPERATIONS")?.cap_count, 2);
+    assert.equal(byCode.get("ACCOUNTING_OPERATIONS")?.cap_count, 1);
     assert.equal(byCode.get("LEAVE_HR_OPERATIONS")?.mr_count, 2);
   } finally {
     await db.close();
@@ -342,7 +347,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const badAdminRes = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({
           code: "FAKE_ADMIN",
           name: "Nhóm giả Admin",
@@ -360,7 +365,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const badTeamDeptRes = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({
           code: "ACC_TEAM_BAD",
           name: "Kế toán gắn đội sai",
@@ -379,7 +384,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const badTeamMrRes = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({
           code: "TEAM_MR_BAD",
           name: "Đội có module role sai",
@@ -399,7 +404,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const gARes = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({
           code: "TEAM_T1_VIEW",
           name: "Quản lý Đội 1",
@@ -417,7 +422,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const gBRes = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({
           code: "TEAM_T2_REVIEW",
           name: "Duyệt báo cáo Đội 2",
@@ -469,7 +474,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const a1 = await assignAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uCross.app}/groups`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ group_id: gA.group_id, expected_account_version: 1 }),
       }),
       uCross.app,
@@ -482,7 +487,7 @@ test("2. D1 Anti-Cartesian & Ceiling Enforcement: no cross-group stitching, no M
     const a2 = await assignAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uCross.app}/groups`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ group_id: gB.group_id, expected_account_version: v2 }),
       }),
       uCross.app,
@@ -555,7 +560,7 @@ test("3. D2/D3 Owner Protection, Non-Protected Admin Removal, C4 PM-Only Recruit
     const remOwnerRes = await removeAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${OWNER.app}/groups/${ownerAdminMem.membership_id}`, {
         method: "DELETE",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ expected_account_version: ownerVerBefore }),
       }),
       OWNER.app,
@@ -625,7 +630,7 @@ test("3. D2/D3 Owner Protection, Non-Protected Admin Removal, C4 PM-Only Recruit
     const remLuanRes = await removeAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${LUANPT.app}/groups/${luanAdminMem.membership_id}`, {
         method: "DELETE",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ expected_account_version: luanGroups.account_version, reason: "Rút quyền BoD/Admin" }),
       }),
       LUANPT.app,
@@ -698,7 +703,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const c1 = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": createKey },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": createKey },
         body: JSON.stringify(createBody),
       }),
       "true",
@@ -711,7 +716,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const cReplay = await createPermissionGroupAdmin(
       new Request("https://bi.local/api/admin/access/groups", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": createKey },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": createKey },
         body: JSON.stringify(createBody),
       }),
       "true",
@@ -770,7 +775,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const assignFin = await assignAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uFin.app}/groups`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ group_id: cashGroup.group_id, expected_account_version: 1 }),
       }),
       uFin.app,
@@ -794,7 +799,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const staleRemove = await removeAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uFin.app}/groups/${finMembership.membership_id}`, {
         method: "DELETE",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ expected_account_version: 1 }),
       }),
       uFin.app,
@@ -811,7 +816,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const okRemove = await removeAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uFin.app}/groups/${finMembership.membership_id}`, {
         method: "DELETE",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ expected_account_version: finMembership.account_version }),
       }),
       uFin.app,
@@ -850,7 +855,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const assignLv = await assignAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uLeave.app}/groups`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ group_id: leaveGroupId, expected_account_version: 1 }),
       }),
       uLeave.app,
@@ -874,7 +879,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const updRes = await updatePermissionGroupAdmin(
       new Request(`https://bi.local/api/admin/access/groups/${leaveGroupId}`, {
         method: "PATCH",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({
           expected_version: 1,
           name: "Quản trị Nghỉ phép HR",
@@ -906,7 +911,7 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
     const remLv = await removeAccountGroupAdmin(
       new Request(`https://bi.local/api/admin/access/accounts/${uLeave.app}/groups/${lvMem.membership_id}`, {
         method: "DELETE",
-        headers: { "content-type": "application/json", "idempotency-key": nextUuid() },
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
         body: JSON.stringify({ expected_account_version: lvMem.account_version }),
       }),
       uLeave.app,
@@ -922,6 +927,109 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
       ])
     ).rows[0].auth;
     assert.equal(lvAfterRemove.is_hr_report_viewer, false);
+  } finally {
+    await db.close();
+  }
+});
+
+test("5. Ponytail Security Hardening: P1-1 dept group ceiling, P1-3 uncutover legacy-grant guard, P2-1 auth-before-group-lock oracle fix", async () => {
+  const db = await createBootstrappedDb();
+  try {
+    const repo = createServicePermissionGroupRepository(createPgliteNamedRpc(db));
+    const ownerDeps = { resolveSession: makeDbSessionResolver(db, OWNER), repository: repo };
+    const { rows: depts } = await db.query(
+      `select department_id, system_key from public.organization_departments`,
+    );
+    const deptByKey = new Map(depts.map((d) => [d.system_key, d.department_id]));
+
+    // P1-1: Regular department group must reject report_view, report_analytics_view, and vendor_finance_record
+    for (const forbiddenCap of ["report_view", "report_analytics_view", "vendor_finance_record"]) {
+      const badRes = await createPermissionGroupAdmin(
+        new Request("https://bi.local/api/admin/access/groups", {
+          method: "POST",
+          headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
+          body: JSON.stringify({
+            code: `BAD_${forbiddenCap.toUpperCase()}`,
+            name: `Nhóm vượt trần ${forbiddenCap}`,
+            department_id: deptByKey.get("ACCOUNTING"),
+            team_id: null,
+            capabilities: [forbiddenCap],
+          }),
+        }),
+        "true",
+        ownerDeps,
+      );
+      assert.equal(badRes.status, 400, `${forbiddenCap} must be rejected on regular dept group`);
+      assert.equal((await badRes.json()).code, "GROUP_CAPABILITY_FORBIDDEN_FOR_DEPARTMENT_GROUP");
+    }
+
+    // P1-1: Assigning ACCOUNTING_OPERATIONS must NOT grant vendor_finance_record / can_fund_vendor_advance / ALL record_scope
+    const uAcc = { auth: nextUuid(), app: nextUuid(), email: "u.acc.p11@hrpartner.vn", name: "Accounting Viewer" };
+    await seedBaseUser(db, uAcc, { enabled: true, authzManaged: true });
+    const accGroupId = (
+      await db.query(`select group_id from public.authz_user_groups where code = 'ACCOUNTING_OPERATIONS'`)
+    ).rows[0].group_id;
+    const assignAcc = await assignAccountGroupAdmin(
+      new Request(`https://bi.local/api/admin/access/accounts/${uAcc.app}/groups`, {
+        method: "POST",
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
+        body: JSON.stringify({ group_id: accGroupId, expected_account_version: 1 }),
+      }),
+      uAcc.app,
+      "true",
+      ownerDeps,
+    );
+    assert.equal(assignAcc.status, 201);
+    const accFinAuth = (
+      await db.query(`select public.vendor_finance__internal_resolve_authority($1::uuid, $2::uuid) as auth`, [
+        uAcc.auth,
+        uAcc.app,
+      ])
+    ).rows[0].auth;
+    assert.equal(accFinAuth.can_fund_vendor_advance, false);
+    assert.notEqual(accFinAuth.record_scope, "ALL");
+
+    // P1-3: Uncutover authz_managed = false account WITH active legacy direct_entry_capability_grants MUST fail closed (409 AUTHZ_CUTOVER_NOT_READY)
+    const uLegacy = { auth: nextUuid(), app: nextUuid(), email: "u.legacy.p13@hrpartner.vn", name: "Uncutover Legacy User" };
+    await seedBaseUser(db, uLegacy, { enabled: true, authzManaged: false });
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'entry_create', '2025-01-01', true)`,
+      [uLegacy.app],
+    );
+    const uncutoverRes = await assignAccountGroupAdmin(
+      new Request(`https://bi.local/api/admin/access/accounts/${uLegacy.app}/groups`, {
+        method: "POST",
+        headers: { ...SAME_ORIGIN_JSON, "idempotency-key": nextUuid() },
+        body: JSON.stringify({ group_id: accGroupId, expected_account_version: 1 }),
+      }),
+      uLegacy.app,
+      "true",
+      ownerDeps,
+    );
+    assert.equal(uncutoverRes.status, 409);
+    assert.equal((await uncutoverRes.json()).code, "AUTHZ_CUTOVER_NOT_READY");
+    const legacyState = (
+      await db.query(
+        `select authz_managed,
+                (select count(*)::int from public.direct_entry_capability_grants g where g.app_user_id = u.app_user_id and g.is_current) as legacy_grants
+           from public.direct_entry_app_users u
+          where u.app_user_id = $1::uuid`,
+        [uLegacy.app],
+      )
+    ).rows[0];
+    assert.deepEqual(legacyState, { authz_managed: false, legacy_grants: 1 });
+
+    // P2-1: Non-admin calling direct_entry_authz_assign_group_member_admin with a nonexistent group_id gets AUTHZ_FORBIDDEN (not GROUP_NOT_FOUND oracle)
+    await assert.rejects(
+      db.query(
+        `select public.direct_entry_authz_assign_group_member_admin(
+           $1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 'Oracle probe', $5::uuid, $6::text
+         )`,
+        [uAcc.auth, uAcc.app, uAcc.app, nextUuid(), nextUuid(), "a".repeat(64)],
+      ),
+      (err) => err?.code === "42501" && String(err?.message ?? "").includes("AUTHZ_FORBIDDEN"),
+    );
   } finally {
     await db.close();
   }

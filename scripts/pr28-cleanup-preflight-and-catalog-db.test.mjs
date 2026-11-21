@@ -495,7 +495,82 @@ test("3. Post-#237 cross-module E2E smoke: unlinked personal account, active Per
     assert.equal(attRes.rows[0].payload.viewer.can_submit_explanation, true);
     assert.equal("is_shared_non_employee" in attRes.rows[0].payload.viewer, false);
 
-    // 3f. Owner SYSTEM_ADMIN group membership remains DB-protected (cannot be removed)
+    // 3f. Expanded post-#237 cross-module smoke across Work Reports, Leave, Attendance, Salary Advance, Vendor Finance & Direct Entry
+    const wrDelRes = await serviceQuery(
+      db,
+      "select public.work_report_list_delegations($1::uuid, $2::uuid) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(wrDelRes.rows[0].payload && Array.isArray(wrDelRes.rows[0].payload.items));
+
+    const attNonEmpRes = await db.query(
+      "select public.attendance__internal_is_non_employee_account($1::uuid, null::timestamptz) as is_non_emp",
+      [UNLINKED_LEGACY.app],
+    );
+    assert.equal(attNonEmpRes.rows[0].is_non_emp, false);
+
+    const leaveMySumRes = await serviceQuery(
+      db,
+      "select public.leave_management_get_my_summary($1::uuid, $2::uuid, 2026) as payload",
+      [UNLINKED_LEGACY.auth, UNLINKED_LEGACY.app],
+    );
+    assert.ok(leaveMySumRes.rows[0].payload);
+
+    const leaveAdminOverviewRes = await serviceQuery(
+      db,
+      "select public.leave_management_get_admin_overview($1::uuid, $2::uuid, null, 25, 0, 'all') as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(leaveAdminOverviewRes.rows[0].payload);
+    assert.equal(JSON.stringify(leaveAdminOverviewRes.rows[0].payload).includes("is_shared_non_employee"), false);
+
+    const leaveMonthRes = await serviceQuery(
+      db,
+      "select public.leave_management_monthly_report($1::uuid, $2::uuid, '2026-11', null, null, 25, 0) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(leaveMonthRes.rows[0].payload);
+
+    const salAuthRes = await db.query(
+      "select public.salary_advance__internal_resolve_authority($1::uuid, $2::uuid) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(salAuthRes.rows[0].payload);
+
+    const vfinAuthRes = await db.query(
+      "select public.vendor_finance__internal_resolve_authority($1::uuid, $2::uuid) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(vfinAuthRes.rows[0].payload);
+
+    const vfinGlobalRes = await serviceQuery(
+      db,
+      "select public.vendor_finance_list_global_roles_admin($1::uuid, $2::uuid, null, true, 1, 25) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(vfinGlobalRes.rows[0].payload);
+
+    const vfinMonthlyRes = await serviceQuery(
+      db,
+      "select public.vendor_finance_get_monthly_report($1::uuid, $2::uuid, '2026-11', null, null, null, 'all') as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(vfinMonthlyRes.rows[0].payload);
+
+    const matrixCatalogRes = await serviceQuery(
+      db,
+      "select public.direct_entry_reporting_detailed_matrix_catalog($1::uuid, $2::uuid) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(matrixCatalogRes.rows[0].payload);
+
+    const workerAudRes = await db.query(
+      "select public.direct_entry_worker_directory_audience($1::uuid, $2::uuid, 'all', null) as payload",
+      [OWNER.auth, OWNER.app],
+    );
+    assert.ok(workerAudRes.rows[0].payload);
+
+    // 3g. Owner SYSTEM_ADMIN group membership remains DB-protected (cannot be removed)
     const ownerGroupRes = await db.query(
       `select m.membership_id::text as membership_id, u.version as account_version
          from public.authz_user_group_members m

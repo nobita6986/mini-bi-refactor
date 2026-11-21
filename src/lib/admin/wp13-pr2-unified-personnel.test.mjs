@@ -584,14 +584,22 @@ function makePermissionGroupsListEnvelope() {
   };
 }
 
+const { parseAssignGroupMemberBody } = repoRequire("./src/lib/admin/permission-group-contract.ts");
+
 function makeAssignGroupEnvelope(groupId, accountVersion) {
   return {
     ok: true,
-    replayed: false,
-    account_ref: ACCOUNT_ID,
-    account_version: accountVersion,
-    membership_id: "85000000-0000-4000-8000-000000000009",
-    group_id: groupId,
+    membership: {
+      membership_id: "85000000-0000-4000-8000-000000000009",
+      group_id: groupId,
+      group_code: groupId === GROUP_ADMIN_ID ? "SYSTEM_ADMIN" : "TUYEN_DUNG",
+      group_name: groupId === GROUP_ADMIN_ID ? "BoD/Admin" : "Nhóm Tuyển dụng",
+      account_ref: ACCOUNT_ID,
+      account_version: accountVersion,
+      is_protected: false,
+      started_at: AS_OF,
+      replayed: false,
+    },
   };
 }
 
@@ -1192,6 +1200,11 @@ test("Happy path: Create employee WITH login + permission group executes Person 
   const req4 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
   assert.ok(req4);
   const req4Body = JSON.parse(req4.options.body);
+  assert.equal(
+    parseAssignGroupMemberBody(req4Body).ok,
+    true,
+    "Step 4 POST /groups body must pass real parseAssignGroupMemberBody (no idempotency_key in body)",
+  );
   assert.equal(req4Body.group_id, GROUP_ADMIN_ID);
   assert.equal(req4Body.expected_account_version, 2);
   respond(req4, 201, makeAssignGroupEnvelope(GROUP_ADMIN_ID, 3));
@@ -1487,14 +1500,18 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
 
   // Step 4: group 1 (TUYEN_DUNG) -> 201; group 2 (BOD_ADMIN) -> 503 uncertain!
   const groupReq1 = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
-  assert.equal(JSON.parse(groupReq1.options.body).group_id, GROUP_RECRUIT_ID);
+  const groupReq1Body = JSON.parse(groupReq1.options.body);
+  assert.equal(parseAssignGroupMemberBody(groupReq1Body).ok, true);
+  assert.equal(groupReq1Body.group_id, GROUP_RECRUIT_ID);
   respond(groupReq1, 201, makeAssignGroupEnvelope(GROUP_RECRUIT_ID, 4));
   await stepper2.flush();
 
   const groupReq2 = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
   const kGroupAdmin = groupReq2.options.headers["Idempotency-Key"];
-  assert.equal(JSON.parse(groupReq2.options.body).group_id, GROUP_ADMIN_ID);
-  assert.equal(JSON.parse(groupReq2.options.body).expected_account_version, 4);
+  const groupReq2Body = JSON.parse(groupReq2.options.body);
+  assert.equal(parseAssignGroupMemberBody(groupReq2Body).ok, true);
+  assert.equal(groupReq2Body.group_id, GROUP_ADMIN_ID);
+  assert.equal(groupReq2Body.expected_account_version, 4);
   respond(groupReq2, 503, { ok: false, code: "AUTHZ_UNAVAILABLE" });
   await stepper2.flush();
 

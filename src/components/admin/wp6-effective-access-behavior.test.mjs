@@ -381,6 +381,11 @@ const { PermissionGroupsManager } = repoRequire("./src/components/admin/permissi
 const { AccountDirectoryDetailManager } = repoRequire(
   "./src/components/admin/account-directory-detail-manager.tsx",
 );
+const {
+  parseAssignGroupMemberBody,
+  parseCreateGroupBody,
+  parseRemoveGroupMemberBody,
+} = repoRequire("./src/lib/admin/permission-group-contract.ts");
 
 const OWNER_ACCOUNT_REF = "11111111-1111-4111-8111-111111111111";
 const GROUP_ADMIN_ID = "22222222-2222-4222-8222-222222222201";
@@ -427,7 +432,7 @@ const SAMPLE_GROUPS = [
     is_system_admin: false,
     active: true,
     version: 1,
-    capabilities: ["vendor_finance_view", "vendor_finance_record"],
+    capabilities: ["vendor_finance_view"],
     module_roles: [{ module_code: "vendor_finance", role_code: "GLOBAL_VIEWER" }],
     member_count: 0,
     member_account_refs: [],
@@ -525,8 +530,10 @@ test("PR #28 [AccountGroupsSection]: enforces Owner is_protected lock, assigns g
   const post1 = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups"));
   assert.ok(post1);
   const key1 = post1.options.headers["Idempotency-Key"];
-  assert.equal(JSON.parse(post1.options.body).expected_account_version, 5);
-  assert.equal(JSON.parse(post1.options.body).group_id, GROUP_ACC_ID);
+  const parsedPost1 = parseAssignGroupMemberBody(JSON.parse(post1.options.body));
+  assert.equal(parsedPost1.ok, true, "POST /groups body must strictly satisfy real server contract parser (no idempotency_key in body)");
+  assert.equal(parsedPost1.value.expected_account_version, 5);
+  assert.equal(parsedPost1.value.group_id, GROUP_ACC_ID);
 
   respond(post1, 503, { ok: false, code: "AUTHZ_UNAVAILABLE" });
   await h.flush();
@@ -539,18 +546,107 @@ test("PR #28 [AccountGroupsSection]: enforces Owner is_protected lock, assigns g
 
   respond(post2, 201, {
     ok: true,
-    membership_id: MEMBERSHIP_ACC_ID,
-    group_id: GROUP_ACC_ID,
-    group_code: "ACCOUNTING_OPERATIONS",
-    group_name: "Kế toán vận hành",
-    account_ref: OWNER_ACCOUNT_REF,
-    account_version: 6,
-    is_protected: false,
-    started_at: "2026-11-21T01:00:00Z",
-    replayed: false,
+    membership: {
+      membership_id: MEMBERSHIP_ACC_ID,
+      group_id: GROUP_ACC_ID,
+      group_code: "ACCOUNTING_OPERATIONS",
+      group_name: "Kế toán vận hành",
+      account_ref: OWNER_ACCOUNT_REF,
+      account_version: 6,
+      is_protected: false,
+      started_at: "2026-11-21T01:00:00Z",
+      replayed: false,
+    },
   });
   await h.flush();
   assert.equal(notifications.success.length, 1);
+
+  // Reload returns both protected Owner membership and newly assigned removable ACCOUNTING_OPERATIONS membership
+  respond(
+    findLastRequest((r) => r.method === "GET" && r.url.endsWith(`/accounts/${OWNER_ACCOUNT_REF}/groups`)),
+    200,
+    {
+      ok: true,
+      as_of: "2026-11-21T01:00:00Z",
+      account_ref: OWNER_ACCOUNT_REF,
+      account_version: 6,
+      enabled: true,
+      memberships: [
+        {
+          membership_id: MEMBERSHIP_OWNER_ID,
+          group_id: GROUP_ADMIN_ID,
+          group_code: "SYSTEM_ADMIN",
+          group_name: "BoD/Admin",
+          group_description: "Toàn quyền quản trị hệ thống",
+          department_id: DEPT_BOD_ID,
+          department_name: "Ban Giám đốc",
+          team_id: null,
+          team_name: null,
+          is_system_admin: true,
+          group_active: true,
+          is_protected: true,
+          can_remove: false,
+          cannot_remove_reason: "PROTECTED_OWNER_ADMIN",
+          started_at: "2026-11-21T00:00:00Z",
+          capabilities: ["entry_admin"],
+          module_roles: [],
+        },
+        {
+          membership_id: MEMBERSHIP_ACC_ID,
+          group_id: GROUP_ACC_ID,
+          group_code: "ACCOUNTING_OPERATIONS",
+          group_name: "Kế toán vận hành",
+          group_description: "Quản lý công nợ nhà cung cấp",
+          department_id: DEPT_ACC_ID,
+          department_name: "Kế toán",
+          team_id: null,
+          team_name: null,
+          is_system_admin: false,
+          group_active: true,
+          is_protected: false,
+          can_remove: true,
+          cannot_remove_reason: null,
+          started_at: "2026-11-21T01:00:00Z",
+          capabilities: ["vendor_finance_view"],
+          module_roles: [{ module_code: "vendor_finance", role_code: "GLOBAL_VIEWER" }],
+        },
+      ],
+      resource_assignments: [],
+    },
+  );
+  respond(findLastRequest((r) => r.url.includes("/api/admin/access/groups?")), 200, {
+    ok: true,
+    as_of: "2026-11-21T01:00:00Z",
+    groups: SAMPLE_GROUPS,
+  });
+  await h.flush();
+
+  // P0-2: Removing non-protected membership calls DELETE /accounts/{ref}/groups/{membershipId} with clean body
+  findButton(h, "Gỡ khỏi nhóm").props.onClick();
+  await h.flush();
+  findNode(h, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await h.flush();
+  const delReq = findLastRequest(
+    (r) =>
+      r.method === "DELETE" &&
+      r.url === `/api/admin/access/accounts/${OWNER_ACCOUNT_REF}/groups/${MEMBERSHIP_ACC_ID}`,
+  );
+  assert.ok(delReq, "DELETE must target /accounts/{ref}/groups/{membershipId}");
+  assert.ok(delReq.options.headers["Idempotency-Key"]);
+  const parsedDel = parseRemoveGroupMemberBody(JSON.parse(delReq.options.body));
+  assert.equal(parsedDel.ok, true, "DELETE body must satisfy real parseRemoveGroupMemberBody (no membership_id/idempotency_key)");
+  assert.equal(parsedDel.value.expected_account_version, 6);
+  respond(delReq, 200, {
+    ok: true,
+    membership: {
+      membership_id: MEMBERSHIP_ACC_ID,
+      account_ref: OWNER_ACCOUNT_REF,
+      account_version: 7,
+      replayed: false,
+    },
+  });
+  await h.flush();
+  assert.equal(notifications.success.length, 2);
 });
 
 test("PR #28 [PermissionGroupsManager]: renders BoD/Admin as locked default, lists plain Vietnamese actions, and creates custom group with department", async () => {
@@ -604,7 +700,7 @@ test("PR #28 [AccountDirectoryDetailManager]: manages unlinked legacy accounts (
   await h.flush();
 
   respond(
-    findLastRequest((r) => r.url.includes(`/user-directory/entry?account_ref=${OWNER_ACCOUNT_REF}`)),
+    findLastRequest((r) => r.url.includes(`/user-directory/detail?account_ref=${OWNER_ACCOUNT_REF}`)),
     200,
     {
       ok: true,
@@ -644,6 +740,67 @@ test("PR #28 [AccountDirectoryDetailManager]: manages unlinked legacy accounts (
   assert.ok(findButton(h, "Khóa đăng nhập"));
   assert.ok(findButton(h, "Đặt lại mật khẩu"));
 
+  // P0-1: Edit display name submits POST (not PATCH) to /display-name
+  findButton(h, "Sửa tên hiển thị").props.onClick();
+  await h.flush();
+  const nameInput = findNode(h, (n) => n.type === "input" && n.props?.type === "text");
+  nameInput.props.onChange({ target: { value: "Nguyễn Thị Lan" } });
+  await h.flush();
+  findNode(h, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await h.flush();
+  const renameReq = findLastRequest(
+    (r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${OWNER_ACCOUNT_REF}/display-name`,
+  );
+  assert.ok(renameReq, "edit display name must use POST /display-name");
+  respond(renameReq, 200, {
+    ok: true,
+    account: {
+      app_user_id: OWNER_ACCOUNT_REF,
+      version: 4,
+      revision_id: "55555555-5555-4555-8555-555555555551",
+      recruiter_id: null,
+      recruiter_version: null,
+      recruiter_revision_id: null,
+    },
+  });
+  await h.flush();
+  // Drain the triggered reload GET /user-directory/detail
+  respond(
+    findLastRequest((r) => r.method === "GET" && r.url.includes(`/user-directory/detail?account_ref=${OWNER_ACCOUNT_REF}`)),
+    200,
+    {
+      ok: true,
+      authorization_date: "2026-11-21",
+      as_of: "2026-11-21T00:05:00Z",
+      entry: {
+        directory_entry_key: `account:${OWNER_ACCOUNT_REF}`,
+        record_kind: "UNLINKED_ACCOUNT",
+        display_name: "Nguyễn Thị Lan",
+        login_state: "ENABLED",
+        person_id: null,
+        account_ref: OWNER_ACCOUNT_REF,
+        active_link_id: null,
+        link_conflict: false,
+        identity_mutation_blocked: false,
+        conflict_details: null,
+        person: null,
+        account: {
+          account_ref: OWNER_ACCOUNT_REF,
+          login_id: "legacy01",
+          display_name: "Nguyễn Thị Lan",
+          enabled: true,
+          version: 4,
+          auth_user_present: true,
+        },
+        active_link: null,
+        department_history: [],
+        head_assignments: [],
+        link_history: [],
+      },
+    },
+  );
+  await h.flush();
+
   // Open Reset Password -> network failure locks dialog without blind Auth retry
   findButton(h, "Đặt lại mật khẩu").props.onClick();
   await h.flush();
@@ -677,7 +834,12 @@ test("PR #28 Zero-Forbidden-Jargon Guard: customer UI components contain no tech
   ];
   for (const rel of files) {
     const src = readFileSync(path.join(repoRoot, rel), "utf8");
-    assert.doesNotMatch(src, /Tài khoản đặc biệt|Đối chiếu dữ liệu cũ|Quyền hiệu lực|Tra cứu quyền hiệu lực/, `${rel} leaked forbidden legacy screen text`);
+    assert.doesNotMatch(
+      src,
+      /Tài khoản đặc biệt|Đối chiếu dữ liệu cũ|Quyền hiệu lực|Tra cứu quyền hiệu lực|\(D10\)|Gỡ liên kết tài khoản/,
+      `${rel} leaked forbidden legacy screen text`,
+    );
     assert.doesNotMatch(src, /leave-shared-account-banner|leave-profile-shared-checkbox|Đánh dấu là tài khoản dùng chung/, `${rel} leaked shared-account Leave UI`);
   }
+  assert.equal(typeof parseCreateGroupBody, "function");
 });

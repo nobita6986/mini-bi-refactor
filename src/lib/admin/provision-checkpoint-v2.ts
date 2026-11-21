@@ -186,6 +186,7 @@ export type ProvisionStep5Recruiter = {
   idempotency_key: string | null;
   team_idempotency_key: string | null;
   committed_recruiter_id: string | null;
+  committed_recruiter_version?: number | null;
 };
 
 export type ProvisionCheckpointV2 = {
@@ -679,9 +680,9 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
       step5Recruiter = null;
     } else {
       const s5 = raw.step5_recruiter;
-      if (
-        !isRecord(s5) ||
-        !hasExactKeys(s5, [
+      const is7 =
+        isRecord(s5) &&
+        hasExactKeys(s5, [
           "enabled",
           "position",
           "team_id",
@@ -689,8 +690,20 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
           "idempotency_key",
           "team_idempotency_key",
           "committed_recruiter_id",
-        ])
-      ) {
+        ]);
+      const is8 =
+        isRecord(s5) &&
+        hasExactKeys(s5, [
+          "enabled",
+          "position",
+          "team_id",
+          "status",
+          "idempotency_key",
+          "team_idempotency_key",
+          "committed_recruiter_id",
+          "committed_recruiter_version",
+        ]);
+      if (!is7 && !is8) {
         return null;
       }
       if (typeof s5.enabled !== "boolean") return null;
@@ -708,6 +721,8 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
       if (!isNullableUuid(s5.idempotency_key)) return null;
       if (!isNullableUuid(s5.team_idempotency_key)) return null;
       if (!isNullableUuid(s5.committed_recruiter_id)) return null;
+      const committedRecruiterVersion = is8 ? s5.committed_recruiter_version : null;
+      if (!isNullablePositiveInt(committedRecruiterVersion)) return null;
       step5Recruiter = {
         enabled: s5.enabled,
         position: s5.position,
@@ -716,6 +731,7 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
         idempotency_key: s5.idempotency_key?.toLowerCase() ?? null,
         team_idempotency_key: s5.team_idempotency_key?.toLowerCase() ?? null,
         committed_recruiter_id: s5.committed_recruiter_id?.toLowerCase() ?? null,
+        committed_recruiter_version: committedRecruiterVersion,
       };
     }
   }

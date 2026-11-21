@@ -32,9 +32,7 @@ import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import { StatusBanner } from "@/components/ui/status-banner";
 import {
   buildAccountStateRequest,
-  buildUnlinkAccountPersonRequest,
   classifyAccountMutation,
-  classifyAccountOrgMutation,
   newAccountIntentKey,
 } from "@/lib/admin/account-access-model";
 import {
@@ -124,15 +122,6 @@ type PersonDialogState =
       manualCheckLocked: boolean;
     }
   | {
-      kind: "unlink-account";
-      accountRef: string;
-      loginId: string | null;
-      expectedAccountVersion: number;
-      expectedPersonVersion: number;
-      expectedLinkId: string;
-      conflictLocked: boolean;
-    }
-  | {
       kind: "activate-recruiter";
       accountRef: string;
       loginId: string;
@@ -154,13 +143,6 @@ type PendingDetailIntent =
       family: "toggle-login";
       url: string;
       nextEnabled: boolean;
-      body: Record<string, unknown>;
-      idempotencyKey: string;
-      message: string;
-    }
-  | {
-      family: "unlink-account";
-      url: string;
       body: Record<string, unknown>;
       idempotencyKey: string;
       message: string;
@@ -672,26 +654,6 @@ export function PersonDetailManager({
     });
   };
 
-  const openUnlinkDialog = () => {
-    if (!person?.active_account_link || authoritativeAccountVersion === null || busy || pendingIntent !== null) {
-      return;
-    }
-    setReason("");
-    setFormError(null);
-    setConflictMsg(null);
-    setActiveHeadBlockMsg(null);
-    setPendingIntent(null);
-    setDialog({
-      kind: "unlink-account",
-      accountRef: person.active_account_link.account_ref,
-      loginId: person.active_account_link.login_id,
-      expectedAccountVersion: authoritativeAccountVersion,
-      expectedPersonVersion: person.version,
-      expectedLinkId: person.active_account_link.link_id,
-      conflictLocked: false,
-    });
-  };
-
   const openActivateRecruiterDialog = () => {
     if (
       !person ||
@@ -803,37 +765,6 @@ export function PersonDetailManager({
           return;
         }
         if (outcome.kind === "unavailable") {
-          setPendingIntent({ ...intent, message: outcome.message });
-          return;
-        }
-        setPendingIntent(null);
-        if (outcome.kind === "conflict") {
-          setConflictMsg(outcome.message);
-          setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
-          return;
-        }
-        setFormError(outcome.message);
-        return;
-      }
-
-      if (intent.family === "unlink-account") {
-        const outcome = classifyAccountOrgMutation(response.status, payload, "unlink");
-        if (outcome.kind === "applied") {
-          notify.success({
-            title: "Đã gỡ liên kết tài khoản đăng nhập khỏi hồ sơ nhân viên.",
-            dedupeKey: `wp13-person-unlink:${personId}`,
-          });
-          setLatestAccountVersion(null);
-          closeDialog();
-          setReloadToken((v) => v + 1);
-          setAccountAccessReloadToken((v) => v + 1);
-          return;
-        }
-        if (outcome.kind === "session-lost") {
-          handleSessionLost(outcome.message, response.status === 401);
-          return;
-        }
-        if (outcome.kind === "uncertain") {
           setPendingIntent({ ...intent, message: outcome.message });
           return;
         }
@@ -1238,29 +1169,6 @@ export function PersonDetailManager({
       return;
     }
 
-    if (dialog.kind === "unlink-account") {
-      const idempotencyKey = newAccountIntentKey();
-      const req = buildUnlinkAccountPersonRequest({
-        expectedAccountVersion: dialog.expectedAccountVersion,
-        expectedPersonVersion: dialog.expectedPersonVersion,
-        expectedLinkId: dialog.expectedLinkId,
-        reason,
-        idempotencyKey,
-      });
-      if (!req.ok) {
-        setFormError(req.message);
-        return;
-      }
-      void dispatchIntent({
-        family: "unlink-account",
-        url: `/api/admin/access/accounts/${encodeURIComponent(dialog.accountRef)}/person-link/end`,
-        body: req.body,
-        idempotencyKey: req.idempotencyKey,
-        message: "",
-      });
-      return;
-    }
-
     if (dialog.kind === "activate-recruiter") {
       const idempotencyKey = newAccountOperationKey();
       const req = buildPersonnelFromAccountRequest({
@@ -1296,8 +1204,7 @@ export function PersonDetailManager({
     dialog?.kind === "edit" ||
     dialog?.kind === "assign-dept" ||
     dialog?.kind === "transfer-dept" ||
-    dialog?.kind === "end-dept" ||
-    dialog?.kind === "unlink-account";
+    dialog?.kind === "end-dept";
 
   const dialogTitle = (() => {
     switch (dialog?.kind) {
@@ -1313,8 +1220,6 @@ export function PersonDetailManager({
         return dialog.nextEnabled ? "Mở lại đăng nhập tài khoản" : "Khóa đăng nhập tài khoản";
       case "reset-password":
         return "Đặt lại mật khẩu đăng nhập";
-      case "unlink-account":
-        return "Gỡ liên kết tài khoản đăng nhập";
       case "activate-recruiter":
         return "Kích hoạt nghiệp vụ tuyển dụng";
       default:
@@ -1327,9 +1232,7 @@ export function PersonDetailManager({
       case "reset-password":
         return "Mật khẩu mới chỉ lưu tạm trong RAM khi gửi và sẽ bị xóa ngay sau phản hồi.";
       case "toggle-login":
-        return "Khóa/mở đăng nhập chỉ ảnh hưởng quyền truy cập hệ thống, tách biệt với trạng thái hồ sơ nhân sự (D10).";
-      case "unlink-account":
-        return "Tác vụ danh tính nâng cao: tách tài khoản đăng nhập khỏi hồ sơ nhân sự và ghi nhận nhật ký kiểm toán.";
+        return "Khóa/mở đăng nhập chỉ ảnh hưởng quyền truy cập hệ thống, tách biệt với trạng thái hồ sơ nhân sự.";
       case "activate-recruiter":
         return "Tạo hồ sơ tính công tuyển dụng từ tài khoản đăng nhập đang hoạt động.";
       default:
@@ -1511,7 +1414,7 @@ export function PersonDetailManager({
             }
           />
 
-          <StatusBanner tone="info" title="Trạng thái hồ sơ người độc lập với khóa tài khoản (D10)">
+          <StatusBanner tone="info" title="Trạng thái hồ sơ nhân sự độc lập với khóa tài khoản">
             Chuyển trạng thái hồ sơ sang <strong>Ngừng hoạt động</strong> không tự khóa tài khoản
             đăng nhập liên kết. Nếu nhân sự nghỉ việc cần chặn đăng nhập hệ thống, hãy dùng nút{" "}
             <strong>Khóa đăng nhập</strong> ngay tại khối <strong>Tài khoản đăng nhập</strong> bên
@@ -1775,7 +1678,7 @@ export function PersonDetailManager({
             <Card>
               <CardHeader
                 title="2. Tài khoản đăng nhập"
-                description="Quản lý đăng nhập của riêng nhân viên này. Tách biệt với trạng thái làm việc (D10)."
+                description="Quản lý đăng nhập của riêng nhân viên này. Tách biệt với trạng thái làm việc."
               />
               {person.active_account_link ? (
                 <div className="space-y-4">
@@ -1810,7 +1713,7 @@ export function PersonDetailManager({
 
                   <p className="text-xs text-muted">
                     Khóa đăng nhập chỉ chặn phiên đăng nhập hệ thống, không tắt nghĩa vụ chấm công /
-                    báo cáo và không đổi trạng thái nhân sự (D10).
+                    báo cáo và không đổi trạng thái nhân sự.
                   </p>
 
                   <div className="flex flex-wrap gap-2">
@@ -1833,27 +1736,6 @@ export function PersonDetailManager({
                         : "Mở lại đăng nhập"}
                     </Button>
                   </div>
-
-                  <details className="rounded-lg border border-border/80 bg-surface p-3">
-                    <summary className="cursor-pointer select-none text-xs font-medium text-muted hover:text-foreground">
-                      Tác vụ danh tính nâng cao (Quản trị)
-                    </summary>
-                    <div className="mt-3 space-y-2.5 text-xs text-muted">
-                      <p>
-                        Chỉ dùng khi cần tách tài khoản đăng nhập khỏi hồ sơ nhân viên do ghép nhầm
-                        hoặc xử lý dữ liệu lịch sử. Thao tác bắt buộc ghi lý do kiểm toán và không
-                        tự xóa tài khoản đăng nhập.
-                      </p>
-                      <Button
-                        variant="danger-outline"
-                        size="sm"
-                        disabled={isDialogLocked}
-                        onClick={openUnlinkDialog}
-                      >
-                        Gỡ liên kết tài khoản
-                      </Button>
-                    </div>
-                  </details>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -2357,16 +2239,6 @@ export function PersonDetailManager({
                 </div>
               </div>
             </>
-          ) : null}
-
-          {dialog?.kind === "unlink-account" && person ? (
-            <Alert tone="warning" title="Xác nhận tách tài khoản khỏi hồ sơ nhân viên">
-              Tài khoản{" "}
-              <strong className="font-mono">{dialog.loginId ?? dialog.accountRef}</strong> sẽ được
-              tách khỏi hồ sơ <strong>{person.full_name}</strong>. Tài khoản sau khi tách vẫn hiển
-              thị trong danh sách <strong>Người dùng</strong> và giữ nguyên trạng thái khóa/mở hiện
-              tại.
-            </Alert>
           ) : null}
 
           {dialog?.kind === "activate-recruiter" ? (

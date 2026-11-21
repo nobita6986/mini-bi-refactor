@@ -40,12 +40,9 @@ export const DEPARTMENT_GROUP_ALLOWED_CAPABILITIES = [
   "worker_edit_history_view",
   "report_form_manage",
   "report_assign",
-  "report_view",
-  "report_analytics_view",
   "report_review",
   "report_delegate",
   "vendor_finance_view",
-  "vendor_finance_record",
   "duplicate_cccd_withdraw",
 ] as const satisfies readonly Capability[];
 
@@ -171,9 +168,14 @@ export const PERMISSION_GROUP_ERROR_CODES = [
   "UNAUTHENTICATED",
   "ACTOR_NOT_AVAILABLE",
   "FORBIDDEN",
+  "CSRF_REJECTED",
+  "CONTENT_TYPE_INVALID",
+  "INVALID_JSON",
+  "BODY_TOO_LARGE",
   "CLIENT_AUTHORITY_FIELD_FORBIDDEN",
   "AUTHZ_VALIDATION_ERROR",
   "AUTHZ_REASON_INVALID",
+  "AUTHZ_CUTOVER_NOT_READY",
   "GROUP_CODE_INVALID",
   "GROUP_NAME_INVALID",
   "GROUP_DESCRIPTION_INVALID",
@@ -211,11 +213,13 @@ export function permissionGroupErrorStatus(code: PermissionGroupErrorCode): numb
       return 401;
     case "ACTOR_NOT_AVAILABLE":
     case "FORBIDDEN":
+    case "CSRF_REJECTED":
       return 403;
     case "GROUP_NOT_FOUND":
     case "GROUP_MEMBERSHIP_NOT_FOUND":
     case "ACCOUNT_NOT_FOUND":
       return 404;
+    case "AUTHZ_CUTOVER_NOT_READY":
     case "GROUP_CODE_CONFLICT":
     case "GROUP_SYSTEM_ADMIN_IMMUTABLE":
     case "GROUP_INACTIVE":
@@ -226,6 +230,8 @@ export function permissionGroupErrorStatus(code: PermissionGroupErrorCode): numb
     case "VERSION_CONFLICT":
     case "IDEMPOTENCY_CONFLICT":
       return 409;
+    case "BODY_TOO_LARGE":
+      return 413;
     case "AUTHZ_UNAVAILABLE":
       return 503;
     default:

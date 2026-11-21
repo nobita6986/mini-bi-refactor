@@ -474,7 +474,6 @@ export function PermissionGroupsManager() {
               capabilities: filteredCaps,
               module_roles: filteredModuleRoles,
               reason: trimmedReason.length > 0 ? trimmedReason : null,
-              idempotency_key: idempotencyKey,
             }
           : {
               name: trimmedName,
@@ -486,7 +485,6 @@ export function PermissionGroupsManager() {
               module_roles: filteredModuleRoles,
               expected_version: editor.group.version,
               reason: trimmedReason.length > 0 ? trimmedReason : null,
-              idempotency_key: idempotencyKey,
             };
 
       const response = await fetch(url, {
@@ -572,7 +570,6 @@ export function PermissionGroupsManager() {
             group_id: membersGroup.group_id,
             expected_account_version: entry.account.version,
             reason: `Thêm vào nhóm ${membersGroup.name}`,
-            idempotency_key: idempotencyKey,
           }),
         },
       );

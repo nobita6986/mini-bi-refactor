@@ -441,7 +441,9 @@ begin
       raise exception 'GROUP_CAPABILITY_FORBIDDEN_FOR_TEAM_GROUP' using errcode = '22023';
     end if;
   else
-    -- Regular non-admin department group: NEVER allow entry_admin or admin-only/team-only overrides
+    -- Regular non-admin department group: NEVER allow admin-only, team-only,
+    -- BoD-executive (report_view / report_analytics_view on ALL scope), or global-treasurer
+    -- (vendor_finance_record on ALL scope; use D4 vendor_finance module roles instead) escalations.
     if new.capability in (
       'entry_admin',
       'entry_team',
@@ -450,7 +452,10 @@ begin
       'change_review',
       'employment_status.review',
       'employment_status.apply',
-      'team_manager_assign'
+      'team_manager_assign',
+      'report_view',
+      'report_analytics_view',
+      'vendor_finance_record'
     ) then
       raise exception 'GROUP_CAPABILITY_FORBIDDEN_FOR_DEPARTMENT_GROUP' using errcode = '22023';
     end if;
@@ -709,8 +714,7 @@ begin
 
   insert into public.authz_user_group_capabilities (group_id, capability, reason)
   values
-    (v_grp_acc, 'vendor_finance_view', 'Khởi tạo quyền xem Tài chính NCC'),
-    (v_grp_acc, 'vendor_finance_record', 'Khởi tạo quyền ghi nhận Tài chính NCC')
+    (v_grp_acc, 'vendor_finance_view', 'Khởi tạo quyền xem Tài chính NCC')
   on conflict (group_id, capability) where ended_at is null do nothing;
 
   -- 5) LEAVE_HR_OPERATIONS ("Quản trị Nghỉ phép HR") bound to RECRUITMENT (D4 module roles)
@@ -2892,6 +2896,9 @@ begin
     raise exception 'AUTHZ_REASON_INVALID' using errcode = '22023';
   end if;
 
+  -- Authorize Full Admin BEFORE locking or reading target group/account (prevents existence/lock oracle)
+  perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
+
   -- Lock group then actor/target in deterministic ascending UUID order
   select g.* into v_group
     from public.authz_user_groups g
@@ -2915,6 +2922,7 @@ begin
     null;
   end loop;
 
+  -- Re-verify Full Admin under row lock
   perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
 
   select u.* into v_target
@@ -2948,6 +2956,17 @@ begin
 
   if not v_target.enabled then
     raise exception 'ACCOUNT_DISABLED' using errcode = 'PT409';
+  end if;
+
+  -- Guard uncutover legacy accounts: never silently wipe unmigrated direct_entry_capability_grants
+  if not coalesce(v_target.authz_managed, false)
+     and exists (
+       select 1
+         from public.direct_entry_capability_grants g
+        where g.app_user_id = p_target_app_user_id
+          and g.is_current = true
+     ) then
+    raise exception 'AUTHZ_CUTOVER_NOT_READY' using errcode = 'PT409';
   end if;
 
   if exists (

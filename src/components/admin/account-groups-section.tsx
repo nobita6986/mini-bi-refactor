@@ -309,6 +309,15 @@ export function AccountGroupsSection({
       return;
     }
 
+    if (intent.op === "remove" && !intent.membershipId) {
+      setFeedback({
+        tone: "error",
+        title: "Thiếu thông tin thành viên nhóm",
+        message: "Vui lòng tải lại trang trước khi gỡ nhóm quyền.",
+      });
+      return;
+    }
+
     setPendingIntent(intent);
     setFeedback(null);
     inFlightRef.current = true;
@@ -316,7 +325,10 @@ export function AccountGroupsSection({
     const tracked = workspaceGuard.trackController();
 
     try {
-      const url = `/api/admin/access/accounts/${encodeURIComponent(normalizedRef)}/groups`;
+      const url =
+        intent.op === "assign"
+          ? `/api/admin/access/accounts/${encodeURIComponent(normalizedRef)}/groups`
+          : `/api/admin/access/accounts/${encodeURIComponent(normalizedRef)}/groups/${encodeURIComponent(intent.membershipId ?? "")}`;
       const method = intent.op === "assign" ? "POST" : "DELETE";
       const body =
         intent.op === "assign"
@@ -324,13 +336,10 @@ export function AccountGroupsSection({
               group_id: intent.groupId,
               expected_account_version: intent.expectedVersion,
               reason: intent.reason,
-              idempotency_key: intent.idempotencyKey,
             }
           : {
-              membership_id: intent.membershipId,
               expected_account_version: intent.expectedVersion,
               reason: intent.reason,
-              idempotency_key: intent.idempotencyKey,
             };
 
       const response = await fetch(url, {

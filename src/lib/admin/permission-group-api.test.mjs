@@ -12,6 +12,7 @@ import {
 } from "./permission-group-api.ts";
 import {
   CAPABILITY_BUSINESS_DESCRIPTORS,
+  DEPARTMENT_GROUP_ALLOWED_CAPABILITIES,
   MODULE_ROLE_BUSINESS_DESCRIPTORS,
   parseAssignGroupMemberBody,
   parseCreateGroupBody,
@@ -21,6 +22,12 @@ import {
   projectAccountGroupsResponse,
   projectListGroupsResponse,
 } from "./permission-group-contract.ts";
+
+const SAME_ORIGIN_JSON = {
+  host: "bi.local",
+  origin: "https://bi.local",
+  "content-type": "application/json",
+};
 
 const DEPT_ID = "00000000-0000-4000-8000-000000000101";
 const TEAM_ID = "00000000-0000-4000-8000-000000000201";
@@ -61,6 +68,11 @@ test("business descriptors cover all 29 verbatim CAPABILITIES and 7 D4 module ro
     assert.doesNotMatch(d.label, /GLOBAL|CONTEXTUAL|scope|NORMAL|SHARED|SERVICE/i);
   }
   assert.equal(MODULE_ROLE_BUSINESS_DESCRIPTORS.length, 7);
+  // P1-1: regular department groups must NOT allow company-wide executive/treasury escalation capabilities
+  assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("report_view"), false);
+  assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("report_analytics_view"), false);
+  assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("vendor_finance_record"), false);
+  assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("vendor_finance_view"), true);
 });
 
 test("request parsers reject forbidden authority/scope fields, SYSTEM_ADMIN creation, and malformed payloads", () => {
@@ -245,11 +257,67 @@ test("HTTP handlers enforce feature gate, authority headers, idempotency key, Fu
   );
   assert.equal(forbRes.status, 403);
 
+  // P0-3: Cross-origin CSRF rejected with 403 CSRF_REJECTED on POST / PATCH / DELETE
+  const csrfPostRes = await createPermissionGroupAdmin(
+    new Request("https://bi.local/api/admin/access/groups", {
+      method: "POST",
+      headers: {
+        host: "bi.local",
+        origin: "https://evil.example",
+        "content-type": "application/json",
+        "idempotency-key": IDEM_KEY,
+      },
+      body: JSON.stringify({ code: "NEW_GRP", name: "Nhóm mới", department_id: DEPT_ID }),
+    }),
+    "true",
+    deps,
+  );
+  assert.equal(csrfPostRes.status, 403);
+  assert.equal((await csrfPostRes.json()).code, "CSRF_REJECTED");
+
+  // P0-3: Auth / Full Admin runs BEFORE body/Idempotency-Key validation on mutations
+  const nonAdminMalformedRes = await createPermissionGroupAdmin(
+    new Request("https://bi.local/api/admin/access/groups", {
+      method: "POST",
+      headers: { host: "bi.local", origin: "https://bi.local", "content-type": "text/plain" },
+      body: "{bad-json",
+    }),
+    "true",
+    nonAdminDeps,
+  );
+  assert.equal(nonAdminMalformedRes.status, 403);
+
+  // P0-3: Non-JSON content-type -> 400 CONTENT_TYPE_INVALID
+  const badCtRes = await createPermissionGroupAdmin(
+    new Request("https://bi.local/api/admin/access/groups", {
+      method: "POST",
+      headers: { host: "bi.local", origin: "https://bi.local", "content-type": "text/plain", "idempotency-key": IDEM_KEY },
+      body: JSON.stringify({ code: "NEW_GRP", name: "Nhóm mới", department_id: DEPT_ID }),
+    }),
+    "true",
+    deps,
+  );
+  assert.equal(badCtRes.status, 400);
+  assert.equal((await badCtRes.json()).code, "CONTENT_TYPE_INVALID");
+
+  // P0-3: Oversized body (> 8 KiB) -> 413 BODY_TOO_LARGE
+  const hugeBodyRes = await createPermissionGroupAdmin(
+    new Request("https://bi.local/api/admin/access/groups", {
+      method: "POST",
+      headers: { ...SAME_ORIGIN_JSON, "idempotency-key": IDEM_KEY },
+      body: JSON.stringify({ code: "HUGE", name: "X".repeat(9000), department_id: DEPT_ID }),
+    }),
+    "true",
+    deps,
+  );
+  assert.equal(hugeBodyRes.status, 413);
+  assert.equal((await hugeBodyRes.json()).code, "BODY_TOO_LARGE");
+
   // Missing Idempotency-Key -> 400
   const missingKeyRes = await createPermissionGroupAdmin(
     new Request("https://bi.local/api/admin/access/groups", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: SAME_ORIGIN_JSON,
       body: JSON.stringify({ code: "NEW_GRP", name: "Nhóm mới", department_id: DEPT_ID }),
     }),
     "true",
@@ -261,7 +329,7 @@ test("HTTP handlers enforce feature gate, authority headers, idempotency key, Fu
   const verRes = await updatePermissionGroupAdmin(
     new Request(`https://bi.local/api/admin/access/groups/${GROUP_ID}`, {
       method: "PATCH",
-      headers: { "content-type": "application/json", "idempotency-key": IDEM_KEY },
+      headers: { ...SAME_ORIGIN_JSON, "idempotency-key": IDEM_KEY },
       body: JSON.stringify({
         expected_version: 3,
         name: "Updated",
@@ -284,7 +352,7 @@ test("HTTP handlers enforce feature gate, authority headers, idempotency key, Fu
   const protRes = await removeAccountGroupAdmin(
     new Request(`https://bi.local/api/admin/access/accounts/${ACCOUNT_REF}/groups/${MEMBER_ID}`, {
       method: "DELETE",
-      headers: { "content-type": "application/json", "idempotency-key": IDEM_KEY },
+      headers: { ...SAME_ORIGIN_JSON, "idempotency-key": IDEM_KEY },
       body: JSON.stringify({ expected_account_version: 2 }),
     }),
     ACCOUNT_REF,
@@ -309,7 +377,7 @@ test("HTTP handlers enforce feature gate, authority headers, idempotency key, Fu
   const dupAssign = await assignAccountGroupAdmin(
     new Request(`https://bi.local/api/admin/access/accounts/${ACCOUNT_REF}/groups`, {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": IDEM_KEY },
+      headers: { ...SAME_ORIGIN_JSON, "idempotency-key": IDEM_KEY },
       body: JSON.stringify({ group_id: GROUP_ID, expected_account_version: 2 }),
     }),
     ACCOUNT_REF,

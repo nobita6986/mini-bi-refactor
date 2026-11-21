@@ -2,7 +2,7 @@
  * PR #28 — Pure, browser-safe UI model for the Unified User Directory.
  *
  * Uses `GET /api/admin/organization/user-directory` and
- * `GET /api/admin/organization/user-directory/entry` as the single source of truth
+ * `GET /api/admin/organization/user-directory/detail` as the single source of truth
  * for employee records (with/without login), legacy unlinked personal accounts,
  * and unresolved link-conflict rows.
  */

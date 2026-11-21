@@ -220,6 +220,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
     ({ id }) =>
       ![
         "organization-persons",
+        "permission-groups",
         "departments",
         "accounts",
         "effective-access",
