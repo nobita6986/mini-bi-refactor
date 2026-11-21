@@ -253,3 +253,81 @@ test("repository exposes only canonical read/lifecycle RPCs", async () => {
   await repo.disableAccount({ auth_subject: ACTOR.auth_subject, app_user_id: ACTOR.app_user_id, target_app_user_id: ACCOUNT.account_ref, expected_version: 1, reason: "x", idempotency_key: "k" });
   assert.deepEqual(calls.map(([name]) => name), ["direct_entry_list_app_users_admin", "direct_entry_get_app_user_admin", "direct_entry_disable_app_user"]);
 });
+
+test("WP13 PR-0 GAP-BE-03: account_type and link_state query parsing and filtered RPC routing", async () => {
+  const rpcCalls = [];
+  const repo = createAccountAccessRepository(async (name, args) => {
+    rpcCalls.push([name, args]);
+    return { data: LIST, error: null };
+  });
+  const dependencies = {
+    resolveSession: async () => ({ actor: { ok: true, actor: ACTOR } }),
+    repository: repo,
+  };
+
+  // Unfiltered (omitted or explicit all/all) routes to legacy 6-arg RPC
+  for (const url of [
+    "/api/admin/access/accounts",
+    "/api/admin/access/accounts?account_type=all&link_state=all",
+  ]) {
+    const res = await listAccounts(request(url), "true", dependencies);
+    assert.equal(res.status, 200, url);
+    assert.deepEqual(Object.keys((await res.json()).list).sort(), [
+      "accounts", "enabled", "page", "page_size", "search", "total",
+    ]);
+  }
+  assert.equal(rpcCalls[0][0], "direct_entry_list_app_users_admin");
+  assert.equal(Object.keys(rpcCalls[0][1]).length, 6);
+  assert.equal(rpcCalls[1][0], "direct_entry_list_app_users_admin");
+  assert.equal(Object.keys(rpcCalls[1][1]).length, 6);
+
+  // Filtered combinations route to 8-arg direct_entry_list_app_users_filtered_admin
+  const validCombos = [
+    ["NORMAL", "all"],
+    ["SHARED", "all"],
+    ["SERVICE", "all"],
+    ["SPECIAL", "all"],
+    ["all", "linked"],
+    ["all", "unlinked"],
+    ["SPECIAL", "unlinked"],
+    ["NORMAL", "linked"],
+  ];
+  for (const [accountType, linkState] of validCombos) {
+    rpcCalls.length = 0;
+    const res = await listAccounts(
+      request(`/api/admin/access/accounts?account_type=${accountType}&link_state=${linkState}&page=2&page_size=10`),
+      "true",
+      dependencies,
+    );
+    assert.equal(res.status, 200, `${accountType}/${linkState}`);
+    assert.equal(rpcCalls.length, 1);
+    assert.equal(rpcCalls[0][0], "direct_entry_list_app_users_filtered_admin");
+    assert.deepEqual(rpcCalls[0][1], {
+      p_auth_subject: ACTOR.auth_subject,
+      p_app_user_id: ACTOR.app_user_id,
+      p_search: null,
+      p_enabled: "all",
+      p_page: 2,
+      p_page_size: 10,
+      p_account_type: accountType,
+      p_link_state: linkState,
+    });
+  }
+
+  // Invalid / malformed / case-mismatch / empty / duplicate params fail closed with 400 ACCOUNT_INVALID before RPC
+  rpcCalls.length = 0;
+  for (const badUrl of [
+    "/api/admin/access/accounts?account_type=",
+    "/api/admin/access/accounts?account_type=normal",
+    "/api/admin/access/accounts?account_type=BOT",
+    "/api/admin/access/accounts?account_type=NORMAL&account_type=SHARED",
+    "/api/admin/access/accounts?link_state=",
+    "/api/admin/access/accounts?link_state=LINKED",
+    "/api/admin/access/accounts?link_state=pending",
+    "/api/admin/access/accounts?link_state=linked&link_state=unlinked",
+  ]) {
+    const res = await listAccounts(request(badUrl), "true", dependencies);
+    assert.deepEqual([res.status, await res.json()], [400, { ok: false, code: "ACCOUNT_INVALID" }], badUrl);
+  }
+  assert.equal(rpcCalls.length, 0);
+});

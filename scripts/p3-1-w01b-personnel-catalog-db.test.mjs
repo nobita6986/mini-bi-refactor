@@ -839,7 +839,7 @@ test("migration #68 remains unique and the current capability vocabulary has 33 
   const { rows: functionRows } = await db.query(
     "select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
     + " where n.nspname = 'public' and p.proname like '%personnel%'");
-  assert.equal(functionRows[0].n, 11, "the personnel surface is exactly the reviewed set");
+  assert.equal(functionRows[0].n, 12, "the personnel surface is exactly the reviewed set");
 });
 
 test("the admin personnel catalog excludes Vendor recruiters from list, count and detail", async () => {
