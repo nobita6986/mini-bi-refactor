@@ -308,6 +308,12 @@ const ROUTE_REGISTRY = Object.freeze({
   "src/app/api/admin/organization/persons/[personId]/transfer-department/route.ts": Object.freeze({
     POST: "transferPersonDepartmentAdmin",
   }),
+  "src/app/api/admin/organization/user-directory/route.ts": Object.freeze({
+    GET: "listUserDirectoryAdmin",
+  }),
+  "src/app/api/admin/organization/user-directory/detail/route.ts": Object.freeze({
+    GET: "getUserDirectoryEntryAdmin",
+  }),
   "src/app/api/admin/access/accounts/[accountRef]/classification/route.ts": Object.freeze({
     POST: "setAccountTypeAdmin",
   }),

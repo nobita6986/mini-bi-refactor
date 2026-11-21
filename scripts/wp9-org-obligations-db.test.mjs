@@ -1369,9 +1369,10 @@ test("WP9 [3/4]: Work Reports blocks SHARED/SERVICE/legacy-shared/INACTIVE/DISAB
 
     // 3. TEAM assignment creates obligations ONLY for eligible active employees (NOT SHARED/LEGACY_SHARED/INACTIVE/DISABLED)
     //    AND TEAM target_member_count matches eligible members only!
+    // Keep the history-preservation submission below before its deadline even when CI runs after 18:00 VN.
     const teamAsgn = await serviceRpc(db, "work_report_create_assignment", [
       OWNER.auth, OWNER.app, tpl.template_id, "TEAM", null, TEAM_A, null,
-      "DAILY", true, 0, "18:00:00", false, todayVn, null, nextKey("asgn-team-a"),
+      "DAILY", true, 1, "18:00:00", false, todayVn, null, nextKey("asgn-team-a"),
     ]);
     await serviceRpc(db, "work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, todayVn]);
 
@@ -1932,7 +1933,7 @@ test("WP9 [4/4]: Work Reports as-of team transfer (zero retroactive Team B OVERD
     const tplOnceSub = await createPublishedTemplate(db, OWNER, "WP9_ONCE_R3_SUB", "ONCE Đã Nộp", "ONCE");
     const onceSubAsgn = await serviceRpc(db, "work_report_create_assignment", [
       OWNER.auth, OWNER.app, tplOnceSub.template_id, "USER", E_ONCE_RESTORE.app, null, null,
-      "ONCE", true, 0, "18:00:00", false, todayVn, dPlus1, nextKey("r3-sub-create"),
+      "ONCE", true, 1, "18:00:00", false, todayVn, dPlus1, nextKey("r3-sub-create"),
     ]);
     const { rows: [subObOrig] } = await db.query(
       "select obligation_id from public.work_report_obligations where assignment_id = $1::uuid",
