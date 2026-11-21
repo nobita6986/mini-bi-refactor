@@ -3,13 +3,15 @@ import { notFound, redirect } from "next/navigation";
 import { PersonDetailManager } from "@/components/admin/person-detail-manager";
 import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
+import { computeCheckpointActorScope } from "@/lib/admin/checkpoint-actor-scope";
+import { hasPairedFullAdminAuthority } from "@/lib/admin/effective-access-page-guard";
 import { normalizeOrgUuid } from "@/lib/admin/person-org-ui-model";
 import { decideOrganizationPersonsPageAccess } from "@/lib/auth/direct-entry-page-access";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "Chi tiết Nhân sự nội bộ — Hệ thống báo cáo HRP" };
+export const metadata = { title: "Chi tiết Nhân sự — Hệ thống báo cáo HRP" };
 
 export default async function AdminOrganizationPersonDetailPage({
   params,
@@ -40,7 +42,19 @@ export default async function AdminOrganizationPersonDetailPage({
       if (!safeId) {
         notFound();
       }
-      return <PersonDetailManager key={safeId} personId={safeId} />;
+      const checkpointActorScope =
+        actor && actor.ok ? computeCheckpointActorScope(actor.actor.app_user_id) : "";
+      const canManageGlobalRoles = actor?.ok
+        ? hasPairedFullAdminAuthority(actor.actor)
+        : false;
+      return (
+        <PersonDetailManager
+          key={safeId}
+          personId={safeId}
+          checkpointActorScope={checkpointActorScope}
+          canManageGlobalRoles={canManageGlobalRoles}
+        />
+      );
     }
   }
 }

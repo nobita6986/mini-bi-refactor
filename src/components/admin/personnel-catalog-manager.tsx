@@ -142,8 +142,22 @@ function ActiveBadge({ active }: { active: boolean }) {
   );
 }
 
-export function PersonnelCatalogManager() {
+export function PersonnelCatalogManager({
+  canManageAccountLinks = true,
+  initialRecruiterId = null,
+}: {
+  canManageAccountLinks?: boolean;
+  initialRecruiterId?: string | null;
+} = {}) {
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
+  const [focusedRecruiterId, setFocusedRecruiterId] = useState<string | null>(initialRecruiterId);
+  const [focusedState, setFocusedState] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "ready"; personnel: AdminPersonnel }
+    | { kind: "not-found" }
+    | { kind: "error" }
+  >({ kind: initialRecruiterId ? "loading" : "idle" });
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
@@ -167,7 +181,7 @@ export function PersonnelCatalogManager() {
   const [accountVersion, setAccountVersion] = useState<number | null>(null);
   const selectedAccountRef = useRef<string | null>(null);
   const [linkedRecruiterIds, setLinkedRecruiterIds] = useState<ReadonlySet<string>>(new Set());
-  const [canLinkAccounts, setCanLinkAccounts] = useState(true);
+  const [canLinkAccounts, setCanLinkAccounts] = useState(canManageAccountLinks);
   const [linkCandidatesState, setLinkCandidatesState] = useState<
     "idle" | "loading" | "ready" | "empty" | "already-linked" | "error"
   >("idle");
@@ -329,6 +343,56 @@ export function PersonnelCatalogManager() {
   }, [includeInactive, page, reloadToken, search]);
 
   useEffect(() => {
+    if (!focusedRecruiterId) {
+      return;
+    }
+    const controller = new AbortController();
+    void (async () => {
+      setFocusedState({ kind: "loading" });
+      try {
+        const response = await fetch(
+          `/api/admin/catalog/personnel/${encodeURIComponent(focusedRecruiterId)}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { Accept: "application/json" },
+          },
+        );
+        if (controller.signal.aborted) return;
+        if (response.status === 401 || response.status === 403) {
+          setListState({ kind: "denied" });
+          setFocusedState({ kind: "idle" });
+          return;
+        }
+        if (response.status === 404) {
+          setFocusedState({ kind: "not-found" });
+          return;
+        }
+        if (response.status !== 200) {
+          setFocusedState({ kind: "error" });
+          return;
+        }
+        const projected = projectPersonnelItem(await response.json().catch(() => null));
+        if (controller.signal.aborted) return;
+        if (!projected || projected.recruiter_id !== focusedRecruiterId) {
+          setFocusedState({ kind: "error" });
+          return;
+        }
+        setFocusedState({ kind: "ready", personnel: projected });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (controller.signal.aborted) return;
+        setFocusedState({ kind: "error" });
+      }
+    })();
+    return () => controller.abort();
+  }, [focusedRecruiterId, reloadToken]);
+
+  useEffect(() => {
+    if (!canManageAccountLinks) {
+      return;
+    }
     if (listState.kind !== "loaded") return;
     const recruiterIds = listState.list.personnel.map((row) => row.recruiter_id);
     const statusQuery = buildRecruiterLinkStatusQuery(recruiterIds);
@@ -357,7 +421,7 @@ export function PersonnelCatalogManager() {
       }
     })();
     return () => controller.abort();
-  }, [listState]);
+  }, [canManageAccountLinks, listState]);
 
   const reloadList = () => {
     setListState({ kind: "loading" });
@@ -370,6 +434,7 @@ export function PersonnelCatalogManager() {
   }, []);
 
   const startCreate = () => {
+    if (!canManageAccountLinks) return;
     setForm(EMPTY_FORM);
     setFormError(null);
     setSelectedAccount(null);
@@ -711,6 +776,11 @@ export function PersonnelCatalogManager() {
           },
         }
       : current);
+    setFocusedState((current) =>
+      current.kind === "ready" && current.personnel.recruiter_id === personnel.recruiter_id
+        ? { kind: "ready", personnel }
+        : current,
+    );
     setMembershipPersonnel((current) => current?.recruiter_id === personnel.recruiter_id
       ? personnel
       : current);
@@ -732,6 +802,7 @@ export function PersonnelCatalogManager() {
             trong cơ cấu tổ chức). Vị trí trong hồ sơ chỉ là thuộc tính nghiệp vụ, không cấp quyền truy cập.
           </p>
         </div>
+        {canManageAccountLinks ? (
           <Dialog.Trigger asChild>
             <button
               type="button"
@@ -741,6 +812,7 @@ export function PersonnelCatalogManager() {
               Tạo nhân sự từ tài khoản
             </button>
           </Dialog.Trigger>
+        ) : null}
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
             <Dialog.Content
@@ -1071,6 +1143,109 @@ export function PersonnelCatalogManager() {
             onReload={() => void reloadConflictedEntity(intent)}
           />
         ))
+      ) : null}
+
+      {focusedRecruiterId ? (
+        <Card data-testid="focused-personnel-card">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-foreground">
+                Hồ sơ tính công đang chọn
+              </h2>
+              <p className="text-xs text-muted">
+                Tải trực tiếp theo mã hồ sơ từ đường dẫn (không phụ thuộc trang hiện hành của bảng).
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setFocusedRecruiterId(null);
+                setFocusedState({ kind: "idle" });
+              }}
+              className="min-h-10 rounded-md border border-border px-3 text-xs font-medium text-foreground hover:bg-surface-hover"
+            >
+              Bỏ chọn hồ sơ
+            </button>
+          </div>
+          {focusedState.kind === "loading" ? (
+            <p role="status" className="mt-3 text-sm text-muted">
+              Đang tải chi tiết hồ sơ tính công…
+            </p>
+          ) : focusedState.kind === "not-found" ? (
+            <div className="mt-3">
+              <Alert tone="warning" title="Không tìm thấy hồ sơ tính công">
+                Hồ sơ tính công trong liên kết không còn tồn tại hoặc không thuộc danh mục hợp lệ.
+              </Alert>
+            </div>
+          ) : focusedState.kind === "error" ? (
+            <div className="mt-3 space-y-2">
+              <Alert tone="warning" title="Không tải được hồ sơ tính công đang chọn">
+                Vui lòng thử tải lại; danh sách phía dưới vẫn sử dụng bình thường.
+              </Alert>
+              <button
+                type="button"
+                onClick={reloadList}
+                className="min-h-10 rounded-md border border-border px-3 text-xs font-medium"
+              >
+                Thử tải lại
+              </button>
+            </div>
+          ) : focusedState.kind === "ready" ? (
+            <div className="mt-3 space-y-3 rounded-lg border border-border bg-surface-muted/35 p-3.5 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="font-semibold text-foreground">{focusedState.personnel.display_name}</p>
+                  <p className="font-mono text-xs text-muted">
+                    {focusedState.personnel.personnel_code ?? "Chưa có mã nhân sự"} ·{" "}
+                    {positionLabel(focusedState.personnel.personnel_position)}
+                  </p>
+                </div>
+                <ActiveBadge active={focusedState.personnel.active} />
+              </div>
+              <p className="text-xs text-muted">
+                Nhóm công tác:{" "}
+                <strong className="text-foreground">
+                  {focusedState.personnel.team_names.join(", ") || "Chưa xếp nhóm"}
+                </strong>{" "}
+                · Hiệu lực HRP: {formatHrpDate(focusedState.personnel.hrp_valid_from)}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Dialog.Trigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => startEdit(focusedState.personnel)}
+                    disabled={conflictLocks.has(focusedState.personnel.recruiter_id)}
+                    className="min-h-10 rounded-md border border-border bg-surface px-3 text-xs font-medium disabled:opacity-50"
+                  >
+                    Chỉnh sửa
+                  </button>
+                </Dialog.Trigger>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    membershipTrigger.current = event.currentTarget;
+                    setMembershipPersonnel(focusedState.personnel);
+                  }}
+                  className="min-h-10 rounded-md bg-primary px-3 text-xs font-medium text-on-primary"
+                >
+                  Quản lý nhóm
+                </button>
+                <Dialog.Trigger asChild>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      startActiveChange(focusedState.personnel, !focusedState.personnel.active)
+                    }
+                    disabled={conflictLocks.has(focusedState.personnel.recruiter_id)}
+                    className="min-h-10 rounded-md border border-border bg-surface px-3 text-xs font-medium disabled:opacity-50"
+                  >
+                    {focusedState.personnel.active ? "Ngừng hoạt động" : "Kích hoạt"}
+                  </button>
+                </Dialog.Trigger>
+              </div>
+            </div>
+          ) : null}
+        </Card>
       ) : null}
 
       <Card>

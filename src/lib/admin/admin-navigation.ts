@@ -29,6 +29,9 @@ type AdminSectionConfig = AdminSection & {
 };
 
 export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
+  { id: "organization-persons", label: "Nhân sự", href: "/admin/organization/persons", visible: adminSecurityNavPredicate },
+  { id: "departments", label: "Phòng ban", href: "/admin/departments", visible: adminSecurityNavPredicate },
+  { id: "effective-access", label: "Quyền hiệu lực", href: "/admin/access/effective", visible: effectiveAccessAdminNavPredicate },
   { id: "personnel", label: "Hồ sơ tính công tuyển dụng", href: "/admin/catalog/personnel", visible: adminAreaNavPredicate },
   { id: "teams", label: "Nhóm", href: "/admin/catalog/teams", visible: adminAreaNavPredicate },
   { id: "labor-types", label: "Loại hình lao động", href: "/admin/catalog/labor-types", visible: adminAreaNavPredicate },
@@ -36,10 +39,6 @@ export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
   { id: "industrial-parks", label: "Khu công nghiệp", href: "/admin/catalog/industrial-parks", visible: recruitmentLocationCatalogNavPredicate },
   { id: "project-team-scopes", label: "Mapping Dự án ↔ Nhóm", href: "/admin/catalog/project-team-scopes", visible: adminSecurityNavPredicate },
   { id: "vendors", label: "Vendor (NCC)", href: "/admin/catalog/vendors", visible: adminAreaNavPredicate },
-  { id: "organization-persons", label: "Nhân sự nội bộ", href: "/admin/organization/persons", visible: adminSecurityNavPredicate },
-  { id: "departments", label: "Phòng ban", href: "/admin/departments", visible: adminSecurityNavPredicate },
-  { id: "accounts", label: "Tài khoản truy cập", href: "/admin/access/accounts", visible: adminSecurityNavPredicate },
-  { id: "effective-access", label: "Quyền hiệu lực", href: "/admin/access/effective", visible: effectiveAccessAdminNavPredicate },
   { id: "attendance", label: "Báo cáo chấm công", href: "/admin/attendance", visible: attendanceReportNavPredicate },
   { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ", href: "/admin/worker-edit-history", visible: workerEditHistoryNavPredicate },
 ];
@@ -56,18 +55,41 @@ const RECRUITMENT_SECTION_IDS = new Set([
 
 export function groupAdminSections(sections: readonly AdminSection[]): AdminSectionMenuItem[] {
   const recruitmentSections = sections.filter((section) => RECRUITMENT_SECTION_IDS.has(section.id));
-  return [
-    ...(recruitmentSections.length > 0
-      ? [{ type: "group" as const, id: "recruitment" as const, label: "Danh mục tuyển dụng" as const, sections: recruitmentSections }]
-      : []),
-    ...sections
-      .filter((section) => !RECRUITMENT_SECTION_IDS.has(section.id))
-      .map((section) => ({ type: "section" as const, section })),
-  ];
+  const result: AdminSectionMenuItem[] = [];
+  let recruitmentInserted = false;
+
+  for (const section of sections) {
+    if (RECRUITMENT_SECTION_IDS.has(section.id)) {
+      if (!recruitmentInserted && recruitmentSections.length > 0) {
+        result.push({
+          type: "group",
+          id: "recruitment",
+          label: "Danh mục tuyển dụng",
+          sections: recruitmentSections,
+        });
+        recruitmentInserted = true;
+      }
+      continue;
+    }
+    result.push({ type: "section", section });
+  }
+
+  return result;
 }
 
 export function isAdminSectionActive(pathname: string, href: string): boolean {
-  return pathname === href || pathname.startsWith(`${href}/`);
+  const cleanPath = pathname.split("?")[0] ?? pathname;
+  if (cleanPath === href || cleanPath.startsWith(`${href}/`)) {
+    return true;
+  }
+  // WP13 PR-2: Auxiliary account tools (/admin/access/accounts) live under Nhân sự
+  if (
+    href === "/admin/organization/persons" &&
+    (cleanPath === "/admin/access/accounts" || cleanPath.startsWith("/admin/access/accounts/"))
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function visibleAdminSections(actor: NavActorProjection | null): readonly AdminSection[] {

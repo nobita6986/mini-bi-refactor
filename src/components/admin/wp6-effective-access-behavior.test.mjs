@@ -1454,6 +1454,7 @@ test("WP6 UI source satisfies a11y, responsive table, contrast/theme guard, and 
   const files = [
     "src/components/admin/effective-access-workspace.tsx",
     "src/components/admin/account-global-roles-panel.tsx",
+    "src/components/admin/account-roles-embedded-section.tsx",
     "src/components/admin/account-access-workspace.tsx",
   ];
   for (const rel of files) {
@@ -1472,10 +1473,10 @@ test("WP6 UI source satisfies a11y, responsive table, contrast/theme guard, and 
   assert.match(effSrc, /tabIndex=\{0\}/);
   assert.match(effSrc, /DATA_TABLE_CLASS/);
 
-  const grSrc = readFileSync(
-    path.join(repoRoot, "src/components/admin/account-global-roles-panel.tsx"),
-    "utf8",
-  );
+  const grSrc =
+    readFileSync(path.join(repoRoot, "src/components/admin/account-global-roles-panel.tsx"), "utf8") +
+    "\n" +
+    readFileSync(path.join(repoRoot, "src/components/admin/account-roles-embedded-section.tsx"), "utf8");
   assert.match(grSrc, /<label htmlFor="assign-global-role-select">/);
   assert.match(grSrc, /<label htmlFor="role-mutation-reason-input">/);
   assert.match(grSrc, /aria-describedby/);

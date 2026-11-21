@@ -107,9 +107,11 @@ test("page gate resolves actor server-side and uses the Full-Admin-only account 
   assert.doesNotMatch(pageAccess, /decideAccountAccessPageAccess[\s\S]{0,220}decideAdminAreaAccess/);
 });
 
-test("Accounts navigation is visible only to the Full Admin triple, not the Admin-area predicate", () => {
-  assert.match(nav, /id: "accounts", label: "Tài khoản truy cập", href: "\/admin\/access\/accounts", visible: adminSecurityNavPredicate/);
-  assert.doesNotMatch(nav, /id: "accounts"[^}]*adminAreaNavPredicate/);
+test("Accounts navigation is consolidated under Nhân sự (Full Admin triple only, never Admin-area predicate)", () => {
+  assert.match(nav, /id: "organization-persons", label: "Nhân sự", href: "\/admin\/organization\/persons", visible: adminSecurityNavPredicate/);
+  assert.doesNotMatch(nav, /id: "accounts"/);
+  assert.doesNotMatch(nav, /id: "organization-persons"[^}]*adminAreaNavPredicate/);
+  assert.match(nav, /cleanPath === "\/admin\/access\/accounts"/);
   assert.match(nav, /\.filter\(\(section\) => section\.visible\(actor\)\)[\s\S]{0,120}\.map\(\(\{ id, label, href \}\) => \(\{ id, label, href \}\)\)/);
   // Catalog sections keep their existing Admin-area visibility.
   assert.match(nav, /id: "personnel"[^}]*adminAreaNavPredicate/);

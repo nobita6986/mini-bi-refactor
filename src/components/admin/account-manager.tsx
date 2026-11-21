@@ -5,15 +5,20 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import * as Dialog from "radix-ui/dialog";
 
 import {
+  AccountLegacyCreatePersonDialog,
+  AccountSpecialCreateDialog,
+} from "@/components/admin/account-auxiliary-dialogs";
+import {
   PersonSearchPicker,
   RecruiterConfirmPicker,
 } from "@/components/admin/org-entity-picker";
 import { Alert } from "@/components/ui/alert";
 import { Card, CardHeader } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClasses } from "@/components/ui/button";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
+import { StatusBanner } from "@/components/ui/status-banner";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import type {
@@ -36,7 +41,9 @@ import {
   newAccountIntentKey,
   projectAccountItem,
   projectAccountListForQuery,
+  resolveAccountViewFilters,
   type AccountEnabledFilter,
+  type AccountManagementView,
   type AccountType,
 } from "@/lib/admin/account-access-model";
 import {
@@ -105,12 +112,15 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
 export function AccountManager({
   onOpenGlobalRoles,
   embedded = false,
+  initialView = "all",
 }: {
   onOpenGlobalRoles?: (accountRef: string) => void;
   embedded?: boolean;
+  initialView?: AccountManagementView;
 } = {}) {
   const notify = useNotify();
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
+  const [view, setView] = useState<AccountManagementView>(initialView);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [enabledFilter, setEnabledFilter] = useState<AccountEnabledFilter>("all");
@@ -135,10 +145,15 @@ export function AccountManager({
     | { kind: "unlink"; account: ExistingAccount }
     | null
   >(null);
+  const [specialCreateOpen, setSpecialCreateOpen] = useState(false);
+  const [legacyCreatePersonAccount, setLegacyCreatePersonAccount] = useState<ExistingAccount | null>(null);
+  const [auxDialogLocked, setAuxDialogLocked] = useState(false);
   const [orgDialogLocked, setOrgDialogLocked] = useState(false);
   const [opDialogLocked, setOpDialogLocked] = useState(false);
   const [reconcileIntent, setReconcileIntent] = useState<{ intentId: string; state: string } | null>(null);
   const [opBusy, setOpBusy] = useState(false);
+
+  const { accountType: viewAccountType, linkState: viewLinkState } = resolveAccountViewFilters(view);
 
   const workspaceEpochRef = useRef(0);
   const workspaceControllersRef = useRef<Set<AbortController>>(new Set());
@@ -173,6 +188,9 @@ export function AccountManager({
     invalidateAccountWorkspaceRefs(workspaceEpochRef, workspaceControllersRef, listReqSeqRef);
     setOrgOperation(null);
     setOrgDialogLocked(false);
+    setSpecialCreateOpen(false);
+    setLegacyCreatePersonAccount(null);
+    setAuxDialogLocked(false);
     setOperation(null);
     setOpDialogLocked(false);
     setDialog(null);
@@ -209,6 +227,9 @@ export function AccountManager({
           invalidateAccountWorkspaceRefs(workspaceEpochRef, workspaceControllersRef, listReqSeqRef);
           setOrgOperation(null);
           setOrgDialogLocked(false);
+          setSpecialCreateOpen(false);
+          setLegacyCreatePersonAccount(null);
+          setAuxDialogLocked(false);
           setOperation(null);
           setOpDialogLocked(false);
           setDialog(null);
@@ -244,7 +265,13 @@ export function AccountManager({
       listReqSeqRef.current !== reqSeq;
 
     void (async () => {
-      const query = buildAccountListQuery({ search, enabled: enabledFilter, page });
+      const query = buildAccountListQuery({
+        search,
+        enabled: enabledFilter,
+        page,
+        accountType: viewAccountType,
+        linkState: viewLinkState,
+      });
       if (!query) {
         controllers.delete(controller);
         if (!isStale()) setListState({ kind: "error" });
@@ -274,6 +301,9 @@ export function AccountManager({
         invalidateAccountWorkspaceRefs(workspaceEpochRef, workspaceControllersRef, listReqSeqRef);
         setOrgOperation(null);
         setOrgDialogLocked(false);
+        setSpecialCreateOpen(false);
+        setLegacyCreatePersonAccount(null);
+        setAuxDialogLocked(false);
         setOperation(null);
         setOpDialogLocked(false);
         setDialog(null);
@@ -295,7 +325,11 @@ export function AccountManager({
       }
       try {
         const list = projectAccountListForQuery(await response.json(), {
-          search, enabled: enabledFilter, page,
+          search,
+          enabled: enabledFilter,
+          page,
+          accountType: viewAccountType,
+          linkState: viewLinkState,
         });
         if (isStale()) return;
         if (!list) {
@@ -320,7 +354,7 @@ export function AccountManager({
       controller.abort();
       controllers.delete(controller);
     };
-  }, [enabledFilter, page, reloadToken, search]);
+  }, [enabledFilter, page, reloadToken, search, viewAccountType, viewLinkState]);
 
   const reloadList = useCallback(() => {
     setListState({ kind: "loading" });
@@ -328,7 +362,13 @@ export function AccountManager({
   }, []);
 
   const reloadAccountsAuthoritative = useCallback(async (): Promise<boolean> => {
-    const query = buildAccountListQuery({ search, enabled: enabledFilter, page });
+    const query = buildAccountListQuery({
+      search,
+      enabled: enabledFilter,
+      page,
+      accountType: viewAccountType,
+      linkState: viewLinkState,
+    });
     if (!query) return false;
     const reqSeq = ++listReqSeqRef.current;
     const tracked = trackWorkspaceRequest();
@@ -351,6 +391,8 @@ export function AccountManager({
         search,
         enabled: enabledFilter,
         page,
+        accountType: viewAccountType,
+        linkState: viewLinkState,
       });
       if (!isWorkspaceRequestActive(tracked.epoch, tracked.controller) || reqSeq !== listReqSeqRef.current) {
         return false;
@@ -373,7 +415,7 @@ export function AccountManager({
     } finally {
       tracked.release();
     }
-  }, [enabledFilter, handleOrgSessionLost, isWorkspaceRequestActive, page, search, trackWorkspaceRequest]);
+  }, [enabledFilter, handleOrgSessionLost, isWorkspaceRequestActive, page, search, trackWorkspaceRequest, viewAccountType, viewLinkState]);
 
   const startStateChange = (account: ExistingAccount, nextEnabled: boolean) => {
     setReason("");
@@ -547,21 +589,49 @@ export function AccountManager({
     : 1;
   const locked = busy || pendingIntent !== null || conflictIntent !== null;
   const rowActionsDisabled =
-    locked || orgDialogLocked || opDialogLocked || opBusy || listState.kind === "denied";
+    locked || orgDialogLocked || opDialogLocked || auxDialogLocked || opBusy || listState.kind === "denied";
+
+  const switchView = (nextView: AccountManagementView) => {
+    if (nextView === view || rowActionsDisabled) return;
+    setView(nextView);
+    setPage(1);
+    setListState({ kind: "loading" });
+  };
 
   return (
     <>
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           {embedded ? (
-            <h2 className="text-lg font-semibold text-foreground">Tài khoản</h2>
+            <h2 className="text-lg font-semibold text-foreground">
+              {view === "special"
+                ? "Tài khoản đặc biệt (SHARED / SERVICE)"
+                : view === "unlinked"
+                  ? "Đối chiếu dữ liệu cũ (Tài khoản chưa liên kết)"
+                  : "Tài khoản"}
+            </h2>
           ) : (
             <h1 className="text-2xl font-bold text-foreground">Tài khoản</h1>
           )}
-          <p className="mt-1 text-sm text-muted">Quản lý trạng thái hoạt động của tài khoản hiện có. Lý do thao tác không bắt buộc.</p>
+          <p className="mt-1 text-sm text-muted">
+            {view === "special"
+              ? "Quản lý Tài khoản dùng chung (SHARED) và Tài khoản tích hợp hệ thống (SERVICE)."
+              : view === "unlinked"
+                ? "Tài khoản cá nhân cũ chưa có hồ sơ nhân viên. Đối chiếu và gắn hồ sơ thủ công có kiểm toán."
+                : "Quản lý trạng thái hoạt động của tài khoản hiện có. Lý do thao tác không bắt buộc."}
+          </p>
         </div>
-        <div className="flex gap-2">
-          {listState.kind !== "denied" ? (
+        <div className="flex flex-wrap gap-2">
+          {listState.kind !== "denied" && view === "special" ? (
+            <button
+              type="button"
+              className={primaryButton}
+              disabled={rowActionsDisabled}
+              onClick={() => setSpecialCreateOpen(true)}
+            >
+              + Tạo tài khoản đặc biệt
+            </button>
+          ) : listState.kind !== "denied" ? (
             <button type="button" className={primaryButton} disabled={rowActionsDisabled}
               onClick={() => { setOperation("create"); }}>
               Tạo tài khoản
@@ -569,6 +639,66 @@ export function AccountManager({
           ) : null}
         </div>
       </header>
+
+      {listState.kind !== "denied" ? (
+        <div
+          role="group"
+          aria-label="Chế độ lọc tài khoản"
+          data-testid="accounts-view-switcher"
+          className="flex flex-wrap items-center gap-2"
+        >
+          <Button
+            type="button"
+            variant={view === "all" ? "primary" : "secondary"}
+            size="sm"
+            disabled={rowActionsDisabled}
+            onClick={() => switchView("all")}
+          >
+            Tất cả tài khoản
+          </Button>
+          <Button
+            type="button"
+            variant={view === "special" ? "primary" : "secondary"}
+            size="sm"
+            disabled={rowActionsDisabled}
+            onClick={() => switchView("special")}
+          >
+            Tài khoản đặc biệt
+          </Button>
+          <Button
+            type="button"
+            variant={view === "unlinked" ? "primary" : "secondary"}
+            size="sm"
+            disabled={rowActionsDisabled}
+            onClick={() => switchView("unlinked")}
+          >
+            Đối chiếu dữ liệu cũ
+          </Button>
+        </div>
+      ) : null}
+
+      {listState.kind !== "denied" && view === "special" ? (
+        <StatusBanner tone="info" title="Tài khoản dùng chung (SHARED) & Tích hợp hệ thống (SERVICE)">
+          Các tài khoản này phục vụ điểm dùng chung hoặc tích hợp tự động, <strong>không gắn hồ sơ nhân viên</strong> và{" "}
+          <strong>không thuộc danh sách chấm công, nghỉ phép hoặc báo cáo công việc định kỳ</strong>. Để thêm nhân viên bình thường và mở đăng nhập, sử dụng{" "}
+          <Link href="/admin/organization/persons" className="font-medium underline">
+            Nhân sự
+          </Link>
+          .
+        </StatusBanner>
+      ) : null}
+
+      {listState.kind !== "denied" && view === "unlinked" ? (
+        <StatusBanner tone="warning" title="Dữ liệu cũ cần đối chiếu thủ công">
+          Danh sách này chỉ gồm tài khoản cá nhân cũ chưa liên kết hồ sơ nhân viên.{" "}
+          <strong>Không mặc định đây là tài khoản kỹ thuật</strong> và{" "}
+          <strong>không tự ghép theo họ tên</strong>. Hãy kiểm tra hồ sơ hiện có hoặc{" "}
+          <Link href="/admin/catalog/personnel" className="font-medium underline">
+            Danh mục hồ sơ tính công tuyển dụng
+          </Link>{" "}
+          trước khi chọn một trong 3 thao tác đối chiếu có kiểm toán bên dưới.
+        </StatusBanner>
+      ) : null}
 
       <Dialog.Root open={dialog !== null}
         onOpenChange={(open) => { if (!open && !locked) setDialog(null); }}>
@@ -650,7 +780,13 @@ export function AccountManager({
         {listState.kind !== "denied" ? (
           <form className="mb-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]" onSubmit={(event) => {
             event.preventDefault();
-            const query = buildAccountListQuery({ search: searchInput, enabled: enabledFilter, page: 1 });
+            const query = buildAccountListQuery({
+              search: searchInput,
+              enabled: enabledFilter,
+              page: 1,
+              accountType: viewAccountType,
+              linkState: viewLinkState,
+            });
             if (!query) {
               setListState({ kind: "error" });
               return;
@@ -751,25 +887,66 @@ export function AccountManager({
                         </td>
                         <td data-card-actions="true" className="px-3 py-3">
                           <div className="flex flex-wrap justify-end gap-2 whitespace-nowrap">
-                            <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={rowActionsDisabled}
-                              onClick={() => { setOrgOperation({ kind: "classification", account }); }}>
-                              Phân loại
-                            </button>
                             {account.active_person_link ? (
-                              <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={rowActionsDisabled}
-                                onClick={() => { setOrgOperation({ kind: "unlink", account }); }}>
-                                Ngắt liên kết
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
-                                disabled={rowActionsDisabled || !canLink}
-                                title={!canLink ? "Tài khoản SHARED/SERVICE không nối hồ sơ người" : undefined}
-                                onClick={() => { if (canLink) setOrgOperation({ kind: "link", account }); }}
+                              <Link
+                                href={`/admin/organization/persons/${encodeURIComponent(account.active_person_link.person_id)}`}
+                                className={buttonClasses({ variant: "soft", size: "sm" })}
                               >
-                                Liên kết người
-                              </button>
+                                Mở hồ sơ nhân viên
+                              </Link>
+                            ) : null}
+                            {view === "unlinked" && canLink ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
+                                  disabled={rowActionsDisabled}
+                                  onClick={() => { setOrgOperation({ kind: "link", account }); }}
+                                >
+                                  Gắn nhân viên có sẵn
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
+                                  disabled={rowActionsDisabled}
+                                  onClick={() => { setLegacyCreatePersonAccount(account); }}
+                                >
+                                  Tạo hồ sơ nhân viên
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
+                                  disabled={rowActionsDisabled}
+                                  onClick={() => { setOrgOperation({ kind: "classification", account }); }}
+                                >
+                                  Đánh dấu Đặc biệt
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={rowActionsDisabled}
+                                  onClick={() => { setOrgOperation({ kind: "classification", account }); }}>
+                                  Phân loại
+                                </button>
+                                {view !== "special" ? (
+                                  account.active_person_link ? (
+                                    <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={rowActionsDisabled}
+                                      onClick={() => { setOrgOperation({ kind: "unlink", account }); }}>
+                                      Ngắt liên kết
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`}
+                                      disabled={rowActionsDisabled || !canLink}
+                                      title={!canLink ? "Tài khoản SHARED/SERVICE không nối hồ sơ người" : undefined}
+                                      onClick={() => { if (canLink) setOrgOperation({ kind: "link", account }); }}
+                                    >
+                                      Liên kết người
+                                    </button>
+                                  )
+                                ) : null}
+                              </>
                             )}
                             <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={rowActionsDisabled}
                               onClick={() => { setOperation({ kind: "edit", account }); }}>
@@ -860,6 +1037,27 @@ export function AccountManager({
         }}
         onClose={() => { setReconcileIntent(null); }}
         onDone={() => { setReconcileIntent(null); reloadList(); }}
+      />
+      <AccountSpecialCreateDialog
+        key={specialCreateOpen ? "special-open" : "special-closed"}
+        open={specialCreateOpen}
+        trackRequest={trackWorkspaceRequest}
+        isRequestActive={isWorkspaceRequestActive}
+        onLockChange={setAuxDialogLocked}
+        onClose={() => setSpecialCreateOpen(false)}
+        onApplied={() => { setSpecialCreateOpen(false); reloadList(); }}
+        onSessionLost={handleOrgSessionLost}
+      />
+      <AccountLegacyCreatePersonDialog
+        key={legacyCreatePersonAccount?.account_ref ?? "legacy-none"}
+        account={legacyCreatePersonAccount}
+        trackRequest={trackWorkspaceRequest}
+        isRequestActive={isWorkspaceRequestActive}
+        onLockChange={setAuxDialogLocked}
+        onClose={() => setLegacyCreatePersonAccount(null)}
+        onApplied={() => { setLegacyCreatePersonAccount(null); reloadList(); }}
+        onReloadRequested={reloadAccountsAuthoritative}
+        onSessionLost={handleOrgSessionLost}
       />
     </>
   );

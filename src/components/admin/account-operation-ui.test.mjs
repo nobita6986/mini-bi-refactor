@@ -53,8 +53,8 @@ test("D3-B: reclassify fires once on list mount via ref guard, not on filter/pag
   assert.match(source, /\/api\/admin\/access\/accounts\/reclassify/);
   // Sanitized error copy, no intent/PII detail.
   assert.match(source, /Không phân loại lại được intent tồn đọng/);
-  // The list load keeps only search/page/filter/reload as its dependency.
-  assert.match(source, /\[enabledFilter, page, reloadToken, search\]/);
+  // The list load keeps only search/page/filter/view/reload as its dependency (never reclassify).
+  assert.match(source, /\[enabledFilter, page, reloadToken, search, viewAccountType, viewLinkState\]/);
 });
 
 test("D3-B: no auth_subject/intent_token/raw identity rendered in the UI surface", () => {

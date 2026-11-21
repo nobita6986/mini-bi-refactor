@@ -941,12 +941,22 @@ function EffectiveAccessDetailPanel({ detail }: { detail: AccountAccessDetail })
             </p>
           </div>
 
-          <Link
-            href={`/admin/access/accounts?tab=global-roles&account=${encodeURIComponent(account.account_ref)}`}
-            className={buttonClasses({ variant: "secondary", size: "sm" })}
-          >
-            Quản lý vai trò toàn cục
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            {account.person ? (
+              <Link
+                href={`/admin/organization/persons/${encodeURIComponent(account.person.person_id)}`}
+                className={buttonClasses({ variant: "primary", size: "sm" })}
+              >
+                Mở hồ sơ nhân viên
+              </Link>
+            ) : null}
+            <Link
+              href={`/admin/access/accounts?tab=global-roles&account=${encodeURIComponent(account.account_ref)}`}
+              className={buttonClasses({ variant: "secondary", size: "sm" })}
+            >
+              Quản lý vai trò toàn cục
+            </Link>
+          </div>
         </div>
 
         <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
