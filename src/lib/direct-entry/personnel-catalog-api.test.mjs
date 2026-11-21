@@ -190,7 +190,7 @@ test("request projections are strict about keys, values and OCC", () => {
   }
 
   const query = personnelCatalogListQuery(new URL("https://app.test/x?search=%20abc%20&page=2&page_size=10&include_inactive=false"));
-  assert.deepEqual(query.ok && query.value, { search: "abc", include_inactive: false, page: 2, page_size: 10 });
+  assert.deepEqual(query.ok && query.value, { search: "abc", include_inactive: false, page: 2, page_size: 10, team_id: null });
   // FIX R1: only absent, "true" and "false" are accepted; anything else is a 400
   // instead of a silent default to true.
   for (const value of ["", "1", "0", "TRUE", "False", "yes", "null"]) {
@@ -239,7 +239,7 @@ test("the session actor is the only actor source and unauthenticated callers get
   assert.equal(body.ok, true);
   assert.deepEqual(body.list, LIST);
   assert.deepEqual(d.calls.rpc[0][1],
-    { ...ACTOR, search: "nv", include_inactive: true, page: 1, page_size: 5 });
+    { ...ACTOR, search: "nv", include_inactive: true, page: 1, page_size: 5, team_id: null });
 });
 
 test("idempotency header mismatch is rejected before the repository", async () => {
@@ -373,4 +373,82 @@ test("repository maps SQLSTATE to sanitized kinds and calls the canonical RPCs",
   }));
   assert.deepEqual(await denied.getPersonnel({ ...ACTOR, recruiter_id: RECRUITER }),
     { ok: false, kind: "denied" });
+});
+
+test("WP13 PR-0 GAP-BE-06: team_id query parsing, 400/404 handling and filtered RPC routing", async () => {
+  const TEAM_ID = "88888888-8888-4888-8888-888888888888";
+  const rpcCalls = [];
+  const repository = createPersonnelCatalogRepository(async (name, args) => {
+    rpcCalls.push([name, args]);
+    if (name === "direct_entry_list_personnel_filtered_admin" && args.p_team_id === OTHER) {
+      return { data: null, error: { code: "P0002", message: "team not found" } };
+    }
+    return { data: LIST, error: null };
+  });
+  const dependencies = {
+    resolveSession: async () => ({ actor: { ok: true, actor: ACTOR } }),
+    repository,
+  };
+
+  // Without team_id or with empty ?team_id= (§7.1) -> team_id=null, legacy 6-arg RPC
+  for (const url of [
+    "https://app.test/api/admin/catalog/personnel?page=1&page_size=25",
+    "https://app.test/api/admin/catalog/personnel?team_id=&page=1&page_size=25",
+  ]) {
+    rpcCalls.length = 0;
+    const unfiltered = await listPersonnelCatalog(new Request(url), "true", dependencies);
+    assert.equal(unfiltered.status, 200, url);
+    assert.deepEqual(Object.keys((await unfiltered.json()).list).sort(), [
+      "authorization_date", "include_inactive", "page", "page_size", "personnel", "search", "total",
+    ]);
+    assert.equal(rpcCalls[0][0], "direct_entry_list_personnel_admin");
+    assert.equal(Object.keys(rpcCalls[0][1]).length, 6);
+  }
+
+  // With valid team_id -> new 7-arg filtered RPC
+  rpcCalls.length = 0;
+  const filtered = await listPersonnelCatalog(
+    new Request(`https://app.test/api/admin/catalog/personnel?team_id=${TEAM_ID}&include_inactive=false&search=an&page=2&page_size=10`),
+    "true",
+    dependencies,
+  );
+  assert.equal(filtered.status, 200);
+  assert.deepEqual(Object.keys((await filtered.json()).list).sort(), [
+    "authorization_date", "include_inactive", "page", "page_size", "personnel", "search", "total",
+  ]);
+  assert.equal(rpcCalls.length, 1);
+  assert.equal(rpcCalls[0][0], "direct_entry_list_personnel_filtered_admin");
+  assert.deepEqual(rpcCalls[0][1], {
+    p_auth_subject: ACTOR.auth_subject,
+    p_app_user_id: ACTOR.app_user_id,
+    p_search: "an",
+    p_include_inactive: false,
+    p_page: 2,
+    p_page_size: 10,
+    p_team_id: TEAM_ID,
+  });
+
+  // Unknown / vendor team P0002 -> 404 PERSONNEL_NOT_FOUND
+  const missing = await listPersonnelCatalog(
+    new Request(`https://app.test/api/admin/catalog/personnel?team_id=${OTHER}`),
+    "true",
+    dependencies,
+  );
+  assert.deepEqual([missing.status, await missing.json()], [404, { ok: false, code: "PERSONNEL_NOT_FOUND" }]);
+
+  // Invalid / whitespace / duplicate / unknown query keys -> 400 PERSONNEL_INVALID before RPC
+  rpcCalls.length = 0;
+  for (const badUrl of [
+    "https://app.test/api/admin/catalog/personnel?team_id=not-a-uuid",
+    "https://app.test/api/admin/catalog/personnel?team_id=%20",
+    `https://app.test/api/admin/catalog/personnel?team_id=${TEAM_ID}&team_id=${OTHER}`,
+    `https://app.test/api/admin/catalog/personnel?teamId=${TEAM_ID}`,
+    "https://app.test/api/admin/catalog/personnel?unknown=1",
+    "https://app.test/api/admin/catalog/personnel?page=1&page=2",
+    "https://app.test/api/admin/catalog/personnel?include_inactive=true&include_inactive=false",
+  ]) {
+    const res = await listPersonnelCatalog(new Request(badUrl), "true", dependencies);
+    assert.deepEqual([res.status, await res.json()], [400, { ok: false, code: "PERSONNEL_INVALID" }], badUrl);
+  }
+  assert.equal(rpcCalls.length, 0);
 });

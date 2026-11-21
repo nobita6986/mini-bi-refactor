@@ -460,6 +460,12 @@ export const WP8D_NAV_READONLY_MIGRATION_NAME =
 export const WP8D_NAV_READONLY_RPC_SIGNATURES = Object.freeze([
   "public.work_report_has_active_obligations(uuid, uuid)",
 ]);
+export const WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME =
+  "20261121100000_wp13_backend_filters_optional_reason.sql";
+export const WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_list_app_users_filtered_admin(uuid, uuid, text, text, integer, integer, text, text)",
+  "public.direct_entry_list_personnel_filtered_admin(uuid, uuid, text, boolean, integer, integer, uuid)",
+]);
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
   "20261121090000_retire_ai_reports_and_provider_config.sql";
 export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
@@ -782,6 +788,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     wp7bAttendanceOrgScopeApplied: has(WP7B_ATTENDANCE_ORG_SCOPE_MIGRATION_NAME),
     wp8dNavReadonlyApplied: has(WP8D_NAV_READONLY_MIGRATION_NAME),
     retireAiReportsApplied: has(RETIRE_AI_REPORTS_MIGRATION_NAME),
+    wp13Pr0BackendFiltersOptionalReasonApplied: has(
+      WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME,
+    ),
   };
 }
 
@@ -853,6 +862,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     wp7bAttendanceOrgScopeApplied = false,
     wp8dNavReadonlyApplied = false,
     retireAiReportsApplied = false,
+    wp13Pr0BackendFiltersOptionalReasonApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -998,6 +1008,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(wp8dNavReadonlyApplied
       ? WP8D_NAV_READONLY_RPC_SIGNATURES
+      : []),
+    ...(wp13Pr0BackendFiltersOptionalReasonApplied
+      ? WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES
       : []),
   ];
 }
