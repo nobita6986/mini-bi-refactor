@@ -3359,7 +3359,7 @@ function AccountingDepartmentMembershipsSection({
                 href="/finance/project-assignments"
                 className={buttonClasses({ variant: "secondary", size: "md" })}
               >
-                Phân công dự án &amp; vai trò toàn cục
+                Phân công kế toán dự án
               </Link>
             ) : null}
             {canManage ? (

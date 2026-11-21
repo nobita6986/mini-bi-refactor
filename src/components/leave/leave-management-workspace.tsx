@@ -311,7 +311,6 @@ export function LeaveManagementWorkspace({
   // Admin Employee Profile Dialog State
   const [editingEmployee, setEditingEmployee] =
     useState<LeaveAdminEmployeeItemProjection | null>(null);
-  const [profileIsShared, setProfileIsShared] = useState<boolean>(false);
   const [profileStatus, setProfileStatus] = useState<LeaveEmploymentStatus>("OFFICIAL");
   const [profileUnitKind, setProfileUnitKind] = useState<LeaveUnitKind>("RECRUITMENT");
   const [profileWorkStartDate, setProfileWorkStartDate] = useState<string>("");
@@ -632,12 +631,10 @@ export function LeaveManagementWorkspace({
       readonly label: string;
       readonly badgeCount?: number;
     }> = tabs.filter((tab) => tab.id === "personal" || tab.id === "approvals");
-    if (!authority?.is_shared_non_employee) {
-      personalTabs.push({
-        id: "explanations",
-        label: "Giải trình chấm công",
-      });
-    }
+    personalTabs.push({
+      id: "explanations",
+      label: "Giải trình chấm công",
+    });
     return personalTabs;
   }, [authority, inboxStatusFilter, inboxData?.total, viewMode]);
 
@@ -1226,7 +1223,6 @@ export function LeaveManagementWorkspace({
 
   const openEditProfileDialog = (emp: LeaveAdminEmployeeItemProjection) => {
     setEditingEmployee(emp);
-    setProfileIsShared(emp.profile.is_shared_non_employee);
     setProfileStatus(emp.profile.employment_status);
     setProfileUnitKind(emp.profile.unit_kind);
     setProfileWorkStartDate(emp.profile.work_start_date ?? "");
@@ -1262,14 +1258,12 @@ export function LeaveManagementWorkspace({
         body: JSON.stringify({
           operation: "UPSERT_EMPLOYEE_PROFILE",
           target_app_user_id: editingEmployee.account.app_user_id,
-          is_shared_non_employee: profileIsShared,
-          employment_status: profileIsShared ? "UNCONFIGURED" : profileStatus,
-          unit_kind: profileIsShared ? "UNCLASSIFIED" : profileUnitKind,
-          work_start_date: profileIsShared ? null : profileWorkStartDate.trim() || null,
+          is_shared_non_employee: false,
+          employment_status: profileStatus,
+          unit_kind: profileUnitKind,
+          work_start_date: profileWorkStartDate.trim() || null,
           official_effective_date:
-            profileIsShared || profileStatus !== "OFFICIAL"
-              ? null
-              : profileOfficialDate.trim() || null,
+            profileStatus !== "OFFICIAL" ? null : profileOfficialDate.trim() || null,
           next_seniority_effective_date: canEditSeniority
             ? profileSeniorityDate.trim() || null
             : editingEmployee.profile.next_seniority_effective_date,
@@ -1625,22 +1619,6 @@ export function LeaveManagementWorkspace({
           </div>
         }
       />
-
-      {/* Shared Marketing / Non-Employee Account Banner */}
-      {viewMode === "personal" &&
-      (meErrorCode === "LEAVE_SHARED_ACCOUNT_FORBIDDEN" ||
-        summary?.authority.is_shared_non_employee) ? (
-        <StatusBanner
-          tone="warning"
-          title="Tài khoản dùng chung không thuộc đối tượng quản lý nghỉ phép cá nhân"
-          dataTestId="leave-shared-account-banner"
-        >
-          <p>
-            Tài khoản hiện tại được đánh dấu là tài khoản dùng chung (Marketing/hệ thống), không gắn
-            với hồ sơ nhân sự cá nhân nên không phát sinh quỹ phép và không tạo đơn xin nghỉ phép.
-          </p>
-        </StatusBanner>
-      ) : null}
 
       {/* Top-Level Workspace Tabs */}
       <div
@@ -2714,15 +2692,9 @@ export function LeaveManagementWorkspace({
                                 ) : null}
                               </td>
                               <td className={DATA_TABLE_TD_CLASS} data-label="Trạng thái phép">
-                                {emp.profile.is_shared_non_employee ? (
-                                  <StatusBadge tone="neutral">
-                                    Tài khoản dùng chung (Loại trừ)
-                                  </StatusBadge>
-                                ) : (
-                                  <StatusBadge tone={empBadge.tone} dot>
-                                    {empBadge.label}
-                                  </StatusBadge>
-                                )}
+                                <StatusBadge tone={empBadge.tone} dot>
+                                  {empBadge.label}
+                                </StatusBadge>
                               </td>
                               <td className={DATA_TABLE_TD_CLASS} data-label="Bộ phận / Team">
                                 <div>{leaveUnitKindLabel(emp.profile.unit_kind)}</div>
@@ -4119,22 +4091,7 @@ export function LeaveManagementWorkspace({
               </div>
             </div>
 
-            <label className="flex items-center gap-2.5 text-sm font-medium text-foreground">
-              <input
-                type="checkbox"
-                checked={profileIsShared}
-                onChange={(e) => setProfileIsShared(e.target.checked)}
-                data-testid="leave-profile-shared-checkbox"
-                className="h-4 w-4 rounded border-border"
-              />
-              <span>
-                Đánh dấu là tài khoản dùng chung (Marketing/hệ thống — loại khỏi quản lý phép cá nhân)
-              </span>
-            </label>
-
-            {!profileIsShared ? (
-              <>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="block text-xs font-medium text-muted mb-1">
                       Trạng thái làm việc
@@ -4240,8 +4197,6 @@ export function LeaveManagementWorkspace({
                     </div>
                   </div>
                 </div>
-              </>
-            ) : null}
 
             <div>
               <label className="block text-xs font-medium text-muted mb-1">

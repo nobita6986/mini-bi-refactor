@@ -29,9 +29,9 @@ type AdminSectionConfig = AdminSection & {
 };
 
 export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
-  { id: "organization-persons", label: "Nhân sự", href: "/admin/organization/persons", visible: adminSecurityNavPredicate },
+  { id: "organization-persons", label: "Người dùng", href: "/admin/organization/persons", visible: adminSecurityNavPredicate },
+  { id: "permission-groups", label: "Nhóm quyền", href: "/admin/access/groups", visible: effectiveAccessAdminNavPredicate },
   { id: "departments", label: "Phòng ban", href: "/admin/departments", visible: adminSecurityNavPredicate },
-  { id: "effective-access", label: "Quyền hiệu lực", href: "/admin/access/effective", visible: effectiveAccessAdminNavPredicate },
   { id: "personnel", label: "Hồ sơ tính công tuyển dụng", href: "/admin/catalog/personnel", visible: adminAreaNavPredicate },
   { id: "teams", label: "Nhóm", href: "/admin/catalog/teams", visible: adminAreaNavPredicate },
   { id: "labor-types", label: "Loại hình lao động", href: "/admin/catalog/labor-types", visible: adminAreaNavPredicate },
@@ -80,13 +80,6 @@ export function groupAdminSections(sections: readonly AdminSection[]): AdminSect
 export function isAdminSectionActive(pathname: string, href: string): boolean {
   const cleanPath = pathname.split("?")[0] ?? pathname;
   if (cleanPath === href || cleanPath.startsWith(`${href}/`)) {
-    return true;
-  }
-  // WP13 PR-2: Auxiliary account tools (/admin/access/accounts) live under Nhân sự
-  if (
-    href === "/admin/organization/persons" &&
-    (cleanPath === "/admin/access/accounts" || cleanPath.startsWith("/admin/access/accounts/"))
-  ) {
     return true;
   }
   return false;

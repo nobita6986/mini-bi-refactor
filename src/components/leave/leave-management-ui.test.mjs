@@ -71,7 +71,9 @@ test("WP2 Personal Leave surface supports FULL/AM/PM request creation, FIFO lots
   assert.ok(workspaceSource.includes('dataTestId="leave-my-requests-table"'));
   assert.ok(workspaceSource.includes('dataTestId="leave-ledger-table"'));
   assert.ok(workspaceSource.includes('dataTestId="leave-withdraw-dialog"'));
-  assert.ok(workspaceSource.includes('dataTestId="leave-shared-account-banner"'));
+  // PR #28 D5: shared non-employee account banner and checkbox are completely removed from UI
+  assert.equal(workspaceSource.includes('dataTestId="leave-shared-account-banner"'), false);
+  assert.equal(workspaceSource.includes('data-testid="leave-profile-shared-checkbox"'), false);
   assert.ok(workspaceSource.includes("/api/leave/me"));
   assert.ok(workspaceSource.includes("/api/leave/requests"));
   assert.ok(workspaceSource.includes("/withdraw"));

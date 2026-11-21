@@ -91,8 +91,8 @@ test("one top-level /admin entry is independently authorized and is not a Direct
 test("Admin internal navigation exposes mapping, departments, organization persons, and worker edit history only to authorized Admin actors", () => {
   assert.deepEqual(ADMIN_SECTIONS.map(({ id, href }) => ({ id, href })), [
     { id: "organization-persons", href: "/admin/organization/persons" },
+    { id: "permission-groups", href: "/admin/access/groups" },
     { id: "departments", href: "/admin/departments" },
-    { id: "effective-access", href: "/admin/access/effective" },
     { id: "personnel", href: "/admin/catalog/personnel" },
     { id: "teams", href: "/admin/catalog/teams" },
     { id: "labor-types", href: "/admin/catalog/labor-types" },
@@ -104,9 +104,9 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "worker-edit-history", href: "/admin/worker-edit-history" },
   ]);
   assert.deepEqual(ADMIN_SECTIONS.map(({ id, label }) => ({ id, label })), [
-    { id: "organization-persons", label: "Nhân sự" },
+    { id: "organization-persons", label: "Người dùng" },
+    { id: "permission-groups", label: "Nhóm quyền" },
     { id: "departments", label: "Phòng ban" },
-    { id: "effective-access", label: "Quyền hiệu lực" },
     { id: "personnel", label: "Hồ sơ tính công tuyển dụng" },
     { id: "teams", label: "Nhóm" },
     { id: "labor-types", label: "Loại hình lao động" },
@@ -118,7 +118,7 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ" },
   ]);
   const serializableSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
-  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "provinces", "industrial-parks", "departments", "effective-access", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
+  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "permission-groups", "provinces", "industrial-parks", "departments", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
   const fullAdminWithoutHistory = serializableSections.filter(({ id }) => id !== "worker-edit-history");
   const allowlistedAdmin = makeNavActor(
@@ -185,6 +185,8 @@ test("catalog and access paths highlight exactly one internal tab", () => {
     ["/admin/catalog/personnel/record", "personnel"],
     ["/admin/organization/persons", "organization-persons"],
     ["/admin/organization/persons/40000000-0000-4000-8000-000000000009", "organization-persons"],
+    ["/admin/organization/persons/account/40000000-0000-4000-8000-000000000010", "organization-persons"],
+    ["/admin/access/groups", "permission-groups"],
     ["/admin/catalog/teams", "teams"],
     ["/admin/catalog/teams/record", "teams"],
     ["/admin/catalog/vendors", "vendors"],
@@ -195,10 +197,6 @@ test("catalog and access paths highlight exactly one internal tab", () => {
     ["/admin/catalog/industrial-parks", "industrial-parks"],
     ["/admin/departments", "departments"],
     ["/admin/departments/40000000-0000-4000-8000-000000000003", "departments"],
-    ["/admin/access/accounts", "organization-persons"],
-    ["/admin/access/accounts/record", "organization-persons"],
-    ["/admin/access/effective", "effective-access"],
-    ["/admin/access/effective/detail", "effective-access"],
     ["/admin/catalog/project-team-scopes", "project-team-scopes"],
   ]) {
     assert.deepEqual(
@@ -226,7 +224,7 @@ test("top-level Admin remains the active registry entry across catalog and acces
   assert.equal(findEntryByPath("/admin/catalog/project-team-scopes")?.id, "admin");
 });
 
-test("effective-access section fails closed on unpaired/cross-paired grants when effective_grants is present", () => {
+test("permission-groups section fails closed on unpaired/cross-paired grants when effective_grants is present", () => {
   const crossPairedActor = {
     capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
     scopes: [{ kind: "all" }],
@@ -237,7 +235,7 @@ test("effective-access section fails closed on unpaired/cross-paired grants when
     ],
   };
   assert.equal(
-    visibleAdminSections(crossPairedActor).some((s) => s.id === "effective-access"),
+    visibleAdminSections(crossPairedActor).some((s) => s.id === "permission-groups"),
     false,
   );
   const hrOperator = {
@@ -250,7 +248,7 @@ test("effective-access section fails closed on unpaired/cross-paired grants when
     ],
   };
   assert.equal(
-    visibleAdminSections(hrOperator).some((s) => s.id === "effective-access"),
+    visibleAdminSections(hrOperator).some((s) => s.id === "permission-groups"),
     false,
   );
   const validPairedAdmin = {
@@ -263,7 +261,12 @@ test("effective-access section fails closed on unpaired/cross-paired grants when
     ],
   };
   assert.equal(
-    visibleAdminSections(validPairedAdmin).some((s) => s.id === "effective-access"),
+    visibleAdminSections(validPairedAdmin).some((s) => s.id === "permission-groups"),
     true,
+  );
+  // Technical effective-access menu entry is completely removed in PR #28
+  assert.equal(
+    visibleAdminSections(validPairedAdmin).some((s) => s.id === "effective-access"),
+    false,
   );
 });

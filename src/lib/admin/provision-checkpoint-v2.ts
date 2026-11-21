@@ -163,6 +163,31 @@ export type ProvisionStep4Role = {
   committed_account_version?: number | null;
 };
 
+export type ProvisionStep4GroupSnapshot = {
+  group_id: string;
+  expected_account_version: number;
+  reason: string | null;
+};
+
+export type ProvisionStep4Group = {
+  group_id: string;
+  group_name: string;
+  status: ProvisionStep4Status;
+  idempotency_key: string;
+  payload_snapshot: ProvisionStep4GroupSnapshot | null;
+  committed_account_version?: number | null;
+};
+
+export type ProvisionStep5Recruiter = {
+  enabled: boolean;
+  position: "STAFF" | "TEAM_LEADER";
+  team_id: string | null;
+  status: "SKIPPED" | "IDLE" | "IN_FLIGHT" | "UNCERTAIN" | "COMMITTED";
+  idempotency_key: string | null;
+  team_idempotency_key: string | null;
+  committed_recruiter_id: string | null;
+};
+
 export type ProvisionCheckpointV2 = {
   schema_version: 2;
   client_flow_id: string;
@@ -174,6 +199,8 @@ export type ProvisionCheckpointV2 = {
   step2_account: ProvisionStep2Account;
   step3_link: ProvisionStep3Link;
   step4_roles: ProvisionStep4Role[];
+  step4_groups?: ProvisionStep4Group[];
+  step5_recruiter?: ProvisionStep5Recruiter | null;
 };
 
 export type CheckpointStorageLike = {
@@ -299,21 +326,37 @@ export function containsForbiddenCheckpointKeys(value: unknown): boolean {
 export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 | null {
   if (!isRecord(raw)) return null;
   if (containsForbiddenCheckpointKeys(raw)) return null;
-  if (
-    !hasExactKeys(raw, [
-      "schema_version",
-      "client_flow_id",
-      "env_origin",
-      "actor_scope",
-      "flow_kind",
-      "updated_at",
-      "step1_person",
-      "step2_account",
-      "step3_link",
-      "step4_roles",
-    ])
-  ) {
-    return null;
+  const allowedTopKeys = new Set([
+    "schema_version",
+    "client_flow_id",
+    "env_origin",
+    "actor_scope",
+    "flow_kind",
+    "updated_at",
+    "step1_person",
+    "step2_account",
+    "step3_link",
+    "step4_roles",
+    "step4_groups",
+    "step5_recruiter",
+  ]);
+  const requiredTopKeys = [
+    "schema_version",
+    "client_flow_id",
+    "env_origin",
+    "actor_scope",
+    "flow_kind",
+    "updated_at",
+    "step1_person",
+    "step2_account",
+    "step3_link",
+    "step4_roles",
+  ];
+  for (const key of Object.keys(raw)) {
+    if (!allowedTopKeys.has(key)) return null;
+  }
+  for (const key of requiredTopKeys) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) return null;
   }
 
   if (raw.schema_version !== PROVISION_CHECKPOINT_SCHEMA_VERSION) return null;
@@ -565,7 +608,119 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
     });
   }
 
-  return {
+  // Optional Step 4b: Permission Groups (PR #28)
+  let step4Groups: ProvisionStep4Group[] | undefined = undefined;
+  if (raw.step4_groups !== undefined) {
+    if (!Array.isArray(raw.step4_groups)) return null;
+    step4Groups = [];
+    for (const item of raw.step4_groups) {
+      if (!isRecord(item)) return null;
+      const is4 = hasExactKeys(item, [
+        "group_id",
+        "group_name",
+        "status",
+        "idempotency_key",
+        "payload_snapshot",
+      ]);
+      const is5 = hasExactKeys(item, [
+        "group_id",
+        "group_name",
+        "status",
+        "idempotency_key",
+        "payload_snapshot",
+        "committed_account_version",
+      ]);
+      if (!is4 && !is5) return null;
+      if (typeof item.group_id !== "string" || !isUuid(item.group_id)) return null;
+      if (!isNonEmptyString(item.group_name)) return null;
+      if (typeof item.status !== "string" || !VALID_STEP4_STATUS.has(item.status as ProvisionStep4Status)) {
+        return null;
+      }
+      if (typeof item.idempotency_key !== "string" || !isUuid(item.idempotency_key)) return null;
+      const committedAccVer = is5 ? item.committed_account_version : null;
+      if (!isNullablePositiveInt(committedAccVer)) return null;
+      let groupPayload: ProvisionStep4GroupSnapshot | null = null;
+      if (item.payload_snapshot !== null) {
+        const pg = item.payload_snapshot;
+        if (!isRecord(pg) || !hasExactKeys(pg, ["group_id", "expected_account_version", "reason"])) {
+          return null;
+        }
+        if (
+          typeof pg.group_id !== "string" ||
+          pg.group_id.toLowerCase() !== item.group_id.toLowerCase() ||
+          typeof pg.expected_account_version !== "number" ||
+          !Number.isSafeInteger(pg.expected_account_version) ||
+          pg.expected_account_version < 1 ||
+          !isNullableString(pg.reason)
+        ) {
+          return null;
+        }
+        groupPayload = {
+          group_id: pg.group_id.toLowerCase(),
+          expected_account_version: pg.expected_account_version,
+          reason: pg.reason,
+        };
+      }
+      step4Groups.push({
+        group_id: item.group_id.toLowerCase(),
+        group_name: item.group_name,
+        status: item.status as ProvisionStep4Status,
+        idempotency_key: item.idempotency_key.toLowerCase(),
+        payload_snapshot: groupPayload,
+        committed_account_version: committedAccVer,
+      });
+    }
+  }
+
+  // Optional Step 5: Inline Recruitment Activation & Team Assignment (PR #28)
+  let step5Recruiter: ProvisionStep5Recruiter | null | undefined = undefined;
+  if (raw.step5_recruiter !== undefined) {
+    if (raw.step5_recruiter === null) {
+      step5Recruiter = null;
+    } else {
+      const s5 = raw.step5_recruiter;
+      if (
+        !isRecord(s5) ||
+        !hasExactKeys(s5, [
+          "enabled",
+          "position",
+          "team_id",
+          "status",
+          "idempotency_key",
+          "team_idempotency_key",
+          "committed_recruiter_id",
+        ])
+      ) {
+        return null;
+      }
+      if (typeof s5.enabled !== "boolean") return null;
+      if (s5.position !== "STAFF" && s5.position !== "TEAM_LEADER") return null;
+      if (!isNullableUuid(s5.team_id)) return null;
+      if (
+        s5.status !== "SKIPPED" &&
+        s5.status !== "IDLE" &&
+        s5.status !== "IN_FLIGHT" &&
+        s5.status !== "UNCERTAIN" &&
+        s5.status !== "COMMITTED"
+      ) {
+        return null;
+      }
+      if (!isNullableUuid(s5.idempotency_key)) return null;
+      if (!isNullableUuid(s5.team_idempotency_key)) return null;
+      if (!isNullableUuid(s5.committed_recruiter_id)) return null;
+      step5Recruiter = {
+        enabled: s5.enabled,
+        position: s5.position,
+        team_id: s5.team_id?.toLowerCase() ?? null,
+        status: s5.status,
+        idempotency_key: s5.idempotency_key?.toLowerCase() ?? null,
+        team_idempotency_key: s5.team_idempotency_key?.toLowerCase() ?? null,
+        committed_recruiter_id: s5.committed_recruiter_id?.toLowerCase() ?? null,
+      };
+    }
+  }
+
+  const normalized: ProvisionCheckpointV2 = {
     schema_version: 2,
     client_flow_id: raw.client_flow_id.toLowerCase(),
     env_origin: raw.env_origin,
@@ -601,6 +756,13 @@ export function parseProvisionCheckpointV2(raw: unknown): ProvisionCheckpointV2 
     },
     step4_roles: step4Roles,
   };
+  if (step4Groups !== undefined) {
+    normalized.step4_groups = step4Groups;
+  }
+  if (step5Recruiter !== undefined) {
+    normalized.step5_recruiter = step5Recruiter;
+  }
+  return normalized;
 }
 
 export function getBrowserSessionStorage(): CheckpointStorageLike | null {
@@ -660,18 +822,22 @@ export function resolveNextStep4AccountVersion(
   let hasCommittedRole = false;
   let hasCommittedWithoutVersion = false;
   let maxCommittedRoleVersion: number | null = null;
-  for (const role of checkpoint.step4_roles) {
-    if (role.status === "COMMITTED") {
+  const allStep4Items: ReadonlyArray<{
+    status: ProvisionStep4Status;
+    committed_account_version?: number | null;
+  }> = [...checkpoint.step4_roles, ...(checkpoint.step4_groups ?? [])];
+  for (const item of allStep4Items) {
+    if (item.status === "COMMITTED") {
       hasCommittedRole = true;
       if (
-        typeof role.committed_account_version === "number" &&
-        Number.isSafeInteger(role.committed_account_version) &&
-        role.committed_account_version >= 1
+        typeof item.committed_account_version === "number" &&
+        Number.isSafeInteger(item.committed_account_version) &&
+        item.committed_account_version >= 1
       ) {
         maxCommittedRoleVersion =
           maxCommittedRoleVersion === null
-            ? role.committed_account_version
-            : Math.max(maxCommittedRoleVersion, role.committed_account_version);
+            ? item.committed_account_version
+            : Math.max(maxCommittedRoleVersion, item.committed_account_version);
       } else {
         hasCommittedWithoutVersion = true;
       }
@@ -717,7 +883,7 @@ export function persistAndVerifyCheckpoint(
       ok: false,
       reason: "INVALID_CHECKPOINT",
       message:
-        "Không thể chuẩn bị checkpoint phục hồi hợp lệ cho phiên hiện tại. Hệ thống đã dừng trước khi gửi yêu cầu tạo dữ liệu.",
+        "Không thể lưu trạng thái tạm cho phiên hiện tại. Hệ thống đã dừng trước khi gửi yêu cầu tạo dữ liệu.",
     };
   }
   if (!storage) {
@@ -725,7 +891,7 @@ export function persistAndVerifyCheckpoint(
       ok: false,
       reason: "STORAGE_UNAVAILABLE",
       message:
-        "Trình duyệt không hỗ trợ hoặc đang chặn bộ nhớ phiên (sessionStorage). Hệ thống đã dừng trước khi gửi yêu cầu để tránh mất khả năng phục hồi khi rớt mạng.",
+        "Trình duyệt đang chặn bộ nhớ tạm của phiên. Hệ thống đã dừng trước khi gửi yêu cầu để tránh tạo trùng khi mất kết nối.",
     };
   }
 
@@ -743,7 +909,7 @@ export function persistAndVerifyCheckpoint(
           ok: false,
           reason: "ACTIVE_CHECKPOINT_CONFLICT",
           message:
-            "Phát hiện bản nháp phục hồi bị lỗi trong bộ nhớ phiên. Hệ thống không tự ghi đè; hãy xóa bản nháp lỗi hoặc đối chiếu thủ công trước khi tạo mới.",
+            "Phát hiện bản lưu tạm bị lỗi trong trình duyệt. Hệ thống không tự ghi đè; hãy xóa bản lưu tạm lỗi trước khi tạo mới.",
         };
       }
       if (
@@ -754,7 +920,7 @@ export function persistAndVerifyCheckpoint(
           ok: false,
           reason: "ACTIVE_CHECKPOINT_CONFLICT",
           message:
-            "Phát hiện checkpoint không khớp ngữ cảnh phiên hiện tại. Hệ thống không tự ghi đè dữ liệu phục hồi.",
+            "Phát hiện bản lưu tạm không khớp phiên đăng nhập hiện tại. Hệ thống không tự ghi đè.",
         };
       }
       if (existingScoped.client_flow_id !== sanitized.client_flow_id) {
@@ -762,7 +928,7 @@ export function persistAndVerifyCheckpoint(
           ok: false,
           reason: "ACTIVE_CHECKPOINT_CONFLICT",
           message:
-            "Bạn đang có một tiến trình thêm nhân viên / mở đăng nhập chưa hoàn tất trong phiên này. Hãy bấm \"Tiếp tục / Đối chiếu\" để hoàn tất hoặc xác nhận hủy tiến trình cũ trước khi mở luồng mới.",
+            "Bạn đang có một tiến trình thêm người dùng / mở đăng nhập chưa hoàn tất trong phiên này. Hãy bấm \"Tiếp tục hoàn tất\" trước khi mở luồng mới.",
         };
       }
     }
@@ -777,7 +943,7 @@ export function persistAndVerifyCheckpoint(
             ok: false,
             reason: "ACTIVE_CHECKPOINT_CONFLICT",
             message:
-              "Phát hiện bản nháp phục hồi bị lỗi trong bộ nhớ phiên. Hệ thống không tự ghi đè; hãy xóa bản nháp lỗi hoặc đối chiếu thủ công trước khi tạo mới.",
+              "Phát hiện bản lưu tạm bị lỗi trong trình duyệt. Hệ thống không tự ghi đè; hãy xóa bản lưu tạm lỗi trước khi tạo mới.",
           };
         }
       } else if (
@@ -789,7 +955,7 @@ export function persistAndVerifyCheckpoint(
             ok: false,
             reason: "ACTIVE_CHECKPOINT_CONFLICT",
             message:
-              "Bạn đang có một tiến trình thêm nhân viên / mở đăng nhập chưa hoàn tất trong phiên này. Hãy bấm \"Tiếp tục / Đối chiếu\" để hoàn tất hoặc xác nhận hủy tiến trình cũ trước khi mở luồng mới.",
+              "Bạn đang có một tiến trình thêm người dùng / mở đăng nhập chưa hoàn tất trong phiên này. Hãy bấm \"Tiếp tục hoàn tất\" trước khi mở luồng mới.",
           };
         }
         shouldMigrateLegacyKey = true;
@@ -800,7 +966,7 @@ export function persistAndVerifyCheckpoint(
       ok: false,
       reason: "WRITE_ERROR",
       message:
-        "Không thể kiểm tra checkpoint hiện hữu trong bộ nhớ phiên trước khi ghi. Đã chặn gửi yêu cầu lên máy chủ (0 thay đổi được ghi).",
+        "Không thể kiểm tra bản lưu tạm trong trình duyệt trước khi gửi. Đã dừng để đảm bảo không ghi trùng dữ liệu.",
     };
   }
 
@@ -812,7 +978,7 @@ export function persistAndVerifyCheckpoint(
       ok: false,
       reason: "WRITE_ERROR",
       message:
-        "Không thể lưu checkpoint phục hồi vào bộ nhớ phiên (có thể hết dung lượng hoặc trình duyệt chặn ghi). Đã chặn gửi yêu cầu lên máy chủ (0 thay đổi được ghi).",
+        "Không thể lưu tạm tiến trình vào trình duyệt (có thể hết dung lượng hoặc trình duyệt chặn ghi). Đã dừng trước khi gửi yêu cầu lên máy chủ.",
     };
   }
 
@@ -824,7 +990,7 @@ export function persistAndVerifyCheckpoint(
       ok: false,
       reason: "READBACK_MISMATCH",
       message:
-        "Không đọc lại được checkpoint sau khi lưu vào bộ nhớ phiên. Đã chặn gửi yêu cầu lên máy chủ (0 thay đổi được ghi).",
+        "Không đọc lại được bản lưu tạm sau khi ghi. Đã dừng trước khi gửi yêu cầu lên máy chủ.",
     };
   }
 
@@ -833,12 +999,14 @@ export function persistAndVerifyCheckpoint(
       ok: false,
       reason: "READBACK_MISMATCH",
       message:
-        "Xác minh đọc lại checkpoint thất bại (dữ liệu trống). Đã chặn gửi yêu cầu lên máy chủ (0 thay đổi được ghi).",
+        "Xác minh bản lưu tạm thất bại (dữ liệu trống). Đã dừng trước khi gửi yêu cầu lên máy chủ.",
     };
   }
 
   const parsedBack = parseStoredCheckpointRaw(readBackRaw);
 
+  const sanitizedGroups = sanitized.step4_groups ?? [];
+  const parsedGroups = parsedBack?.step4_groups ?? [];
   const matches =
     parsedBack !== null &&
     parsedBack.client_flow_id === sanitized.client_flow_id &&
@@ -862,14 +1030,26 @@ export function persistAndVerifyCheckpoint(
         role.idempotency_key === sanitized.step4_roles[index]?.idempotency_key &&
         (role.committed_account_version ?? null) ===
           (sanitized.step4_roles[index]?.committed_account_version ?? null),
-    );
+    ) &&
+    parsedGroups.length === sanitizedGroups.length &&
+    parsedGroups.every(
+      (grp, index) =>
+        grp.group_id === sanitizedGroups[index]?.group_id &&
+        grp.status === sanitizedGroups[index]?.status &&
+        grp.idempotency_key === sanitizedGroups[index]?.idempotency_key &&
+        (grp.committed_account_version ?? null) ===
+          (sanitizedGroups[index]?.committed_account_version ?? null),
+    ) &&
+    (parsedBack.step5_recruiter?.status ?? null) === (sanitized.step5_recruiter?.status ?? null) &&
+    (parsedBack.step5_recruiter?.committed_recruiter_id ?? null) ===
+      (sanitized.step5_recruiter?.committed_recruiter_id ?? null);
 
   if (!parsedBack || !matches) {
     return {
       ok: false,
       reason: "READBACK_MISMATCH",
       message:
-        "Xác minh đọc lại checkpoint không khớp với dữ liệu vừa ghi. Đã chặn gửi yêu cầu lên máy chủ (0 thay đổi được ghi).",
+        "Xác minh bản lưu tạm không khớp với dữ liệu vừa ghi. Đã dừng trước khi gửi yêu cầu lên máy chủ.",
     };
   }
 
@@ -909,7 +1089,7 @@ function verifyStoredCheckpointRaw(
     return {
       kind: "corrupt",
       message:
-        "Dữ liệu checkpoint trong bộ nhớ phiên không hợp lệ. Vui lòng đối chiếu thủ công tại danh sách Nhân sự / Đối chiếu dữ liệu cũ.",
+        "Dữ liệu tiến trình lưu tạm trong trình duyệt không thể đọc được. Vui lòng kiểm tra lại danh sách Người dùng trước khi thao tác tiếp.",
     };
   }
 
@@ -918,7 +1098,7 @@ function verifyStoredCheckpointRaw(
     return {
       kind: "corrupt",
       message:
-        "Checkpoint trong bộ nhớ phiên sai cấu trúc hoặc chứa trường không hợp lệ. Hệ thống không tự chạy tiếp; hãy đối chiếu thủ công.",
+        "Dữ liệu tiến trình lưu tạm trong trình duyệt bị sai cấu trúc. Hệ thống không tự chạy tiếp; hãy kiểm tra danh sách Người dùng.",
     };
   }
 

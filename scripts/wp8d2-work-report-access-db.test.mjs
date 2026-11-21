@@ -2758,7 +2758,7 @@ test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIREC
       p_app_user_id: SVC_READ_ALL5.app,
     });
     assert.equal(all5Templates.error, null);
-    assert.ok(all5Templates.data.templates.length >= 2);
+    assert.ok(all5Templates.data.items.length >= 2);
 
     const all5TplDetail = await readOnlyRpc("work_report_get_template", {
       p_auth_subject: SVC_READ_ALL5.auth,
@@ -2773,7 +2773,7 @@ test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIREC
       p_app_user_id: SVC_READ_ALL5.app,
     });
     assert.equal(all5Assignments.error, null);
-    assert.equal(all5Assignments.data.assignments.length, 4);
+    assert.equal(all5Assignments.data.items.length, 4);
 
     const all5AssignmentDetail = await readOnlyRpc("work_report_get_assignment_detail", {
       p_auth_subject: SVC_READ_ALL5.auth,
@@ -2781,7 +2781,7 @@ test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIREC
       p_assignment_id: asgTeamA.assignment_id,
     });
     assert.equal(all5AssignmentDetail.error, null);
-    assert.equal(all5AssignmentDetail.data.assignment.assignment_id, asgTeamA.assignment_id);
+    assert.equal(all5AssignmentDetail.data.assignment_id, asgTeamA.assignment_id);
 
     // 6. Strict per-capability isolation: SVC_ANALYTICS_ONLY can read analytics ONLY
     const anOnlyOverview = await readOnlyRpc("work_report_analytics_overview", {

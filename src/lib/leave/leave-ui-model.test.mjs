@@ -689,12 +689,12 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
     { limit: 25, offset: 50, account_status: "ACTIVE" },
   ]);
   assert.equal(catalogResult.allEmployees.length, 68);
-  assert.equal(catalogResult.employees.length, 66);
+  assert.equal(catalogResult.employees.length, 68);
 
-  // Verify ineligible accounts (shared or inactive) are excluded from general admin dropdowns,
+  // Verify inactive accounts are excluded from general admin dropdowns,
   // and PROBATION/UNCONFIGURED accounts are additionally excluded from Opening Balance initialization.
   for (const emp of all76Employees) {
-    if (emp.profile.is_shared_non_employee || !emp.account.account_enabled) {
+    if (!emp.account.account_enabled) {
       assert.equal(isEligibleLeaveAdminDropdownEmployee(emp), false);
       assert.equal(isEligibleLeaveOpeningBalanceEmployee(emp), false);
       assert.equal(
@@ -718,18 +718,18 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
     }
   }
 
-  const expected66Ids = catalogResult.employees.map((e) => e.account.app_user_id);
-  assert.equal(resolveLeaveAdminDropdownEmployees(all76Employees).length, 66);
-  const openingOfficial44 = resolveLeaveOpeningBalanceEmployees(catalogResult.employees);
-  assert.equal(openingOfficial44.length, 44);
+  const expected68Ids = catalogResult.employees.map((e) => e.account.app_user_id);
+  assert.equal(resolveLeaveAdminDropdownEmployees(all76Employees).length, 68);
+  const openingOfficial46 = resolveLeaveOpeningBalanceEmployees(catalogResult.employees);
+  assert.equal(openingOfficial46.length, 46);
   assert.ok(
-    openingOfficial44.every((e) => e.profile.employment_status === "OFFICIAL"),
+    openingOfficial46.every((e) => e.profile.employment_status === "OFFICIAL"),
     "Opening balance options must only include OFFICIAL employees",
   );
-  const expected44OfficialIds = openingOfficial44.map((e) => e.account.app_user_id);
+  const expected46OfficialIds = openingOfficial46.map((e) => e.account.app_user_id);
 
   // 2. Changing profile table page (page 1, page 2, page 3), search keyword, or account_status filter
-  // must NOT change the dropdown option sets used by department approver / module grant (66) or opening balance (44 OFFICIAL).
+  // must NOT change the dropdown option sets used by department approver / module grant (68) or opening balance (46 OFFICIAL).
   const page1Employees = active68Employees.slice(0, 25);
   const page2Employees = active68Employees.slice(25, 50);
   const page3Employees = active68Employees.slice(50, 68);
@@ -750,34 +750,34 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
       fallbackPageEmployees: tablePageSlice,
       optionCatalogLoaded: true,
     });
-    assert.equal(resolvedOptions.length, 66);
+    assert.equal(resolvedOptions.length, 68);
     assert.deepEqual(
       resolvedOptions.map((e) => e.account.app_user_id),
-      expected66Ids,
+      expected68Ids,
     );
 
     const resolvedOpeningOfficials = resolveLeaveOpeningBalanceEmployees(resolvedOptions);
-    assert.equal(resolvedOpeningOfficials.length, 44);
+    assert.equal(resolvedOpeningOfficials.length, 46);
     assert.deepEqual(
       resolvedOpeningOfficials.map((e) => e.account.app_user_id),
-      expected44OfficialIds,
+      expected46OfficialIds,
     );
   }
 
-  // Even before catalog finishes loading, fallback filters out shared & inactive accounts
+  // Even before catalog finishes loading, fallback filters out inactive accounts
   const fallbackFromMixedPage = resolveAdminSelectorEmployeeOptions({
     optionCatalogEmployees: [],
-    fallbackPageEmployees: all76Employees.slice(60, 76), // 6 eligible (61..66) + 2 shared (67..68) + 8 inactive (69..76)
+    fallbackPageEmployees: all76Employees.slice(60, 76), // 8 active (61..68) + 8 inactive (69..76)
     optionCatalogLoaded: false,
   });
-  assert.equal(fallbackFromMixedPage.length, 6);
+  assert.equal(fallbackFromMixedPage.length, 8);
   assert.deepEqual(
     fallbackFromMixedPage.map((e) => e.account.app_user_id),
-    all76Employees.slice(60, 66).map((e) => e.account.app_user_id),
+    all76Employees.slice(60, 68).map((e) => e.account.app_user_id),
   );
-  // Among 61..66, 61, 62, 64, 65 are OFFICIAL (4), while 63 is PROBATION and 66 is UNCONFIGURED
+  // Among 61..68, 61, 62, 64, 65, 67, 68 are OFFICIAL (6), while 63 is PROBATION and 66 is UNCONFIGURED
   const fallbackOpeningOfficials = resolveLeaveOpeningBalanceEmployees(fallbackFromMixedPage);
-  assert.equal(fallbackOpeningOfficials.length, 4);
+  assert.equal(fallbackOpeningOfficials.length, 6);
 
   // 3. Preserve display name / login code for already-selected OFFICIAL choices in opening balance rows
   // when list data reloads or when profile table queries change.
@@ -800,18 +800,18 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
   const selectedLabelSnapshot = resolveKnownLeaveAccountLabel(
     selectedUserId,
     knownAccountsById,
-    openingOfficial44,
+    openingOfficial46,
   );
   assert.equal(selectedLabelSnapshot, "Nhân Sự NV059 (@nhansu059)");
 
-  // Normal state with full catalog loaded: only 44 OFFICIAL options are present, including NV059
+  // Normal state with full catalog loaded: only 46 OFFICIAL options are present, including NV059
   const rowOptionsNormal = resolveOpeningRowSelectOptions({
     eligibleEmployees: catalogResult.employees,
     selectedAppUserId: selectedUserId,
     knownAccountsById,
     fallbackLabel: selectedLabelSnapshot,
   });
-  assert.equal(rowOptionsNormal.length, 44);
+  assert.equal(rowOptionsNormal.length, 46);
   assert.equal(
     rowOptionsNormal.find((opt) => opt.app_user_id === selectedUserId)?.label,
     "Nhân Sự NV059 (@nhansu059)",
@@ -847,7 +847,7 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
     knownAccountsById,
     fallbackLabel: selectedLabelSnapshot,
   });
-  assert.equal(rowOptionsWithKnownLookup.length, 44);
+  assert.equal(rowOptionsWithKnownLookup.length, 46);
   assert.equal(
     rowOptionsWithKnownLookup.find((opt) => opt.app_user_id === selectedUserId)?.label,
     "Nhân Sự NV059 (@nhansu059)",
@@ -868,7 +868,6 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
   for (const nonOfficialSelectedId of [
     makeUuid(3), // PROBATION
     makeUuid(6), // UNCONFIGURED
-    makeUuid(67), // SHARED
     makeUuid(70), // INACTIVE
   ]) {
     const optionsWithNonOfficialSelected = resolveOpeningRowSelectOptions({
@@ -877,7 +876,7 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
       knownAccountsById,
       fallbackLabel: "Nhân Sự Không Hợp Lệ",
     });
-    assert.equal(optionsWithNonOfficialSelected.length, 44);
+    assert.equal(optionsWithNonOfficialSelected.length, 46);
     assert.equal(
       optionsWithNonOfficialSelected.some(
         (opt) => opt.app_user_id === nonOfficialSelectedId,
@@ -904,14 +903,14 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
     knownAccountsById,
     fallbackLabel: selectedLabelSnapshot,
   });
-  assert.equal(rowOptionsAfterDemotion.length, 43);
+  assert.equal(rowOptionsAfterDemotion.length, 45);
   assert.equal(
     rowOptionsAfterDemotion.some((opt) => opt.app_user_id === selectedUserId),
     false,
   );
 
   // 4. Bulk text parser resolves OFFICIAL employees beyond page 1 (e.g. NV059 on page 3)
-  // and rejects PROBATION (NV003), UNCONFIGURED (NV006), shared (shared67), inactive (NV070), and unknown UUIDs
+  // and rejects PROBATION (NV003), UNCONFIGURED (NV006), inactive (NV070), and unknown UUIDs
   const bulkValidBeyondPage1 = parseOpeningBalanceBulkText(
     "NV059\t2\t1.5\t0.5\tNhân sự chính thức trang 3",
     catalogResult.employees,
@@ -940,13 +939,6 @@ test("Admin dropdown employee options with >25 accounts stay independent of prof
   );
   assert.equal(bulkUnconfiguredRejected.rows.length, 0);
   assert.equal(bulkUnconfiguredRejected.parseErrors.length, 1);
-
-  const bulkSharedRejected = parseOpeningBalanceBulkText(
-    "shared67\t1\t1\t0\tTài khoản dùng chung",
-    all76Employees,
-  );
-  assert.equal(bulkSharedRejected.rows.length, 0);
-  assert.equal(bulkSharedRejected.parseErrors.length, 1);
 
   const bulkInactiveRejected = parseOpeningBalanceBulkText(
     "NV070\t1\t1\t0\tTài khoản ngừng hoạt động",

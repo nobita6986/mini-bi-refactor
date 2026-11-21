@@ -536,6 +536,144 @@ function makePersonListEnvelope(persons = [], overrides = {}) {
   };
 }
 
+const GROUP_RECRUIT_ID = "60000000-0000-4000-8000-000000000011";
+const GROUP_ADMIN_ID = "60000000-0000-4000-8000-000000000012";
+
+function makePermissionGroupsListEnvelope() {
+  return {
+    ok: true,
+    as_of: AS_OF,
+    groups: [
+      {
+        group_id: GROUP_RECRUIT_ID,
+        group_code: "TUYEN_DUNG",
+        name: "Nhóm Tuyển dụng",
+        description: "Nhóm nghiệp vụ phòng Tuyển dụng",
+        department_id: DEPT_ID,
+        department_code: "RECRUITMENT",
+        department_name: "Phòng Tuyển dụng",
+        department_system_key: "RECRUITMENT",
+        team_id: null,
+        team_name: null,
+        is_system_admin: false,
+        active: true,
+        version: 1,
+        member_count: 2,
+        capabilities: ["entry_create", "entry_own"],
+        module_roles: [],
+      },
+      {
+        group_id: GROUP_ADMIN_ID,
+        group_code: "BOD_ADMIN",
+        name: "BoD/Admin",
+        description: "Quản trị toàn hệ thống",
+        department_id: DEPT_ID,
+        department_code: "BOD",
+        department_name: "Ban Giám đốc",
+        department_system_key: "BOD",
+        team_id: null,
+        team_name: null,
+        is_system_admin: true,
+        active: true,
+        version: 1,
+        member_count: 1,
+        capabilities: [],
+        module_roles: [],
+      },
+    ],
+  };
+}
+
+function makeAssignGroupEnvelope(groupId, accountVersion) {
+  return {
+    ok: true,
+    replayed: false,
+    account_ref: ACCOUNT_ID,
+    account_version: accountVersion,
+    membership_id: "85000000-0000-4000-8000-000000000009",
+    group_id: groupId,
+  };
+}
+
+function makeUserDirectoryEntryFromPerson(personSummary) {
+  const link = personSummary.active_account_link;
+  const hasLink = link !== null && link !== undefined;
+  return {
+    directory_entry_key: hasLink ? `linked:${personSummary.person_id}:${link.account_ref}` : `person:${personSummary.person_id}`,
+    record_kind: hasLink ? "LINKED_PERSON_ACCOUNT" : "PERSON_ONLY",
+    display_name: personSummary.full_name,
+    login_state: hasLink ? (link.enabled ? "ENABLED" : "DISABLED") : "NO_ACCOUNT",
+    person_id: personSummary.person_id,
+    account_ref: hasLink ? link.account_ref : null,
+    active_link_id: hasLink ? link.link_id : null,
+    link_conflict: false,
+    identity_mutation_blocked: false,
+    conflict_details: null,
+    person: {
+      person_id: personSummary.person_id,
+      employee_code: personSummary.employee_code,
+      full_name: personSummary.full_name,
+      status: personSummary.status,
+      joined_on: personSummary.joined_on,
+      recruiter_id: personSummary.recruiter_id,
+      version: personSummary.version,
+      active_department: personSummary.active_department,
+    },
+    account: hasLink
+      ? {
+          account_ref: link.account_ref,
+          login_id: link.login_id,
+          display_name: link.display_name,
+          enabled: link.enabled,
+          version: link.account_version ?? 1,
+          auth_user_present: true,
+        }
+      : null,
+    active_link: hasLink
+      ? {
+          link_id: link.link_id,
+          started_at: link.started_at,
+          source_kind: link.source_kind,
+          evidence_date: link.evidence_date,
+          version: link.version,
+        }
+      : null,
+  };
+}
+
+function makeUserDirectoryListEnvelope(entries = [], overrides = {}) {
+  const normalized = entries.map((item) =>
+    "directory_entry_key" in item ? item : makeUserDirectoryEntryFromPerson(item),
+  );
+  const linkedCount = normalized.filter((e) => e.record_kind === "LINKED_PERSON_ACCOUNT").length;
+  const personOnlyCount = normalized.filter((e) => e.record_kind === "PERSON_ONLY").length;
+  const unlinkedCount = normalized.filter((e) => e.record_kind === "UNLINKED_ACCOUNT").length;
+  const conflictCount = normalized.filter((e) => e.link_conflict).length;
+  return {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    search: null,
+    record_kind: "all",
+    person_status: "all",
+    login_state: "all",
+    department_id: null,
+    page: 1,
+    page_size: 25,
+    total: normalized.length,
+    has_more: false,
+    summary: {
+      total_all: normalized.length,
+      linked_count: linkedCount,
+      person_only_count: personOnlyCount,
+      unlinked_account_count: unlinkedCount,
+      conflict_count: conflictCount,
+    },
+    entries: normalized,
+    ...overrides,
+  };
+}
+
 function makeAccount(overrides = {}) {
   return {
     account_ref: ACCOUNT_ID,
@@ -702,19 +840,11 @@ const { PersonDetailManager } = repoRequire("./src/components/admin/person-detai
 const { AccountProvisionAndLinkStepper } = repoRequire(
   "./src/components/admin/account-provision-and-link-stepper.tsx",
 );
-const { AccountRolesEmbeddedSection } = repoRequire(
-  "./src/components/admin/account-roles-embedded-section.tsx",
+const { AccountGroupsSection } = repoRequire(
+  "./src/components/admin/account-groups-section.tsx",
 );
-const { AccountManager } = repoRequire("./src/components/admin/account-manager.tsx");
-const {
-  AccountSpecialCreateDialog,
-  AccountLegacyCreatePersonDialog,
-} = repoRequire("./src/components/admin/account-auxiliary-dialogs.tsx");
 const { PersonnelCatalogManager } = repoRequire(
   "./src/components/admin/personnel-catalog-manager.tsx",
-);
-const { EffectiveAccessWorkspace } = repoRequire(
-  "./src/components/admin/effective-access-workspace.tsx",
 );
 
 const ACTOR_A_SCOPE = computeCheckpointActorScope(ADMIN_A_ID);
@@ -972,18 +1102,19 @@ test("AdminSubnav §5.2 order renames Nhân sự, drops standalone accounts, kee
   assert.deepEqual(
     grouped.map((item) => (item.type === "group" ? `group:${item.label}` : `${item.section.id}:${item.section.label}`)),
     [
-      "organization-persons:Nhân sự",
+      "organization-persons:Người dùng",
+      "permission-groups:Nhóm quyền",
       "departments:Phòng ban",
-      "effective-access:Quyền hiệu lực",
       "group:Danh mục tuyển dụng",
       "attendance:Báo cáo chấm công",
       "worker-edit-history:Lịch sử chỉnh sửa NLĐ",
     ],
   );
   assert.equal(ADMIN_SECTIONS.some((s) => s.id === "accounts"), false);
+  assert.equal(ADMIN_SECTIONS.some((s) => s.id === "effective-access"), false);
   assert.equal(ADMIN_SECTIONS.some((s) => s.id === "teams" && s.href === "/admin/catalog/teams"), true);
-  assert.equal(isAdminSectionActive("/admin/access/accounts", "/admin/organization/persons"), true);
-  assert.equal(isAdminSectionActive("/admin/access/accounts?view=special", "/admin/organization/persons"), true);
+  assert.equal(isAdminSectionActive("/admin/organization/persons/account/11111111-1111-4111-8111-111111111111", "/admin/organization/persons"), true);
+  assert.equal(isAdminSectionActive("/admin/access/groups", "/admin/access/groups"), true);
 });
 
 // ============================================================================
@@ -1003,10 +1134,10 @@ test("Pre-Step-1 checkpoint persist failure (QuotaExceeded & read-back mismatch)
   });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl.flush();
 
-  findButton(pl, "+ Thêm nhân viên").props.onClick();
+  findButton(pl, "+ Thêm người dùng").props.onClick();
   await pl.flush();
   const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
   findNode(stepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-200" } });
@@ -1018,10 +1149,10 @@ test("Pre-Step-1 checkpoint persist failure (QuotaExceeded & read-back mismatch)
   findNode(stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await stepper.flush();
   assert.equal(requests.filter((r) => r.method === "POST").length, postCountBefore);
-  assert.equal(textOf(stepper.tree).includes("Không thể lưu checkpoint phục hồi trước khi gửi"), true);
+  assert.equal(textOf(stepper.tree).includes("Không thể lưu trạng thái tạm trước khi gửi"), true);
 });
 
-test("Happy path: Create employee WITH login + optional role executes Person -> Account -> Link -> Role, clears RAM password & checkpoint", async () => {
+test("Happy path: Create employee WITH login + permission group executes Person -> Account -> Link -> Group, clears RAM password & checkpoint", async () => {
   const storage = makeMemoryStorage();
   const pl = mount(PersonListManager, {
     checkpointActorScope: ACTOR_A_SCOPE,
@@ -1031,12 +1162,15 @@ test("Happy path: Create employee WITH login + optional role executes Person -> 
   });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl.flush();
 
-  findButton(pl, "+ Thêm nhân viên").props.onClick();
+  findButton(pl, "+ Thêm người dùng").props.onClick();
   await pl.flush();
   const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+  respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?page=1&page_size=100"), 200, { ok: true, list: { teams: [] } });
+  await stepper.flush();
 
   findNode(stepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-101" } });
   findNode(stepper, (n) => n.props?.id === "create-person-full-name").props.onChange({ target: { value: "Nguyễn Văn An" } });
@@ -1047,10 +1181,9 @@ test("Happy path: Create employee WITH login + optional role executes Person -> 
   findNode(stepper, (n) => n.props?.id === "provision-login-id").props.onChange({ target: { value: "an.nv" } });
   findNode(stepper, (n) => n.props?.id === "provision-password").props.onChange({ target: { value: "TempPass!123" } });
   findNode(stepper, (n) => n.props?.id === "provision-password-confirm").props.onChange({ target: { value: "TempPass!123" } });
-  // Select optional RECRUITER role checkbox
+  // Select optional BoD/Admin permission group (checkboxes[0]=wantLogin, checkboxes[1]=TUYEN_DUNG, checkboxes[2]=BOD_ADMIN)
   const checkboxes = collectNodes(stepper.tree).filter((n) => n.type === "input" && n.props?.type === "checkbox");
-  // checkboxes[0] is want-login toggle, checkboxes[1] is RECRUITER
-  checkboxes[1].props.onChange({ target: { checked: true } });
+  checkboxes[2].props.onChange({ target: { checked: true } });
   await stepper.flush();
 
   findNode(stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
@@ -1082,13 +1215,13 @@ test("Happy path: Create employee WITH login + optional role executes Person -> 
   respond(req3, 201, makeLinkPersonEnvelope({ account_version: 2, person_version: 2 }));
   await stepper.flush();
 
-  // Step 4: POST /api/admin/access/accounts/[id]/roles (RECRUITER)
-  const req4 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/roles`);
+  // Step 4: POST /api/admin/access/accounts/[id]/groups (GROUP_ADMIN_ID)
+  const req4 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
   assert.ok(req4);
   const req4Body = JSON.parse(req4.options.body);
-  assert.equal(req4Body.role_code, "RECRUITER");
-  assert.equal(req4Body.expected_version, 2);
-  respond(req4, 201, makeAssignRoleEnvelope("RECRUITER", 3));
+  assert.equal(req4Body.group_id, GROUP_ADMIN_ID);
+  assert.equal(req4Body.expected_account_version, 2);
+  respond(req4, 201, makeAssignGroupEnvelope(GROUP_ADMIN_ID, 3));
   await stepper.flush();
 
   // Checkpoint cleared after full completion & success toast emitted
@@ -1106,10 +1239,10 @@ test("Fault recovery: Step 1 disconnect -> reload -> Admin B sees NO banner -> A
   });
   await plA.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await plA.flush();
 
-  findButton(plA, "+ Thêm nhân viên").props.onClick();
+  findButton(plA, "+ Thêm người dùng").props.onClick();
   await plA.flush();
   const stepperA = await syncChildFromTree(plA, AccountProvisionAndLinkStepper, null);
   findNode(stepperA, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-501" } });
@@ -1143,7 +1276,7 @@ test("Fault recovery: Step 1 disconnect -> reload -> Admin B sees NO banner -> A
     originOverride: ORIGIN,
   });
   await plB.flush();
-  assert.equal(maybeButton(plB, "Tiếp tục / Đối chiếu"), null);
+  assert.equal(maybeButton(plB, "Tiếp tục hoàn tất"), null);
   assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), true);
   plB.unmount();
 
@@ -1155,10 +1288,10 @@ test("Fault recovery: Step 1 disconnect -> reload -> Admin B sees NO banner -> A
   });
   await plA2.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await plA2.flush();
 
-  findButton(plA2, "Tiếp tục / Đối chiếu").props.onClick();
+  findButton(plA2, "Tiếp tục hoàn tất").props.onClick();
   await plA2.flush();
   const stepperA2 = await syncChildFromTree(plA2, AccountProvisionAndLinkStepper, null);
   await stepperA2.flush();
@@ -1242,21 +1375,29 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
   });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope([makePersonSummary()]));
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope([makePersonSummary()]));
   await pl.flush();
 
   // Open login for existing active employee -> skips POST /persons completely!
   findButton(pl, "Mở đăng nhập").props.onClick();
   await pl.flush();
   const stepper1 = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+  respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?page=1&page_size=100"), 200, { ok: true, list: { teams: [] } });
+  await stepper1.flush();
   findNode(stepper1, (n) => n.props?.id === "open-login-reason").props.onChange({ target: { value: "Mở đăng nhập nhân viên" } });
   findNode(stepper1, (n) => n.props?.id === "provision-login-id").props.onChange({ target: { value: "an.nv" } });
   findNode(stepper1, (n) => n.props?.id === "provision-password").props.onChange({ target: { value: "InitPass!11" } });
   findNode(stepper1, (n) => n.props?.id === "provision-password-confirm").props.onChange({ target: { value: "InitPass!11" } });
-  // Check two roles: RECRUITER and ADMIN
-  const roleChecks = collectNodes(stepper1.tree).filter((n) => n.type === "input" && n.props?.type === "checkbox");
-  roleChecks[0].props.onChange({ target: { checked: true } });
-  roleChecks[2].props.onChange({ target: { checked: true } });
+  // Check two permission groups: TUYEN_DUNG & BOD_ADMIN, and uncheck inline recruiter activation so Step 4 finishes cleanly
+  const groupChecks1 = collectNodes(stepper1.tree).filter((n) => n.type === "input" && n.props?.type === "checkbox");
+  groupChecks1[0].props.onChange({ target: { checked: true } });
+  await stepper1.flush();
+  const groupChecks2 = collectNodes(stepper1.tree).filter((n) => n.type === "input" && n.props?.type === "checkbox");
+  groupChecks2[1].props.onChange({ target: { checked: true } });
+  await stepper1.flush();
+  const afterChecks = collectNodes(stepper1.tree).filter((n) => n.type === "input" && n.props?.type === "checkbox");
+  afterChecks[2].props.onChange({ target: { checked: false } });
   await stepper1.flush();
 
   findNode(stepper1, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
@@ -1285,10 +1426,10 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
   });
   await plReload.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope([makePersonSummary()]));
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope([makePersonSummary()]));
   await plReload.flush();
 
-  findButton(plReload, "Tiếp tục / Đối chiếu").props.onClick();
+  findButton(plReload, "Tiếp tục hoàn tất").props.onClick();
   await plReload.flush();
   const stepper2 = await syncChildFromTree(plReload, AccountProvisionAndLinkStepper, null);
   // Server verification GET /persons/[id] runs automatically on resume
@@ -1299,7 +1440,7 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
 
   // Zero auto-search of /accounts?search=an.nv!
   assert.equal(requests.some((r) => r.url.includes("/api/admin/access/accounts?")), false);
-  assert.equal(textOf(stepper2.tree).includes("Chưa có mã đối chiếu (intent_id)"), true);
+  assert.equal(textOf(stepper2.tree).includes("Cần nhập lại mật khẩu tạm để tiếp tục sau khi tải lại trang"), true);
 
   // Re-enter password -> replays EXACT frozen K_account!
   findNode(stepper2, (n) => n.props?.id === "provision-password").props.onChange({ target: { value: "InitPass!11" } });
@@ -1337,7 +1478,7 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
     (r) => r.method === "POST" && r.url === "/api/admin/access/accounts",
   ).length;
 
-  findButton(stepper2, "Tải lại phiên bản mới nhất từ máy chủ").props.onClick();
+  findButton(stepper2, "Tải lại dữ liệu mới nhất từ máy chủ").props.onClick();
   await stepper2.flush();
   respond(findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`), 200, {
     ok: true,
@@ -1371,36 +1512,36 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
   respond(linkReq3, 201, makeLinkPersonEnvelope({ account_version: 3, person_version: 3 }));
   await stepper2.flush();
 
-  // Step 4: role 1 (RECRUITER) -> 201; role 2 (ADMIN) -> 503 uncertain!
-  const roleReq1 = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/roles`);
-  assert.equal(JSON.parse(roleReq1.options.body).role_code, "RECRUITER");
-  respond(roleReq1, 201, makeAssignRoleEnvelope("RECRUITER", 4, "80000000-0000-4000-8000-000000000010"));
+  // Step 4: group 1 (TUYEN_DUNG) -> 201; group 2 (BOD_ADMIN) -> 503 uncertain!
+  const groupReq1 = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
+  assert.equal(JSON.parse(groupReq1.options.body).group_id, GROUP_RECRUIT_ID);
+  respond(groupReq1, 201, makeAssignGroupEnvelope(GROUP_RECRUIT_ID, 4));
   await stepper2.flush();
 
-  const roleReq2 = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/roles`);
-  const kRoleAdmin = roleReq2.options.headers["Idempotency-Key"];
-  assert.equal(JSON.parse(roleReq2.options.body).role_code, "ADMIN");
-  assert.equal(JSON.parse(roleReq2.options.body).expected_version, 4);
-  respond(roleReq2, 503, { ok: false, code: "AUTHZ_UNAVAILABLE" });
+  const groupReq2 = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
+  const kGroupAdmin = groupReq2.options.headers["Idempotency-Key"];
+  assert.equal(JSON.parse(groupReq2.options.body).group_id, GROUP_ADMIN_ID);
+  assert.equal(JSON.parse(groupReq2.options.body).expected_account_version, 4);
+  respond(groupReq2, 503, { ok: false, code: "AUTHZ_UNAVAILABLE" });
   await stepper2.flush();
 
-  // Retry Step 4 -> NEVER repeats Step 2, Step 3, or Role 1; replays ONLY ADMIN with EXACT K_role!
-  const linkCountBeforeRoleRetry = requests.filter((r) => r.url.includes("/person-link")).length;
+  // Retry Step 4 -> NEVER repeats Step 2, Step 3, or Group 1; replays ONLY GROUP_ADMIN_ID with EXACT Idempotency-Key!
+  const linkCountBeforeGroupRetry = requests.filter((r) => r.url.includes("/person-link")).length;
   findNode(stepper2, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await stepper2.flush();
-  const roleReq2Retry = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/roles`);
-  assert.equal(JSON.parse(roleReq2Retry.options.body).role_code, "ADMIN");
-  assert.equal(roleReq2Retry.options.headers["Idempotency-Key"], kRoleAdmin);
+  const groupReq2Retry = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
+  assert.equal(JSON.parse(groupReq2Retry.options.body).group_id, GROUP_ADMIN_ID);
+  assert.equal(groupReq2Retry.options.headers["Idempotency-Key"], kGroupAdmin);
   assert.equal(
     requests.filter((r) => r.method === "POST" && r.url === "/api/admin/access/accounts").length,
     accountPostCountAfterStep2,
   );
   assert.equal(
     requests.filter((r) => r.url.includes("/person-link")).length,
-    linkCountBeforeRoleRetry,
+    linkCountBeforeGroupRetry,
   );
 
-  respond(roleReq2Retry, 201, makeAssignRoleEnvelope("ADMIN", 5, "80000000-0000-4000-8000-000000000011"));
+  respond(groupReq2Retry, 201, makeAssignGroupEnvelope(GROUP_ADMIN_ID, 5));
   await stepper2.flush();
   assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
   assert.equal(storage.store.has(PROVISION_CHECKPOINT_STORAGE_KEY), false);
@@ -1480,11 +1621,11 @@ test("PersonDetailManager renders 4 blocks on 1 page, hides NORMAL/SHARED/SERVIC
     true,
   );
 
-  // Mount Block 3 AccountRolesEmbeddedSection and simulate 503 local degrade
-  const block3Child = await syncChildFromTree(pd, AccountRolesEmbeddedSection, null);
-  const effReq = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/access`);
-  assert.ok(effReq);
-  respond(effReq, 503, { ok: false, code: "UNAVAILABLE" });
+  // Mount Block 3 AccountGroupsSection and simulate 503 local degrade
+  const block3Child = await syncChildFromTree(pd, AccountGroupsSection, null);
+  const groupsReq = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/groups`);
+  assert.ok(groupsReq);
+  respond(groupsReq, 503, { ok: false, code: "AUTHZ_UNAVAILABLE" });
   await block3Child.flush();
   // Parent PersonDetailManager stays ready (not broken!)
   assert.ok(maybeButton(pd, "Sửa hồ sơ"));
@@ -1508,132 +1649,6 @@ test("PersonDetailManager renders 4 blocks on 1 page, hides NORMAL/SHARED/SERVIC
   assert.equal(maybeNode(pd, (n) => n.props?.type === "submit"), null);
   assert.equal(requests.some((r) => r.url.includes("/reconcile")), false);
   assert.equal(storage.store.size, 0);
-});
-
-// ============================================================================
-// 4. Auxiliary Tools (/admin/access/accounts ?view=special / ?view=unlinked + Effective Link)
-// ============================================================================
-
-test("AccountManager ?view=special and ?view=unlinked use PR-0 server filters + pagination, 2-step special create, and 3 legacy flows", async () => {
-  // 4a) view=special with 30 server-filtered rows across pages 1 and 2
-  const amSpecial = mount(AccountManager, { initialView: "special", embedded: true });
-  await amSpecial.flush();
-  const listReq1 = findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?"));
-  assert.ok(listReq1);
-  assert.equal(listReq1.url.includes("account_type=SPECIAL"), true);
-  assert.equal(listReq1.url.includes("view="), false);
-  respond(listReq1, 200, makeAccountListEnvelope(
-    [makeAccount({ account_ref: ACCOUNT_SPECIAL_ID, display_name: "Máy chấm công 1", login_id: "kiosk.1", account_type: "SHARED" })],
-    { total: 30, page: 1 },
-  ));
-  await amSpecial.flush();
-
-  // Link Person is hidden in special view; '+ Tạo tài khoản đặc biệt' is visible
-  assert.equal(maybeButton(amSpecial, "Liên kết người"), null);
-  assert.ok(maybeButton(amSpecial, "+ Tạo tài khoản đặc biệt"));
-
-  // Next page sends page=2&account_type=SPECIAL (server pagination, NOT page-1 client filter!)
-  findButton(amSpecial, "Trang sau").props.onClick();
-  await amSpecial.flush();
-  const listReq2 = findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?"));
-  assert.equal(listReq2.url.includes("page=2"), true);
-  assert.equal(listReq2.url.includes("account_type=SPECIAL"), true);
-
-  // 2-step special create: POST /accounts -> POST /accounts/[id]/classification (SERVICE)
-  findButton(amSpecial, "+ Tạo tài khoản đặc biệt").props.onClick();
-  await amSpecial.flush();
-  const specialDlg = await syncChildFromTree(amSpecial, AccountSpecialCreateDialog, null);
-  findNode(specialDlg, (n) => n.props?.id === "special-account-type").props.onChange({ target: { value: "SERVICE" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-login-id").props.onChange({ target: { value: "n8n.sync" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-display-name").props.onChange({ target: { value: "N8N Sync" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-password").props.onChange({ target: { value: "SvcPass!123" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-password-confirm").props.onChange({ target: { value: "SvcPass!123" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-reason").props.onChange({ target: { value: "Tích hợp báo cáo" } });
-  await specialDlg.flush();
-
-  findNode(specialDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await specialDlg.flush();
-  const spCreate = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  assert.ok(spCreate);
-  respond(spCreate, 200, {
-    ok: true,
-    account: makeFinalizeCreateAccount({
-      app_user_id: ACCOUNT_SPECIAL_ID,
-      display_name: "N8N Sync",
-    }),
-  });
-  await specialDlg.flush();
-  const spClassify = findLastRequest(
-    (r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_SPECIAL_ID}/classification`,
-  );
-  assert.ok(spClassify);
-  assert.equal(JSON.parse(spClassify.options.body).account_type, "SERVICE");
-  respond(spClassify, 200, {
-    ok: true,
-    replayed: false,
-    account: {
-      account_ref: ACCOUNT_SPECIAL_ID,
-      account_type: "SERVICE",
-      version: 2,
-    },
-  });
-  await specialDlg.flush();
-  await amSpecial.flush();
-  // Confirm Step 2 settled cleanly (dialog closed & success notification emitted)
-  assert.equal(notifications.success.some((n) => n.title.includes("SERVICE")), true);
-  amSpecial.unmount();
-
-  // 4b) view=unlinked sends account_type=NORMAL&link_state=unlinked and exposes 3 legacy flows
-  const amUnlinked = mount(AccountManager, { initialView: "unlinked", embedded: true });
-  await amUnlinked.flush();
-  const unlinkedReq = findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?"));
-  assert.equal(unlinkedReq.url.includes("account_type=NORMAL"), true);
-  assert.equal(unlinkedReq.url.includes("link_state=unlinked"), true);
-  assert.equal(unlinkedReq.url.includes("view="), false);
-  respond(unlinkedReq, 200, makeAccountListEnvelope([makeAccount({ version: 4 })]));
-  await amUnlinked.flush();
-
-  assert.ok(maybeButton(amUnlinked, "Gắn nhân viên có sẵn"));
-  assert.ok(maybeButton(amUnlinked, "Tạo hồ sơ nhân viên"));
-  assert.ok(maybeButton(amUnlinked, "Đánh dấu Đặc biệt"));
-
-  // Legacy Create Person prefills account_ref & expected_account_version
-  findButton(amUnlinked, "Tạo hồ sơ nhân viên").props.onClick();
-  await amUnlinked.flush();
-  const legacyDlg = await syncChildFromTree(amUnlinked, AccountLegacyCreatePersonDialog, null);
-  findNode(legacyDlg, (n) => n.props?.id === "legacy-person-code").props.onChange({ target: { value: "NS-OLD-1" } });
-  findNode(legacyDlg, (n) => n.props?.id === "legacy-person-reason").props.onChange({ target: { value: "Đối chiếu dữ liệu cũ" } });
-  await legacyDlg.flush();
-  findNode(legacyDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await legacyDlg.flush();
-  const legacyPost = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/organization/persons");
-  assert.ok(legacyPost);
-  const legacyBody = JSON.parse(legacyPost.options.body);
-  assert.equal(legacyBody.account_ref, ACCOUNT_ID);
-  assert.equal(legacyBody.expected_account_version, 4);
-  assert.equal(legacyBody.employee_code, "NS-OLD-1");
-});
-
-test("EffectiveAccessWorkspace displays 'Mở hồ sơ nhân viên' link when account is linked to a Person", async () => {
-  const eff = mount(EffectiveAccessWorkspace, {
-    canManageGlobalRoles: true,
-    initialAccountRef: ACCOUNT_ID,
-  });
-  await eff.flush();
-  const detailReq = findLastRequest((r) => r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/access`);
-  assert.ok(detailReq);
-  respond(detailReq, 200, makeEffectiveAccessEnvelope());
-  await eff.flush();
-  const detailPanelNode = findNode(
-    eff,
-    (n) => typeof n.type === "function" && n.type.name === "EffectiveAccessDetailPanel",
-  );
-  const detailPanel = mount(detailPanelNode.type, detailPanelNode.props);
-  await detailPanel.flush();
-  const personLink = collectNodes(detailPanel.tree).find(
-    (n) => n.props?.href === `/admin/organization/persons/${PERSON_ID}` && textOf(n).includes("Mở hồ sơ nhân viên"),
-  );
-  assert.ok(personLink);
 });
 
 // ============================================================================
@@ -1703,10 +1718,10 @@ test("Regression: PersonListManager parent re-render and fresh inline callbacks 
   });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl.flush();
 
-  findButton(pl, "+ Thêm nhân viên").props.onClick();
+  findButton(pl, "+ Thêm người dùng").props.onClick();
   await pl.flush();
   const initialStepperNode = findNode(
     pl,
@@ -1785,7 +1800,7 @@ test("Regression: PersonListManager parent re-render and fresh inline callbacks 
   await stepper.flush();
 
   const dialogText = textOf(stepper.tree);
-  assert.equal(dialogText.includes("Đối chiếu kết quả tạo tài khoản"), true);
+  assert.equal(dialogText.includes("Kiểm tra lại kết quả mở đăng nhập"), true);
   assert.equal(dialogText.includes("NS-777"), true);
   assert.equal(
     maybeNode(stepper, (n) => n.props?.id === "provision-password"),
@@ -1850,14 +1865,14 @@ test("Ponytail regressions (P1 #1-#5 & P2 #12): Step 1 resume hides required pas
   });
   await pl1.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl1.flush();
 
-  findButton(pl1, "Tiếp tục / Đối chiếu").props.onClick();
+  findButton(pl1, "Tiếp tục hoàn tất").props.onClick();
   await pl1.flush();
   const s1 = await syncChildFromTree(pl1, AccountProvisionAndLinkStepper, null);
   assert.equal(maybeNode(s1, (n) => n.props?.id === "provision-password"), null, "Password input must NOT block Step 1 replay");
-  assert.equal(textOf(s1.tree).includes("Chưa có mã đối chiếu (intent_id)"), false);
+  assert.equal(textOf(s1.tree).includes("Cần nhập lại mật khẩu tạm để tiếp tục sau khi tải lại trang"), false);
   assert.equal(findNode(s1, (n) => n.type?.name === "FormDialog").props.closeDisabled, true);
 
   // (b) P1 #2: Deterministic 409 DUPLICATE_CODE during Step 1 resume keeps Part 1 visible & allows fresh submit!
@@ -1898,7 +1913,7 @@ test("Ponytail regressions (P1 #1-#5 & P2 #12): Step 1 resume hides required pas
   await s1.flush();
   assert.equal(findNode(s1, (n) => n.type?.name === "FormDialog").props.closeDisabled, false, "BLOCKED intent must unlock close");
   assert.equal(findNode(s1, (n) => n.props?.id === "provision-login-id").props.disabled, false, "BLOCKED intent must allow editing login_id");
-  assert.ok(maybeButton(s1, "Đã đối chiếu thủ công · Xóa bản nháp cục bộ"));
+  assert.ok(maybeButton(s1, "Đã kiểm tra · Xóa bản lưu tạm"));
 
   // (c) P1 #5: Step 2 deterministic 409 clears idempotency_key in storage -> reloading keeps login_id editable!
   findNode(s1, (n) => n.props?.id === "provision-login-id").props.onChange({ target: { value: "lan.dup" } });
@@ -1928,9 +1943,9 @@ test("Ponytail regressions (P1 #1-#5 & P2 #12): Step 1 resume hides required pas
   });
   await pl2.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl2.flush();
-  findButton(pl2, "Tiếp tục / Đối chiếu").props.onClick();
+  findButton(pl2, "Tiếp tục hoàn tất").props.onClick();
   await pl2.flush();
   const s2 = await syncChildFromTree(pl2, AccountProvisionAndLinkStepper, null);
   respond(
@@ -1989,9 +2004,9 @@ test("Ponytail regressions (P1 #1-#5 & P2 #12): Step 1 resume hides required pas
   });
   await pl3.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl3.flush();
-  findButton(pl3, "Tiếp tục / Đối chiếu").props.onClick();
+  findButton(pl3, "Tiếp tục hoàn tất").props.onClick();
   await pl3.flush();
   const s3 = await syncChildFromTree(pl3, AccountProvisionAndLinkStepper, null);
   respond(
@@ -2000,57 +2015,18 @@ test("Ponytail regressions (P1 #1-#5 & P2 #12): Step 1 resume hides required pas
     { ok: true, authorization_date: AUTH_DATE, as_of: AS_OF, person: makePersonDetail({ person_id: PERSON_ID, status: "INACTIVE" }) },
   );
   await s3.flush();
-  assert.equal(textOf(s3.tree).includes("tài khoản đăng nhập mồ côi"), true);
+  assert.equal(textOf(s3.tree).includes("tránh tạo tài khoản thừa"), true);
   assert.equal(findNode(s3, (n) => n.type?.name === "FormDialog").props.closeDisabled, false);
   s3.unmount();
   pl3.unmount();
 });
 
-test("Ponytail regressions (P1 #4, #6, #7, #8 & P2 #10, #11): SpecialDialog locks reason + handles BLOCKED, uncertain reload preserves pendingIntent key, non-paired Block 3 does 0 access fetches", async () => {
-  // (a) P1 #6 & #4: AccountSpecialCreateDialog locks reason on 503 uncertain & unlocks on terminal BLOCKED intent
-  const am = mount(AccountManager, { initialView: "special", embedded: true });
-  await am.flush();
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([]));
-  await am.flush();
-
-  findButton(am, "+ Tạo tài khoản đặc biệt").props.onClick();
-  await am.flush();
-  const specialDlg = await syncChildFromTree(am, AccountSpecialCreateDialog, null);
-  findNode(specialDlg, (n) => n.props?.id === "special-account-login-id").props.onChange({ target: { value: "svc.lock" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-display-name").props.onChange({ target: { value: "Svc Lock" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-password").props.onChange({ target: { value: "SvcPass!123" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-password-confirm").props.onChange({ target: { value: "SvcPass!123" } });
-  findNode(specialDlg, (n) => n.props?.id === "special-account-reason").props.onChange({ target: { value: "Tích hợp khóa lý do" } });
-  await specialDlg.flush();
-
-  findNode(specialDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await specialDlg.flush();
-  const firstPost = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  const key1 = firstPost.options.headers["Idempotency-Key"];
-  respond(firstPost, 503, { ok: false, code: "ACCOUNT_OPERATION_UNAVAILABLE" });
-  await specialDlg.flush();
-  assert.equal(
-    findNode(specialDlg, (n) => n.props?.id === "special-account-reason").props.disabled,
-    true,
-    "Reason textarea MUST be locked during Step 1 uncertain to prevent payload mismatch key wipe",
-  );
-
-  // Retry sends exact same K1 -> server returns BLOCKED intent -> must unlock close (zero deadlock!)
-  findNode(specialDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await specialDlg.flush();
-  const secondPost = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  assert.equal(secondPost.options.headers["Idempotency-Key"], key1);
-  respond(secondPost, 200, { ok: true, intent: makeIntentEnvelope("BLOCKED") });
-  await specialDlg.flush();
-  assert.equal(findNode(specialDlg, (n) => n.type?.name === "FormDialog").props.closeDisabled, false);
-  specialDlg.unmount();
-  am.unmount();
-
+test("Ponytail regressions (P1 #7, #8 & P2 #11): uncertain reload preserves pendingIntent key, non-paired Block 3 does 0 group fetches", async () => {
   // (b) P1 #7: PersonDetailManager uncertain toggle-login reload preserves frozen Idempotency-Key & expected_version
   const pd = mount(PersonDetailManager, {
     personId: PERSON_ID,
     checkpointActorScope: ACTOR_A_SCOPE,
-    canManageGlobalRoles: false, // P1 #8: unpaired actor must NOT fetch /roles or /access!
+    canManageGlobalRoles: false, // P1 #8: unpaired actor must NOT fetch /groups!
     storage: makeMemoryStorage(),
     originOverride: ORIGIN,
   });
@@ -2079,9 +2055,12 @@ test("Ponytail regressions (P1 #4, #6, #7, #8 & P2 #10, #11): SpecialDialog lock
     },
   );
   await pd.flush();
-  // P1 #8 check: 0 calls to /roles or /access when canManageGlobalRoles === false!
-  assert.equal(requests.some((r) => r.url.includes("/api/admin/access/roles") || r.url.endsWith("/access")), false);
-  assert.equal(textOf(pd.tree).includes("paired Full Admin"), true);
+  // P1 #8 check: 0 calls to /groups or /access when canManageGlobalRoles === false!
+  const block3Unpaired = await syncChildFromTree(pd, AccountGroupsSection, null);
+  assert.equal(requests.some((r) => r.url.includes("/api/admin/access/groups") || r.url.endsWith("/groups")), false);
+  assert.ok(
+    findNode(block3Unpaired, (n) => String(n.props?.description ?? "").includes("BoD/Admin")),
+  );
 
   // Trigger toggle-login -> 503 uncertain -> 'Tải lại để đối chiếu' -> MUST preserve pendingIntent & retry with exact key + expected_version=5!
   findButton(pd, "Khóa đăng nhập").props.onClick();
@@ -2119,7 +2098,7 @@ test("Ponytail regressions (P1 #4, #6, #7, #8 & P2 #10, #11): SpecialDialog lock
   const personnelPage = readFileSync(path.join(repoRoot, "src/app/admin/catalog/personnel/page.tsx"), "utf8");
   assert.match(personsPage, /hasPairedFullAdminAuthority/);
   assert.match(personDetailPage, /hasPairedFullAdminAuthority/);
-  assert.match(accountsPage, /key=\{`\$\{initialTab\}:\$\{initialView\}:\$\{initialAccountRef \?\? ""\}`\}/);
+  assert.match(accountsPage, /resolveLegacyAccountsRedirectTarget/);
   assert.match(personnelPage, /key=\{initialRecruiterId \?\? "all"\}/);
 });
 
@@ -2182,7 +2161,7 @@ test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritt
     const originalBytes = storage.store.get(expectedKey);
     assert.ok(originalBytes);
 
-    // 1) SAME ACTOR A on PersonListManager: '+ Thêm nhân viên' and row 'Mở đăng nhập' MUST be disabled & blocked!
+    // 1) SAME ACTOR A on PersonListManager: '+ Thêm người dùng' and row 'Mở đăng nhập' MUST be disabled & blocked!
     const plA = mount(PersonListManager, {
       checkpointActorScope: ACTOR_A_SCOPE,
       canManageGlobalRoles: true,
@@ -2192,15 +2171,15 @@ test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritt
     await plA.flush();
     respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
     respond(
-      findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")),
+      findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")),
       200,
-      makePersonListEnvelope([makePersonSummary({ active_account_link: null })]),
+      makeUserDirectoryListEnvelope([makePersonSummary({ active_account_link: null })]),
     );
     await plA.flush();
 
-    const addBtnA = findButton(plA, "+ Thêm nhân viên");
+    const addBtnA = findButton(plA, "+ Thêm người dùng");
     const quickOpenBtnA = findButton(plA, "Mở đăng nhập");
-    assert.equal(addBtnA.props.disabled, true, `[${seedMode}] + Thêm nhân viên must be disabled while checkpoint active`);
+    assert.equal(addBtnA.props.disabled, true, `[${seedMode}] + Thêm người dùng must be disabled while checkpoint active`);
     assert.equal(quickOpenBtnA.props.disabled, true, `[${seedMode}] Mở đăng nhập must be disabled while checkpoint active`);
     addBtnA.props.onClick();
     quickOpenBtnA.props.onClick();
@@ -2262,7 +2241,7 @@ test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritt
       `[${seedMode}] Direct fresh stepper bypass for same actor must dispatch 0 POST`,
     );
     assert.equal(storage.store.get(expectedKey), originalBytes);
-    assert.equal(textOf(directStepper.tree).includes("Tiếp tục / Đối chiếu"), true);
+    assert.equal(textOf(directStepper.tree).includes("Tiếp tục hoàn tất"), true);
     directStepper.unmount();
 
     // 4) Stale/mismatched client_flow_id clear MUST NOT delete Admin A's checkpoint!
@@ -2284,10 +2263,10 @@ test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritt
     });
     await plB.flush();
     respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
     await plB.flush();
-    assert.equal(maybeButton(plB, "Tiếp tục / Đối chiếu"), null);
-    const addBtnB = findButton(plB, "+ Thêm nhân viên");
+    assert.equal(maybeButton(plB, "Tiếp tục hoàn tất"), null);
+    const addBtnB = findButton(plB, "+ Thêm người dùng");
     assert.equal(Boolean(addBtnB.props.disabled), false);
     addBtnB.props.onClick();
     await plB.flush();
@@ -2328,18 +2307,18 @@ test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritt
     });
     await plA2.flush();
     respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
     await plA2.flush();
-    // EmptyState '+ Thêm nhân viên' button MUST ALSO be disabled while blocking checkpoint exists!
+    // EmptyState '+ Thêm người dùng' button MUST ALSO be disabled while blocking checkpoint exists!
     const allAddButtonsEmpty = collectNodes(plA2.tree).filter(
-      (n) => typeof n.props?.onClick === "function" && textOf(n).trim() === "+ Thêm nhân viên",
+      (n) => typeof n.props?.onClick === "function" && textOf(n).trim() === "+ Thêm người dùng",
     );
-    assert.equal(allAddButtonsEmpty.length, 2, "Expected both header and EmptyState + Thêm nhân viên buttons");
+    assert.equal(allAddButtonsEmpty.length, 2, "Expected both header and EmptyState + Thêm người dùng buttons");
     for (const btn of allAddButtonsEmpty) {
-      assert.equal(btn.props.disabled, true, `[${seedMode}] Every + Thêm nhân viên button (incl. EmptyState) must be disabled`);
+      assert.equal(btn.props.disabled, true, `[${seedMode}] Every + Thêm người dùng button (incl. EmptyState) must be disabled`);
     }
 
-    findButton(plA2, "Tiếp tục / Đối chiếu").props.onClick();
+    findButton(plA2, "Tiếp tục hoàn tất").props.onClick();
     await plA2.flush();
     const stepperA2 = await syncChildFromTree(plA2, AccountProvisionAndLinkStepper, null);
     findNode(stepperA2, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
@@ -2373,14 +2352,14 @@ test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritt
   });
   await plCorrupt.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await plCorrupt.flush();
-  findButton(plCorrupt, "Đã đối chiếu thủ công · Xóa bản nháp lỗi").props.onClick();
+  findButton(plCorrupt, "Đã kiểm tra · Xóa bản lưu tạm lỗi").props.onClick();
   await plCorrupt.flush();
   // Corrupt scoped entry removed; unseen valid legacy checkpoint preserved & now surfaced for resume!
   assert.equal(mixedStorage.store.has(ACTOR_A_STORAGE_KEY), false);
   assert.equal(mixedStorage.store.get(PROVISION_CHECKPOINT_STORAGE_KEY), validLegacyBytes);
-  assert.ok(maybeButton(plCorrupt, "Tiếp tục / Đối chiếu"));
+  assert.ok(maybeButton(plCorrupt, "Tiếp tục hoàn tất"));
   plCorrupt.unmount();
 
   const corruptLegacyStorage = makeMemoryStorage();
@@ -2463,9 +2442,9 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
     });
     await pl.flush();
     respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
     await pl.flush();
-    findButton(pl, "Tiếp tục / Đối chiếu").props.onClick();
+    findButton(pl, "Tiếp tục hoàn tất").props.onClick();
     await pl.flush();
     const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
     const verify = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`);
@@ -2564,7 +2543,7 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
     },
   });
   await run2.stepper.flush();
-  findButton(run2.stepper, "Tải lại phiên bản tài khoản mới nhất").props.onClick();
+  findButton(run2.stepper, "Tải lại dữ liệu tài khoản mới nhất").props.onClick();
   await run2.stepper.flush();
   const reloadAccountReq = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}`);
   assert.ok(reloadAccountReq);
@@ -2662,16 +2641,17 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
 // 6. Web-only PR-2 Static Scope & Hygiene Guard
 // ============================================================================
 
-test("WP13 PR-2 web-only files have zero simulator hacks, zero server-only leaks into client bundles, and preserve /admin/access/accounts & /admin/catalog/teams", () => {
+test("PR #28 unified admin UI files have zero simulator hacks, zero server-only leaks into client bundles, and safely redirect legacy URLs", () => {
   const clientFiles = [
     "src/lib/admin/provision-checkpoint-v2.ts",
+    "src/lib/admin/user-directory-ui-model.ts",
+    "src/lib/admin/permission-group-ui-model.ts",
     "src/components/admin/account-provision-and-link-stepper.tsx",
-    "src/components/admin/account-roles-embedded-section.tsx",
-    "src/components/admin/account-auxiliary-dialogs.tsx",
+    "src/components/admin/account-groups-section.tsx",
+    "src/components/admin/account-directory-detail-manager.tsx",
+    "src/components/admin/permission-groups-manager.tsx",
     "src/components/admin/person-list-manager.tsx",
     "src/components/admin/person-detail-manager.tsx",
-    "src/components/admin/account-access-workspace.tsx",
-    "src/components/admin/account-manager.tsx",
     "src/components/admin/personnel-catalog-manager.tsx",
   ];
   for (const rel of clientFiles) {
@@ -2688,13 +2668,14 @@ test("WP13 PR-2 web-only files have zero simulator hacks, zero server-only leaks
   assert.match(serverScopeSrc, /import "server-only"/);
   assert.match(serverScopeSrc, /createHash\("sha256"\)/);
 
-  // /admin/access/accounts page NEVER redirects to /admin/organization/persons
+  // /admin/access/accounts page enforces server auth gate then resolves safely into unified flow
   const accountsPageSrc = readFileSync(
     path.join(repoRoot, "src/app/admin/access/accounts/page.tsx"),
     "utf8",
   );
-  assert.doesNotMatch(accountsPageSrc, /redirect\(["']\/admin\/organization\/persons/);
-  assert.match(accountsPageSrc, /parseAccountManagementView/);
+  assert.match(accountsPageSrc, /decideAccountAccessPageAccess/);
+  assert.match(accountsPageSrc, /resolveLegacyAccountsRedirectTarget/);
+  assert.match(accountsPageSrc, /createServiceUserDirectoryRepository/);
 
   // /admin/catalog/personnel page computes canManageAccountLinks & initialRecruiterId server-side
   const personnelPageSrc = readFileSync(

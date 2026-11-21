@@ -11,7 +11,7 @@ import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "Chi tiết Nhân sự — Hệ thống báo cáo HRP" };
+export const metadata = { title: "Chi tiết Người dùng — Hệ thống báo cáo HRP" };
 
 export default async function AdminOrganizationPersonDetailPage({
   params,

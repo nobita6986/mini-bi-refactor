@@ -241,14 +241,24 @@ test("decideEffectiveAccessPageAccess maps actor resolutions fail-closed", () =>
   );
 });
 
-test("server page gates for /admin/access/effective and /admin/access/accounts use trusted server authority", () => {
+test("server page gates for /admin/access/groups, /admin/access/effective, and /admin/access/accounts use trusted server authority", () => {
+  const groupsPageSrc = readFileSync(
+    path.join(repoRoot, "src/app/admin/access/groups/page.tsx"),
+    "utf8",
+  );
+  assert.match(groupsPageSrc, /resolveActorForRequest/);
+  assert.match(groupsPageSrc, /decideEffectiveAccessPageAccess/);
+  assert.match(groupsPageSrc, /redirect\("\/login\?next=\/admin\/access\/groups"\)/);
+  assert.doesNotMatch(groupsPageSrc, /use client|@supabase|createClient|email/i);
+
   const effectivePageSrc = readFileSync(
     path.join(repoRoot, "src/app/admin/access/effective/page.tsx"),
     "utf8",
   );
   assert.match(effectivePageSrc, /resolveActorForRequest/);
   assert.match(effectivePageSrc, /decideEffectiveAccessPageAccess/);
-  assert.match(effectivePageSrc, /redirect\("\/login\?next=\/admin\/access\/effective"\)/);
+  assert.match(effectivePageSrc, /redirect\("\/login\?next=\/admin\/access\/groups"\)/);
+  assert.match(effectivePageSrc, /resolveLegacyEffectiveRedirectTarget/);
   assert.match(effectivePageSrc, /await searchParams/);
   assert.doesNotMatch(effectivePageSrc, /use client|@supabase|createClient|email/i);
 
@@ -258,7 +268,7 @@ test("server page gates for /admin/access/effective and /admin/access/accounts u
   );
   assert.match(accountsPageSrc, /resolveActorForRequest/);
   assert.match(accountsPageSrc, /decideAccountAccessPageAccess/);
-  assert.match(accountsPageSrc, /hasPairedFullAdminAuthority/);
+  assert.match(accountsPageSrc, /resolveLegacyAccountsRedirectTarget/);
   assert.match(accountsPageSrc, /await searchParams/);
   assert.doesNotMatch(accountsPageSrc, /@gmail|@hrp|owner@|email/i);
 });
