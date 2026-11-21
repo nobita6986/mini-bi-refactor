@@ -144,6 +144,7 @@ const TEST_WEIGHTS = {
   "test:wp13-pr2-unified-personnel": 3.0,
   "test:pr28-unified-user-directory": 12.0,
   "test:pr28-permission-groups": 14.0,
+  "test:pr28-integrations-retirement": 8.0,
 };
 
 const target = process.argv[2];

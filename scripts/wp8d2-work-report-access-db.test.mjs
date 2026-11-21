@@ -33,9 +33,7 @@ import {
   workReportViewPredicate,
   workReportsNavPredicate,
 } from "../src/lib/navigation/registry-capability.ts";
-import { createAnalyticsRepository } from "../src/lib/work-reports/analytics-repository.ts";
 import { createAssignmentRepository } from "../src/lib/work-reports/assignment-repository.ts";
-import { createReportReaderRepository } from "../src/lib/work-reports/report-reader-repository.ts";
 import {
   decideWorkReportReview,
   getWorkReportReviewSubmission,
@@ -43,11 +41,8 @@ import {
 } from "../src/lib/work-reports/review-api.ts";
 import { createReviewRepository } from "../src/lib/work-reports/review-repository.ts";
 import { createSubmissionRepository } from "../src/lib/work-reports/submission-repository.ts";
-import { createWorkReportTemplateRepository } from "../src/lib/work-reports/template-repository.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
-import { resolveN8nBodServiceActor } from "../src/lib/integrations/n8n/auth.ts";
-import { dispatchN8nBodQuery } from "../src/lib/integrations/n8n/dispatcher.ts";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
 const WP8D2_MIGRATION_NAME = "20261120170000_wp8d2_work_report_access.sql";
@@ -2717,86 +2712,53 @@ test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIREC
       }
     };
 
-    const makeN8nDepsFor = (svcUser) => ({
-      resolveActor: () => resolveN8nBodServiceActor({
-        env: { authSubject: svcUser.auth, appUserId: svcUser.app },
-        resolveActorContextRpc: (authSubject) =>
-          readOnlyRpc("direct_entry_resolve_actor_context", { p_auth_subject: authSubject }),
-      }),
-      workReportTemplateRepo: createWorkReportTemplateRepository(readOnlyRpc),
-      workReportAssignmentRepo: createAssignmentRepository(readOnlyRpc),
-      workReportReaderRepo: createReportReaderRepository(readOnlyRpc),
-      workReportSubmissionRepo: createSubmissionRepository(readOnlyRpc),
-      workReportAnalyticsRepo: createAnalyticsRepository(readOnlyRpc),
+    // 4. Direct readOnlyRpc verification of SVC_READ_VA (report_view + report_analytics_view @ ALL)
+    const vaSubmissions = await readOnlyRpc("work_report_list_readable_submissions", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
     });
+    assert.equal(vaSubmissions.error, null);
+    assert.equal(vaSubmissions.data.items.length, 3, "Reads all 3 submitted reports across TEAM_A and TEAM_B");
 
-    // 4. T0 exact reproduction: SVC_READ_VA (report_view + report_analytics_view @ ALL) via REAL N8N resolver + dispatcher!
-    const vaActorRes = await resolveN8nBodServiceActor({
-      env: { authSubject: SVC_READ_VA.auth, appUserId: SVC_READ_VA.app },
-      resolveActorContextRpc: (authSubject) =>
-        readOnlyRpc("direct_entry_resolve_actor_context", { p_auth_subject: authSubject }),
+    const vaDetail = await readOnlyRpc("work_report_get_submission", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+      p_obligation_id: obA1T1.obligation_id,
     });
-    assert.equal(vaActorRes.ok, true, "Production resolveN8nBodServiceActor accepts DB_SEEDED_DIRECT_GRANT SERVICE actor");
-    assert.deepEqual(vaActorRes.capabilities, ["report_analytics_view", "report_view"]);
+    assert.equal(vaDetail.error, null);
+    assert.ok(vaDetail.data);
 
-    const vaSubmissions = await dispatchN8nBodQuery(
-      { dataset: "work_reports_submissions", mode: "detail", page_size: 20 },
-      makeN8nDepsFor(SVC_READ_VA),
-    );
-    assert.equal(vaSubmissions.status, 200, "REAL N8N dispatcher work_reports_submissions succeeds for SERVICE with report_view @ ALL");
-    assert.equal(vaSubmissions.body.ok, true);
-    assert.equal(vaSubmissions.body.rows.length, 3, "Reads all 3 submitted reports across TEAM_A and TEAM_B");
+    const vaAnalytics = await readOnlyRpc("work_report_analytics_overview", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+      p_template_id: t1.template_id,
+      p_from: today,
+      p_to: today,
+      p_finality: "provisional_included",
+    });
+    assert.equal(vaAnalytics.error, null);
+    assert.ok(vaAnalytics.data);
 
-    const vaDetail = await dispatchN8nBodQuery(
-      {
-        dataset: "work_reports_submission_detail",
-        mode: "detail",
-        filters: [{ field: "obligation_id", op: "eq", value: obA1T1.obligation_id }],
-      },
-      makeN8nDepsFor(SVC_READ_VA),
-    );
-    assert.equal(vaDetail.status, 200, "REAL N8N dispatcher work_reports_submission_detail succeeds for SERVICE with report_view @ ALL");
-    assert.equal(vaDetail.body.ok, true);
-    assert.equal(vaDetail.body.rows.length, 1);
+    // SVC_READ_VA does NOT have report_form_manage or report_assign -> MUST fail closed with 42501 on templates & assignments!
+    const vaTemplatesDenied = await readOnlyRpc("work_report_list_templates", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+    });
+    assert.equal(vaTemplatesDenied.error?.code, "42501");
 
-    const vaAnalytics = await dispatchN8nBodQuery(
-      {
-        dataset: "work_reports_analytics",
-        mode: "both",
-        date_range: { from: today, to: today },
-        filters: [
-          { field: "template_id", op: "eq", value: t1.template_id },
-          { field: "group_by", op: "eq", value: "team" },
-        ],
-      },
-      makeN8nDepsFor(SVC_READ_VA),
-    );
-    assert.equal(vaAnalytics.status, 200, "REAL N8N dispatcher work_reports_analytics succeeds for SERVICE with report_analytics_view @ ALL");
-    assert.equal(vaAnalytics.body.ok, true);
-    assert.ok(vaAnalytics.body.rows.length >= 2, "Analytics breakdown returns both TEAM_A and TEAM_B");
+    const vaAssignmentsDenied = await readOnlyRpc("work_report_list_assignments", {
+      p_auth_subject: SVC_READ_VA.auth,
+      p_app_user_id: SVC_READ_VA.app,
+    });
+    assert.equal(vaAssignmentsDenied.error?.code, "42501");
 
-    // SVC_READ_VA does NOT have report_form_manage or report_assign -> MUST fail closed with *_FORBIDDEN on templates & assignments!
-    const vaTemplatesDenied = await dispatchN8nBodQuery(
-      { dataset: "work_reports_templates", mode: "detail" },
-      makeN8nDepsFor(SVC_READ_VA),
-    );
-    assert.equal(vaTemplatesDenied.body.ok, false, "SERVICE with only report_view+report_analytics_view denied work_reports_templates");
-    assert.equal(vaTemplatesDenied.body.error.code, "WORK_REPORT_TEMPLATES_DENIED");
-
-    const vaAssignmentsDenied = await dispatchN8nBodQuery(
-      { dataset: "work_reports_assignments", mode: "detail" },
-      makeN8nDepsFor(SVC_READ_VA),
-    );
-    assert.equal(vaAssignmentsDenied.body.ok, false, "SERVICE with only report_view+report_analytics_view denied work_reports_assignments");
-    assert.equal(vaAssignmentsDenied.body.error.code, "WORK_REPORT_ASSIGNMENTS_DENIED");
-
-    // 5. Full 5-dataset REAL N8N dispatcher read via SVC_READ_ALL5 (report_view + report_analytics_view + report_form_manage + report_assign @ ALL)
-    const all5Templates = await dispatchN8nBodQuery(
-      { dataset: "work_reports_templates", mode: "detail" },
-      makeN8nDepsFor(SVC_READ_ALL5),
-    );
-    assert.equal(all5Templates.status, 200);
-    assert.ok(all5Templates.body.rows.length >= 2);
+    // 5. Full 5-dataset direct read via SVC_READ_ALL5
+    const all5Templates = await readOnlyRpc("work_report_list_templates", {
+      p_auth_subject: SVC_READ_ALL5.auth,
+      p_app_user_id: SVC_READ_ALL5.app,
+    });
+    assert.equal(all5Templates.error, null);
+    assert.ok(all5Templates.data.templates.length >= 2);
 
     const all5TplDetail = await readOnlyRpc("work_report_get_template", {
       p_auth_subject: SVC_READ_ALL5.auth,
@@ -2806,39 +2768,31 @@ test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIREC
     assert.equal(all5TplDetail.error, null);
     assert.equal(all5TplDetail.data.template_id, t1.template_id);
 
-    const all5Assignments = await dispatchN8nBodQuery(
-      { dataset: "work_reports_assignments", mode: "detail" },
-      makeN8nDepsFor(SVC_READ_ALL5),
-    );
-    assert.equal(all5Assignments.status, 200);
-    assert.equal(all5Assignments.body.rows.length, 4);
+    const all5Assignments = await readOnlyRpc("work_report_list_assignments", {
+      p_auth_subject: SVC_READ_ALL5.auth,
+      p_app_user_id: SVC_READ_ALL5.app,
+    });
+    assert.equal(all5Assignments.error, null);
+    assert.equal(all5Assignments.data.assignments.length, 4);
 
-    // Assignment detail drill-down invokes work_report_get_assignment_detail (STABLE, inside READ ONLY tx!)
-    const all5AssignmentDetail = await dispatchN8nBodQuery(
-      {
-        dataset: "work_reports_assignments",
-        mode: "detail",
-        filters: [{ field: "assignment_id", op: "eq", value: asgTeamA.assignment_id }],
-      },
-      makeN8nDepsFor(SVC_READ_ALL5),
-    );
-    assert.equal(all5AssignmentDetail.status, 200);
-    assert.equal(all5AssignmentDetail.body.rows.length, 1);
+    const all5AssignmentDetail = await readOnlyRpc("work_report_get_assignment_detail", {
+      p_auth_subject: SVC_READ_ALL5.auth,
+      p_app_user_id: SVC_READ_ALL5.app,
+      p_assignment_id: asgTeamA.assignment_id,
+    });
+    assert.equal(all5AssignmentDetail.error, null);
+    assert.equal(all5AssignmentDetail.data.assignment.assignment_id, asgTeamA.assignment_id);
 
-    // 6. Strict per-capability isolation: SVC_ANALYTICS_ONLY can read analytics ONLY — denied submissions, detail, contributions, templates, assignments
-    const anOnlyDispatcher = await dispatchN8nBodQuery(
-      {
-        dataset: "work_reports_analytics",
-        mode: "both",
-        date_range: { from: today, to: today },
-        filters: [
-          { field: "template_id", op: "eq", value: t1.template_id },
-          { field: "group_by", op: "eq", value: "team" },
-        ],
-      },
-      makeN8nDepsFor(SVC_ANALYTICS_ONLY),
-    );
-    assert.equal(anOnlyDispatcher.status, 200);
+    // 6. Strict per-capability isolation: SVC_ANALYTICS_ONLY can read analytics ONLY
+    const anOnlyOverview = await readOnlyRpc("work_report_analytics_overview", {
+      p_auth_subject: SVC_ANALYTICS_ONLY.auth,
+      p_app_user_id: SVC_ANALYTICS_ONLY.app,
+      p_template_id: t1.template_id,
+      p_from: today,
+      p_to: today,
+      p_finality: "provisional_included",
+    });
+    assert.equal(anOnlyOverview.error, null);
     assert.equal((await readOnlyRpc("work_report_analytics_filter_options", {
       p_auth_subject: SVC_ANALYTICS_ONLY.auth,
       p_app_user_id: SVC_ANALYTICS_ONLY.app,
@@ -3207,12 +3161,6 @@ test("WP8D-2 [8/8] D2-SERVICE-READ-01: Managed SERVICE accounts (DB_SEEDED_DIREC
       "update public.direct_entry_app_users set enabled = false where app_user_id = $1::uuid",
       [SVC_READ_ALL5.app],
     );
-    const disabledN8nRes = await resolveN8nBodServiceActor({
-      env: { authSubject: SVC_READ_ALL5.auth, appUserId: SVC_READ_ALL5.app },
-      resolveActorContextRpc: (authSubject) =>
-        readOnlyRpc("direct_entry_resolve_actor_context", { p_auth_subject: authSubject }),
-    });
-    assert.equal(disabledN8nRes.ok, false, "Disabled SERVICE actor rejected by resolveN8nBodServiceActor");
     for (const [fnName, args] of [
       ["work_report_list_readable_submissions", { p_auth_subject: SVC_READ_ALL5.auth, p_app_user_id: SVC_READ_ALL5.app }],
       ["work_report_analytics_overview", { p_auth_subject: SVC_READ_ALL5.auth, p_app_user_id: SVC_READ_ALL5.app }],

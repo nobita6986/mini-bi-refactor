@@ -52,7 +52,6 @@ import { previewCccdDocument } from "../src/lib/direct-entry/document-finalize-a
 import { postFullProfileBatch } from "../src/lib/direct-entry/full-profile-api.ts";
 import { createDirectEntrySessionResponse } from "../src/lib/direct-entry/session-bootstrap.ts";
 import { postWorkerPortraitStage } from "../src/lib/direct-entry/worker-portrait-stage-api.ts";
-import { resolveN8nBodServiceActor } from "../src/lib/integrations/n8n/auth.ts";
 import { migrationChecksum } from "./lib/migration-validation.mjs";
 import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 
@@ -2019,52 +2018,9 @@ test("WP8C-2 #5: Real SQL -> Actor RPC -> TS APIs / Session / N8N + D10 Disable/
     );
     assert.equal(staleBatchRes.status, 403);
 
-    // 4. N8N Service Actor Resolution wired directly to real PGlite `direct_entry_resolve_actor_context`!
-    const n8nAdmin = await resolveN8nBodServiceActor({
-      env: { authSubject: ADMIN_M.auth, appUserId: ADMIN_M.app },
-      resolveActorContextRpc: async (sub) => ({
-        data: await serviceRpc(db, "direct_entry_resolve_actor_context", [sub]),
-        error: null,
-      }),
-    });
-    assert.equal(n8nAdmin.ok, true, "Mirror-cleared canonical ADMIN_M must work for n8n even with all_scope_grants=[]");
-    assert.ok(n8nAdmin.capabilities.includes("entry_admin"));
-
-    const n8nHrOnly = await resolveN8nBodServiceActor({
-      env: { authSubject: HR_ONLY.auth, appUserId: HR_ONLY.app },
-      resolveActorContextRpc: async (sub) => ({
-        data: await serviceRpc(db, "direct_entry_resolve_actor_context", [sub]),
-        error: null,
-      }),
-    });
-    assert.equal(n8nHrOnly.ok, false, "HR_OPERATOR lacks entry_admin/report_analytics_view@ALL and must be rejected by n8n");
-
-    // Direct-granted report_analytics_view @ ALL on SERVICE account succeeds with strictly paired @ALL capabilities
-    await createDirectGrant(
-      db,
-      OWNER,
-      SVC_ACC,
-      [{ capability: "report_analytics_view", scope_kind: "ALL", scope_id: null }],
-      "WP8C2 n8n service report_analytics_view@ALL",
-    );
-    const n8nSvc = await resolveN8nBodServiceActor({
-      env: { authSubject: SVC_ACC.auth, appUserId: SVC_ACC.app },
-      resolveActorContextRpc: async (sub) => ({
-        data: await serviceRpc(db, "direct_entry_resolve_actor_context", [sub]),
-        error: null,
-      }),
-    });
-    assert.equal(n8nSvc.ok, true, "SERVICE account with paired report_analytics_view@ALL must succeed for n8n");
-    assert.deepEqual(n8nSvc.capabilities, ["report_analytics_view"]);
-
-    const n8nStale = await resolveN8nBodServiceActor({
-      env: { authSubject: EMP_STALE.auth, appUserId: EMP_STALE.app },
-      resolveActorContextRpc: async (sub) => ({
-        data: await serviceRpc(db, "direct_entry_resolve_actor_context", [sub]),
-        error: null,
-      }),
-    });
-    assert.equal(n8nStale.ok, false, "EMP_STALE with stale legacy all_scope_grants must be rejected by n8n");
+    // 4. Mirror-cleared canonical ADMIN_M still resolves paired entry_admin@ALL directly via actor context
+    const adminCtx = await serviceRpc(db, "direct_entry_resolve_actor_context", [ADMIN_M.auth]);
+    assert.ok(adminCtx?.effective_grants?.some((g) => g.capability === "entry_admin" && g.scope_kind === "ALL"));
 
     // 5. D10 Disable & Re-Enable lifecycle on mirror-cleared managed REC_M
     const recVer1 = (

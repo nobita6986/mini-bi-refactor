@@ -58,13 +58,6 @@ import {
   projectAdminUpdateLocationRequest,
   updateProjectLocationAdmin,
 } from "../direct-entry/project-admin-api.ts";
-import {
-  authenticateHrpSyncRequest,
-  resetHrpSyncRateLimiterForTests,
-} from "../integrations/hrp/auth.ts";
-import {
-  handleHrpSyncCatalogGet,
-} from "../integrations/hrp/catalog-api.ts";
 
 const AUTH_SUBJECT = "19000000-0000-4000-8000-0000000000a1";
 const APP_USER_ID = "29000000-0000-4000-8000-0000000000a1";
@@ -72,9 +65,6 @@ const STAFF_USER_ID = "29000000-0000-4000-8000-0000000000b2";
 const BRANCH_ID = "39000000-0000-4000-8000-0000000000c1";
 const ASSIGNMENT_ID = "49000000-0000-4000-8000-0000000000d1";
 const IDEMPOTENCY_KEY = "59000000-0000-4000-8000-0000000000e1";
-const HRP_AUTH_SUBJECT = "69000000-0000-4000-8000-0000000000f1";
-const HRP_APP_USER_ID = "79000000-0000-4000-8000-0000000000f2";
-const REQUEST_ID = "89000000-0000-4000-8000-0000000000f3";
 const TODAY_VN = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Ho_Chi_Minh",
 }).format(new Date());
@@ -902,123 +892,6 @@ test("Project Location Admin contract and endpoint validate coordinates, radius 
   assert.equal(calledInput.project_id, "proj_1");
   assert.equal(calledInput.expected_version, 2);
   assert.equal(calledInput.radius_meters, 300);
-});
-
-test("HRP Integration Catalog API enforces Bearer M2M auth, key rotation, kill switch, rate limit <= 60 req/min/key, X-Request-Id echo, and catalog schema", async () => {
-  resetHrpSyncRateLimiterForTests();
-  const baseEnv = {
-    HRP_SYNC_API_ENABLED: "true",
-    HRP_SYNC_API_KEY: "primary-secret-key-256bit-value-001",
-    HRP_SYNC_API_KEY_NEXT: "secondary-rotated-key-256bit-value-002",
-    HRP_SYNC_AUTH_SUBJECT: HRP_AUTH_SUBJECT,
-  };
-
-  // 1. Kill switch
-  const disabledRes = await handleHrpSyncCatalogGet(
-    new Request("https://bi.example.com/api/integrations/hrp/v1/catalog", {
-      headers: { authorization: `Bearer ${baseEnv.HRP_SYNC_API_KEY}` },
-    }),
-    {
-      env: { ...baseEnv, HRP_SYNC_API_ENABLED: "false" },
-      nowMs: 1_700_000_000_000,
-    },
-  );
-  assert.equal(disabledRes.status, 503);
-  assert.equal((await disabledRes.json()).error.code, "SERVICE_DISABLED");
-
-  // 2. Unauthorized on wrong token
-  const unauthRes = await handleHrpSyncCatalogGet(
-    new Request("https://bi.example.com/api/integrations/hrp/v1/catalog", {
-      headers: { authorization: "Bearer wrong-token" },
-    }),
-    {
-      env: baseEnv,
-      nowMs: 1_700_000_000_000,
-    },
-  );
-  assert.equal(unauthRes.status, 401);
-  assert.equal((await unauthRes.json()).error.code, "INVALID_BEARER_TOKEN");
-
-  // 3. Both primary and secondary keys succeed and echo X-Request-Id
-  for (const token of [baseEnv.HRP_SYNC_API_KEY, baseEnv.HRP_SYNC_API_KEY_NEXT]) {
-    const okRes = await handleHrpSyncCatalogGet(
-      new Request("https://bi.example.com/api/integrations/hrp/v1/catalog", {
-        headers: {
-          authorization: `Bearer ${token}`,
-          "x-request-id": REQUEST_ID,
-        },
-      }),
-      {
-        env: baseEnv,
-        nowMs: 1_700_000_000_000,
-        resolveActor: async () => ({
-          ok: true,
-          actor: {
-            auth_subject: HRP_AUTH_SUBJECT,
-            app_user_id: HRP_APP_USER_ID,
-          },
-        }),
-        repository: {
-          getCatalog: async () => ({
-            ok: true,
-            data: {
-              ok: true,
-              serverTime: "2026-10-25T03:00:00.000Z",
-              projects: [
-                {
-                  projectId: "proj_luxshare_bn",
-                  displayName: "Luxshare Bắc Ninh",
-                  active: true,
-                  version: 4,
-                  updatedAt: "2026-10-25T02:00:00.000Z",
-                  location: {
-                    address: "KCN Quế Võ, Bắc Ninh",
-                    latitude: 21.163421,
-                    longitude: 106.15389,
-                    radiusMeters: 300,
-                    confirmedAt: "2026-10-25T02:00:00.000Z",
-                  },
-                },
-              ],
-              recruiters: [],
-              laborTypes: [],
-            },
-          }),
-        },
-      },
-    );
-    assert.equal(okRes.status, 200);
-    assert.equal(okRes.headers.get("x-request-id"), REQUEST_ID);
-    assert.match(okRes.headers.get("cache-control") ?? "", /no-store/);
-    const body = await okRes.json();
-    assert.equal(body.ok, true);
-    assert.equal(body.projects[0].location.radiusMeters, 300);
-  }
-
-  // 4. Rate limit: 60 allowed in window, 61st returns 429 RATE_LIMITED
-  resetHrpSyncRateLimiterForTests();
-  const fixedNow = 1_700_000_120_000;
-  for (let i = 1; i <= 60; i += 1) {
-    const auth = authenticateHrpSyncRequest(
-      new Request("https://bi.example.com/api/integrations/hrp/v1/catalog", {
-        headers: { authorization: `Bearer ${baseEnv.HRP_SYNC_API_KEY}` },
-      }),
-      { env: baseEnv, nowMs: fixedNow },
-    );
-    assert.equal(auth.ok, true);
-  }
-  const rateLimited = authenticateHrpSyncRequest(
-    new Request("https://bi.example.com/api/integrations/hrp/v1/catalog", {
-      headers: { authorization: `Bearer ${baseEnv.HRP_SYNC_API_KEY}` },
-    }),
-    { env: baseEnv, nowMs: fixedNow },
-  );
-  assert.equal(rateLimited.ok, false);
-  if (!rateLimited.ok) {
-    assert.equal(rateLimited.status, 429);
-    assert.equal(rateLimited.code, "RATE_LIMITED");
-    assert.ok(rateLimited.retryAfterSeconds >= 1);
-  }
 });
 
 test("Attendance Slot Policy Admin contract and handlers enforce Full Admin on POST, allow BoD on GET, and map overlap/past/version conflict errors", async () => {
