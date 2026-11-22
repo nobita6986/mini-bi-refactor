@@ -59,70 +59,31 @@ begin
 
   -- Gate 3: Unmappable active authz_direct_capability_grants outside D1 group ceiling
   -- (never auto-upgrades non-Admin report-only or project/department exceptions to Admin,
+  --  never treats an overlapping role/group as covering an independent direct grant,
   --  never silently drops them, and never retains infinite legacy fallback).
   select count(*)::integer
     into v_unmappable_direct_count
     from public.authz_direct_capability_grants dg
    where dg.ended_at is null
      and dg.started_at <= v_now
-     -- Ignore grants already satisfied by an existing active group OR a role assignment about to be backfilled
+     -- Ignore grants already migrated by their own direct_grant_id lineage
      and not exists (
        select 1
-         from public.authz_user_group_members m
-         join public.authz_user_groups g on g.group_id = m.group_id and g.active = true
-         join public.organization_departments d on d.department_id = g.department_id and d.is_active = true
-         left join public.teams t on t.team_id = g.team_id and t.active = true and t.code <> '__system_vendor__'
-         join public.authz_user_group_capabilities gc
-           on gc.group_id = g.group_id
-          and gc.ended_at is null
-          and gc.started_at <= v_now
-          and gc.capability = dg.capability
-        where m.app_user_id = dg.app_user_id
-          and m.ended_at is null
-          and m.started_at <= v_now
-          and (g.team_id is null or t.team_id is not null)
-          and (
-            (dg.scope_kind = 'ALL' and dg.scope_id is null and g.team_id is null and (
-              g.is_system_admin
-              or gc.capability not in (
-                'entry_create', 'entry_own', 'submission_create', 'document_upload',
-                'document_view', 'change_request_create', 'employment_status.request'
-              )
-              or (
-                gc.capability = 'document_view'
-                and exists (
-                  select 1 from public.authz_user_group_capabilities gc2
-                   where gc2.group_id = g.group_id
-                     and gc2.ended_at is null
-                     and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
-                )
-              )
-            ))
-            or (dg.scope_kind = 'OWN' and dg.scope_id is null and gc.capability in (
-              'entry_create', 'entry_own', 'submission_create', 'document_upload',
-              'document_view', 'change_request_create', 'employment_status.request'
-            ))
-            or (dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = dg.scope_id)
-          )
+         from public.authz_legacy_direct_grant_migrations dm
+        where dm.direct_grant_id = dg.direct_grant_id
      )
      and not exists (
        select 1
-         from public.authz_account_role_assignments ara
-         join public.authz_role_capabilities rc on rc.role_code = ara.role_code
-        where ara.app_user_id = dg.app_user_id
-          and ara.ended_at is null
-          and ara.started_at <= v_now
-          and ara.role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')
-          and rc.capability = dg.capability
-          and rc.scope_template = dg.scope_kind
-          and dg.scope_id is null
+         from public.authz_user_group_members m_prev
+        where m_prev.migrated_from_source = 'authz_direct_capability_grants'
+          and m_prev.migrated_from_id = dg.direct_grant_id
      )
      -- Ignore grants that ARE cleanly D1-mappable by direct_entry_authz__internal_backfill_legacy_to_groups()
      and not (
        (dg.capability = 'vendor_finance_view' and dg.scope_kind = 'ALL' and dg.scope_id is null)
        or (
          dg.scope_kind = 'CONTEXT_TEAM'
-         and dg.scope_id ~ '^[0-9a-fA-F-]{36}$'
+         and dg.scope_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
          and dg.capability in (
            'entry_team', 'team_manager_assign', 'change_review',
            'report_view', 'report_analytics_view', 'report_assign',

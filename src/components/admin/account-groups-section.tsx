@@ -556,7 +556,7 @@ export function AccountGroupsSection({
                           </span>
                           <StatusBadge tone="info">{membership.department_name}</StatusBadge>
                           {membership.team_name ? (
-                            <StatusBadge tone="neutral">Đội: {membership.team_name}</StatusBadge>
+                            <StatusBadge tone="neutral">Tổ đội: {membership.team_name}</StatusBadge>
                           ) : null}
                           {membership.is_protected ? (
                             <StatusBadge tone="warning">Tài khoản chủ sở hữu được bảo vệ</StatusBadge>

@@ -46,6 +46,9 @@ import {
 } from "./lib/migration-validation.mjs";
 import { buildLegacyTechnicalIdentityManifest } from "./lib/pr28-legacy-identity-manifest.mjs";
 import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
+import { CAPABILITIES } from "../src/lib/auth/direct-entry-v2.ts";
+import { getAccountGroupsAdmin, listPermissionGroupsAdmin } from "../src/lib/admin/permission-group-api.ts";
+import { createServicePermissionGroupRepository } from "../src/lib/admin/permission-group-repository.ts";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
@@ -1380,28 +1383,46 @@ test("7. PR28 Ponytail P1-1/P1-2/P2-4: Gate 4 suspended grants, recruiter link c
       [disabledSusp.app],
     );
 
-    // P2-4 two-phase: twoPhaseUser has HR_OPERATOR + redundant direct grant catalog_master_manage @ ALL before #236 backfill
+    // P2-4 two-phase: twoPhaseUser has HR_OPERATOR + independent EXCEPTION_GRANT catalog_master_manage @ ALL before #236 backfill
     await db.query(
       "insert into public.authz_account_role_assignments (app_user_id, role_code, scope_kind, source_kind, reason, assigned_by_app_user_id) values ($1::uuid, 'HR_OPERATOR', 'GLOBAL', 'ADMIN_ASSIGNMENT', 'Pre-236 HR', $2::uuid)",
       [twoPhaseUser.app, OWNER.app],
     );
     await db.query(
-      "insert into public.authz_direct_capability_grants (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id) values ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', 'Redundant direct grant', $2::uuid)",
+      "insert into public.authz_direct_capability_grants (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id) values ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', 'Independent pre-236 catalog exception', $2::uuid)",
       [twoPhaseUser.app, OWNER.app],
     );
 
-    // Run #236 backfill (phase 1)
+    // Run #236 backfill (phase 1) -> independent direct grant gets its OWN revocable migrated group membership + ledger row
     await db.query("select public.direct_entry_authz__internal_backfill_legacy_to_groups()");
-    const coveredLedger = (
+    const migratedLedger = (
       await db.query(
-        "select resolution_kind from public.authz_legacy_direct_grant_migrations dm join public.authz_direct_capability_grants dg on dg.direct_grant_id = dm.direct_grant_id where dg.app_user_id = $1::uuid",
+        `select dm.resolution_kind, dm.group_id::text, dm.membership_id::text, g.code
+           from public.authz_legacy_direct_grant_migrations dm
+           join public.authz_direct_capability_grants dg on dg.direct_grant_id = dm.direct_grant_id
+           join public.authz_user_groups g on g.group_id = dm.group_id
+          where dg.app_user_id = $1::uuid`,
         [twoPhaseUser.app],
       )
     ).rows;
-    assert.equal(coveredLedger.length, 1);
-    assert.equal(coveredLedger[0].resolution_kind, "COVERED_BY_GROUP");
+    assert.equal(migratedLedger.length, 1);
+    assert.equal(migratedLedger[0].resolution_kind, "MIGRATED_TO_GROUP");
+    assert.equal(migratedLedger[0].code, "MIGRATED_DEPT_CATALOG_MASTER_MANAGE");
+    assert.ok(migratedLedger[0].membership_id);
 
-    // Admin edits HR_CATALOG_OPERATOR between #236 and #237 to remove catalog_master_manage
+    // Admin removes twoPhaseUser's migrated exception membership AND edits HR_CATALOG_OPERATOR to drop catalog_master_manage between #236 and #237
+    const twoPhaseVer = (
+      await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [twoPhaseUser.app])
+    ).rows[0].version;
+    const kRemoveExc = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_remove_group_member_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::integer, 'Revoke migrated exception between #236 and #237', $6::uuid, $7::text
+       )`,
+      [OWNER.auth, OWNER.app, twoPhaseUser.app, migratedLedger[0].membership_id, twoPhaseVer, kRemoveExc, sha256(kRemoveExc)],
+    );
+
     const hrGroup = (
       await db.query("select group_id, department_id, name, description, version from public.authz_user_groups where code = 'HR_CATALOG_OPERATOR'")
     ).rows[0];
@@ -1442,14 +1463,14 @@ test("7. PR28 Ponytail P1-1/P1-2/P2-4: Gate 4 suspended grants, recruiter link c
     // Apply #237 (phase 2)
     await db.exec(migrations[cleanupIdx].sql);
 
-    // P2-4 check: twoPhaseUser did NOT receive a phantom MIGRATED_DEPT_CATALOG_MASTER_MANAGE group!
+    // P2-4 check: twoPhaseUser's revoked migrated exception membership MUST NOT resurrect on #237 catch-up backfill!
     const twoPhaseCtx = (
       await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [twoPhaseUser.auth])
     ).rows[0].ctx;
     assert.equal(
       twoPhaseCtx.capabilities.includes("catalog_master_manage"),
       false,
-      "two-phase #236->edit->#237 must NOT resurrect direct grant covered by edited group",
+      "two-phase #236->remove exception & edit HR->#237 must NOT resurrect revoked migrated exception membership",
     );
 
     // P2-4 check: leave_management_get_admin_overview excludes disabled Leave-group member
@@ -1524,6 +1545,669 @@ test("7. PR28 Ponytail P1-1/P1-2/P2-4: Gate 4 suspended grants, recruiter link c
     ).rows[0].ctx;
     assert.equal(recLinkCtx.capabilities.includes("entry_create"), true);
     assert.equal(recLinkCtx.capabilities.includes("document_upload"), false, "link_recruiter must NOT leak dropped capability from RECRUITER_OPERATIONS");
+  } finally {
+    await db.close();
+  }
+});
+
+test("8. PR28-T0-R3 & PR28-T0-R4: Independent direct grant preservation (pre/post controls), role-only R1 control, zero resurrection, ACCOUNTING collision/edit isolation, unmappable Gate 3 & migrated Vietnamese labels via real API handlers", async () => {
+  const migrations = await loadMigrations();
+  const grpIdx = migrations.findIndex((m) => m.name === PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
+  const cleanupIdx = migrations.findIndex((m) => m.name === PR28_CLEANUP_MIGRATION_NAME);
+  const db = new PGlite();
+  try {
+    await db.exec(ROLE_PREAMBLE);
+    // Apply up to #235 (just before #236)
+    for (let i = 0; i < grpIdx; i += 1) {
+      await db.exec(migrations[i].sql);
+    }
+
+    const roleOnlyHr = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r3.roleonly@hrpartner.vn",
+      name: "R3 Role Only HR",
+    };
+    const hrPlusExc = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r3.hrplusexc@hrpartner.vn",
+      name: "R3 HR Plus Independent Exception",
+    };
+    const hrPlusExcEdit = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r3.hrplusexcedit@hrpartner.vn",
+      name: "R3 HR Plus Exception Edit Control",
+    };
+    const multiBranchUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r4.multibranch@hrpartner.vn",
+      name: "R4 All Three Migrated Branches",
+    };
+    const accCollisionUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r3.acccollision@hrpartner.vn",
+      name: "R3 Accounting Collision User",
+    };
+    const accEditedUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r3.accedited@hrpartner.vn",
+      name: "R3 Accounting Edited Guard User",
+    };
+
+    for (const u of [
+      OWNER,
+      LUANPT,
+      LIENVU,
+      NGATTT,
+      roleOnlyHr,
+      hrPlusExc,
+      hrPlusExcEdit,
+      multiBranchUser,
+      accCollisionUser,
+      accEditedUser,
+    ]) {
+      await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [u.auth, u.email]);
+      await db.query(
+        "insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled) values ($1::uuid, $2::uuid, $3, true)",
+        [u.app, u.auth, u.name],
+      );
+    }
+    for (const adm of [OWNER, LUANPT, LIENVU, NGATTT]) {
+      await db.query(
+        "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1::uuid, 'all', null, '2020-01-01', true)",
+        [adm.app],
+      );
+      for (const cap of ["entry_admin", "recruiter_master_manage", "team_master_manage"]) {
+        await db.query(
+          "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1::uuid, $2, '2020-01-01', true)",
+          [adm.app, cap],
+        );
+      }
+    }
+
+    const plan = await runWp5Cutover(db, { mode: "read-only-plan" });
+    await runWp5Cutover(db, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint: plan.manifest_fingerprint,
+      actorAppUserId: OWNER.app,
+      reason: "R3/R4 pre-upgrade cutover",
+    });
+
+    const teamNorthId = nextUuid();
+    await db.query(
+      "insert into public.teams (team_id, code, display_name, active) values ($1::uuid, 'to-mien-bac', 'Tổ Miền Bắc', true)",
+      [teamNorthId],
+    );
+
+    const assignHrRole = async (u) => {
+      const k = nextUuid();
+      await serviceQuery(
+        db,
+        `select public.direct_entry_authz_assign_global_role_admin(
+           $1::uuid, $2::uuid, $3::uuid, 'HR_OPERATOR', 1, 'Pre-236 canonical HR_OPERATOR', $4::uuid, $5::text
+         )`,
+        [OWNER.auth, OWNER.app, u.app, k, sha256(k)],
+      );
+      return (
+        await db.query(
+          "select assignment_id::text as id from public.authz_account_role_assignments where app_user_id = $1::uuid and role_code = 'HR_OPERATOR' and ended_at is null",
+          [u.app],
+        )
+      ).rows[0].id;
+    };
+
+    const roleOnlyAssignmentId = await assignHrRole(roleOnlyHr);
+    const excHrAssignmentId = await assignHrRole(hrPlusExc);
+    await assignHrRole(hrPlusExcEdit);
+    await assignHrRole(multiBranchUser);
+
+    // Independent EXCEPTION_GRANT catalog_master_manage @ ALL on hrPlusExc & hrPlusExcEdit
+    const excGrantId = (
+      await db.query(
+        `insert into public.authz_direct_capability_grants (
+           app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+         ) values ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', 'Independent catalog exception', $2::uuid)
+         returning direct_grant_id::text as id`,
+        [hrPlusExc.app, OWNER.app],
+      )
+    ).rows[0].id;
+    await db.query(
+      `insert into public.authz_direct_capability_grants (
+         app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+       ) values ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', 'Independent catalog exception edit control', $2::uuid)`,
+      [hrPlusExcEdit.app, OWNER.app],
+    );
+
+    // All 3 migrated branches on multiBranchUser (DEPT + OWN + TEAM)
+    await db.query(
+      `insert into public.authz_direct_capability_grants (
+         app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+       ) values
+         ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', 'Dept branch exception', $2::uuid),
+         ($1::uuid, 'entry_create', 'OWN', null, 'EXCEPTION_GRANT', 'Own branch exception', $2::uuid),
+         ($1::uuid, 'entry_team', 'CONTEXT_TEAM', $3::text, 'EXCEPTION_GRANT', 'Team branch exception', $2::uuid)`,
+      [multiBranchUser.app, OWNER.app, teamNorthId],
+    );
+
+    // Pre-upgrade positive control on hrPlusExc (exact T0 oracle):
+    // BEGIN -> revoke HR_OPERATOR via canonical RPC -> paired=true & catalog guard ALLOW -> ROLLBACK
+    const preVer = (
+      await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [hrPlusExc.app])
+    ).rows[0].version;
+    const preRevokeKey = nextUuid();
+    await db.exec("begin");
+    try {
+      await db.exec("set local role service_role");
+      await db.query(
+        `select public.direct_entry_authz_revoke_global_role_admin(
+           $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::integer, 'Pre-236 positive control revoke HR', $6::uuid, $7::text
+         )`,
+        [OWNER.auth, OWNER.app, hrPlusExc.app, excHrAssignmentId, preVer, preRevokeKey, sha256(preRevokeKey)],
+      );
+      const preCtx = (
+        await db.query("select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [hrPlusExc.auth])
+      ).rows[0].ctx;
+      const prePaired =
+        Array.isArray(preCtx.effective_grants) &&
+        preCtx.effective_grants.some((g) => g.capability === "catalog_master_manage" && g.scope_kind === "ALL");
+      assert.equal(prePaired, true, "Pre-upgrade positive control: revoking HR_OPERATOR must keep independent exception paired=true");
+      await db.exec("reset role");
+      const preGuard = (
+        await db.query("select public.direct_entry_assert_catalog_operator($1::uuid, $2::uuid) as res", [hrPlusExc.auth, hrPlusExc.app])
+      ).rows[0].res;
+      assert.equal(preGuard, "catalog_master_manage", "Pre-upgrade positive control: catalog guard must ALLOW via independent exception");
+    } finally {
+      await db.exec("rollback");
+    }
+
+    // D. Unmappable independent EXCEPTION_GRANT report_view @ ALL on ADMIN user (LUANPT)
+    //    AND malformed 36-char non-UUID CONTEXT_TEAM scope_id (Ponytail P2-1) MUST fail closed without 22P02 crash
+    const unmappableOnAdminId = (
+      await db.query(
+        `insert into public.authz_direct_capability_grants (
+           app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+         ) values ($1::uuid, 'report_view', 'ALL', null, 'EXCEPTION_GRANT', 'Independent unmappable report exception on ADMIN', $2::uuid)
+         returning direct_grant_id::text as id`,
+        [LUANPT.app, OWNER.app],
+      )
+    ).rows[0].id;
+    const malformedTeamGrantId = (
+      await db.query(
+        `insert into public.authz_direct_capability_grants (
+           app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+         ) values ($1::uuid, 'entry_team', 'CONTEXT_TEAM', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'EXCEPTION_GRANT', 'Malformed 36-char non-UUID team scope', $2::uuid)
+         returning direct_grant_id::text as id`,
+        [LUANPT.app, OWNER.app],
+      )
+    ).rows[0].id;
+    const mUnmappableOnAdmin = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mUnmappableOnAdmin.cleanup_migration_safe, false, "ADMIN role must NOT swallow unmappable independent direct grant");
+    assert.equal(mUnmappableOnAdmin.authorization_cutover_manifest.unmappable_direct_grant_count, 2);
+    assert.equal(
+      mUnmappableOnAdmin.authorization_cutover_manifest.active_direct_grants.find((g) => g.direct_grant_id === unmappableOnAdminId)?.classification,
+      "UNMAPPABLE_REQUIRES_T0_DECISION",
+    );
+    assert.equal(
+      mUnmappableOnAdmin.authorization_cutover_manifest.active_direct_grants.find((g) => g.direct_grant_id === malformedTeamGrantId)?.classification,
+      "UNMAPPABLE_REQUIRES_T0_DECISION",
+    );
+
+    // Apply #236 (additive) — must NOT crash with 22P02 on malformed 36-char CONTEXT_TEAM scope_id!
+    await db.exec(migrations[grpIdx].sql);
+
+    // Verify Gate 3 in #237 ALSO blocks cleanly without 22P02 while unmappable exceptions are active!
+    await assert.rejects(
+      () => db.exec(migrations[cleanupIdx].sql),
+      (err) => String(err?.message ?? "").includes("PR28_CLEANUP_BLOCKED_UNMAPPABLE_DIRECT_GRANTS"),
+    );
+    await db.exec("rollback;");
+
+    // Resolve both unmappable exceptions before running #237
+    await db.query(
+      "update public.authz_direct_capability_grants set ended_at = clock_timestamp(), ended_reason = 'Resolved by T0', ended_by_app_user_id = $3::uuid where direct_grant_id in ($1::uuid, $2::uuid)",
+      [unmappableOnAdminId, malformedTeamGrantId, OWNER.app],
+    );
+
+    // Apply #237 (group-only cutover)
+    await db.exec(migrations[cleanupIdx].sql);
+
+    const checkCatalogAccess = async (user) => {
+      const ctx = (
+        await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [user.auth])
+      ).rows[0].ctx;
+      const paired =
+        Array.isArray(ctx.effective_grants) &&
+        ctx.effective_grants.some((g) => g.capability === "catalog_master_manage" && g.scope_kind === "ALL");
+      let guardResult = null;
+      let guardErrorCode = null;
+      try {
+        guardResult = (
+          await db.query("select public.direct_entry_assert_catalog_operator($1::uuid, $2::uuid) as res", [user.auth, user.app])
+        ).rows[0].res;
+      } catch (err) {
+        guardErrorCode = err?.code ?? "ERR";
+      }
+      return { paired, guardResult, guardErrorCode };
+    };
+
+    // A. Role-only control: exactly 1 membership (HR_CATALOG_OPERATOR), removing it immediately revokes!
+    const roleOnlyMemberships = (
+      await db.query(
+        `select m.membership_id::text, m.migrated_from_source, m.migrated_from_id::text, g.code
+           from public.authz_user_group_members m
+           join public.authz_user_groups g on g.group_id = m.group_id
+          where m.app_user_id = $1::uuid and m.ended_at is null`,
+        [roleOnlyHr.app],
+      )
+    ).rows;
+    assert.equal(roleOnlyMemberships.length, 1);
+    assert.equal(roleOnlyMemberships[0].code, "HR_CATALOG_OPERATOR");
+    assert.equal(roleOnlyMemberships[0].migrated_from_id, roleOnlyAssignmentId);
+    assert.deepEqual(await checkCatalogAccess(roleOnlyHr), {
+      paired: true,
+      guardResult: "catalog_master_manage",
+      guardErrorCode: null,
+    });
+    const roleOnlyVer = (
+      await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [roleOnlyHr.app])
+    ).rows[0].version;
+    const kRemoveRoleOnly = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_remove_group_member_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::integer, 'Remove role-only HR', $6::uuid, $7::text
+       )`,
+      [OWNER.auth, OWNER.app, roleOnlyHr.app, roleOnlyMemberships[0].membership_id, roleOnlyVer, kRemoveRoleOnly, sha256(kRemoveRoleOnly)],
+    );
+    assert.deepEqual(await checkCatalogAccess(roleOnlyHr), {
+      paired: false,
+      guardResult: null,
+      guardErrorCode: "42501",
+    });
+
+    // B. Independent Exception Oracle (hrPlusExc): 2 distinct active memberships with exact provenance + ledger!
+    const excMemberships = (
+      await db.query(
+        `select m.membership_id::text, m.group_id::text, m.source_kind, m.migrated_from_source, m.migrated_from_id::text, g.code
+           from public.authz_user_group_members m
+           join public.authz_user_groups g on g.group_id = m.group_id
+          where m.app_user_id = $1::uuid and m.ended_at is null
+          order by g.code asc`,
+        [hrPlusExc.app],
+      )
+    ).rows;
+    assert.equal(excMemberships.length, 2, "Independent HR role + EXCEPTION_GRANT must produce 2 revocable memberships");
+    const hrMem = excMemberships.find((m) => m.code === "HR_CATALOG_OPERATOR");
+    const migMem = excMemberships.find((m) => m.code === "MIGRATED_DEPT_CATALOG_MASTER_MANAGE");
+    assert.ok(hrMem && migMem);
+    assert.equal(hrMem.migrated_from_source, "authz_account_role_assignments");
+    assert.equal(hrMem.migrated_from_id, excHrAssignmentId);
+    assert.equal(migMem.source_kind, "BACKFILL_MIGRATION");
+    assert.equal(migMem.migrated_from_source, "authz_direct_capability_grants");
+    assert.equal(migMem.migrated_from_id, excGrantId);
+
+    const ledgerRow = (
+      await db.query(
+        "select resolution_kind, group_id::text, membership_id::text from public.authz_legacy_direct_grant_migrations where direct_grant_id = $1::uuid",
+        [excGrantId],
+      )
+    ).rows[0];
+    assert.deepEqual(ledgerRow, {
+      resolution_kind: "MIGRATED_TO_GROUP",
+      group_id: migMem.group_id,
+      membership_id: migMem.membership_id,
+    });
+
+    // Step B1: Remove HR_CATALOG_OPERATOR -> catalog_master_manage MUST STAY ALLOW via independent migrated group!
+    let excVer = (
+      await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [hrPlusExc.app])
+    ).rows[0].version;
+    const kRemoveExcHr = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_remove_group_member_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::integer, 'Remove HR membership only', $6::uuid, $7::text
+       )`,
+      [OWNER.auth, OWNER.app, hrPlusExc.app, hrMem.membership_id, excVer, kRemoveExcHr, sha256(kRemoveExcHr)],
+    );
+    assert.deepEqual(
+      await checkCatalogAccess(hrPlusExc),
+      { paired: true, guardResult: "catalog_master_manage", guardErrorCode: null },
+      "Removing HR_CATALOG_OPERATOR must preserve independent EXCEPTION_GRANT source",
+    );
+
+    // Step B2: Remove MIGRATED_DEPT_CATALOG_MASTER_MANAGE -> IMMEDIATELY DENY (42501), original direct grant row preserved (ended_at=null)!
+    excVer = (
+      await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [hrPlusExc.app])
+    ).rows[0].version;
+    const kRemoveExcMig = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_remove_group_member_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::integer, 'Remove migrated exception membership', $6::uuid, $7::text
+       )`,
+      [OWNER.auth, OWNER.app, hrPlusExc.app, migMem.membership_id, excVer, kRemoveExcMig, sha256(kRemoveExcMig)],
+    );
+    assert.deepEqual(
+      await checkCatalogAccess(hrPlusExc),
+      { paired: false, guardResult: null, guardErrorCode: "42501" },
+      "Removing migrated exception membership must immediately revoke access without legacy fallback",
+    );
+    const origDirectGrantStillIntact = (
+      await db.query("select ended_at from public.authz_direct_capability_grants where direct_grant_id = $1::uuid", [excGrantId])
+    ).rows[0];
+    assert.equal(origDirectGrantStillIntact.ended_at, null, "Original authz_direct_capability_grants history row must remain intact");
+
+    // Step B3: Re-running backfill MUST NOT duplicate or resurrect revoked memberships!
+    await db.query("select public.direct_entry_authz__internal_backfill_legacy_to_groups()");
+    assert.deepEqual(
+      await checkCatalogAccess(hrPlusExc),
+      { paired: false, guardResult: null, guardErrorCode: "42501" },
+      "Re-running backfill must cause zero resurrection on same-origin direct_grant_id",
+    );
+
+    // Step B4: Editing/disabling HR_CATALOG_OPERATOR also preserves hrPlusExcEdit's independent exception!
+    const hrGrp = (
+      await db.query("select group_id, department_id, name, description, version from public.authz_user_groups where code = 'HR_CATALOG_OPERATOR'")
+    ).rows[0];
+    const kDisableHr = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_update_group_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::text, $6::text, $7::uuid, null::uuid, false,
+         array['recruiter_master_manage', 'team_master_manage', 'audit_view', 'document_view']::text[],
+         '[]'::jsonb, 'Disable and trim HR_CATALOG_OPERATOR', $8::uuid, $9::text
+       )`,
+      [OWNER.auth, OWNER.app, hrGrp.group_id, hrGrp.version, hrGrp.name, hrGrp.description, hrGrp.department_id, kDisableHr, sha256(kDisableHr)],
+    );
+    assert.deepEqual(
+      await checkCatalogAccess(hrPlusExcEdit),
+      { paired: true, guardResult: "catalog_master_manage", guardErrorCode: null },
+      "Editing & disabling HR_CATALOG_OPERATOR must preserve independent migrated exception on hrPlusExcEdit",
+    );
+
+    // C. ACCOUNTING_OPERATIONS collision & Admin-edit (module_role escalation) isolation!
+    const accGrp = (
+      await db.query("select group_id, department_id, name, description, version from public.authz_user_groups where code = 'ACCOUNTING_OPERATIONS'")
+    ).rows[0];
+    const accColVer = (
+      await db.query("select version from public.direct_entry_app_users where app_user_id = $1::uuid", [accCollisionUser.app])
+    ).rows[0].version;
+    const kAssignAcc = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_assign_group_member_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::integer, 'Assign ACCOUNTING_OPERATIONS before exception backfill', $6::uuid, $7::text
+       )`,
+      [OWNER.auth, OWNER.app, accCollisionUser.app, accGrp.group_id, accColVer, kAssignAcc, sha256(kAssignAcc)],
+    );
+    await db.query(
+      `insert into public.authz_direct_capability_grants (
+         app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+       ) values ($1::uuid, 'vendor_finance_view', 'ALL', null, 'EXCEPTION_GRANT', 'Independent vfin view alongside ACCOUNTING_OPERATIONS', $2::uuid)`,
+      [accCollisionUser.app, OWNER.app],
+    );
+    await db.query("select public.direct_entry_authz__internal_backfill_legacy_to_groups()");
+    const accColMems = (
+      await db.query(
+        `select m.membership_id::text, g.code, g.name
+           from public.authz_user_group_members m
+           join public.authz_user_groups g on g.group_id = m.group_id
+          where m.app_user_id = $1::uuid and m.ended_at is null
+          order by g.code asc`,
+        [accCollisionUser.app],
+      )
+    ).rows;
+    assert.deepEqual(
+      accColMems.map((r) => r.code),
+      ["ACCOUNTING_OPERATIONS", "MIGRATED_DEPT_VENDOR_FINANCE_VIEW"],
+      "Independent vendor_finance_view alongside active ACCOUNTING_OPERATIONS must isolate into MIGRATED_DEPT_VENDOR_FINANCE_VIEW",
+    );
+    assert.equal(accColMems[1].name, "Xem công nợ nhà cung cấp (Cấp riêng)");
+
+    // Admin adds module_role vendor_finance/GLOBAL_VIEWER to ACCOUNTING_OPERATIONS -> new exception on accEditedUser MUST NOT silently escalate!
+    const kEditAcc = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_update_group_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::text, $6::text, $7::uuid, null::uuid, true,
+         array['vendor_finance_view']::text[],
+         '[{"module_code":"vendor_finance","role_code":"GLOBAL_VIEWER"}]'::jsonb,
+         'Add GLOBAL_VIEWER module role to ACCOUNTING_OPERATIONS', $8::uuid, $9::text
+       )`,
+      [OWNER.auth, OWNER.app, accGrp.group_id, accGrp.version, accGrp.name, accGrp.description, accGrp.department_id, kEditAcc, sha256(kEditAcc)],
+    );
+    await db.query(
+      `insert into public.authz_direct_capability_grants (
+         app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+       ) values ($1::uuid, 'vendor_finance_view', 'ALL', null, 'EXCEPTION_GRANT', 'Independent vfin view after ACCOUNTING_OPERATIONS edit', $2::uuid)`,
+      [accEditedUser.app, OWNER.app],
+    );
+    await db.query("select public.direct_entry_authz__internal_backfill_legacy_to_groups()");
+    const accEditedMems = (
+      await db.query(
+        `select g.code
+           from public.authz_user_group_members m
+           join public.authz_user_groups g on g.group_id = m.group_id
+          where m.app_user_id = $1::uuid and m.ended_at is null`,
+        [accEditedUser.app],
+      )
+    ).rows;
+    assert.deepEqual(
+      accEditedMems.map((r) => r.code),
+      ["MIGRATED_DEPT_VENDOR_FINANCE_VIEW"],
+      "Edited ACCOUNTING_OPERATIONS with added module_role must NOT be reused for plain vendor_finance_view direct grant (zero escalation)",
+    );
+
+    // C2 (Ponytail P1-1 & P1-2):
+    //   1) Moving canonical MIGRATED_DEPT_VENDOR_FINANCE_VIEW to an INACTIVE department MUST NOT reuse that dead group!
+    //   2) Pre-existing colliding fallback code (attempt 1 md5 hash) edited by Admin MUST NEVER be mutated or reused!
+    const deadDeptId = (
+      await db.query(
+        "insert into public.organization_departments (code, name, is_active) values ('DEAD_CUSTOM_DEPT', 'Phòng Đã Ngừng', false) returning department_id::text as id",
+      )
+    ).rows[0].id;
+    const migVfinGrp = (
+      await db.query("select group_id::text as id from public.authz_user_groups where code = 'MIGRATED_DEPT_VENDOR_FINANCE_VIEW'")
+    ).rows[0];
+    await db.query(
+      "update public.authz_user_groups set department_id = $1::uuid where group_id = $2::uuid",
+      [deadDeptId, migVfinGrp.id],
+    );
+
+    const p1User = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "r3.ponytail.p1@hrpartner.vn",
+      name: "R3 Ponytail P1 Guard User",
+    };
+    await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [p1User.auth, p1User.email]);
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled, authz_managed) values ($1::uuid, $2::uuid, $3, true, true)",
+      [p1User.app, p1User.auth, p1User.name],
+    );
+    const p1GrantId = nextUuid();
+    // Deliberately pre-occupy attempt #1 fallback code with an Admin group holding audit_view!
+    const collidingAttempt1Hash = createHash("md5").update(`${p1GrantId}:1`).digest("hex").slice(0, 16).toUpperCase();
+    const collidingFallbackCode = `${"MIGRATED_DEPT_VENDOR_FINANCE_VIEW".slice(0, 47)}_${collidingAttempt1Hash}`;
+    const recDeptId = (
+      await db.query("select department_id::text as id from public.organization_departments where system_key = 'RECRUITMENT'")
+    ).rows[0].id;
+    const preOccupiedGrpId = (
+      await db.query(
+        `insert into public.authz_user_groups (code, name, description, department_id, team_id, is_system_admin, active)
+         values ($1::text, 'Nhóm kiểm toán tùy chỉnh', 'Nhóm Admin tạo sẵn trùng mã dự phòng', $2::uuid, null, false, true)
+         returning group_id::text as id`,
+        [collidingFallbackCode, recDeptId],
+      )
+    ).rows[0].id;
+    await db.query(
+      "insert into public.authz_user_group_capabilities (group_id, capability, reason) values ($1::uuid, 'audit_view', 'Admin custom audit group')",
+      [preOccupiedGrpId],
+    );
+
+    await db.query(
+      `insert into public.authz_direct_capability_grants (
+         direct_grant_id, app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id
+       ) values ($1::uuid, $2::uuid, 'vendor_finance_view', 'ALL', null, 'EXCEPTION_GRANT', 'Ponytail P1-1/P1-2 isolation test', $3::uuid)`,
+      [p1GrantId, p1User.app, OWNER.app],
+    );
+    await db.query("select public.direct_entry_authz__internal_backfill_legacy_to_groups()");
+
+    // Verify pre-occupied Admin group was NOT mutated (still ONLY audit_view!)
+    const preOccupiedCaps = (
+      await db.query(
+        "select capability from public.authz_user_group_capabilities where group_id = $1::uuid and ended_at is null order by capability",
+        [preOccupiedGrpId],
+      )
+    ).rows.map((r) => r.capability);
+    assert.deepEqual(preOccupiedCaps, ["audit_view"], "Fallback disambiguation must NEVER mutate a colliding Admin-edited group");
+
+    // Verify p1User received a fresh active group under an active department with ONLY vendor_finance_view (0 escalation, 0 silent loss)
+    await db.query("select public.direct_entry_authz__internal_sync_legacy_grants($1::uuid)", [p1User.app]);
+    const p1Ctx = (
+      await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [p1User.auth])
+    ).rows[0].ctx;
+    assert.deepEqual(
+      p1Ctx.effective_grants.map((g) => ({ capability: g.capability, scope_kind: g.scope_kind })),
+      [{ capability: "vendor_finance_view", scope_kind: "ALL" }],
+    );
+    assert.deepEqual(p1Ctx.capabilities, ["vendor_finance_view"]);
+    assert.equal(p1Ctx.capabilities.includes("audit_view"), false, "Must NOT escalate from colliding fallback group");
+    const p1Ledger = (
+      await db.query(
+        `select dm.resolution_kind, g.code, d.is_active as dept_active
+           from public.authz_legacy_direct_grant_migrations dm
+           join public.authz_user_groups g on g.group_id = dm.group_id
+           join public.organization_departments d on d.department_id = g.department_id
+          where dm.direct_grant_id = $1::uuid`,
+        [p1GrantId],
+      )
+    ).rows[0];
+    assert.equal(p1Ledger.resolution_kind, "MIGRATED_TO_GROUP");
+    assert.equal(p1Ledger.dept_active, true, "Migrated group must be under an active department");
+    assert.notEqual(p1Ledger.code, "MIGRATED_DEPT_VENDOR_FINANCE_VIEW");
+    assert.notEqual(p1Ledger.code, collidingFallbackCode);
+
+    // Restore MIGRATED_DEPT_VENDOR_FINANCE_VIEW back to ACCOUNTING so E below checks clean list
+    const accDeptId = (
+      await db.query("select department_id::text as id from public.organization_departments where system_key = 'ACCOUNTING'")
+    ).rows[0].id;
+    await db.query(
+      "update public.authz_user_groups set department_id = $1::uuid where group_id = $2::uuid",
+      [accDeptId, migVfinGrp.id],
+    );
+
+    // E. PR28-T0-R4 End-to-End DB -> Real HTTP API Handlers (listPermissionGroupsAdmin & getAccountGroupsAdmin)
+    const ownerSession = async () => ({
+      actor: {
+        ok: true,
+        actor: {
+          auth_subject: OWNER.auth,
+          app_user_id: OWNER.app,
+          enabled: true,
+          capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage"],
+          scopes: [{ kind: "all", team_id: null }],
+          effective_grants: [
+            { capability: "entry_admin", scope_kind: "ALL", scope_id: null },
+            { capability: "recruiter_master_manage", scope_kind: "ALL", scope_id: null },
+            { capability: "team_master_manage", scope_kind: "ALL", scope_id: null },
+          ],
+        },
+      },
+    });
+    const pgliteRpcCaller = async (fnName, params) => {
+      try {
+        if (fnName === "direct_entry_authz_list_groups_admin") {
+          const res = await serviceQuery(
+            db,
+            "select public.direct_entry_authz_list_groups_admin($1::uuid, $2::uuid, $3::uuid, $4::boolean) as payload",
+            [params.p_auth_subject, params.p_actor_app_user_id, params.p_department_id, params.p_include_inactive],
+          );
+          return { data: res.rows[0]?.payload ?? null, error: null };
+        }
+        if (fnName === "direct_entry_authz_get_account_groups_admin") {
+          const res = await serviceQuery(
+            db,
+            "select public.direct_entry_authz_get_account_groups_admin($1::uuid, $2::uuid, $3::uuid) as payload",
+            [params.p_auth_subject, params.p_actor_app_user_id, params.p_target_app_user_id],
+          );
+          return { data: res.rows[0]?.payload ?? null, error: null };
+        }
+        throw new Error(`Unexpected RPC ${fnName}`);
+      } catch (err) {
+        return { data: null, error: { code: err?.code ?? null, message: err?.message ?? String(err) } };
+      }
+    };
+    const apiDeps = {
+      resolveSession: ownerSession,
+      repository: createServicePermissionGroupRepository(pgliteRpcCaller),
+    };
+
+    const listRes = await listPermissionGroupsAdmin(
+      new Request("https://bi.local/api/admin/access/groups?include_inactive=true", { method: "GET" }),
+      "true",
+      apiDeps,
+    );
+    assert.equal(listRes.status, 200);
+    const listBody = await listRes.json();
+    assert.equal(listBody.ok, true);
+
+    const acctRes = await getAccountGroupsAdmin(
+      new Request(`https://bi.local/api/admin/access/accounts/${multiBranchUser.app}/groups`, { method: "GET" }),
+      multiBranchUser.app,
+      "true",
+      apiDeps,
+    );
+    assert.equal(acctRes.status, 200);
+    const acctBody = await acctRes.json();
+    assert.equal(acctBody.ok, true);
+
+    const expectedTeamCode = `MIGRATED_TEAM_${teamNorthId.replace(/-/g, "").slice(0, 8).toUpperCase()}_ENTRY_TEAM`;
+    const migratedGroups = listBody.groups.filter((g) => g.code.startsWith("MIGRATED_"));
+    const byCode = new Map(migratedGroups.map((g) => [g.code, g]));
+
+    assert.equal(byCode.get("MIGRATED_DEPT_CATALOG_MASTER_MANAGE")?.name, "Quản lý danh mục dự án và NCC (Cấp riêng)");
+    assert.deepEqual(byCode.get("MIGRATED_DEPT_CATALOG_MASTER_MANAGE")?.capabilities, ["catalog_master_manage"]);
+    assert.equal(byCode.get("MIGRATED_OWN_ENTRY_CREATE")?.name, "Tạo hồ sơ tuyển dụng (Cá nhân)");
+    assert.deepEqual(byCode.get("MIGRATED_OWN_ENTRY_CREATE")?.capabilities, ["entry_create"]);
+    assert.equal(byCode.get(expectedTeamCode)?.name, "Theo dõi tuyển dụng tổ đội — Tổ Miền Bắc");
+    assert.deepEqual(byCode.get(expectedTeamCode)?.capabilities, ["entry_team"]);
+    assert.equal(byCode.get("MIGRATED_DEPT_VENDOR_FINANCE_VIEW")?.name, "Xem công nợ nhà cung cấp (Cấp riêng)");
+    assert.deepEqual(byCode.get("MIGRATED_DEPT_VENDOR_FINANCE_VIEW")?.capabilities, ["vendor_finance_view"]);
+
+    // Verify all 3 migrated branches + coexisting HR_CATALOG_OPERATOR appear visibly on multiBranchUser's account API response
+    const multiCodes = acctBody.memberships.map((m) => m.group_code).sort();
+    assert.deepEqual(multiCodes, [
+      "HR_CATALOG_OPERATOR",
+      "MIGRATED_DEPT_CATALOG_MASTER_MANAGE",
+      "MIGRATED_OWN_ENTRY_CREATE",
+      expectedTeamCode,
+    ]);
+
+    // Zero-leak assertion across ALL 29 verbatim CAPABILITIES and banned technical phrases on every group & membership label/description
+    const allDisplayedCopy = [
+      ...listBody.groups.flatMap((g) => [g.name, g.description]),
+      ...acctBody.memberships.flatMap((m) => [m.group_name, m.group_description]),
+    ].join("\n");
+    for (const cap of CAPABILITIES) {
+      assert.equal(
+        allDisplayedCopy.includes(cap),
+        false,
+        `API group/membership name or description leaked raw capability token: ${cap}`,
+      );
+    }
+    assert.doesNotMatch(
+      allDisplayedCopy,
+      /MIGRATED_|chuyển đổi|quyền trực tiếp/i,
+      "API group/membership name or description leaked migration/technical jargon",
+    );
   } finally {
     await db.close();
   }

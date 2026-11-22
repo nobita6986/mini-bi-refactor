@@ -385,7 +385,10 @@ const {
   parseAssignGroupMemberBody,
   parseCreateGroupBody,
   parseRemoveGroupMemberBody,
+  projectAccountGroupsResponse,
+  projectListGroupsResponse,
 } = repoRequire("./src/lib/admin/permission-group-contract.ts");
+const { CAPABILITIES } = repoRequire("./src/lib/auth/direct-entry-v2.ts");
 
 const OWNER_ACCOUNT_REF = "11111111-1111-4111-8111-111111111111";
 const GROUP_ADMIN_ID = "22222222-2222-4222-8222-222222222201";
@@ -842,4 +845,312 @@ test("PR #28 Zero-Forbidden-Jargon Guard: customer UI components contain no tech
     assert.doesNotMatch(src, /leave-shared-account-banner|leave-profile-shared-checkbox|Đánh dấu là tài khoản dùng chung/, `${rel} leaked shared-account Leave UI`);
   }
   assert.equal(typeof parseCreateGroupBody, "function");
+});
+
+test("PR28-T0-R4 API -> Component: migrated direct-grant groups render plain Vietnamese labels across PermissionGroupsManager (list + edit modal) and AccountGroupsSection (coexisting independent sources)", async () => {
+  const DEPT_REC_ID = "33333333-3333-4333-8333-333333333303";
+  const TEAM_NORTH_ID = "aabbccdd-1111-4111-8111-111111111111";
+  const GROUP_HR_ID = "22222222-2222-4222-8222-222222222210";
+  const GROUP_MIG_DEPT_ID = "22222222-2222-4222-8222-222222222211";
+  const GROUP_MIG_OWN_ID = "22222222-2222-4222-8222-222222222212";
+  const GROUP_MIG_TEAM_ID = "22222222-2222-4222-8222-222222222213";
+  const TARGET_USER_REF = "11111111-1111-4111-8111-111111111199";
+
+  const rawGroupsPayload = {
+    as_of: "2026-11-22T00:00:00Z",
+    groups: [
+      {
+        group_id: GROUP_HR_ID,
+        code: "HR_CATALOG_OPERATOR",
+        name: "Vận hành Nhân sự & Danh mục",
+        description: "Quản trị danh mục tuyển dụng, tổ đội, nhân sự tuyển dụng, nhật ký kiểm toán và xem chứng từ.",
+        department_id: DEPT_REC_ID,
+        department_code: "RECRUITMENT",
+        department_name: "Phòng Tuyển dụng",
+        department_system_key: "RECRUITMENT",
+        team_id: null,
+        team_code: null,
+        team_name: null,
+        is_system_admin: false,
+        active: true,
+        version: 1,
+        capabilities: [
+          "catalog_master_manage",
+          "recruiter_master_manage",
+          "team_master_manage",
+          "audit_view",
+          "document_view",
+        ],
+        module_roles: [],
+        member_count: 1,
+        member_account_refs: [TARGET_USER_REF],
+        updated_at: "2026-11-22T00:00:00Z",
+      },
+      {
+        group_id: GROUP_MIG_DEPT_ID,
+        code: "MIGRATED_DEPT_CATALOG_MASTER_MANAGE",
+        name: "Quản lý danh mục dự án và NCC (Cấp riêng)",
+        description: "Nhóm quyền nghiệp vụ cấp riêng theo đơn vị: Quản lý danh mục dự án và NCC.",
+        department_id: DEPT_REC_ID,
+        department_code: "RECRUITMENT",
+        department_name: "Phòng Tuyển dụng",
+        department_system_key: "RECRUITMENT",
+        team_id: null,
+        team_code: null,
+        team_name: null,
+        is_system_admin: false,
+        active: true,
+        version: 1,
+        capabilities: ["catalog_master_manage"],
+        module_roles: [],
+        member_count: 1,
+        member_account_refs: [TARGET_USER_REF],
+        updated_at: "2026-11-22T00:00:00Z",
+      },
+      {
+        group_id: GROUP_MIG_OWN_ID,
+        code: "MIGRATED_OWN_ENTRY_CREATE",
+        name: "Tạo hồ sơ tuyển dụng (Cá nhân)",
+        description: "Nhóm quyền nghiệp vụ cấp riêng theo hồ sơ cá nhân: Tạo hồ sơ tuyển dụng.",
+        department_id: DEPT_REC_ID,
+        department_code: "RECRUITMENT",
+        department_name: "Phòng Tuyển dụng",
+        department_system_key: "RECRUITMENT",
+        team_id: null,
+        team_code: null,
+        team_name: null,
+        is_system_admin: false,
+        active: true,
+        version: 1,
+        capabilities: ["entry_create"],
+        module_roles: [],
+        member_count: 1,
+        member_account_refs: [TARGET_USER_REF],
+        updated_at: "2026-11-22T00:00:00Z",
+      },
+      {
+        group_id: GROUP_MIG_TEAM_ID,
+        code: "MIGRATED_TEAM_AABBCCDD_ENTRY_TEAM",
+        name: "Theo dõi tuyển dụng tổ đội — Tổ Miền Bắc",
+        description: "Nhóm quyền nghiệp vụ cấp riêng theo tổ đội: Theo dõi tuyển dụng tổ đội.",
+        department_id: DEPT_REC_ID,
+        department_code: "RECRUITMENT",
+        department_name: "Phòng Tuyển dụng",
+        department_system_key: "RECRUITMENT",
+        team_id: TEAM_NORTH_ID,
+        team_code: "to-mien-bac",
+        team_name: "Tổ Miền Bắc",
+        is_system_admin: false,
+        active: true,
+        version: 1,
+        capabilities: ["entry_team"],
+        module_roles: [],
+        member_count: 1,
+        member_account_refs: [TARGET_USER_REF],
+        updated_at: "2026-11-22T00:00:00Z",
+      },
+    ],
+  };
+
+  const projectedList = projectListGroupsResponse(rawGroupsPayload);
+  assert.ok(projectedList, "migrated groups API payload must pass real projectListGroupsResponse contract");
+
+  const rawAccountGroupsPayload = {
+    as_of: "2026-11-22T00:00:00Z",
+    account_ref: TARGET_USER_REF,
+    account_version: 3,
+    enabled: true,
+    memberships: [
+      {
+        membership_id: "44444444-4444-4444-8444-444444444410",
+        group_id: GROUP_HR_ID,
+        group_code: "HR_CATALOG_OPERATOR",
+        group_name: "Vận hành Nhân sự & Danh mục",
+        group_description: "Quản trị danh mục tuyển dụng, tổ đội, nhân sự tuyển dụng, nhật ký kiểm toán và xem chứng từ.",
+        department_id: DEPT_REC_ID,
+        department_name: "Phòng Tuyển dụng",
+        team_id: null,
+        team_name: null,
+        is_system_admin: false,
+        group_active: true,
+        is_protected: false,
+        can_remove: true,
+        cannot_remove_reason: null,
+        started_at: "2026-11-22T00:00:00Z",
+        capabilities: ["catalog_master_manage", "recruiter_master_manage", "team_master_manage", "audit_view", "document_view"],
+        module_roles: [],
+      },
+      {
+        membership_id: "44444444-4444-4444-8444-444444444411",
+        group_id: GROUP_MIG_DEPT_ID,
+        group_code: "MIGRATED_DEPT_CATALOG_MASTER_MANAGE",
+        group_name: "Quản lý danh mục dự án và NCC (Cấp riêng)",
+        group_description: "Nhóm quyền nghiệp vụ cấp riêng theo đơn vị: Quản lý danh mục dự án và NCC.",
+        department_id: DEPT_REC_ID,
+        department_name: "Phòng Tuyển dụng",
+        team_id: null,
+        team_name: null,
+        is_system_admin: false,
+        group_active: true,
+        is_protected: false,
+        can_remove: true,
+        cannot_remove_reason: null,
+        started_at: "2026-11-22T00:00:00Z",
+        capabilities: ["catalog_master_manage"],
+        module_roles: [],
+      },
+      {
+        membership_id: "44444444-4444-4444-8444-444444444412",
+        group_id: GROUP_MIG_OWN_ID,
+        group_code: "MIGRATED_OWN_ENTRY_CREATE",
+        group_name: "Tạo hồ sơ tuyển dụng (Cá nhân)",
+        group_description: "Nhóm quyền nghiệp vụ cấp riêng theo hồ sơ cá nhân: Tạo hồ sơ tuyển dụng.",
+        department_id: DEPT_REC_ID,
+        department_name: "Phòng Tuyển dụng",
+        team_id: null,
+        team_name: null,
+        is_system_admin: false,
+        group_active: true,
+        is_protected: false,
+        can_remove: true,
+        cannot_remove_reason: null,
+        started_at: "2026-11-22T00:00:00Z",
+        capabilities: ["entry_create"],
+        module_roles: [],
+      },
+      {
+        membership_id: "44444444-4444-4444-8444-444444444413",
+        group_id: GROUP_MIG_TEAM_ID,
+        group_code: "MIGRATED_TEAM_AABBCCDD_ENTRY_TEAM",
+        group_name: "Theo dõi tuyển dụng tổ đội — Tổ Miền Bắc",
+        group_description: "Nhóm quyền nghiệp vụ cấp riêng theo tổ đội: Theo dõi tuyển dụng tổ đội.",
+        department_id: DEPT_REC_ID,
+        department_name: "Phòng Tuyển dụng",
+        team_id: TEAM_NORTH_ID,
+        team_name: "Tổ Miền Bắc",
+        is_system_admin: false,
+        group_active: true,
+        is_protected: false,
+        can_remove: true,
+        cannot_remove_reason: null,
+        started_at: "2026-11-22T00:00:00Z",
+        capabilities: ["entry_team"],
+        module_roles: [],
+      },
+    ],
+    resource_assignments: [],
+  };
+
+  const projectedAccount = projectAccountGroupsResponse(rawAccountGroupsPayload);
+  assert.ok(projectedAccount, "migrated account groups API payload must pass real projectAccountGroupsResponse contract");
+
+  const assertZeroRawTokens = (surfaceText, surfaceLabel) => {
+    for (const cap of CAPABILITIES) {
+      assert.equal(
+        surfaceText.includes(cap),
+        false,
+        `${surfaceLabel} leaked raw capability token: ${cap}`,
+      );
+    }
+    assert.doesNotMatch(
+      surfaceText,
+      /MIGRATED_|chuyển đổi|quyền trực tiếp/i,
+      `${surfaceLabel} leaked technical migration copy`,
+    );
+  };
+
+  // 1) PermissionGroupsManager: list view + Edit modal on MIGRATED_DEPT_CATALOG_MASTER_MANAGE
+  const groupsMount = mount(PermissionGroupsManager);
+  await groupsMount.flush();
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/access/groups?")), 200, {
+    ok: true,
+    ...projectedList,
+  });
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments?")), 200, {
+    ok: true,
+    authorization_date: "2026-11-22",
+    as_of: "2026-11-22T00:00:00Z",
+    departments: [
+      {
+        department_id: DEPT_REC_ID,
+        code: "RECRUITMENT",
+        name: "Phòng Tuyển dụng",
+        system_key: "RECRUITMENT",
+        is_active: true,
+        version: 1,
+        active_member_count: 1,
+        active_head: null,
+      },
+    ],
+  });
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/catalog/teams?")), 200, {
+    ok: true,
+    teams: [
+      {
+        team_id: TEAM_NORTH_ID,
+        code: "to-mien-bac",
+        display_name: "Tổ Miền Bắc",
+        active: true,
+        version: 1,
+        updated_at: "2026-11-22T00:00:00Z",
+      },
+    ],
+  });
+  await groupsMount.flush();
+
+  const listText = textOf(groupsMount.tree);
+  assert.ok(listText.includes("Quản lý danh mục dự án và NCC (Cấp riêng)"));
+  assert.ok(listText.includes("Tạo hồ sơ tuyển dụng (Cá nhân)"));
+  assert.ok(listText.includes("Theo dõi tuyển dụng tổ đội — Tổ Miền Bắc"));
+  assert.ok(listText.includes("Tổ đội: Tổ Miền Bắc"));
+  assertZeroRawTokens(listText, "PermissionGroupsManager list");
+
+  // Open Edit dialog on the migrated dept group (2nd "Chỉnh sửa" button: index 1 after HR_CATALOG_OPERATOR)
+  const editButtons = collectNodes(groupsMount.tree).filter(
+    (n) => (n.type === "button" || n.type?.name === "Button") && textOf(n).trim() === "Chỉnh sửa",
+  );
+  assert.equal(editButtons.length, 4);
+  editButtons[1].props.onClick();
+  await groupsMount.flush();
+
+  const editModalText = textOf(groupsMount.tree);
+  const editInputValues = collectNodes(groupsMount.tree)
+    .filter((n) => n.type === "input")
+    .map((n) => String(n.props?.value ?? ""))
+    .join("\n");
+  assert.equal(editModalText.includes("Mã nhóm"), false, "Edit modal must hide technical Mã nhóm field");
+  assert.ok(editInputValues.includes("Quản lý danh mục dự án và NCC (Cấp riêng)"));
+  assertZeroRawTokens(`${editModalText}\n${editInputValues}`, "PermissionGroupsManager edit modal");
+
+  // 2) AccountGroupsSection: coexisting HR_CATALOG_OPERATOR + 3 migrated independent memberships
+  const guard = makeWorkspaceGuard();
+  const acctMount = mount(AccountGroupsSection, {
+    accountRef: TARGET_USER_REF,
+    canManageGroups: true,
+    workspaceGuard: guard,
+    onSessionLost: () => {},
+  });
+  await acctMount.flush();
+  respond(findLastRequest((r) => r.url.endsWith(`/accounts/${TARGET_USER_REF}/groups`)), 200, {
+    ok: true,
+    ...projectedAccount,
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/access/groups?")), 200, {
+    ok: true,
+    ...projectedList,
+  });
+  await acctMount.flush();
+
+  const acctText = textOf(acctMount.tree);
+  assert.ok(acctText.includes("Vận hành Nhân sự & Danh mục"));
+  assert.ok(acctText.includes("Quản lý danh mục dự án và NCC (Cấp riêng)"));
+  assert.ok(acctText.includes("Tạo hồ sơ tuyển dụng (Cá nhân)"));
+  assert.ok(acctText.includes("Theo dõi tuyển dụng tổ đội — Tổ Miền Bắc"));
+  assert.ok(acctText.includes("Tổ đội: Tổ Miền Bắc"));
+  assertZeroRawTokens(acctText, "AccountGroupsSection migrated memberships");
+
+  const removeButtons = collectNodes(acctMount.tree).filter(
+    (n) => (n.type === "button" || n.type?.name === "Button") && textOf(n).trim() === "Gỡ khỏi nhóm",
+  );
+  assert.equal(removeButtons.length, 4, "Every coexisting independent membership must remain independently removable");
 });

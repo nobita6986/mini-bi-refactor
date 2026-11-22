@@ -298,9 +298,11 @@ create table if not exists public.authz_legacy_direct_grant_migrations (
     references public.authz_direct_capability_grants(direct_grant_id) on delete restrict,
   resolution_kind text not null
     constraint authz_legacy_direct_grant_migrations_kind_chk
-    check (resolution_kind in ('COVERED_BY_GROUP', 'MIGRATED_TO_GROUP')),
-  group_id uuid
+    check (resolution_kind in ('MIGRATED_TO_GROUP')),
+  group_id uuid not null
     references public.authz_user_groups(group_id) on delete restrict,
+  membership_id uuid not null
+    references public.authz_user_group_members(membership_id) on delete restrict,
   recorded_at timestamptz not null default pg_catalog.clock_timestamp()
 );
 
@@ -666,10 +668,17 @@ declare
   v_dg record;
   v_team record;
   v_target_group_id uuid;
+  v_target_dept_id uuid;
+  v_target_team_id uuid;
   v_code text;
+  v_base_code text;
   v_name text;
+  v_base_name text;
+  v_description text;
   v_cap_sanitized text;
-  v_covering_group_id uuid;
+  v_cap_label text;
+  v_attempt integer;
+  v_inserted_membership_id uuid;
 begin
   select department_id into v_dept_bod
     from public.organization_departments
@@ -824,7 +833,9 @@ begin
     )
   on conflict (group_id, app_user_id) where ended_at is null do nothing;
 
-  -- 3.4 Backfill D1-mappable active direct capability grants (never auto-upgrades unmappable exceptions!)
+  -- 3.4 Backfill D1-mappable active direct capability grants (never auto-upgrades unmappable exceptions,
+  -- and NEVER drops an independent direct grant just because another role/group happens to overlap the
+  -- same capability/scope — every independent direct_grant_id preserves its own revocable group membership!)
   for v_dg in
     select dg.*
       from public.authz_direct_capability_grants dg
@@ -843,76 +854,92 @@ begin
        )
      order by dg.created_at asc, dg.direct_grant_id asc
   loop
-    -- Skip if already satisfied by an active group membership of this user, recording permanent provenance
-    v_covering_group_id := null;
-    select g.group_id
-      into v_covering_group_id
-      from public.authz_user_group_members m
-      join public.authz_user_groups g
-        on g.group_id = m.group_id
-       and g.active = true
-      join public.organization_departments d
-        on d.department_id = g.department_id
-       and d.is_active = true
-      left join public.teams t
-        on t.team_id = g.team_id
-       and t.active = true
-       and t.code <> '__system_vendor__'
-      join public.authz_user_group_capabilities gc
-        on gc.group_id = g.group_id
-       and gc.ended_at is null
-       and gc.started_at <= v_now
-       and gc.capability = v_dg.capability
-     where m.app_user_id = v_dg.app_user_id
-       and m.ended_at is null
-       and m.started_at <= v_now
-       and (g.team_id is null or t.team_id is not null)
-       and (
-         (v_dg.scope_kind = 'ALL' and v_dg.scope_id is null and g.team_id is null and (
-           g.is_system_admin
-           or (
-             gc.capability not in (
-               'entry_create', 'entry_own', 'submission_create', 'document_upload',
-               'document_view', 'change_request_create', 'employment_status.request'
-             )
-           )
-           or (
-             gc.capability = 'document_view'
-             and exists (
-               select 1
-                 from public.authz_user_group_capabilities gc2
-                where gc2.group_id = g.group_id
-                  and gc2.ended_at is null
-                  and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
-             )
-           )
-         ))
-         or (v_dg.scope_kind = 'OWN' and v_dg.scope_id is null and gc.capability in (
-           'entry_create', 'entry_own', 'submission_create', 'document_upload',
-           'document_view', 'change_request_create', 'employment_status.request'
-         ))
-         or (v_dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = v_dg.scope_id)
-       )
-     order by g.is_system_admin desc, g.group_id asc
-     limit 1;
-
-    if v_covering_group_id is not null then
-      insert into public.authz_legacy_direct_grant_migrations (
-        direct_grant_id, resolution_kind, group_id, recorded_at
-      ) values (
-        v_dg.direct_grant_id, 'COVERED_BY_GROUP', v_covering_group_id, v_now
-      )
-      on conflict (direct_grant_id) do nothing;
-      continue;
-    end if;
-
     v_target_group_id := null;
+    v_target_dept_id := null;
+    v_target_team_id := null;
+    v_code := null;
+    v_name := null;
+    v_description := null;
+    v_inserted_membership_id := null;
     v_cap_sanitized := pg_catalog.replace(pg_catalog.upper(v_dg.capability), '.', '_');
 
+    -- Plain Vietnamese business label aligned with CAPABILITY_BUSINESS_DESCRIPTORS (UX-05 / PR28-T0-R4)
+    v_cap_label := case v_dg.capability
+      when 'entry_create' then 'Tạo hồ sơ tuyển dụng'
+      when 'entry_own' then 'Xem và sửa bản nháp tuyển dụng'
+      when 'submission_create' then 'Nộp đợt nhập liệu tuyển dụng'
+      when 'document_upload' then 'Tải lên ảnh và CCCD'
+      when 'document_view' then 'Xem và tải chứng từ hồ sơ'
+      when 'change_request_create' then 'Đề xuất sửa hồ sơ tuyển dụng'
+      when 'employment_status.request' then 'Đề xuất cập nhật trạng thái NLĐ'
+      when 'entry_team' then 'Theo dõi tuyển dụng tổ đội'
+      when 'team_manager_assign' then 'Phân công nhân sự tổ đội'
+      when 'change_review' then 'Duyệt yêu cầu sửa hồ sơ'
+      when 'report_view' then 'Xem báo cáo tổng quan'
+      when 'report_analytics_view' then 'Xem phân tích số liệu'
+      when 'report_form_manage' then 'Quản lý mẫu báo cáo công việc'
+      when 'report_assign' then 'Giao đợt báo cáo công việc'
+      when 'report_review' then 'Xem và duyệt báo cáo công việc'
+      when 'report_delegate' then 'Ủy quyền duyệt báo cáo công việc'
+      when 'recruiter_master_manage' then 'Quản lý nhân sự tuyển dụng'
+      when 'team_master_manage' then 'Quản lý danh mục tổ đội'
+      when 'catalog_master_manage' then 'Quản lý danh mục dự án và NCC'
+      when 'audit_view' then 'Xem nhật ký hoạt động'
+      when 'duplicate_cccd_withdraw' then 'Rút hồ sơ trùng CCCD'
+      when 'worker_edit_history_view' then 'Xem lịch sử chỉnh sửa NLĐ'
+      when 'vendor_finance_view' then 'Xem công nợ nhà cung cấp'
+      else 'Nghiệp vụ chuyên biệt'
+    end;
+
     if v_dg.capability = 'vendor_finance_view' and v_dg.scope_kind = 'ALL' and v_dg.scope_id is null then
-      v_target_group_id := v_grp_acc;
+      -- Reuse canonical ACCOUNTING_OPERATIONS only when it is still active under an active department,
+      -- non-admin, teamless, with exact 1 effective cap ('vendor_finance_view'), 0 active module_roles,
+      -- and this user does not already hold an active membership there; otherwise isolate under a dedicated group.
+      if exists (
+           select 1
+             from public.authz_user_groups g_acc
+             join public.organization_departments d_acc
+               on d_acc.department_id = g_acc.department_id
+              and d_acc.is_active = true
+            where g_acc.group_id = v_grp_acc
+              and g_acc.active = true
+              and g_acc.is_system_admin = false
+              and g_acc.team_id is null
+              and exists (
+                select 1 from public.authz_user_group_capabilities gc
+                 where gc.group_id = g_acc.group_id
+                   and gc.ended_at is null
+                   and gc.started_at <= v_now
+                   and gc.capability = 'vendor_finance_view'
+              )
+              and (
+                select count(*)::integer from public.authz_user_group_capabilities gc
+                 where gc.group_id = g_acc.group_id
+                   and gc.ended_at is null
+              ) = 1
+              and not exists (
+                select 1 from public.authz_user_group_module_roles gmr
+                 where gmr.group_id = g_acc.group_id
+                   and gmr.ended_at is null
+              )
+         )
+         and not exists (
+           select 1
+             from public.authz_user_group_members m_exist
+            where m_exist.group_id = v_grp_acc
+              and m_exist.app_user_id = v_dg.app_user_id
+              and m_exist.ended_at is null
+         ) then
+        v_target_group_id := v_grp_acc;
+      else
+        v_code := 'MIGRATED_DEPT_VENDOR_FINANCE_VIEW';
+        v_name := pg_catalog.btrim(pg_catalog.left(v_cap_label || ' (Cấp riêng)', 128));
+        v_description := 'Nhóm quyền nghiệp vụ cấp riêng theo đơn vị: ' || v_cap_label || '.';
+        v_target_dept_id := v_dept_acc;
+        v_target_team_id := null;
+      end if;
     elsif v_dg.scope_kind = 'CONTEXT_TEAM'
-          and v_dg.scope_id ~ '^[0-9a-fA-F-]{36}$'
+          and v_dg.scope_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           and v_dg.capability in (
             'entry_team', 'team_manager_assign', 'change_review',
             'report_view', 'report_analytics_view', 'report_assign',
@@ -925,18 +952,10 @@ begin
          and t.code <> '__system_vendor__';
       if found then
         v_code := 'MIGRATED_TEAM_' || pg_catalog.upper(pg_catalog.substr(pg_catalog.replace(v_team.team_id::text, '-', ''), 1, 8)) || '_' || v_cap_sanitized;
-        v_name := pg_catalog.btrim(pg_catalog.left('Nhóm chuyển đổi ' || coalesce(v_team.display_name, v_team.code) || ' (' || v_dg.capability || ')', 128));
-        insert into public.authz_user_groups (
-          code, name, description, department_id, team_id, is_system_admin, active
-        ) values (
-          v_code, v_name, 'Nhóm quyền theo đội được chuyển đổi tự động từ quyền trực tiếp hiện hữu.',
-          v_dept_rec, v_team.team_id, false, true
-        )
-        on conflict (code) do nothing;
-        select group_id into v_target_group_id from public.authz_user_groups where code = v_code;
-        insert into public.authz_user_group_capabilities (group_id, capability, reason)
-        values (v_target_group_id, v_dg.capability, 'Chuyển đổi từ quyền trực tiếp theo đội')
-        on conflict (group_id, capability) where ended_at is null do nothing;
+        v_name := pg_catalog.btrim(pg_catalog.left(v_cap_label || ' — ' || coalesce(nullif(pg_catalog.btrim(v_team.display_name), ''), 'Tổ đội tuyển dụng'), 128));
+        v_description := 'Nhóm quyền nghiệp vụ cấp riêng theo tổ đội: ' || v_cap_label || '.';
+        v_target_dept_id := v_dept_rec;
+        v_target_team_id := v_team.team_id;
       end if;
     elsif v_dg.scope_kind = 'OWN'
           and v_dg.scope_id is null
@@ -945,18 +964,10 @@ begin
             'document_view', 'change_request_create', 'employment_status.request'
           ) then
       v_code := 'MIGRATED_OWN_' || v_cap_sanitized;
-      v_name := pg_catalog.left('Nhóm chuyển đổi cá nhân (' || v_dg.capability || ')', 128);
-      insert into public.authz_user_groups (
-        code, name, description, department_id, team_id, is_system_admin, active
-      ) values (
-        v_code, v_name, 'Nhóm quyền cá nhân được chuyển đổi tự động từ quyền trực tiếp hiện hữu.',
-        v_dept_rec, null, false, true
-      )
-      on conflict (code) do nothing;
-      select group_id into v_target_group_id from public.authz_user_groups where code = v_code;
-      insert into public.authz_user_group_capabilities (group_id, capability, reason)
-      values (v_target_group_id, v_dg.capability, 'Chuyển đổi từ quyền trực tiếp cá nhân')
-      on conflict (group_id, capability) where ended_at is null do nothing;
+      v_name := pg_catalog.btrim(pg_catalog.left(v_cap_label || ' (Cá nhân)', 128));
+      v_description := 'Nhóm quyền nghiệp vụ cấp riêng theo hồ sơ cá nhân: ' || v_cap_label || '.';
+      v_target_dept_id := v_dept_rec;
+      v_target_team_id := null;
     elsif v_dg.scope_kind = 'ALL'
           and v_dg.scope_id is null
           and v_dg.capability in (
@@ -966,18 +977,102 @@ begin
             'worker_edit_history_view'
           ) then
       v_code := 'MIGRATED_DEPT_' || v_cap_sanitized;
-      v_name := pg_catalog.left('Nhóm chuyển đổi phòng ban (' || v_dg.capability || ')', 128);
-      insert into public.authz_user_groups (
-        code, name, description, department_id, team_id, is_system_admin, active
-      ) values (
-        v_code, v_name, 'Nhóm quyền phòng ban được chuyển đổi tự động từ quyền trực tiếp hiện hữu.',
-        v_dept_rec, null, false, true
-      )
-      on conflict (code) do nothing;
-      select group_id into v_target_group_id from public.authz_user_groups where code = v_code;
-      insert into public.authz_user_group_capabilities (group_id, capability, reason)
-      values (v_target_group_id, v_dg.capability, 'Chuyển đổi từ quyền trực tiếp phòng ban')
-      on conflict (group_id, capability) where ended_at is null do nothing;
+      v_name := pg_catalog.btrim(pg_catalog.left(v_cap_label || ' (Cấp riêng)', 128));
+      v_description := 'Nhóm quyền nghiệp vụ cấp riêng theo đơn vị: ' || v_cap_label || '.';
+      v_target_dept_id := v_dept_rec;
+      v_target_team_id := null;
+    end if;
+
+    if v_target_group_id is null and v_code is not null then
+      -- Reuse canonical per-(scope, cap) group only when it is still active under an active department,
+      -- non-admin, exact same team_id, exact 1 effective matching cap, 0 active module_roles, and this user
+      -- does not already hold an active membership there; never mutate an existing/Admin-edited group.
+      v_base_code := v_code;
+      v_base_name := v_name;
+      v_attempt := 0;
+
+      select g.group_id
+        into v_target_group_id
+        from public.authz_user_groups g
+       where g.code = v_base_code;
+
+      if v_target_group_id is not null and (
+        not exists (
+          select 1
+            from public.authz_user_groups g_ok
+            join public.organization_departments d_ok
+              on d_ok.department_id = g_ok.department_id
+             and d_ok.is_active = true
+           where g_ok.group_id = v_target_group_id
+             and g_ok.active = true
+             and g_ok.is_system_admin = false
+             and g_ok.team_id is not distinct from v_target_team_id
+             and exists (
+               select 1 from public.authz_user_group_capabilities gc
+                where gc.group_id = g_ok.group_id
+                  and gc.ended_at is null
+                  and gc.started_at <= v_now
+                  and gc.capability = v_dg.capability
+             )
+             and (
+               select count(*)::integer from public.authz_user_group_capabilities gc
+                where gc.group_id = g_ok.group_id
+                  and gc.ended_at is null
+             ) = 1
+             and not exists (
+               select 1 from public.authz_user_group_module_roles gmr
+                where gmr.group_id = g_ok.group_id
+                  and gmr.ended_at is null
+             )
+        )
+        or exists (
+          select 1
+            from public.authz_user_group_members m_exist
+           where m_exist.group_id = v_target_group_id
+             and m_exist.app_user_id = v_dg.app_user_id
+             and m_exist.ended_at is null
+        )
+      ) then
+        v_target_group_id := null;
+        v_attempt := 1;
+      end if;
+
+      if v_target_group_id is null then
+        while v_target_group_id is null and v_attempt <= 100 loop
+          if v_attempt = 0 then
+            v_code := v_base_code;
+            v_name := v_base_name;
+          else
+            v_code := pg_catalog.left(v_base_code, 47) || '_' || pg_catalog.upper(pg_catalog.substr(pg_catalog.md5(v_dg.direct_grant_id::text || ':' || v_attempt::text), 1, 16));
+            v_name := pg_catalog.btrim(pg_catalog.left(
+              case
+                when v_target_team_id is not null then pg_catalog.btrim(pg_catalog.left(v_base_name, 117)) || ' (Bổ sung)'
+                else v_cap_label || ' (Cấp riêng bổ sung)'
+              end,
+              128
+            ));
+          end if;
+
+          insert into public.authz_user_groups (
+            code, name, description, department_id, team_id, is_system_admin, active
+          ) values (
+            v_code, v_name, v_description,
+            v_target_dept_id, v_target_team_id, false, true
+          )
+          on conflict (code) do nothing
+          returning group_id into v_target_group_id;
+
+          v_attempt := v_attempt + 1;
+        end loop;
+
+        if v_target_group_id is null then
+          raise exception 'PR28_BACKFILL_DIRECT_GRANT_GROUP_COLLISION: %', v_dg.direct_grant_id
+            using errcode = '55000';
+        end if;
+
+        insert into public.authz_user_group_capabilities (group_id, capability, started_at, reason)
+        values (v_target_group_id, v_dg.capability, v_now, 'Thiết lập quyền nghiệp vụ cho nhóm cấp riêng');
+      end if;
     end if;
 
     if v_target_group_id is not null then
@@ -998,18 +1093,24 @@ begin
         'BACKFILL_MIGRATION',
         'authz_direct_capability_grants',
         v_dg.direct_grant_id,
-        'Chuyển tiếp tự động quyền trực tiếp hợp lệ sang nhóm quyền',
+        'Cấp quyền nghiệp vụ từ cấu hình phân quyền trước nâng cấp',
         least(v_dg.started_at, v_now),
         v_dg.granted_by_app_user_id,
         false,
         null
       )
-      on conflict (group_id, app_user_id) where ended_at is null do nothing;
+      on conflict (group_id, app_user_id) where ended_at is null do nothing
+      returning membership_id into v_inserted_membership_id;
+
+      if v_inserted_membership_id is null then
+        raise exception 'PR28_BACKFILL_DIRECT_GRANT_MEMBERSHIP_COLLISION: %', v_dg.direct_grant_id
+          using errcode = '55000';
+      end if;
 
       insert into public.authz_legacy_direct_grant_migrations (
-        direct_grant_id, resolution_kind, group_id, recorded_at
+        direct_grant_id, resolution_kind, group_id, membership_id, recorded_at
       ) values (
-        v_dg.direct_grant_id, 'MIGRATED_TO_GROUP', v_target_group_id, v_now
+        v_dg.direct_grant_id, 'MIGRATED_TO_GROUP', v_target_group_id, v_inserted_membership_id, v_now
       )
       on conflict (direct_grant_id) do nothing;
     end if;

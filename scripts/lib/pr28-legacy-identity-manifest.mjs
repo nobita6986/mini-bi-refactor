@@ -62,12 +62,18 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
         select 1 from information_schema.tables
          where table_schema = 'public'
            and table_name = 'authz_user_group_members'
-      ) as has_group_members
+      ) as has_group_members,
+      exists (
+        select 1 from information_schema.tables
+         where table_schema = 'public'
+           and table_name = 'authz_legacy_direct_grant_migrations'
+      ) as has_direct_grant_migrations
   `);
 
   const hasAccountType = Boolean(colChecks[0]?.has_account_type);
   const hasIsSharedFlag = Boolean(colChecks[0]?.has_is_shared_flag);
   const hasGroupMembers = Boolean(colChecks[0]?.has_group_members);
+  const hasDirectGrantMigrations = Boolean(colChecks[0]?.has_direct_grant_migrations);
 
   // Discover all active FK columns pointing to public.direct_entry_app_users or auth.users
   const { rows: fkRows } = await client.query(`
@@ -304,45 +310,19 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
           and lmg.role_code in ('HR_LEAVE_OPERATOR', 'HR_REPORT_VIEWER', 'LEAVE_ADMIN_BOD_APPROVER')) as active_leave_module_grants
   `);
 
-  const groupCoverageSql = hasGroupMembers
+  const migratedByLedgerSql = hasDirectGrantMigrations
     ? `exists (
          select 1
-           from public.authz_user_group_members m
-           join public.authz_user_groups g on g.group_id = m.group_id and g.active = true
-           join public.organization_departments d on d.department_id = g.department_id and d.is_active = true
-           left join public.teams t on t.team_id = g.team_id and t.active = true and t.code <> '__system_vendor__'
-           join public.authz_user_group_capabilities gc
-             on gc.group_id = g.group_id
-            and gc.ended_at is null
-            and gc.started_at <= pg_catalog.clock_timestamp()
-            and gc.capability = dg.capability
-          where m.app_user_id = dg.app_user_id
-            and m.ended_at is null
-            and m.started_at <= pg_catalog.clock_timestamp()
-            and (g.team_id is null or t.team_id is not null)
-            and (
-              (dg.scope_kind = 'ALL' and dg.scope_id is null and g.team_id is null and (
-                g.is_system_admin
-                or gc.capability not in (
-                  'entry_create', 'entry_own', 'submission_create', 'document_upload',
-                  'document_view', 'change_request_create', 'employment_status.request'
-                )
-                or (
-                  gc.capability = 'document_view'
-                  and exists (
-                    select 1 from public.authz_user_group_capabilities gc2
-                     where gc2.group_id = g.group_id
-                       and gc2.ended_at is null
-                       and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
-                  )
-                )
-              ))
-              or (dg.scope_kind = 'OWN' and dg.scope_id is null and gc.capability in (
-                'entry_create', 'entry_own', 'submission_create', 'document_upload',
-                'document_view', 'change_request_create', 'employment_status.request'
-              ))
-              or (dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = dg.scope_id)
-            )
+           from public.authz_legacy_direct_grant_migrations dm
+          where dm.direct_grant_id = dg.direct_grant_id
+       )`
+    : "false";
+  const migratedByMemberSql = hasGroupMembers
+    ? `exists (
+         select 1
+           from public.authz_user_group_members m_prev
+          where m_prev.migrated_from_source = 'authz_direct_capability_grants'
+            and m_prev.migrated_from_id = dg.direct_grant_id
        )`
     : "false";
 
@@ -355,24 +335,12 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
       dg.capability,
       dg.scope_kind,
       dg.scope_id,
-      ${groupCoverageSql} as covered_by_group,
-      exists (
-        select 1
-          from public.authz_account_role_assignments ara
-          join public.authz_role_capabilities rc on rc.role_code = ara.role_code
-         where ara.app_user_id = dg.app_user_id
-           and ara.ended_at is null
-           and ara.started_at <= pg_catalog.clock_timestamp()
-           and ara.role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')
-           and rc.capability = dg.capability
-           and rc.scope_template = dg.scope_kind
-           and dg.scope_id is null
-      ) as covered_by_mappable_role,
+      (${migratedByLedgerSql} or ${migratedByMemberSql}) as migrated_by_lineage,
       (
         (dg.capability = 'vendor_finance_view' and dg.scope_kind = 'ALL' and dg.scope_id is null)
         or (
           dg.scope_kind = 'CONTEXT_TEAM'
-          and dg.scope_id ~ '^[0-9a-fA-F-]{36}$'
+          and dg.scope_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           and dg.capability in (
             'entry_team', 'team_manager_assign', 'change_review',
             'report_view', 'report_analytics_view', 'report_assign',
@@ -412,9 +380,9 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
   `);
 
   const activeDirectGrants = directGrantRows.map((r) => {
-    const classification = r.covered_by_group
-      ? "COVERED_BY_GROUP"
-      : r.covered_by_mappable_role || r.d1_mappable
+    const classification = r.migrated_by_lineage
+      ? "MIGRATED_TO_GROUP"
+      : r.d1_mappable
         ? "MAPPABLE_TO_GROUP"
         : "UNMAPPABLE_REQUIRES_T0_DECISION";
     return {

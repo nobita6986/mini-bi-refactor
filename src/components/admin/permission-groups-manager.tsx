@@ -866,7 +866,13 @@ export function PermissionGroupsManager() {
               </Alert>
             ) : null}
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div
+              className={
+                editor.kind === "create"
+                  ? "grid grid-cols-1 gap-3 sm:grid-cols-2"
+                  : "grid grid-cols-1 gap-3"
+              }
+            >
               <div className="space-y-1">
                 <label htmlFor={nameId} className="block text-sm font-medium text-foreground">
                   Tên nhóm quyền <span aria-hidden="true">*</span>
@@ -875,7 +881,7 @@ export function PermissionGroupsManager() {
                   id={nameId}
                   type="text"
                   required
-                  maxLength={120}
+                  maxLength={128}
                   value={groupName}
                   disabled={busy || conflictLocked}
                   onChange={(e) => {
@@ -890,25 +896,27 @@ export function PermissionGroupsManager() {
                 />
               </div>
 
-              <div className="space-y-1">
-                <label htmlFor={codeId} className="block text-sm font-medium text-foreground">
-                  Mã nhóm <span aria-hidden="true">*</span>
-                </label>
-                <input
-                  id={codeId}
-                  type="text"
-                  required
-                  maxLength={64}
-                  value={groupCode}
-                  disabled={busy || conflictLocked || editor.kind === "edit"}
-                  onChange={(e) => {
-                    setCodeEditedManually(true);
-                    setGroupCode(e.target.value.toUpperCase());
-                  }}
-                  placeholder="VI_DU_KE_TOAN"
-                  className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-mono text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30 disabled:opacity-60"
-                />
-              </div>
+              {editor.kind === "create" ? (
+                <div className="space-y-1">
+                  <label htmlFor={codeId} className="block text-sm font-medium text-foreground">
+                    Mã nhóm <span aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id={codeId}
+                    type="text"
+                    required
+                    maxLength={64}
+                    value={groupCode}
+                    disabled={busy || conflictLocked}
+                    onChange={(e) => {
+                      setCodeEditedManually(true);
+                      setGroupCode(e.target.value.toUpperCase());
+                    }}
+                    placeholder="VI_DU_KE_TOAN"
+                    className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-mono text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30 disabled:opacity-60"
+                  />
+                </div>
+              ) : null}
             </div>
 
             <div className="space-y-1">
