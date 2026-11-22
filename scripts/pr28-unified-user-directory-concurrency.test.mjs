@@ -229,18 +229,7 @@ test(
       assert.equal(pr28PostCheck.details.unsafeSecdefSearchPathCount, 0);
       assert.equal(pr28PostCheck.details.bootstrapExecutorIntact, true);
 
-      // Apply any subsequent migrations and verify full-chain S0-T1-C postconditions
-      for (let i = pr28Idx + 1; i < names.length; i += 1) {
-        const sql = await readFile(path.join(MIGRATION_DIR, names[i]), "utf8");
-        await client.query(sql);
-      }
-      const postCheck = await verifyS0T1CSecurityPostconditions(client, s0Sql, new Set(names));
-      assert.equal(postCheck.ok, true, `full-chain S0-T1-C failed: ${postCheck.reason}`);
-      assert.equal(postCheck.details.exposedClientOrPublicCount, 0);
-      assert.equal(postCheck.details.unsafeSecdefSearchPathCount, 0);
-      assert.equal(postCheck.details.bootstrapExecutorIntact, true);
-
-      // Seed actors & run WP5 cutover
+      // Seed actors & run WP5 cutover BEFORE applying #236/#237 group-only cutover (real production order)
       for (const u of [OWNER, LUANPT, LIENVU, NGATTT, TARGET_A, TARGET_B]) {
         await client.query("insert into auth.users (id, email) values ($1::uuid, $2)", [u.auth, u.email]);
         await client.query(
@@ -282,6 +271,17 @@ test(
         expectedFingerprint: plan.manifest_fingerprint,
       });
       assert.equal(applied.status, "APPLIED");
+
+      // Apply subsequent migrations (#236/#237) and verify full-chain S0-T1-C postconditions
+      for (let i = pr28Idx + 1; i < names.length; i += 1) {
+        const sql = await readFile(path.join(MIGRATION_DIR, names[i]), "utf8");
+        await client.query(sql);
+      }
+      const postCheck = await verifyS0T1CSecurityPostconditions(client, s0Sql, new Set(names));
+      assert.equal(postCheck.ok, true, `full-chain S0-T1-C failed: ${postCheck.reason}`);
+      assert.equal(postCheck.details.exposedClientOrPublicCount, 0);
+      assert.equal(postCheck.details.unsafeSecdefSearchPathCount, 0);
+      assert.equal(postCheck.details.bootstrapExecutorIntact, true);
 
       const { rows: [recDept] } = await client.query(
         "select department_id from public.organization_departments where system_key = 'RECRUITMENT'",
