@@ -107,22 +107,113 @@ test('PR28 approved Marketing retirement: fresh, absent, already retired and fai
       assert.equal((await db.query('select count(*)::int as n from public.direct_entry_scope_grants where app_user_id=$1::uuid and is_current',[targets[0].app])).rows[0].n,0);
       assert.deepEqual((await db.query('select public.direct_entry_authz__internal_resolve_effective_grants($1::uuid) as g',[targets[0].app])).rows[0].g,[]);
     }));
-    await t.test('active Project Manager assignment blocks retirement',()=>inCase(async()=>{
+    await t.test('active Project Manager assignment blocks retirement and historical revoked PM allows',()=>inCase(async()=>{
       await seed();
       await db.query("insert into public.direct_entry_projects(project_id,display_name,active) values('PRJ_MKT_GUARD','Marketing Guard Project',true)");
       await db.query("insert into public.direct_entry_project_manager_assignments(project_id,manager_recruiter_id,valid_from,is_current,created_by_user_id) values('PRJ_MKT_GUARD',$1::uuid,'2020-01-01',true,$2::uuid)",[targets[0].recruiter,admins[0].app]);
       await blocked(/PR28_MARKETING_RETIREMENT_STATE_CHANGED/);
+      await db.query("update public.direct_entry_project_manager_assignments set valid_to='2025-01-01',revoked_at=now(),is_current=false where project_id='PRJ_MKT_GUARD'");
+      await db.exec(body);
+      const rows=await state();
+      assert.equal(rows.length,2);
+      assert.ok(rows.every(r=>!r.enabled&&r.profiles===0&&r.archives===1));
     }));
-    await t.test('active Work Report assignment or delegation blocks retirement',()=>inCase(async()=>{
+    await t.test('active Work Report USER/USER_SET assignment or delegate/grantor delegation blocks, while REVOKED allows',()=>inCase(async()=>{
       await seed();
-      const tplId='49002370-0000-4000-8000-000000000001',verId='49002370-0000-4000-8000-000000000002',asgId='49002370-0000-4000-8000-000000000003';
+      const tplId='49002370-0000-4000-8000-000000000001',verId='49002370-0000-4000-8000-000000000002',asgUserId='49002370-0000-4000-8000-000000000003',asgSetId='49002370-0000-4000-8000-000000000004';
       await db.query("insert into public.work_report_templates(template_id,template_code,display_name,default_frequency,status,created_by_user_id) values($1::uuid,'MKT_GUARD_TPL','Guard Template','DAILY','ACTIVE',$2::uuid)",[tplId,admins[0].app]);
       await db.query("insert into public.work_report_template_versions(version_id,template_id,version_no,status,schema_json,metric_contract_json,schema_checksum,published_by_user_id,published_at) values($1::uuid,$2::uuid,1,'PUBLISHED','{}'::jsonb,'{}'::jsonb,repeat('a',64),$3::uuid,now())",[verId,tplId,admins[0].app]);
-      await db.query("insert into public.work_report_assignments(assignment_id,template_id,template_version_id,target_kind,target_user_id,frequency,effective_from,state,is_current,assigned_by_user_id) values($1::uuid,$2::uuid,$3::uuid,'USER',$4::uuid,'DAILY','2026-01-01','ACTIVE',true,$5::uuid)",[asgId,tplId,verId,targets[0].app,admins[0].app]);
+      await db.query("insert into public.work_report_assignments(assignment_id,template_id,template_version_id,target_kind,target_user_id,frequency,effective_from,state,is_current,assigned_by_user_id) values($1::uuid,$2::uuid,$3::uuid,'USER',$4::uuid,'DAILY','2026-01-01','ACTIVE',true,$5::uuid)",[asgUserId,tplId,verId,targets[0].app,admins[0].app]);
       await blocked(/PR28_MARKETING_RETIREMENT_STATE_CHANGED/);
-      await db.query("update public.work_report_assignments set state='REVOKED',is_current=false where assignment_id=$1::uuid",[asgId]);
-      await db.query("insert into public.work_report_delegations(grantor_user_id,delegate_app_user_id,capability,template_id,template_version_id,scope_kind,effective_from,effective_to,state,is_current) values($1::uuid,$2::uuid,'report_review',$3::uuid,$4::uuid,'all',now()-interval '1 day',now()+interval '1 day','ACTIVE',true)",[admins[0].app,targets[0].app,tplId,verId]);
+      await db.query("update public.work_report_assignments set state='REVOKED',is_current=false where assignment_id=$1::uuid",[asgUserId]);
+
+      await db.query("insert into public.work_report_assignments(assignment_id,template_id,template_version_id,target_kind,frequency,effective_from,state,is_current,assigned_by_user_id) values($1::uuid,$2::uuid,$3::uuid,'USER_SET','DAILY','2026-01-01','ACTIVE',true,$4::uuid)",[asgSetId,tplId,verId,admins[0].app]);
+      await db.query("insert into public.work_report_assignment_targets(assignment_id,target_user_id) values($1::uuid,$2::uuid)",[asgSetId,targets[1].app]);
       await blocked(/PR28_MARKETING_RETIREMENT_STATE_CHANGED/);
+      await db.query("update public.work_report_assignments set state='REVOKED',is_current=false where assignment_id=$1::uuid",[asgSetId]);
+
+      const delDelegate=(await db.query("insert into public.work_report_delegations(grantor_user_id,delegate_app_user_id,capability,template_id,template_version_id,scope_kind,effective_from,effective_to,state,is_current) values($1::uuid,$2::uuid,'report_review',$3::uuid,$4::uuid,'all',now()-interval '1 day',now()+interval '1 day','ACTIVE',true) returning delegation_id",[admins[0].app,targets[0].app,tplId,verId])).rows[0].delegation_id;
+      await blocked(/PR28_MARKETING_RETIREMENT_STATE_CHANGED/);
+      await db.query("update public.work_report_delegations set state='REVOKED',is_current=false,revoked_at=now(),revoked_by_user_id=$2::uuid where delegation_id=$1::uuid",[delDelegate,admins[0].app]);
+
+      const delGrantor=(await db.query("insert into public.work_report_delegations(grantor_user_id,delegate_app_user_id,capability,template_id,template_version_id,scope_kind,effective_from,effective_to,state,is_current) values($1::uuid,$2::uuid,'report_review',$3::uuid,$4::uuid,'all',now()-interval '1 day',now()+interval '1 day','ACTIVE',true) returning delegation_id",[targets[0].app,admins[0].app,tplId,verId])).rows[0].delegation_id;
+      await blocked(/PR28_MARKETING_RETIREMENT_STATE_CHANGED/);
+      await db.query("update public.work_report_delegations set state='REVOKED',is_current=false,revoked_at=now(),revoked_by_user_id=$2::uuid where delegation_id=$1::uuid",[delGrantor,admins[0].app]);
+
+      await db.exec(body);
+      const rows=await state();
+      assert.equal(rows.length,2);
+      assert.ok(rows.every(r=>!r.enabled&&r.profiles===0&&r.archives===1));
     }));
+    await t.test('active Work Report GROUP assignment blocks and rolls back both targets, while non-member, inactive group, and REVOKED group assignment allow',()=>inCase(async()=>{
+      const tplId='49002370-0000-4000-8000-000000000021',verId='49002370-0000-4000-8000-000000000022',grpId='49002370-0000-4000-8000-000000000023',asgId='49002370-0000-4000-8000-000000000024';
+      await seed();
+      await db.query("insert into public.work_report_templates(template_id,template_code,display_name,default_frequency,status,created_by_user_id) values($1::uuid,'MKT_GRP_TPL','Group Guard Template','DAILY','ACTIVE',$2::uuid)",[tplId,admins[0].app]);
+      await db.query("insert into public.work_report_template_versions(version_id,template_id,version_no,status,schema_json,metric_contract_json,schema_checksum,published_by_user_id,published_at) values($1::uuid,$2::uuid,1,'PUBLISHED','{}'::jsonb,'{}'::jsonb,repeat('b',64),$3::uuid,now())",[verId,tplId,admins[0].app]);
+      await db.query("insert into public.work_report_groups(group_id,display_name,active,created_by_user_id,updated_by_user_id) values($1::uuid,'Active WR Group',true,$2::uuid,$2::uuid)",[grpId,admins[0].app]);
+      await db.query("insert into public.work_report_assignments(assignment_id,template_id,template_version_id,target_kind,target_group_id,frequency,effective_from,state,is_current,assigned_by_user_id) values($1::uuid,$2::uuid,$3::uuid,'GROUP',$4::uuid,'DAILY','2026-01-01','ACTIVE',true,$5::uuid)",[asgId,tplId,verId,grpId,admins[0].app]);
+
+      // Positive: attach targets[1] (second in ORDER BY app_user_id) so rollback proves targets[0] is also untouched
+      await db.query("insert into public.work_report_group_members(group_id,member_user_id,added_by_user_id) values($1::uuid,$2::uuid,$3::uuid)",[grpId,targets[1].app,admins[0].app]);
+      await blocked(new RegExp(`PR28_MARKETING_RETIREMENT_STATE_CHANGED: ${targets[1].app}`));
+      assert.equal((await db.query("select count(*)::int as n from public.leave_audit_events where event_type='EMPLOYEE_PROFILE_RETIRED'")).rows[0].n,0);
+
+      // Control 1: non-member in active GROUP allows retirement
+      await db.exec('savepoint wr_group_ctrl_nonmember');
+      await db.query("delete from public.work_report_group_members where group_id=$1::uuid and member_user_id=$2::uuid",[grpId,targets[1].app]);
+      await db.query("insert into public.work_report_group_members(group_id,member_user_id,added_by_user_id) values($1::uuid,$2::uuid,$2::uuid)",[grpId,admins[0].app]);
+      await db.exec(body);
+      const rowsCtrl1=await state();
+      assert.equal(rowsCtrl1.length,2);
+      assert.ok(rowsCtrl1.every(r=>!r.enabled&&r.profiles===0&&r.archives===1));
+      await db.exec('rollback to savepoint wr_group_ctrl_nonmember');
+
+      // Control 2: member of inactive work_report_groups(active=false) allows retirement
+      await db.exec('savepoint wr_group_ctrl_inactive');
+      await db.query("update public.work_report_groups set active=false where group_id=$1::uuid",[grpId]);
+      await db.exec(body);
+      const rowsCtrl2=await state();
+      assert.equal(rowsCtrl2.length,2);
+      assert.ok(rowsCtrl2.every(r=>!r.enabled&&r.profiles===0&&r.archives===1));
+      await db.exec('rollback to savepoint wr_group_ctrl_inactive');
+
+      // Control 3: REVOKED GROUP assignment on active group allows retirement
+      await db.query("update public.work_report_assignments set state='REVOKED',is_current=false where assignment_id=$1::uuid",[asgId]);
+      await db.exec(body);
+      const rowsCtrl3=await state();
+      assert.equal(rowsCtrl3.length,2);
+      assert.ok(rowsCtrl3.every(r=>!r.enabled&&r.profiles===0&&r.archives===1));
+    }));
+    await t.test('audit variants: duplicate valid 2/2 and corrupt 1/0 while disabled block incomplete; pre-existing valid 1/1 while enabled blocks profile changed',async()=>{
+      // Duplicate valid 2/2 while disabled -> INCOMPLETE
+      await inCase(async()=>{
+        await seed();await db.exec(prefix);
+        const existing=(await db.query("select payload from public.leave_audit_events where target_app_user_id=$1::uuid and event_type='EMPLOYEE_PROFILE_RETIRED' limit 1",[targets[0].app])).rows[0].payload;
+        await db.query("insert into public.leave_audit_events(audit_event_id,event_type,actor_app_user_id,target_app_user_id,reason,payload) values(gen_random_uuid(),'EMPLOYEE_PROFILE_RETIRED',$1::uuid,$2::uuid,'duplicate valid audit',$3::jsonb)",[admins[0].app,targets[0].app,JSON.stringify(existing)]);
+        await blocked(/PR28_MARKETING_RETIREMENT_INCOMPLETE/);
+      });
+      // Corrupt 1/0 audit while disabled (all other postconditions clean) -> INCOMPLETE
+      await inCase(async()=>{
+        await seed();
+        await db.query("update public.authz_user_group_members set ended_at=clock_timestamp(),ended_reason='fixture',ended_by_app_user_id=$2::uuid where app_user_id=$1::uuid and ended_at is null",[targets[0].app,admins[0].app]);
+        await db.query("update public.authz_account_role_assignments set ended_at=clock_timestamp(),ended_reason='fixture',ended_by_app_user_id=$2::uuid where app_user_id=$1::uuid and ended_at is null",[targets[0].app,admins[0].app]);
+        await db.query("update public.direct_entry_app_users set enabled=false,version=version+1 where app_user_id=$1::uuid",[targets[0].app]);
+        await db.query("update public.direct_entry_capability_grants set is_current=false,suspended_by_account_disable=false where app_user_id=$1::uuid",[targets[0].app]);
+        await db.query("update public.direct_entry_scope_grants set is_current=false,suspended_by_account_disable=false where app_user_id=$1::uuid",[targets[0].app]);
+        await db.query("update public.direct_entry_app_user_recruiter_links set is_current=false,suspended_by_account_disable=false where app_user_id=$1::uuid",[targets[0].app]);
+        await db.query("delete from public.leave_employee_profiles where app_user_id=$1::uuid",[targets[0].app]);
+        const corruptPayload={decision:'OWNER_RETIRE_MARKETING_PR28',account_retired:true,before_profile:{app_user_id:targets[0].app,is_shared_non_employee:true,employment_status:'OFFICIAL',unit_kind:'UNCLASSIFIED',row_version:1,next_seniority_units:0,work_start_date:null,official_effective_date:null,next_seniority_effective_date:null,notes:null}};
+        await db.query("insert into public.leave_audit_events(audit_event_id,event_type,actor_app_user_id,target_app_user_id,reason,payload) values(gen_random_uuid(),'EMPLOYEE_PROFILE_RETIRED',$1::uuid,$2::uuid,'corrupt audit payload',$3::jsonb)",[admins[0].app,targets[0].app,JSON.stringify(corruptPayload)]);
+        await blocked(/PR28_MARKETING_RETIREMENT_INCOMPLETE/);
+      });
+      // Pre-existing valid 1/1 audit while enabled=true -> PROFILE_CHANGED
+      await inCase(async()=>{
+        await seed();
+        const prof=(await db.query('select to_jsonb(p) as profile from public.leave_employee_profiles p where p.app_user_id=$1::uuid',[targets[0].app])).rows[0].profile;
+        const validPayload={decision:'OWNER_RETIRE_MARKETING_PR28',account_retired:true,before_profile:prof};
+        await db.query("insert into public.leave_audit_events(audit_event_id,event_type,actor_app_user_id,target_app_user_id,reason,payload) values(gen_random_uuid(),'EMPLOYEE_PROFILE_RETIRED',$1::uuid,$2::uuid,'pre-existing valid audit while enabled',$3::jsonb)",[admins[0].app,targets[0].app,JSON.stringify(validPayload)]);
+        await blocked(/PR28_MARKETING_RETIREMENT_PROFILE_CHANGED/);
+      });
+    });
   }finally{await db.close();}
 });

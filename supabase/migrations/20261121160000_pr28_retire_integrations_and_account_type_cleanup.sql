@@ -48,6 +48,13 @@ declare
 begin
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('T0_PR28_RETIRE_MARKETING'));
   if exists (select 1 from public.direct_entry_app_users where app_user_id = any(v_approved_ids)) then
+    perform 1 from public.authz_user_groups g
+     where g.code = 'RECRUITER_OPERATIONS'
+        or g.group_id in (
+          select m.group_id from public.authz_user_group_members m
+           where m.app_user_id = any(v_approved_ids) and m.ended_at is null
+        )
+     order by g.group_id asc for key share;
     perform 1 from public.direct_entry_app_users
      where app_user_id = any(v_approved_ids)
         or app_user_id in (
@@ -92,7 +99,14 @@ begin
                      and (wra.target_user_id = v_user.app_user_id
                           or exists (select 1 from public.work_report_assignment_targets wrat
                                       where wrat.assignment_id = wra.assignment_id
-                                        and wrat.target_user_id = v_user.app_user_id)))
+                                        and wrat.target_user_id = v_user.app_user_id)
+                          or (wra.target_kind = 'GROUP'
+                              and exists (select 1 from public.work_report_groups wrg
+                                            join public.work_report_group_members wrgm
+                                              on wrgm.group_id = wrg.group_id
+                                           where wrg.group_id = wra.target_group_id
+                                             and wrg.active
+                                             and wrgm.member_user_id = v_user.app_user_id))))
        or exists (select 1 from public.work_report_delegations wrd
                    where wrd.is_current and wrd.state = 'ACTIVE'
                      and (wrd.delegate_app_user_id = v_user.app_user_id
