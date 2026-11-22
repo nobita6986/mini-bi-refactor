@@ -1,7 +1,9 @@
 -- Migration #237: PR #28 — Fail-closed preflight, atomic group-only authorization cutover,
 -- obsolete integration/per-account-role/module-grant RPC retirement, and legacy column cleanup.
 --
--- Preconditions enforced atomically before ANY DDL or DML:
+-- Owner-approved retirement runs first in the same transaction. Any later gate
+-- failure rolls back retirement, audit and cleanup together. Unresolved data stays blocked.
+-- Cleanup preconditions:
 --   1. Zero rows in public.direct_entry_app_users with account_type IN ('SHARED', 'SERVICE').
 --   2. Zero rows in public.leave_employee_profiles with is_shared_non_employee = true.
 --   3. Zero unmappable active rows in public.authz_direct_capability_grants outside D1 group ceiling.
@@ -14,8 +16,210 @@
 
 begin;
 
+-- Owner decision 2026-11-22: retire these two known accounts, preserving identities,
+-- business history and the complete unused leave configuration in append-only audit.
+-- Missing target UUIDs are a no-op. Any unexpected state requires a new review.
+-- This runs before cleanup gates, inside the same transaction: a later gate failure
+-- rolls the retirement back too. It never converts technical accounts into staff.
+do $pr28_retire_marketing$
+declare
+  v_approved_ids uuid[] := array[
+    '6772d4bb-edd6-4a7d-9092-621d37d072a7'::uuid,
+    'b206918e-38ae-482e-b3f2-0e96593655dc'::uuid
+  ];
+  v_approved_names text[] := array[
+    'Marketing Vĩnh Phúc'::text,
+    'Marketing Bắc Giang'::text
+  ];
+  v_target record;
+  v_user public.direct_entry_app_users%rowtype;
+  v_profile public.leave_employee_profiles%rowtype;
+  v_actor record;
+  v_member record;
+  v_role record;
+  v_version integer;
+  v_key uuid;
+  v_audit_id uuid;
+  v_total_retired integer;
+  v_count integer;
+  v_profile_json jsonb;
+  v_links jsonb;
+  v_reason text := 'Owner 2026-11-22: ngừng sử dụng hai tài khoản Marketing; giữ định danh và toàn bộ lịch sử; lưu cấu hình nghỉ phép chưa sử dụng vào audit.';
+begin
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('T0_PR28_RETIRE_MARKETING'));
+  if exists (select 1 from public.direct_entry_app_users where app_user_id = any(v_approved_ids)) then
+    perform 1 from public.direct_entry_app_users
+     where app_user_id = any(v_approved_ids)
+        or app_user_id in (
+          select a.app_user_id from public.authz_account_role_assignments a
+           where a.role_code = 'ADMIN' and a.is_protected and a.ended_at is null
+        )
+     order by app_user_id asc for update;
+  end if;
+  for v_target in
+    select approved.app_user_id, approved.expected_name
+      from unnest(v_approved_ids, v_approved_names) as approved(app_user_id, expected_name)
+     order by approved.app_user_id
+  loop
+    select * into v_user from public.direct_entry_app_users
+     where app_user_id = v_target.app_user_id for update;
+    if not found then continue; end if;
+
+    if v_user.display_name is distinct from v_target.expected_name
+       or v_user.account_type is distinct from 'NORMAL'
+       or not coalesce(v_user.authz_managed, false)
+       or exists (select 1 from public.authz_account_role_assignments
+                   where app_user_id = v_user.app_user_id and is_protected and ended_at is null)
+       or exists (select 1 from public.authz_user_group_members
+                   where app_user_id = v_user.app_user_id and is_protected and ended_at is null)
+       or exists (select 1 from public.organization_account_person_links
+                   where app_user_id = v_user.app_user_id)
+       or exists (select 1 from public.organization_department_memberships
+                   where app_user_id = v_user.app_user_id)
+       or exists (select 1 from public.direct_entry_team_leader_assignments
+                   where leader_app_user_id = v_user.app_user_id)
+       or exists (select 1 from public.direct_entry_project_manager_assignments pma
+                    join public.direct_entry_app_user_recruiter_links rl
+                      on rl.recruiter_id = pma.manager_recruiter_id
+                   where rl.app_user_id = v_user.app_user_id
+                     and (pma.revoked_at is null or pma.is_current))
+       or exists (select 1 from public.vendor_finance_project_accountants
+                   where accountant_user_id = v_user.app_user_id)
+       or exists (select 1 from public.leave_department_approvers
+                   where approver_app_user_id = v_user.app_user_id)
+       or exists (select 1 from public.work_report_assignments wra
+                   where wra.is_current and wra.state = 'ACTIVE'
+                     and (wra.target_user_id = v_user.app_user_id
+                          or exists (select 1 from public.work_report_assignment_targets wrat
+                                      where wrat.assignment_id = wra.assignment_id
+                                        and wrat.target_user_id = v_user.app_user_id)))
+       or exists (select 1 from public.work_report_delegations wrd
+                   where wrd.is_current and wrd.state = 'ACTIVE'
+                     and (wrd.delegate_app_user_id = v_user.app_user_id
+                          or wrd.grantor_user_id = v_user.app_user_id))
+       or exists (select 1 from public.authz_direct_capability_grants
+                   where app_user_id = v_user.app_user_id and ended_at is null)
+       or exists (select 1 from public.vendor_finance_global_roles
+                   where app_user_id = v_user.app_user_id
+                     and (valid_to is null or valid_to > public.direct_entry_authorization_date()))
+       or exists (select 1 from public.leave_module_grants
+                   where app_user_id = v_user.app_user_id and is_current)
+       or exists (select 1 from public.direct_entry_account_operation_intents
+                   where (account_ref = v_user.app_user_id or auth_subject = v_user.auth_subject)
+                     and state in ('PENDING','IN_FLIGHT','INDETERMINATE','BLOCKED','CONFLICT'))
+       or exists (select 1 from public.leave_requests where app_user_id = v_user.app_user_id)
+       or exists (select 1 from public.leave_lots where app_user_id = v_user.app_user_id)
+    then
+      raise exception 'PR28_MARKETING_RETIREMENT_STATE_CHANGED: %', v_user.app_user_id;
+    end if;
+
+    select
+      count(*)::integer,
+      count(*) filter (
+        where a.payload->>'decision' = 'OWNER_RETIRE_MARKETING_PR28'
+          and a.payload->>'account_retired' = 'true'
+          and a.payload->'before_profile'->>'app_user_id' = v_user.app_user_id::text
+          and a.payload->'before_profile'->>'is_shared_non_employee' = 'true'
+          and a.payload->'before_profile'->>'employment_status' = 'UNCONFIGURED'
+          and a.payload->'before_profile'->>'unit_kind' = 'UNCLASSIFIED'
+          and a.payload->'before_profile'->>'row_version' = '1'
+          and a.payload->'before_profile'->>'next_seniority_units' = '0'
+          and a.payload->'before_profile'->>'work_start_date' is null
+          and a.payload->'before_profile'->>'official_effective_date' is null
+          and a.payload->'before_profile'->>'next_seniority_effective_date' is null
+          and a.payload->'before_profile'->>'notes' is null
+      )::integer
+      into v_total_retired, v_count
+      from public.leave_audit_events a
+     where a.target_app_user_id = v_user.app_user_id
+       and a.event_type = 'EMPLOYEE_PROFILE_RETIRED';
+
+    if not v_user.enabled then
+      if v_total_retired <> 1 or v_count <> 1
+         or exists (select 1 from public.leave_employee_profiles where app_user_id = v_user.app_user_id)
+         or exists (select 1 from public.authz_account_role_assignments where app_user_id = v_user.app_user_id and ended_at is null)
+         or exists (select 1 from public.authz_user_group_members where app_user_id = v_user.app_user_id and ended_at is null)
+         or exists (select 1 from public.direct_entry_capability_grants where app_user_id = v_user.app_user_id and (is_current or suspended_by_account_disable))
+         or exists (select 1 from public.direct_entry_scope_grants where app_user_id = v_user.app_user_id and (is_current or suspended_by_account_disable))
+         or exists (select 1 from public.direct_entry_app_user_recruiter_links where app_user_id = v_user.app_user_id and (is_current or suspended_by_account_disable))
+         or public.direct_entry_authz__internal_resolve_effective_grants(v_user.app_user_id) <> '[]'::jsonb
+      then raise exception 'PR28_MARKETING_RETIREMENT_INCOMPLETE: %', v_user.app_user_id;
+      end if;
+      continue;
+    end if;
+
+    select * into v_profile from public.leave_employee_profiles
+     where app_user_id = v_user.app_user_id for update;
+    if not found then raise exception 'PR28_MARKETING_RETIREMENT_PROFILE_MISSING: %', v_user.app_user_id; end if;
+    if v_total_retired <> 0 or v_count <> 0
+       or not v_profile.is_shared_non_employee or v_profile.row_version <> 1
+       or v_profile.employment_status <> 'UNCONFIGURED' or v_profile.unit_kind <> 'UNCLASSIFIED'
+       or v_profile.work_start_date is not null or v_profile.official_effective_date is not null
+       or v_profile.next_seniority_effective_date is not null or v_profile.next_seniority_units <> 0
+       or v_profile.notes is not null
+       or exists (select 1 from pg_catalog.pg_constraint where contype = 'f' and confrelid = 'public.leave_employee_profiles'::regclass)
+       or exists (select 1 from public.authz_account_role_assignments where app_user_id = v_user.app_user_id and ended_at is null and role_code not in ('EMPLOYEE_BASE','RECRUITER'))
+       or exists (select 1 from public.authz_user_group_members m join public.authz_user_groups g using(group_id) where m.app_user_id = v_user.app_user_id and m.ended_at is null and g.code <> 'RECRUITER_OPERATIONS')
+    then raise exception 'PR28_MARKETING_RETIREMENT_PROFILE_CHANGED: %', v_user.app_user_id;
+    end if;
+    v_profile_json := to_jsonb(v_profile);
+
+    select u.app_user_id, u.auth_subject into v_actor
+      from public.direct_entry_app_users u join public.authz_account_role_assignments a using(app_user_id)
+     where u.enabled and a.role_code = 'ADMIN' and a.is_protected and a.ended_at is null
+       and u.app_user_id <> v_user.app_user_id order by u.app_user_id limit 1;
+    if not found then raise exception 'PR28_MARKETING_RETIREMENT_OWNER_REQUIRED'; end if;
+
+    for v_member in select membership_id from public.authz_user_group_members
+      where app_user_id = v_user.app_user_id and ended_at is null order by membership_id
+    loop
+      select version into v_version from public.direct_entry_app_users where app_user_id = v_user.app_user_id;
+      v_key := gen_random_uuid();
+      perform public.direct_entry_authz_remove_group_member_admin(v_actor.auth_subject,v_actor.app_user_id,v_user.app_user_id,v_member.membership_id,v_version,v_reason,v_key,
+        public.direct_entry_payload_hash(jsonb_build_object('decision','OWNER_RETIRE_MARKETING_PR28','member',v_member.membership_id,'version',v_version,'key',v_key)));
+    end loop;
+    for v_role in select assignment_id from public.authz_account_role_assignments
+      where app_user_id = v_user.app_user_id and ended_at is null order by assignment_id
+    loop
+      select version into v_version from public.direct_entry_app_users where app_user_id = v_user.app_user_id;
+      v_key := gen_random_uuid();
+      perform public.direct_entry_authz_revoke_global_role_admin(v_actor.auth_subject,v_actor.app_user_id,v_user.app_user_id,v_role.assignment_id,v_version,v_reason,v_key,
+        public.direct_entry_payload_hash(jsonb_build_object('decision','OWNER_RETIRE_MARKETING_PR28','assignment',v_role.assignment_id,'version',v_version,'key',v_key)));
+    end loop;
+    select version into v_version from public.direct_entry_app_users where app_user_id = v_user.app_user_id;
+    perform public.direct_entry_disable_app_user(v_actor.auth_subject,v_actor.app_user_id,v_user.app_user_id,v_version,v_reason,gen_random_uuid()::text);
+
+    select coalesce(jsonb_agg(to_jsonb(l) order by l.link_id),'[]'::jsonb) into v_links
+      from public.direct_entry_app_user_recruiter_links l where l.app_user_id = v_user.app_user_id;
+    update public.direct_entry_app_user_recruiter_links set suspended_by_account_disable = false
+     where app_user_id = v_user.app_user_id and not is_current and suspended_by_account_disable;
+
+    v_audit_id := gen_random_uuid();
+    insert into public.leave_audit_events(audit_event_id,event_type,actor_app_user_id,target_app_user_id,reason,payload)
+    values(v_audit_id,'EMPLOYEE_PROFILE_RETIRED',v_actor.app_user_id,v_user.app_user_id,v_reason,
+      jsonb_build_object('decision','OWNER_RETIRE_MARKETING_PR28','migration_file','20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql',
+        'account_retired',true,'before_profile',v_profile_json,'recruiter_links_after_disable_before_final_retirement',v_links));
+    delete from public.leave_employee_profiles p
+     where p.app_user_id = v_user.app_user_id and p.row_version = v_profile.row_version and to_jsonb(p) = v_profile_json;
+    get diagnostics v_count = row_count;
+    if v_count <> 1 then raise exception 'PR28_MARKETING_RETIREMENT_ARCHIVE_CONFLICT'; end if;
+
+    if exists (select 1 from public.direct_entry_app_users where app_user_id = v_user.app_user_id and enabled)
+       or exists (select 1 from public.authz_account_role_assignments where app_user_id = v_user.app_user_id and ended_at is null)
+       or exists (select 1 from public.authz_user_group_members where app_user_id = v_user.app_user_id and ended_at is null)
+       or exists (select 1 from public.direct_entry_capability_grants where app_user_id = v_user.app_user_id and (is_current or suspended_by_account_disable))
+       or exists (select 1 from public.direct_entry_scope_grants where app_user_id = v_user.app_user_id and (is_current or suspended_by_account_disable))
+       or exists (select 1 from public.direct_entry_app_user_recruiter_links where app_user_id = v_user.app_user_id and (is_current or suspended_by_account_disable))
+       or public.direct_entry_authz__internal_resolve_effective_grants(v_user.app_user_id) <> '[]'::jsonb
+    then raise exception 'PR28_MARKETING_RETIREMENT_POSTCONDITION_FAILED: %',v_user.app_user_id;
+    end if;
+  end loop;
+end;
+$pr28_retire_marketing$;
+
+
 -- ============================================================================
--- 1. FAIL-CLOSED PREFLIGHT GATES (aborts with 0 DDL/DML if preconditions fail)
+-- 1. FAIL-CLOSED PREFLIGHT GATES (failure rolls back the entire transaction)
 -- ============================================================================
 do $$
 declare

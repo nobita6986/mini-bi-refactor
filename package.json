@@ -197,7 +197,7 @@
     "test:pr28-unified-user-directory": "node --conditions=react-server --test src/lib/organization/user-directory-api.test.mjs scripts/pr28-unified-user-directory-db.test.mjs && node --test scripts/pr28-unified-user-directory-concurrency.test.mjs",
     "test:pr28-permission-groups": "node --conditions=react-server --test src/lib/admin/permission-group-api.test.mjs scripts/pr28-permission-groups-db.test.mjs && node --test scripts/pr28-permission-groups-concurrency.test.mjs",
     "test:pr28-integrations-retirement": "node --test scripts/pr28-integrations-retirement.test.mjs",
-    "test:pr28-cleanup-preflight": "node --conditions=react-server --test scripts/pr28-cleanup-preflight-and-catalog-db.test.mjs && node --test scripts/pr28-cleanup-preflight-concurrency.test.mjs"
+    "test:pr28-cleanup-preflight": "node --conditions=react-server --test scripts/pr28-cleanup-preflight-and-catalog-db.test.mjs && node --test scripts/pr28-cleanup-preflight-concurrency.test.mjs && node --conditions=react-server --test scripts/pr28-approved-marketing-retirement-db.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1146.0",
