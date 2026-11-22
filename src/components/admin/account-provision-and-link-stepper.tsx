@@ -11,7 +11,7 @@ import {
 import type { Wp4WorkspaceGuard } from "@/components/admin/wp4-workspace-guard";
 import { Alert } from "@/components/ui/alert";
 import { StatusBadge, type BadgeTone } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClasses } from "@/components/ui/button";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
 import {
@@ -58,10 +58,12 @@ import {
   type ProvisionStep5Recruiter,
 } from "@/lib/admin/provision-checkpoint-v2";
 import {
-  buildAssignGlobalRoleRequest,
-  classifyRoleMutationResponse,
   newRoleMutationIdempotencyKey,
 } from "@/lib/admin/role-effective-access-model";
+import {
+  parseActiveTeamCatalogOptions,
+  type ActiveTeamSelectOption,
+} from "@/lib/admin/team-catalog-model";
 import type { AdminPersonnel, PersonnelPosition } from "@/lib/direct-entry/personnel-catalog-contract";
 
 export type ProvisionExistingPersonSnapshot = {
@@ -96,36 +98,11 @@ export type ProvisionStepperProps = {
   originOverride?: string;
 };
 
-type InlineTeamOption = {
-  team_id: string;
-  code: string;
-  name: string;
+const LEGACY_ROLE_TO_SEED_GROUP_CODE: Readonly<Record<string, string>> = {
+  ADMIN: "SYSTEM_ADMIN",
+  HR_OPERATOR: "HR_CATALOG_OPERATOR",
+  RECRUITER: "RECRUITER_OPERATIONS",
 };
-
-function parseInlineTeams(payload: unknown): InlineTeamOption[] {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return [];
-  const rec = payload as Record<string, unknown>;
-  const list = Array.isArray(rec.teams)
-    ? rec.teams
-    : typeof rec.list === "object" &&
-        rec.list !== null &&
-        Array.isArray((rec.list as Record<string, unknown>).teams)
-      ? ((rec.list as Record<string, unknown>).teams as unknown[])
-      : [];
-  const out: InlineTeamOption[] = [];
-  for (const item of list) {
-    if (typeof item !== "object" || item === null) continue;
-    const row = item as Record<string, unknown>;
-    const teamId = typeof row.team_id === "string" ? row.team_id : typeof row.id === "string" ? row.id : null;
-    const code = typeof row.code === "string" ? row.code : typeof row.team_code === "string" ? row.team_code : "";
-    const name = typeof row.name === "string" ? row.name : typeof row.team_name === "string" ? row.team_name : "";
-    const active = row.active !== false && row.is_active !== false;
-    if (teamId && name && active) {
-      out.push({ team_id: teamId, code, name });
-    }
-  }
-  return out;
-}
 
 const TERMINAL_FAILED_INTENT_STATES = new Set(["CONFLICT", "FAILED", "EXPIRED", "BLOCKED"]);
 
@@ -208,7 +185,8 @@ export function AccountProvisionAndLinkStepper({
 
   // Step 4 Permission Groups & optional Step 5 inline Recruitment setup
   const [availableGroups, setAvailableGroups] = useState<readonly PermissionGroupSummary[]>([]);
-  const [availableTeams, setAvailableTeams] = useState<readonly InlineTeamOption[]>([]);
+  const [availableTeams, setAvailableTeams] = useState<readonly ActiveTeamSelectOption[]>([]);
+  const [inlineTeamsError, setInlineTeamsError] = useState<string | null>(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [activateRecruiterInline, setActivateRecruiterInline] = useState(false);
   const [inlineRecruiterPosition, setInlineRecruiterPosition] = useState<PersonnelPosition>("STAFF");
@@ -263,7 +241,7 @@ export function AccountProvisionAndLinkStepper({
             signal: tracked.controller.signal,
             headers: { Accept: "application/json" },
           }),
-          fetch("/api/admin/catalog/teams?page=1&page_size=100", {
+          fetch("/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100", {
             method: "GET",
             cache: "no-store",
             signal: tracked.controller.signal,
@@ -280,10 +258,23 @@ export function AccountProvisionAndLinkStepper({
         }
         if (teamResp.status === 200) {
           const teamJson = await teamResp.json().catch(() => null);
-          setAvailableTeams(parseInlineTeams(teamJson));
+          const parsedTeams = parseActiveTeamCatalogOptions(teamJson);
+          if (parsedTeams.ok) {
+            setAvailableTeams(parsedTeams.teams);
+            setInlineTeamsError(null);
+          } else {
+            setAvailableTeams([]);
+            setInlineTeamsError("Không thể đọc danh sách tổ đội tuyển dụng đang hoạt động.");
+          }
+        } else {
+          setAvailableTeams([]);
+          setInlineTeamsError("Không tải được danh sách tổ đội tuyển dụng đang hoạt động.");
         }
       } catch {
-        // Optional metadata degrades gracefully; core person/account flow remains usable.
+        if (!mountedRef.current || !workspaceGuard.isActive(tracked.epoch, tracked.controller)) {
+          return;
+        }
+        setInlineTeamsError("Không thể kết nối máy chủ để tải danh sách tổ đội tuyển dụng.");
       } finally {
         tracked.release();
       }
@@ -661,7 +652,8 @@ export function AccountProvisionAndLinkStepper({
       // 5a: Create personnel/recruiter profile from account if not yet committed
       if (!recruiterId) {
         const key5a = step5.idempotency_key ?? newAccountOperationKey();
-        const latestVer =
+        const frozenVer5a =
+          step5.expected_account_version ??
           resolveNextStep4AccountVersion(currentCp, verifiedStep4AccountVersion) ??
           currentCp.step3_link.post_link_account_version ??
           currentCp.step2_account.committed_account_version ??
@@ -669,7 +661,7 @@ export function AccountProvisionAndLinkStepper({
         const loginIdValue = currentCp.step2_account.non_secret_snapshot?.login_id ?? loginId;
         const built = buildPersonnelFromAccountRequest({
           accountRef,
-          expectedAccountVersion: latestVer,
+          expectedAccountVersion: frozenVer5a,
           loginId: loginIdValue,
           personnelPosition: step5.position,
           reason:
@@ -689,7 +681,12 @@ export function AccountProvisionAndLinkStepper({
         const persisted5a = persistCpOrReport({
           ...currentCp,
           updated_at: nowIso(),
-          step5_recruiter: { ...step5, status: "IN_FLIGHT", idempotency_key: key5a },
+          step5_recruiter: {
+            ...step5,
+            status: "IN_FLIGHT",
+            idempotency_key: key5a,
+            expected_account_version: frozenVer5a,
+          },
         });
         if (!persisted5a) return;
         currentCp = persisted5a;
@@ -752,17 +749,31 @@ export function AccountProvisionAndLinkStepper({
               typeof (rawJson as Record<string, unknown>).message === "string"
                 ? String((rawJson as Record<string, unknown>).message)
                 : "Chưa kích hoạt được hồ sơ tuyển dụng lúc này.";
+            const isUncertain5a = response.status >= 500;
             persistCpOrReport({
               ...currentCp,
               updated_at: nowIso(),
-              step5_recruiter: { ...currentCp.step5_recruiter!, status: response.status >= 500 ? "UNCERTAIN" : "IDLE" },
+              step5_recruiter: {
+                ...currentCp.step5_recruiter!,
+                status: isUncertain5a ? "UNCERTAIN" : "IDLE",
+              },
             });
-            setStep5PartialFailure(msg);
-            setFeedback({
-              tone: "warning",
-              title: "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
-              message: `${msg} Bạn có thể thử lại hoặc mở hồ sơ người dùng để kích hoạt tuyển dụng sau.`,
-            });
+            if (isUncertain5a) {
+              setStep5PartialFailure(null);
+              setFeedback({
+                tone: "warning",
+                title: "Chưa nhận được xác nhận khi kích hoạt tuyển dụng",
+                message:
+                  "Hồ sơ, tài khoản và nhóm quyền đã được lưu. Hệ thống giữ nguyên yêu cầu đang chờ để bạn bấm \"Tiếp tục thiết lập tuyển dụng\" mà không tạo trùng.",
+              });
+            } else {
+              setStep5PartialFailure(msg);
+              setFeedback({
+                tone: "warning",
+                title: "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
+                message: `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
+              });
+            }
             return;
           }
         } catch (error) {
@@ -773,11 +784,12 @@ export function AccountProvisionAndLinkStepper({
             updated_at: nowIso(),
             step5_recruiter: { ...currentCp.step5_recruiter!, status: "UNCERTAIN" },
           });
-          setStep5PartialFailure("Mất kết nối khi kích hoạt hồ sơ tuyển dụng.");
+          setStep5PartialFailure(null);
           setFeedback({
             tone: "warning",
             title: "Mất kết nối khi kích hoạt tuyển dụng",
-            message: "Người dùng và nhóm quyền đã được lưu. Bấm tiếp tục để hoàn tất bước tuyển dụng.",
+            message:
+              "Hồ sơ, tài khoản và nhóm quyền đã được lưu. Bản phục hồi vẫn được giữ nguyên — hãy bấm \"Tiếp tục thiết lập tuyển dụng\" hoặc đóng tạm để hoàn tất sau mà không tạo trùng.",
           });
           return;
         } finally {
@@ -834,17 +846,31 @@ export function AccountProvisionAndLinkStepper({
               typeof (rawJson as Record<string, unknown>).message === "string"
                 ? String((rawJson as Record<string, unknown>).message)
                 : "Chưa xếp được tổ đội tuyển dụng lúc này.";
+            const isUncertain5b = response.status >= 500;
             persistCpOrReport({
               ...currentCp,
               updated_at: nowIso(),
-              step5_recruiter: { ...currentCp.step5_recruiter!, status: response.status >= 500 ? "UNCERTAIN" : "IDLE" },
+              step5_recruiter: {
+                ...currentCp.step5_recruiter!,
+                status: isUncertain5b ? "UNCERTAIN" : "IDLE",
+              },
             });
-            setStep5PartialFailure(msg);
-            setFeedback({
-              tone: "warning",
-              title: "Đã tạo hồ sơ tuyển dụng — chưa xếp xong tổ đội",
-              message: `${msg} Bạn có thể thử lại hoặc mở hồ sơ người dùng để xếp tổ đội sau.`,
-            });
+            if (isUncertain5b) {
+              setStep5PartialFailure(null);
+              setFeedback({
+                tone: "warning",
+                title: "Chưa nhận được xác nhận khi xếp tổ đội tuyển dụng",
+                message:
+                  "Hồ sơ tính công tuyển dụng đã được kích hoạt. Bản phục hồi vẫn được giữ nguyên — hãy bấm \"Tiếp tục thiết lập tuyển dụng\" hoặc đóng tạm để đồng bộ an toàn.",
+              });
+            } else {
+              setStep5PartialFailure(msg);
+              setFeedback({
+                tone: "warning",
+                title: "Đã tạo hồ sơ tuyển dụng — chưa xếp xong tổ đội",
+                message: `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để xếp tổ đội sau.`,
+              });
+            }
             return;
           }
         } catch (error) {
@@ -855,11 +881,12 @@ export function AccountProvisionAndLinkStepper({
             updated_at: nowIso(),
             step5_recruiter: { ...currentCp.step5_recruiter!, status: "UNCERTAIN" },
           });
-          setStep5PartialFailure("Mất kết nối khi xếp tổ đội tuyển dụng.");
+          setStep5PartialFailure(null);
           setFeedback({
             tone: "warning",
-            title: "Mất kết nối khi xếp tổ đội",
-            message: "Người dùng và nhóm quyền đã được lưu. Bấm tiếp tục để hoàn tất bước xếp tổ đội.",
+            title: "Mất kết nối khi xếp tổ đội tuyển dụng",
+            message:
+              "Hồ sơ, tài khoản và hồ sơ tính công tuyển dụng đã được lưu. Bản phục hồi vẫn được giữ nguyên — hãy bấm \"Tiếp tục thiết lập tuyển dụng\" hoặc đóng tạm để hoàn tất sau.",
           });
           return;
         } finally {
@@ -1100,11 +1127,42 @@ export function AccountProvisionAndLinkStepper({
       const personId = currentCp.step1_person.committed_person_id;
       if (!accountRef || !personId) return;
 
+      // Resolve canonical seed groups for any pre-upgrade legacy step4_roles checkpoint
+      let groupsCatalog = availableGroups;
+      if (groupsCatalog.length === 0) {
+        const grpTracked = workspaceGuard.trackController();
+        try {
+          const grpResp = await fetch("/api/admin/access/groups?include_inactive=false", {
+            method: "GET",
+            cache: "no-store",
+            signal: grpTracked.controller.signal,
+            headers: { Accept: "application/json" },
+          });
+          if (!mountedRef.current || !workspaceGuard.isActive(callerEpoch, grpTracked.controller)) return;
+          if (grpResp.status === 401 || grpResp.status === 403) {
+            handleSessionLossInside("Phiên đăng nhập không còn hợp lệ.", grpResp.status === 401);
+            return;
+          }
+          if (grpResp.status === 200) {
+            const grpJson = await grpResp.json().catch(() => null);
+            const projected = projectPermissionGroupsEnvelope(grpJson);
+            if (projected) {
+              groupsCatalog = projected.groups.filter((g) => g.active);
+              setAvailableGroups(groupsCatalog);
+            }
+          }
+        } catch {
+          // Handled below if matching group is unavailable.
+        } finally {
+          grpTracked.release();
+        }
+      }
+
       for (let idx = 0; idx < currentCp.step4_roles.length; idx += 1) {
         const roleEntry = currentCp.step4_roles[idx];
         if (!roleEntry || roleEntry.status === "COMMITTED") continue;
 
-        // Already-dispatched UNCERTAIN/IN_FLIGHT roles MUST replay their exact frozen
+        // Already-dispatched UNCERTAIN/IN_FLIGHT items MUST replay their exact frozen
         // payload_snapshot (expected_version + idempotency_key) without masking OCC.
         const isDispatchedReplay =
           (roleEntry.status === "IN_FLIGHT" || roleEntry.status === "UNCERTAIN") &&
@@ -1116,13 +1174,28 @@ export function AccountProvisionAndLinkStepper({
         if (frozenExpectedVersion === null) {
           setStep4VersionConflict(true);
           setStep4PartialFailure(
-            "Chưa xác định được dữ liệu tài khoản hiện hành sau các vai trò đã cấp trước đó.",
+            "Chưa xác định được dữ liệu tài khoản hiện hành sau các nhóm quyền đã xếp trước đó.",
           );
           setFeedback({
             tone: "warning",
             title: "Cần tải lại dữ liệu tài khoản mới nhất trước khi tiếp tục",
             message:
-              "Vai trò trước đó đã được cấp nhưng chưa có dữ liệu tài khoản xác nhận mới nhất. Hãy bấm \"Tải lại dữ liệu tài khoản mới nhất\" để lấy trạng thái mới nhất từ máy chủ.",
+              "Nhóm quyền trước đó đã được lưu nhưng chưa có dữ liệu tài khoản xác nhận mới nhất. Hãy bấm \"Tải lại dữ liệu tài khoản mới nhất\" để lấy trạng thái mới nhất từ máy chủ.",
+          });
+          return;
+        }
+
+        const targetGroupCode = LEGACY_ROLE_TO_SEED_GROUP_CODE[roleEntry.role_code];
+        const matchedGroup = targetGroupCode
+          ? groupsCatalog.find((g) => g.code === targetGroupCode) ?? null
+          : null;
+        if (!matchedGroup) {
+          const msg = "Không tìm thấy nhóm quyền tương ứng để tiếp tục bản lưu tạm trước nâng cấp.";
+          setStep4PartialFailure(msg);
+          setFeedback({
+            tone: "warning",
+            title: "Hồ sơ & tài khoản đã liên kết — cần xếp nhóm quyền trên hồ sơ",
+            message: `${msg} Bạn có thể bấm "Đóng & Mở hồ sơ" để xếp nhóm quyền trực tiếp trên trang chi tiết người dùng.`,
           });
           return;
         }
@@ -1131,27 +1204,11 @@ export function AccountProvisionAndLinkStepper({
           roleEntry.payload_snapshot?.reason ??
           (currentCp.step1_person.payload_snapshot?.reason ||
             currentCp.step3_link.payload_snapshot?.reason ||
-            "Cấp vai trò khởi tạo khi mở tài khoản nhân viên");
+            "Xếp nhóm quyền khởi tạo khi mở tài khoản nhân viên");
         const safeReason =
           frozenReason.trim().length >= 3
             ? frozenReason.trim().slice(0, 500)
-            : "Cấp vai trò khởi tạo cho nhân viên";
-
-        const built = buildAssignGlobalRoleRequest({
-          roleCode: roleEntry.role_code,
-          expectedVersion: frozenExpectedVersion,
-          reason: safeReason,
-          idempotencyKey: roleEntry.idempotency_key,
-        });
-        if (!built.ok) {
-          setStep4PartialFailure(built.message);
-          setFeedback({
-            tone: "warning",
-            title: "Hồ sơ & tài khoản đã liên kết, nhưng chưa cấp xong vai trò",
-            message: built.message,
-          });
-          return;
-        }
+            : "Xếp nhóm quyền khởi tạo cho nhân viên";
 
         const nextRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
           i === idx
@@ -1159,9 +1216,9 @@ export function AccountProvisionAndLinkStepper({
                 ...r,
                 status: "IN_FLIGHT",
                 payload_snapshot: {
-                  role_code: built.body.role_code,
-                  expected_version: built.body.expected_version,
-                  reason: built.body.reason,
+                  role_code: r.role_code,
+                  expected_version: frozenExpectedVersion,
+                  reason: safeReason,
                 },
               }
             : r,
@@ -1177,7 +1234,7 @@ export function AccountProvisionAndLinkStepper({
         const tracked = workspaceGuard.trackController();
         try {
           const response = await fetch(
-            `/api/admin/access/accounts/${encodeURIComponent(accountRef)}/roles`,
+            `/api/admin/access/accounts/${encodeURIComponent(accountRef)}/groups`,
             {
               method: "POST",
               cache: "no-store",
@@ -1185,9 +1242,13 @@ export function AccountProvisionAndLinkStepper({
               headers: {
                 Accept: "application/json",
                 "Content-Type": "application/json",
-                "Idempotency-Key": built.idempotencyKey,
+                "Idempotency-Key": roleEntry.idempotency_key,
               },
-              body: JSON.stringify(built.body),
+              body: JSON.stringify({
+                group_id: matchedGroup.group_id,
+                expected_account_version: frozenExpectedVersion,
+                reason: safeReason,
+              }),
             },
           );
           if (
@@ -1205,7 +1266,10 @@ export function AccountProvisionAndLinkStepper({
           ) {
             return;
           }
-          const outcome = classifyRoleMutationResponse(response.status, rawJson, accountRef);
+          const outcome = classifyPermissionGroupMutationResponse<{
+            account_version?: number;
+            membership?: { account_version?: number };
+          }>(response.status, rawJson);
 
           if (outcome.kind === "session-lost") {
             handleSessionLossInside(outcome.message, outcome.unauthenticated);
@@ -1223,15 +1287,14 @@ export function AccountProvisionAndLinkStepper({
             });
             setFeedback({
               tone: "warning",
-              title: `Chưa xác nhận kết quả cấp vai trò ${roleEntry.role_code}`,
+              title: `Chưa xác nhận kết quả thêm vào nhóm "${matchedGroup.name}"`,
               message:
-                "Hồ sơ nhân viên và tài khoản đã liên kết thành công. Khóa yêu cầu và phiên bản gốc của bước cấp vai trò vẫn được giữ nguyên để thử gửi lại an toàn.",
+                "Hồ sơ nhân viên và tài khoản đã liên kết thành công. Yêu cầu đang chờ vẫn được giữ nguyên để thử gửi lại an toàn mà không bị trùng.",
             });
             return;
           }
 
-          if (outcome.kind === "version-conflict") {
-            // Deterministic 409 OCC: transition rejected role back to IDLE and require explicit authoritative reload.
+          if (outcome.kind === "conflict" && outcome.code === "VERSION_CONFLICT") {
             const settledRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
               i === idx
                 ? {
@@ -1251,14 +1314,13 @@ export function AccountProvisionAndLinkStepper({
             setStep4PartialFailure(outcome.message);
             setFeedback({
               tone: "warning",
-              title: `Dữ liệu tài khoản vừa thay đổi khi cập nhật nhóm quyền (${roleEntry.role_code})`,
-              message: `${outcome.message} Bấm "Tải lại dữ liệu tài khoản mới nhất" để đối chiếu và tiếp tục, hoặc đóng hộp thoại để mở hồ sơ người dùng.`,
+              title: `Dữ liệu tài khoản vừa thay đổi khi thêm vào nhóm "${matchedGroup.name}"`,
+              message: `${outcome.message} Bấm "Tải lại dữ liệu tài khoản mới nhất" để đối chiếu và tiếp tục, hoặc bấm "Đóng & Mở hồ sơ" để xếp nhóm sau.`,
             });
             return;
           }
 
           if (outcome.kind !== "applied") {
-            // Transition deterministic failure out of IN_FLIGHT -> IDLE (and clear stale payload_snapshot so retry cannot replay stale expected_version).
             const settledRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
               i === idx ? { ...r, status: "IDLE", payload_snapshot: null } : r,
             );
@@ -1270,21 +1332,24 @@ export function AccountProvisionAndLinkStepper({
             setStep4PartialFailure(outcome.message);
             setFeedback({
               tone: "warning",
-              title: `Hồ sơ & tài khoản đã liên kết — chưa cấp được vai trò ${roleEntry.role_code}`,
-              message: `${outcome.message} Bạn có thể đóng hộp thoại và mở Hồ sơ nhân viên để cấp vai trò sau.`,
+              title: `Hồ sơ & tài khoản đã liên kết — chưa thêm được vào nhóm "${matchedGroup.name}"`,
+              message: `${outcome.message} Bạn có thể bấm "Đóng & Mở hồ sơ" để xếp nhóm quyền sau.`,
             });
             return;
           }
 
-          // Persist the authoritative server-returned account_version alongside COMMITTED (PR27-R2/P2).
-          currentAccountVersion = outcome.result.account_version;
-          setVerifiedStep4AccountVersion(outcome.result.account_version);
+          const resolvedVersion =
+            outcome.data?.membership?.account_version ?? outcome.data?.account_version;
+          const nextVersion =
+            typeof resolvedVersion === "number" && resolvedVersion >= 1 ? resolvedVersion : null;
+          currentAccountVersion = nextVersion;
+          if (nextVersion !== null) setVerifiedStep4AccountVersion(nextVersion);
           const committedRoles: ProvisionStep4Role[] = currentCp.step4_roles.map((r, i) =>
             i === idx
               ? {
                   ...r,
                   status: "COMMITTED",
-                  committed_account_version: outcome.result.account_version,
+                  committed_account_version: nextVersion,
                 }
               : r,
           );
@@ -1308,9 +1373,9 @@ export function AccountProvisionAndLinkStepper({
           });
           setFeedback({
             tone: "warning",
-            title: `Mất phản hồi khi cấp vai trò ${roleEntry.role_code}`,
+            title: `Mất kết nối khi thêm vào nhóm "${matchedGroup.name}"`,
             message:
-              "Hồ sơ nhân viên và tài khoản đã liên kết thành công. Hãy bấm thử gửi lại cùng khóa yêu cầu để xác nhận bước cấp vai trò.",
+              "Hồ sơ nhân viên và tài khoản đã liên kết thành công. Bấm tiếp tục để đồng bộ nhóm quyền an toàn mà không bị trùng.",
           });
           return;
         } finally {
@@ -1318,13 +1383,22 @@ export function AccountProvisionAndLinkStepper({
         }
       }
 
+      if ((currentCp.step4_groups ?? []).some((g) => g.status !== "COMMITTED")) {
+        await runStep4Groups(currentCp, currentAccountVersion, callerEpoch);
+        return;
+      }
+      if (currentCp.step5_recruiter?.enabled && currentCp.step5_recruiter.status !== "COMMITTED") {
+        await runStep5Recruiter(currentCp, callerEpoch);
+        return;
+      }
+
       finishAndClearCheckpoint(
         { personId, accountRef, openedLogin: true },
-        "Đã hoàn tất mở tài khoản, liên kết hồ sơ nhân viên và cấp vai trò.",
+        "Đã hoàn tất mở tài khoản, liên kết hồ sơ nhân viên và xếp nhóm quyền.",
         currentCp.client_flow_id,
       );
     },
-    [finishAndClearCheckpoint, handleSessionLossInside, persistCpOrReport, workspaceGuard],
+    [availableGroups, finishAndClearCheckpoint, handleSessionLossInside, persistCpOrReport, runStep4Groups, runStep5Recruiter, workspaceGuard],
   );
 
   // =========================================================================
@@ -1475,7 +1549,7 @@ export function AccountProvisionAndLinkStepper({
           setMismatchConfirmRequired(true);
           setFeedback({
             tone: "warning",
-            title: "Cần xác nhận hồ sơ tính công tuyển dụng (RECRUITER_LINK_MISMATCH)",
+            title: "Cần xác nhận hồ sơ tính công tuyển dụng",
             message: outcome.message,
           });
           return;
@@ -1737,11 +1811,11 @@ export function AccountProvisionAndLinkStepper({
           setFeedback({
             tone: isTerminalFail ? "error" : "warning",
             title: isTerminalFail
-              ? `Tạo tài khoản chưa thành công (${outcome.state})`
-              : `Cần đối chiếu yêu cầu tạo tài khoản (${outcome.state})`,
+              ? "Mở tài khoản đăng nhập chưa thành công"
+              : "Cần kiểm tra kết quả mở đăng nhập",
             message: isTerminalFail
-              ? `${outcome.message} Hồ sơ nhân viên ở Bước 1 đã được lưu an toàn — bạn có thể đổi tên đăng nhập khác (tạo khóa yêu cầu mới) hoặc đóng hộp thoại để mở hồ sơ nhân viên.`
-              : `${outcome.message} Mật khẩu đã được xóa khỏi bộ nhớ tạm. Bấm "Đối chiếu kết quả tạo tài khoản" — thao tác đối chiếu KHÔNG cần nhập lại mật khẩu và KHÔNG gọi lại hệ thống xác thực để tạo mới.`,
+              ? `${outcome.message} Hồ sơ nhân viên ở Bước 1 đã được lưu an toàn — bạn có thể đổi tên đăng nhập khác hoặc đóng hộp thoại để mở hồ sơ nhân viên.`
+              : `${outcome.message} Mật khẩu đã được xóa khỏi bộ nhớ tạm. Bấm "Kiểm tra lại kết quả mở đăng nhập" — thao tác kiểm tra không cần nhập lại mật khẩu và không tạo thêm tài khoản trùng.`,
           });
           return;
         }
@@ -2655,7 +2729,18 @@ export function AccountProvisionAndLinkStepper({
           },
         });
         setStep3VersionConflict(false);
-        if (syncedCp && !syncedCp.step4_roles.some((r) => r.status !== "COMMITTED")) {
+        const hasPendingRoles = Boolean(
+          syncedCp?.step4_roles.some((r) => r.status !== "COMMITTED"),
+        );
+        const hasPendingGroups = Boolean(
+          (syncedCp?.step4_groups ?? []).some((g) => g.status !== "COMMITTED"),
+        );
+        const hasPendingRecruiter = Boolean(
+          syncedCp?.step5_recruiter?.enabled &&
+            syncedCp.step5_recruiter.status !== "COMMITTED" &&
+            syncedCp.step5_recruiter.status !== "SKIPPED",
+        );
+        if (syncedCp && !hasPendingRoles && !hasPendingGroups && !hasPendingRecruiter) {
           finishAndClearCheckpoint(
             { personId, accountRef, openedLogin: true },
             "Đã xác minh trên máy chủ: tài khoản và hồ sơ nhân viên đã được liên kết.",
@@ -2667,7 +2752,7 @@ export function AccountProvisionAndLinkStepper({
         setFeedback({
           tone: "info",
           title: "Đã xác minh liên kết trên máy chủ",
-          message: "Bạn có thể tiếp tục cấp các vai trò còn lại.",
+          message: "Bạn có thể tiếp tục hoàn tất các bước nhóm quyền và tuyển dụng còn lại.",
         });
         return;
       }
@@ -2832,36 +2917,54 @@ export function AccountProvisionAndLinkStepper({
         checkpoint.step2_account.intent_id === null)) &&
     checkpoint.step2_account.intent_id === null;
 
-  const isUncertainState =
+  const isCoreStepUncertain =
     checkpoint !== null &&
     (checkpoint.step1_person.status === "IN_FLIGHT" ||
       checkpoint.step1_person.status === "UNCERTAIN" ||
       step2PreIntentUncertain ||
       step2HasReconcilableIntent ||
       checkpoint.step3_link.status === "IN_FLIGHT" ||
-      checkpoint.step3_link.status === "UNCERTAIN" ||
-      checkpoint.step4_roles.some((r) => r.status === "IN_FLIGHT" || r.status === "UNCERTAIN") ||
+      checkpoint.step3_link.status === "UNCERTAIN");
+
+  const isStep4Or5Uncertain =
+    checkpoint !== null &&
+    (checkpoint.step4_roles.some((r) => r.status === "IN_FLIGHT" || r.status === "UNCERTAIN") ||
       (checkpoint.step4_groups ?? []).some(
         (g) => g.status === "IN_FLIGHT" || g.status === "UNCERTAIN",
       ) ||
       checkpoint.step5_recruiter?.status === "IN_FLIGHT" ||
       checkpoint.step5_recruiter?.status === "UNCERTAIN");
 
+  const isUncertainState = isCoreStepUncertain || isStep4Or5Uncertain;
+
   const needsPasswordReentryForFrozenStep2 =
     step2NeedsPasswordReentry && step2PreIntentUncertain;
 
+  // Core steps (1-3) keep PR27-R1/R2 close lock during unresolved UNCERTAIN/IN_FLIGHT;
+  // Step 4/5 UNCERTAIN allows temporary close WITHOUT wiping sessionStorage checkpoint (UX-04).
   const isCloseDisabled =
     busy ||
     verifyingResume ||
-    (isUncertainState &&
+    (isCoreStepUncertain &&
       !needsPasswordReentryForFrozenStep2 &&
       !step3HardBlocked &&
       !step3VersionConflict &&
       !mismatchConfirmRequired &&
-      !step4PartialFailure &&
-      !step4VersionConflict &&
-      !step5PartialFailure &&
       !resumeServerError);
+
+  const committedPersonId = checkpoint?.step1_person.committed_person_id ?? null;
+  const committedAccountRef = checkpoint?.step2_account.committed_account_ref ?? null;
+
+  // Only allow "Đóng & Mở hồ sơ" (which clears checkpoint AND navigates to profile)
+  // when NO step is IN_FLIGHT/UNCERTAIN and a deterministic Step 4/5 error settled to IDLE.
+  const canClearAndOpenProfile =
+    !isUncertainState &&
+    Boolean(step4PartialFailure || step5PartialFailure) &&
+    committedPersonId !== null &&
+    checkpoint !== null;
+
+  const showStep5Progress =
+    wantLogin && Boolean(activateRecruiterInline || checkpoint?.step5_recruiter?.enabled);
 
   const step1Locked =
     busy ||
@@ -2882,8 +2985,6 @@ export function AccountProvisionAndLinkStepper({
           step2PreIntentUncertain ||
           (checkpoint.step2_account.status === "IDLE" &&
             checkpoint.step2_account.intent_id === null))));
-
-  const committedPersonId = checkpoint?.step1_person.committed_person_id ?? null;
 
   const hasSelectedRecruitmentGroup = selectedGroupIds.some((gid) => {
     const grp = availableGroups.find((g) => g.group_id === gid);
@@ -2962,28 +3063,71 @@ export function AccountProvisionAndLinkStepper({
     return { label: `${totalSelected} nhóm`, tone: "neutral" as BadgeTone };
   })();
 
+  const renderFeedbackAlert = () =>
+    feedback ? (
+      <Alert
+        tone={feedback.tone === "success" ? "info" : feedback.tone}
+        role={feedback.tone === "error" || feedback.tone === "warning" ? "alert" : "status"}
+        title={feedback.title}
+      >
+        <p>{feedback.message}</p>
+        {step3VersionConflict ? (
+          <div className="mt-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              onClick={() => void handleStep3ReloadVersions()}
+            >
+              Tải lại dữ liệu mới nhất từ máy chủ
+            </Button>
+          </div>
+        ) : null}
+        {step4VersionConflict ? (
+          <div className="mt-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              onClick={() => void handleStep4ReloadAccountVersion()}
+            >
+              Tải lại dữ liệu tài khoản mới nhất
+            </Button>
+          </div>
+        ) : null}
+      </Alert>
+    ) : null;
+
+  const showFeedbackAtTop = Boolean(
+    feedback &&
+      (isUncertainState ||
+        step4PartialFailure ||
+        step5PartialFailure ||
+        step3VersionConflict ||
+        step4VersionConflict ||
+        resumeServerError ||
+        mismatchConfirmRequired),
+  );
+
   return (
     <FormDialog
       open={open && mode !== null}
       onOpenChange={(nextOpen) => {
         if (!nextOpen && !isCloseDisabled) {
+          // Temporary close via Esc/backdrop NEVER wipes checkpoint (preserves recovery banner & frozen keys).
           clearRamPasswords();
-          if ((step4PartialFailure || step5PartialFailure) && committedPersonId && checkpoint) {
-            clearVerifiedCheckpoint({
-              expectedOrigin: resolveOrigin(),
-              expectedActorScope: checkpointActorScope,
-              expectedClientFlowId: checkpoint.client_flow_id,
-              storage: resolveStorage(),
-            });
-            onCheckpointChangedRef.current?.();
-          }
+          onCheckpointChangedRef.current?.();
           onClose();
         }
       }}
       title={dialogTitle}
       description={
         wantLogin
-          ? "Thực hiện lần lượt: Thông tin người dùng → Tài khoản đăng nhập → Gắn hồ sơ → Nhóm quyền. Các bước đã lưu trên máy chủ sẽ không bị tạo lại."
+          ? showStep5Progress
+            ? "Thực hiện lần lượt: Thông tin người dùng → Tài khoản đăng nhập → Gắn hồ sơ → Nhóm quyền → Tuyển dụng. Các bước đã lưu trên máy chủ sẽ không bị tạo lại."
+            : "Thực hiện lần lượt: Thông tin người dùng → Tài khoản đăng nhập → Gắn hồ sơ → Nhóm quyền. Các bước đã lưu trên máy chủ sẽ không bị tạo lại."
           : "Tạo hồ sơ nhân viên (chưa mở đăng nhập). Bạn có thể mở đăng nhập bất cứ lúc nào sau đó."
       }
       closeDisabled={isCloseDisabled}
@@ -2995,7 +3139,9 @@ export function AccountProvisionAndLinkStepper({
         <ol
           aria-label="Tiến trình thực hiện"
           data-testid="provision-stepper-progress"
-          className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-surface-muted/40 p-3 text-xs sm:grid-cols-4"
+          className={`grid grid-cols-2 gap-2 rounded-lg border border-border bg-surface-muted/40 p-3 text-xs ${
+            showStep5Progress ? "sm:grid-cols-5" : "sm:grid-cols-4"
+          }`}
         >
           <li className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2">
             <span className="font-medium text-foreground">1. Hồ sơ</span>
@@ -3021,7 +3167,25 @@ export function AccountProvisionAndLinkStepper({
             <span className="font-medium text-foreground">4. Nhóm quyền</span>
             <StatusBadge tone={step4Badge.tone}>{step4Badge.label}</StatusBadge>
           </li>
+          {showStep5Progress ? (
+            <li
+              className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2"
+              aria-current={
+                checkpoint?.step5_recruiter?.status === "IN_FLIGHT" ||
+                checkpoint?.step5_recruiter?.status === "UNCERTAIN"
+                  ? "step"
+                  : undefined
+              }
+            >
+              <span className="font-medium text-foreground">5. Tuyển dụng</span>
+              <StatusBadge tone={stepBadge(checkpoint?.step5_recruiter?.status ?? "IDLE").tone}>
+                {stepBadge(checkpoint?.step5_recruiter?.status ?? "IDLE").label}
+              </StatusBadge>
+            </li>
+          ) : null}
         </ol>
+
+        {showFeedbackAtTop ? renderFeedbackAlert() : null}
 
         {verifyingResume ? (
           <p role="status" className="text-sm text-muted">
@@ -3341,10 +3505,15 @@ export function AccountProvisionAndLinkStepper({
                             <option value="">Chọn sau</option>
                             {availableTeams.map((team) => (
                               <option key={team.team_id} value={team.team_id}>
-                                {team.name} {team.code ? `(${team.code})` : ""}
+                                {team.display_name} ({team.code})
                               </option>
                             ))}
                           </select>
+                          {inlineTeamsError ? (
+                            <p className="text-[11px] text-warning" role="status">
+                              {inlineTeamsError}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     ) : null}
@@ -3370,45 +3539,18 @@ export function AccountProvisionAndLinkStepper({
           </div>
         ) : null}
 
-        {feedback ? (
-          <Alert
-            tone={feedback.tone === "success" ? "info" : feedback.tone}
-            role={feedback.tone === "error" ? "alert" : "status"}
-            title={feedback.title}
-          >
-            <p>{feedback.message}</p>
-            {step3VersionConflict ? (
-              <div className="mt-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void handleStep3ReloadVersions()}
-                >
-                  Tải lại dữ liệu mới nhất từ máy chủ
-                </Button>
-              </div>
-            ) : null}
-            {step4VersionConflict ? (
-              <div className="mt-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void handleStep4ReloadAccountVersion()}
-                >
-                  Tải lại dữ liệu tài khoản mới nhất
-                </Button>
-              </div>
-            ) : null}
-          </Alert>
-        ) : null}
+        {!showFeedbackAtTop ? renderFeedbackAlert() : null}
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
           <div>
-            {checkpoint && (needsPasswordReentryForFrozenStep2 || step2AllowNewLoginEdit || step3HardBlocked || step4PartialFailure || step5PartialFailure || resumeServerError) ? (
+            {checkpoint &&
+            (needsPasswordReentryForFrozenStep2 ||
+              step2AllowNewLoginEdit ||
+              step3HardBlocked ||
+              step4PartialFailure ||
+              step5PartialFailure ||
+              isStep4Or5Uncertain ||
+              resumeServerError) ? (
               <Button
                 type="button"
                 variant="danger-outline"
@@ -3421,33 +3563,45 @@ export function AccountProvisionAndLinkStepper({
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="secondary"
-              size="md"
-              disabled={isCloseDisabled}
-              onClick={() => {
-                if (!isCloseDisabled) {
+            {canClearAndOpenProfile && committedPersonId && checkpoint && !isCloseDisabled ? (
+              <Link
+                href={`/admin/organization/persons/${encodeURIComponent(committedPersonId)}`}
+                className={buttonClasses({ variant: "secondary", size: "md" })}
+                onClick={() => {
                   clearRamPasswords();
-                  if ((step4PartialFailure || step5PartialFailure) && committedPersonId && checkpoint) {
-                    clearVerifiedCheckpoint({
-                      expectedOrigin: resolveOrigin(),
-                      expectedActorScope: checkpointActorScope,
-                      expectedClientFlowId: checkpoint.client_flow_id,
-                      storage: resolveStorage(),
-                    });
-                    onCheckpointChangedRef.current?.();
-                  }
+                  clearVerifiedCheckpoint({
+                    expectedOrigin: resolveOrigin(),
+                    expectedActorScope: checkpointActorScope,
+                    expectedClientFlowId: checkpoint.client_flow_id,
+                    storage: resolveStorage(),
+                  });
+                  onCheckpointChangedRef.current?.();
+                  onCompletedRef.current({
+                    personId: committedPersonId,
+                    accountRef: committedAccountRef,
+                    openedLogin: true,
+                  });
+                }}
+              >
+                Đóng &amp; Mở hồ sơ
+              </Link>
+            ) : (
+              <Button
+                type="button"
+                variant="secondary"
+                size="md"
+                disabled={isCloseDisabled}
+                onClick={() => {
+                  if (isCloseDisabled) return;
+                  clearRamPasswords();
+                  // Temporary close: NEVER wipe sessionStorage recovery checkpoint when steps remain UNCERTAIN/pending!
+                  onCheckpointChangedRef.current?.();
                   onClose();
-                }
-              }}
-            >
-              {(step4PartialFailure || step5PartialFailure) && committedPersonId
-                ? "Đóng & Mở hồ sơ"
-                : checkpoint
-                  ? "Đóng tạm"
-                  : "Hủy"}
-            </Button>
+                }}
+              >
+                {checkpoint ? "Đóng tạm" : "Hủy"}
+              </Button>
+            )}
             {!resumeServerError && !step3HardBlocked && !step3VersionConflict && !step4VersionConflict ? (
               <Button
                 type="submit"

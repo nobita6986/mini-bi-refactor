@@ -816,7 +816,7 @@ export function PersonDetailManager({
       setPendingIntent({
         ...intent,
         message:
-          "Mất kết nối trong lúc lưu thay đổi. Đã giữ nguyên dữ liệu và khóa idempotency; bạn có thể thử lại đúng yêu cầu hoặc tải lại để đối chiếu.",
+          "Mất kết nối trong lúc lưu thay đổi. Hệ thống đã giữ nguyên yêu cầu vừa gửi; bạn có thể thử lại đúng yêu cầu hoặc tải lại để đối chiếu.",
       });
     } finally {
       inFlightRef.current = false;
@@ -909,7 +909,7 @@ export function PersonDetailManager({
       if (outcome.kind === "unavailable") {
         clearRamResetPasswords();
         setFormError(
-          "Không nhận được xác nhận từ máy chủ khi đặt lại mật khẩu. Không tự gửi lại Auth lần hai; hãy kiểm tra thủ công hoặc mở thao tác mới sau khi xác minh.",
+          "Không nhận được xác nhận từ máy chủ khi đặt lại mật khẩu. Hệ thống không tự gửi lại để tránh ghi đè; hãy kiểm tra đăng nhập thực tế hoặc mở thao tác mới sau khi xác minh.",
         );
         setDialog((prev) =>
           prev?.kind === "reset-password" ? { ...prev, manualCheckLocked: true } : prev,
@@ -921,7 +921,7 @@ export function PersonDetailManager({
       if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       clearRamResetPasswords();
       setFormError(
-        "Mất kết nối trong lúc đặt lại mật khẩu. Đã xóa mật khẩu khỏi bộ nhớ và không tự gửi lại Auth; hãy kiểm tra đăng nhập thực tế trước khi thực hiện thao tác mới.",
+        "Mất kết nối trong lúc đặt lại mật khẩu. Hệ thống đã xóa mật khẩu vừa nhập và không tự gửi lại; hãy kiểm tra đăng nhập thực tế trước khi thực hiện thao tác mới.",
       );
       setDialog((prev) =>
         prev?.kind === "reset-password" ? { ...prev, manualCheckLocked: true } : prev,
@@ -997,7 +997,8 @@ export function PersonDetailManager({
           prev
             ? {
                 ...prev,
-                message: `Đã tải trạng thái hiện tại từ máy chủ (hồ sơ v${projected.person.version}). Khóa idempotency và phiên bản gốc vẫn được giữ nguyên — hãy bấm "Thử lại đúng yêu cầu" để xác nhận an toàn hoặc đóng nếu bạn đã xác minh thay đổi đã được áp dụng.`,
+                message:
+                  "Đã tải trạng thái hiện tại từ máy chủ. Yêu cầu đang chờ vẫn được giữ nguyên — hãy bấm \"Thử lại đúng yêu cầu\" để xác nhận an toàn hoặc đóng nếu bạn đã xác minh thay đổi đã được áp dụng.",
               }
             : null,
         );
@@ -1230,7 +1231,7 @@ export function PersonDetailManager({
   const dialogDescription = (() => {
     switch (dialog?.kind) {
       case "reset-password":
-        return "Mật khẩu mới chỉ lưu tạm trong RAM khi gửi và sẽ bị xóa ngay sau phản hồi.";
+        return "Mật khẩu mới chỉ được dùng để gửi lên máy chủ và sẽ bị xóa khỏi màn hình ngay sau khi hoàn tất.";
       case "toggle-login":
         return "Khóa/mở đăng nhập chỉ ảnh hưởng quyền truy cập hệ thống, tách biệt với trạng thái hồ sơ nhân sự.";
       case "activate-recruiter":
@@ -1399,10 +1400,10 @@ export function PersonDetailManager({
                   >
                     {person.active_account_link.enabled
                       ? "Đang mở đăng nhập"
-                      : "Đang khóa đăng nhập"}
+                      : "Đã khóa đăng nhập"}
                   </StatusBadge>
                 ) : (
-                  <StatusBadge tone="neutral">Chưa có tài khoản</StatusBadge>
+                  <StatusBadge tone="neutral">Chưa mở đăng nhập</StatusBadge>
                 )}
               </div>
             }
@@ -1414,8 +1415,8 @@ export function PersonDetailManager({
             }
           />
 
-          <StatusBanner tone="info" title="Trạng thái hồ sơ nhân sự độc lập với khóa tài khoản">
-            Chuyển trạng thái hồ sơ sang <strong>Ngừng hoạt động</strong> không tự khóa tài khoản
+          <StatusBanner tone="info" title="Trạng thái làm việc độc lập với khóa tài khoản">
+            Chuyển trạng thái hồ sơ sang <strong>Ngừng làm việc</strong> không tự khóa tài khoản
             đăng nhập liên kết. Nếu nhân sự nghỉ việc cần chặn đăng nhập hệ thống, hãy dùng nút{" "}
             <strong>Khóa đăng nhập</strong> ngay tại khối <strong>Tài khoản đăng nhập</strong> bên
             dưới.
@@ -1693,7 +1694,7 @@ export function PersonDetailManager({
                       >
                         {person.active_account_link.enabled
                           ? "Đang mở đăng nhập"
-                          : "Đang khóa đăng nhập"}
+                          : "Đã khóa đăng nhập"}
                       </StatusBadge>
                     </div>
                     <p className="text-xs text-muted">
@@ -1826,7 +1827,7 @@ export function PersonDetailManager({
           <Card>
             <CardHeader
               title="4. Nghiệp vụ Tuyển dụng"
-              description="Hồ sơ tính công tuyển dụng, phân Nhóm và phân công Dự án của nhân sự (nếu có)."
+              description="Hồ sơ tính công tuyển dụng, phân Tổ đội tuyển dụng và phân công Dự án của nhân sự (nếu có)."
             />
             {person.recruiter_id ? (
               <div className="space-y-4">
@@ -1872,7 +1873,7 @@ export function PersonDetailManager({
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-xs text-muted">Nhóm hiện tại</dt>
+                      <dt className="text-xs text-muted">Tổ đội tuyển dụng hiện tại</dt>
                       <dd className="mt-0.5 flex flex-wrap gap-1">
                         {recruiterState.personnel.team_names.length > 0 ? (
                           recruiterState.personnel.team_names.map((teamName) => (
@@ -1881,7 +1882,7 @@ export function PersonDetailManager({
                             </StatusBadge>
                           ))
                         ) : (
-                          <span className="text-xs text-muted">Chưa vào nhóm</span>
+                          <span className="text-xs text-muted">Chưa vào tổ đội</span>
                         )}
                       </dd>
                     </div>
@@ -1893,13 +1894,13 @@ export function PersonDetailManager({
                     href={`/admin/catalog/personnel?recruiter=${encodeURIComponent(person.recruiter_id)}`}
                     className={buttonClasses({ variant: "primary", size: "sm" })}
                   >
-                    Mở hồ sơ tính công &amp; phân Nhóm
+                    Mở hồ sơ tính công &amp; phân Tổ đội
                   </Link>
                   <Link
                     href="/admin/catalog/teams"
                     className={buttonClasses({ variant: "secondary", size: "sm" })}
                   >
-                    Mở quản lý Nhóm &amp; Trưởng nhóm
+                    Mở quản lý Tổ đội tuyển dụng &amp; Trưởng nhóm
                   </Link>
                   <Link
                     href="/direct-entry/projects"

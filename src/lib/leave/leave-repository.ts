@@ -369,18 +369,6 @@ export function createLeaveRepository(
             p_idempotency_key: input.idempotency_key,
             p_request_fingerprint: input.request_fingerprint,
           });
-        case "MANAGE_MODULE_GRANT":
-          return invoke("leave_management_manage_module_grant_admin", {
-            p_actor_auth_subject: input.auth_subject,
-            p_actor_app_user_id: input.app_user_id,
-            p_action: input.action,
-            p_target_app_user_id: input.target_app_user_id,
-            p_role_code: input.role_code,
-            p_expected_row_version: input.expected_row_version,
-            p_reason: input.reason,
-            p_idempotency_key: input.idempotency_key,
-            p_request_fingerprint: input.request_fingerprint,
-          });
       }
     },
 

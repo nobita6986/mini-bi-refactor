@@ -115,7 +115,10 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
     false,
     "Department approver mutation must not send stale adminData.as_of_date as valid_from",
   );
-  assert.ok(workspaceSource.includes("MANAGE_MODULE_GRANT"));
+  // PR #28 D4 / T0-R2 / UX-03: per-account MANAGE_MODULE_GRANT is retired in favor of Permission Groups (/admin/access/groups)
+  assert.equal(workspaceSource.includes("MANAGE_MODULE_GRANT"), false);
+  assert.ok(workspaceSource.includes('data-testid="leave-group-managed-roles-card"'));
+  assert.ok(workspaceSource.includes('href="/admin/access/groups"'));
   assert.ok(workspaceSource.includes("/api/leave/admin/opening-balances/preview"));
   assert.ok(workspaceSource.includes("/api/leave/admin/opening-balances/apply"));
   assert.ok(workspaceSource.includes('data-testid="leave-opening-preview-btn"'));

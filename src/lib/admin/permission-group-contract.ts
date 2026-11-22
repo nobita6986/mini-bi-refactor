@@ -325,7 +325,13 @@ export type AccountGroupMembershipItem = {
 };
 
 export type AccountResourceAssignmentItem = {
-  assignment_kind: "TEAM_LEADER" | "PROJECT_MANAGER" | "PROJECT_ACCOUNTANT" | "DEPARTMENT_HEAD";
+  assignment_kind:
+    | "TEAM_LEADER"
+    | "PROJECT_MANAGER"
+    | "PROJECT_ACCOUNTANT"
+    | "DEPARTMENT_HEAD"
+    | "LEAVE_DEPARTMENT_APPROVER"
+    | "WORK_REPORT_DELEGATE";
   resource_ref: string;
   resource_label: string;
 };
@@ -862,7 +868,14 @@ export function projectAccountGroupsResponse(raw: unknown): AccountGroupsRespons
       module_roles,
     });
   }
-  const validKinds = new Set(["TEAM_LEADER", "PROJECT_MANAGER", "PROJECT_ACCOUNTANT", "DEPARTMENT_HEAD"]);
+  const validKinds = new Set([
+    "TEAM_LEADER",
+    "PROJECT_MANAGER",
+    "PROJECT_ACCOUNTANT",
+    "DEPARTMENT_HEAD",
+    "LEAVE_DEPARTMENT_APPROVER",
+    "WORK_REPORT_DELEGATE",
+  ]);
   const resource_assignments: AccountResourceAssignmentItem[] = [];
   for (const r of raw.resource_assignments) {
     if (!isPlainObject(r)) return null;

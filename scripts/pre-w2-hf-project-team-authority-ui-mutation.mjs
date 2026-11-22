@@ -74,8 +74,8 @@ const probes = [
   {
     label: "admit catalog operator to mapping navigation",
     file: MAPPING_NAV,
-    mutate: (s) => replace(s, 'id: "project-team-scopes", label: "Mapping Dự án ↔ Nhóm", href: "/admin/catalog/project-team-scopes", visible: adminSecurityNavPredicate',
-      'id: "project-team-scopes", label: "Mapping Dự án ↔ Nhóm", href: "/admin/catalog/project-team-scopes", visible: adminAreaNavPredicate'),
+    mutate: (s) => replace(s, 'id: "project-team-scopes", label: "Phân công Dự án ↔ Tổ đội", href: "/admin/catalog/project-team-scopes", visible: adminSecurityNavPredicate',
+      'id: "project-team-scopes", label: "Phân công Dự án ↔ Tổ đội", href: "/admin/catalog/project-team-scopes", visible: adminAreaNavPredicate'),
     args: PAGE_NAV_LANE,
   },
   {

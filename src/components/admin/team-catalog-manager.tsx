@@ -483,9 +483,9 @@ export function TeamCatalogManager({
       <div className="space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-foreground">Danh mục nhóm</h1>
+            <h1 className="text-2xl font-semibold text-foreground">Danh mục Tổ đội tuyển dụng</h1>
             <p className="mt-1 max-w-2xl text-sm text-muted">
-              Quản lý tên hiển thị và trạng thái hoạt động của nhóm. Mã nhóm không thay đổi sau khi tạo.
+              Quản lý tên hiển thị và trạng thái hoạt động của tổ đội tuyển dụng. Mã tổ đội không thay đổi sau khi tạo.
             </p>
           </div>
           <Dialog.Trigger asChild>

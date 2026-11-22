@@ -532,8 +532,9 @@ export function AccountGroupsSection({
             </h3>
             {readyData.memberships.length === 0 ? (
               <p className="rounded-lg border border-dashed border-border px-4 py-4 text-sm text-muted">
-                Chưa tham gia nhóm quyền nào (sử dụng các tính năng cơ bản của nhân viên như chấm
-                công, nghỉ phép và báo cáo được giao).
+                {readyData.resource_assignments.length > 0
+                  ? "Chưa tham gia nhóm quyền nào. Quyền hiện tại chỉ đến từ các phân công nghiệp vụ bên dưới và các tính năng cơ bản của nhân viên."
+                  : "Chưa tham gia nhóm quyền nào (chỉ sử dụng các tính năng cơ bản của nhân viên như chấm công, nghỉ phép và báo cáo được giao)."}
               </p>
             ) : (
               <div className="space-y-2.5">

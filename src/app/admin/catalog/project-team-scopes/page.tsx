@@ -8,7 +8,7 @@ import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "Mapping Dự án ↔ Nhóm — Hệ thống báo cáo HRP" };
+export const metadata = { title: "Phân công Dự án ↔ Tổ đội — Hệ thống báo cáo HRP" };
 
 export default async function ProjectTeamScopesPage() {
   const actor = await resolveActorForRequest().catch(() => null);

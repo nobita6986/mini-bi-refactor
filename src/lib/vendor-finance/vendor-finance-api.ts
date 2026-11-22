@@ -16,11 +16,9 @@ import {
 import {
   computeApplyOpeningBatchFingerprint,
   computeApplySharedAdvanceOffsetFingerprint,
-  computeAssignGlobalRoleFingerprint,
   computeAssignProjectAccountantFingerprint,
   computeClassifySubLedgerFingerprint,
   computeCreateReconciliationFingerprint,
-  computeEndGlobalRoleFingerprint,
   computeEndProjectAccountantFingerprint,
   computeFundSharedAdvanceFingerprint,
   computeRecordEntryFingerprint,
@@ -31,17 +29,14 @@ import {
   computeReverseSharedAdvanceMovementFingerprint,
   parseApplyOpeningBatchBody,
   parseApplySharedAdvanceOffsetBody,
-  parseAssignGlobalRoleBody,
   parseAssignProjectAccountantBody,
   parseClassifyVendorSubLedgerBody,
   parseCreateVendorReconciliationBody,
-  parseEndGlobalRoleBody,
   parseEndProjectAccountantBody,
   parseExportVendorFinanceVendorsQuery,
   parseFinalizeVendorFinanceEvidenceBody,
   parseFundSharedAdvanceBody,
   parseGetVendorFinanceVendorDetailQuery,
-  parseListGlobalRolesAdminQuery,
   parseListProjectAccountantsAdminQuery,
   parseListSharedAdvanceMovementsQuery,
   parseListVendorFinanceEntriesQuery,
@@ -1181,165 +1176,6 @@ export async function handlePostEndProjectAccountantAdmin(
     auth_subject: actor.auth_subject,
     app_user_id: actor.app_user_id,
     assignment_id: parsedAssignmentId.id,
-    expected_version: parsedBody.value.expected_version,
-    valid_to: parsedBody.value.valid_to,
-    reason: parsedBody.value.reason,
-    idempotency_key: parsedBody.value.idempotency_key,
-    request_fingerprint: fingerprint,
-  });
-  if (!saved.ok) return vfinError(saved.code);
-
-  return vfinOk(saved.data, 200);
-}
-
-export async function handleGetGlobalRolesAdmin(
-  request: Request,
-  enabledFlag: string | undefined,
-  dependencies: VendorFinanceApiDependencies,
-): Promise<Response> {
-  const gate = directEntryFeatureGate(enabledFlag);
-  if (gate) return gate;
-
-  if (hasDisallowedAuthorityHeaders(request)) {
-    return vfinError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
-  }
-
-  const url = parseRequestUrl(request);
-  if (!url) return vfinError("VENDOR_FINANCE_QUERY_INVALID");
-
-  const actor = await resolveVendorFinanceAuthority(dependencies, "admin");
-  if (!actor.ok) return actor.response;
-
-  const query = parseListGlobalRolesAdminQuery(url);
-  if (!query.ok) return vfinError(query.code);
-
-  const result = await dependencies.repository.listGlobalRolesAdmin({
-    auth_subject: actor.auth_subject,
-    app_user_id: actor.app_user_id,
-    search: query.value.search,
-    include_history: query.value.include_history,
-    page: query.value.page,
-    page_size: query.value.page_size,
-  });
-  if (!result.ok) return vfinError(result.code);
-
-  return vfinOk(result.data, 200);
-}
-
-export async function handlePostAssignGlobalRoleAdmin(
-  request: Request,
-  enabledFlag: string | undefined,
-  dependencies: VendorFinanceApiDependencies,
-): Promise<Response> {
-  const gate = directEntryFeatureGate(enabledFlag);
-  if (gate) return gate;
-
-  if (!isSameOriginAuthRequest(request)) {
-    return vfinError("CSRF_ORIGIN_DENIED");
-  }
-
-  if (hasDisallowedAuthorityHeaders(request)) {
-    return vfinError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
-  }
-
-  const url = parseRequestUrl(request);
-  if (!url || !parseNoQueryParams(url).ok) {
-    return vfinError("VENDOR_FINANCE_QUERY_INVALID");
-  }
-
-  const actor = await resolveVendorFinanceAuthority(dependencies, "admin");
-  if (!actor.ok) return actor.response;
-
-  const boundedBody = await readBoundedJsonBody(
-    request,
-    MAX_VENDOR_FINANCE_MUTATION_JSON_BYTES,
-  );
-  if (!boundedBody.ok) return vfinError(boundedBody.code);
-
-  const parsedBody = parseAssignGlobalRoleBody(
-    boundedBody.value,
-    request.headers.get("idempotency-key"),
-  );
-  if (!parsedBody.ok) return vfinError(parsedBody.code);
-
-  const fingerprint = computeAssignGlobalRoleFingerprint({
-    account_ref: parsedBody.value.account_ref,
-    role_code: parsedBody.value.role_code,
-    valid_from: parsedBody.value.valid_from,
-    expected_version: parsedBody.value.expected_version,
-    reason: parsedBody.value.reason,
-  });
-
-  const saved = await dependencies.repository.assignGlobalRoleAdmin({
-    auth_subject: actor.auth_subject,
-    app_user_id: actor.app_user_id,
-    account_ref: parsedBody.value.account_ref,
-    role_code: parsedBody.value.role_code,
-    expected_version: parsedBody.value.expected_version,
-    valid_from: parsedBody.value.valid_from,
-    reason: parsedBody.value.reason,
-    idempotency_key: parsedBody.value.idempotency_key,
-    request_fingerprint: fingerprint,
-  });
-  if (!saved.ok) return vfinError(saved.code);
-
-  return vfinOk(saved.data, saved.data.replayed ? 200 : 201);
-}
-
-export async function handlePostEndGlobalRoleAdmin(
-  request: Request,
-  roleGrantId: string,
-  enabledFlag: string | undefined,
-  dependencies: VendorFinanceApiDependencies,
-): Promise<Response> {
-  const gate = directEntryFeatureGate(enabledFlag);
-  if (gate) return gate;
-
-  if (!isSameOriginAuthRequest(request)) {
-    return vfinError("CSRF_ORIGIN_DENIED");
-  }
-
-  if (hasDisallowedAuthorityHeaders(request)) {
-    return vfinError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
-  }
-
-  const url = parseRequestUrl(request);
-  if (!url || !parseNoQueryParams(url).ok) {
-    return vfinError("VENDOR_FINANCE_QUERY_INVALID");
-  }
-
-  const actor = await resolveVendorFinanceAuthority(dependencies, "admin");
-  if (!actor.ok) return actor.response;
-
-  const parsedRoleGrantId = parseUuidParam(
-    roleGrantId,
-    "VENDOR_FINANCE_GLOBAL_ROLE_INVALID",
-  );
-  if (!parsedRoleGrantId.ok) return vfinError(parsedRoleGrantId.code);
-
-  const boundedBody = await readBoundedJsonBody(
-    request,
-    MAX_VENDOR_FINANCE_MUTATION_JSON_BYTES,
-  );
-  if (!boundedBody.ok) return vfinError(boundedBody.code);
-
-  const parsedBody = parseEndGlobalRoleBody(
-    boundedBody.value,
-    request.headers.get("idempotency-key"),
-  );
-  if (!parsedBody.ok) return vfinError(parsedBody.code);
-
-  const fingerprint = computeEndGlobalRoleFingerprint({
-    role_grant_id: parsedRoleGrantId.id,
-    expected_version: parsedBody.value.expected_version,
-    valid_to: parsedBody.value.valid_to,
-    reason: parsedBody.value.reason,
-  });
-
-  const saved = await dependencies.repository.endGlobalRoleAdmin({
-    auth_subject: actor.auth_subject,
-    app_user_id: actor.app_user_id,
-    role_grant_id: parsedRoleGrantId.id,
     expected_version: parsedBody.value.expected_version,
     valid_to: parsedBody.value.valid_to,
     reason: parsedBody.value.reason,

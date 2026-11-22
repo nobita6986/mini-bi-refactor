@@ -324,16 +324,6 @@ export type PatchAdminConfigInput =
       reason: string | null;
       idempotency_key: string;
       request_fingerprint: string;
-    }
-  | {
-      operation: "MANAGE_MODULE_GRANT";
-      action: LeaveModuleGrantAction;
-      target_app_user_id: string;
-      role_code: LeaveModuleGrantRole;
-      expected_row_version: number;
-      reason: string | null;
-      idempotency_key: string;
-      request_fingerprint: string;
     };
 
 export type OpeningBatchRowInput = {
@@ -1077,46 +1067,6 @@ export function parsePatchAdminConfigBody(
         unit_kind: unitKind as LeaveDepartmentApproverUnitKind,
         approver_app_user_id: approverAppUserId,
         valid_from: validFrom,
-        expected_row_version: expectedRowVersion,
-        reason: reason.reason,
-        idempotency_key: idem.key,
-        request_fingerprint,
-      },
-    };
-  }
-
-  if (operation === "MANAGE_MODULE_GRANT") {
-    const action =
-      typeof body.action === "string" ? body.action.trim().toUpperCase() : "";
-    const roleCode =
-      typeof body.role_code === "string"
-        ? body.role_code.trim().toUpperCase()
-        : "";
-    if (
-      !LEAVE_MODULE_GRANT_ACTIONS.includes(action as LeaveModuleGrantAction) ||
-      !LEAVE_MODULE_GRANT_ROLES.includes(roleCode as LeaveModuleGrantRole) ||
-      !isValidUuid(body.target_app_user_id)
-    ) {
-      return { ok: false, code: "LEAVE_MODULE_GRANT_INVALID" };
-    }
-    const targetAppUserId = body.target_app_user_id.trim().toLowerCase();
-
-    const request_fingerprint = sha256Hex({
-      op: "MANAGE_MODULE_GRANT",
-      action,
-      target_app_user_id: targetAppUserId,
-      role_code: roleCode,
-      expected_row_version: expectedRowVersion,
-      reason: reason.reason,
-    });
-
-    return {
-      ok: true,
-      data: {
-        operation: "MANAGE_MODULE_GRANT",
-        action: action as LeaveModuleGrantAction,
-        target_app_user_id: targetAppUserId,
-        role_code: roleCode as LeaveModuleGrantRole,
         expected_row_version: expectedRowVersion,
         reason: reason.reason,
         idempotency_key: idem.key,

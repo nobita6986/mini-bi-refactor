@@ -266,8 +266,8 @@ export function ProjectTeamScopeManager() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-foreground">Mapping Dự án ↔ Nhóm</h1>
-        <p className="mt-1 text-sm text-muted">Cấp và thu hồi mapping Project↔Team. Chỉ Full Admin.</p>
+        <h1 className="text-2xl font-bold text-foreground">Phân công Dự án ↔ Tổ đội</h1>
+        <p className="mt-1 text-sm text-muted">Cấp và thu hồi phân công giữa Dự án và Tổ đội tuyển dụng.</p>
       </header>
 
       <Card>

@@ -546,7 +546,7 @@ function makePermissionGroupsListEnvelope() {
     groups: [
       {
         group_id: GROUP_RECRUIT_ID,
-        group_code: "TUYEN_DUNG",
+        code: "RECRUITER_OPERATIONS",
         name: "Nhóm Tuyển dụng",
         description: "Nhóm nghiệp vụ phòng Tuyển dụng",
         department_id: DEPT_ID,
@@ -554,17 +554,20 @@ function makePermissionGroupsListEnvelope() {
         department_name: "Phòng Tuyển dụng",
         department_system_key: "RECRUITMENT",
         team_id: null,
+        team_code: null,
         team_name: null,
         is_system_admin: false,
         active: true,
         version: 1,
         member_count: 2,
+        member_account_refs: [],
+        updated_at: AS_OF,
         capabilities: ["entry_create", "entry_own"],
         module_roles: [],
       },
       {
         group_id: GROUP_ADMIN_ID,
-        group_code: "BOD_ADMIN",
+        code: "SYSTEM_ADMIN",
         name: "BoD/Admin",
         description: "Quản trị toàn hệ thống",
         department_id: DEPT_ID,
@@ -572,15 +575,33 @@ function makePermissionGroupsListEnvelope() {
         department_name: "Ban Giám đốc",
         department_system_key: "BOD",
         team_id: null,
+        team_code: null,
         team_name: null,
         is_system_admin: true,
         active: true,
         version: 1,
         member_count: 1,
+        member_account_refs: [],
+        updated_at: AS_OF,
         capabilities: [],
         module_roles: [],
       },
     ],
+  };
+}
+
+function makeTeamCatalogListEnvelope(teams = []) {
+  return {
+    ok: true,
+    list: {
+      authorization_date: AUTH_DATE,
+      include_inactive: false,
+      search: null,
+      page: 1,
+      page_size: 100,
+      total: teams.length,
+      teams,
+    },
   };
 }
 
@@ -726,31 +747,6 @@ function makeLinkPersonEnvelope(overrides = {}) {
       evidence_date: null,
       version: 1,
       ...(overrides.link ?? {}),
-    },
-  };
-}
-
-function makeAssignRoleEnvelope(roleCode, accountVersion, assignmentId = "80000000-0000-4000-8000-000000000009") {
-  return {
-    ok: true,
-    replayed: false,
-    account_ref: ACCOUNT_ID,
-    account_version: accountVersion,
-    assignment: {
-      assignment_id: assignmentId,
-      role_code: roleCode,
-      display_name: roleCode === "ADMIN" ? "BoD/Admin" : "Tuyển dụng",
-      is_effective: true,
-      inactive_reason: null,
-      is_protected: false,
-      can_revoke: true,
-      cannot_revoke_reason: null,
-      source_kind: "ADMIN_ASSIGNMENT",
-      started_at: AS_OF,
-      ended_at: null,
-      reason: "Cấp vai trò khởi tạo",
-      ended_reason: null,
-      assigned_by_display: "Owner",
     },
   };
 }
@@ -1150,7 +1146,7 @@ test("Happy path: Create employee WITH login + permission group executes Person 
   await pl.flush();
   const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
   respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
-  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?page=1&page_size=100"), 200, { ok: true, list: { teams: [] } });
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100"), 200, makeTeamCatalogListEnvelope());
   await stepper.flush();
 
   findNode(stepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-101" } });
@@ -1369,7 +1365,7 @@ test("Fault recovery: Step 2 disconnect BEFORE intent_id + reload keeps frozen K
   await pl.flush();
   const stepper1 = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
   respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
-  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?page=1&page_size=100"), 200, { ok: true, list: { teams: [] } });
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100"), 200, makeTeamCatalogListEnvelope());
   await stepper1.flush();
   findNode(stepper1, (n) => n.props?.id === "open-login-reason").props.onChange({ target: { value: "Mở đăng nhập nhân viên" } });
   findNode(stepper1, (n) => n.props?.id === "provision-login-id").props.onChange({ target: { value: "an.nv" } });
@@ -2437,6 +2433,10 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
     findButton(pl, "Tiếp tục hoàn tất").props.onClick();
     await pl.flush();
     const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+    const grpReq = findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false");
+    if (grpReq) respond(grpReq, 200, makePermissionGroupsListEnvelope());
+    const teamsReq = findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100");
+    if (teamsReq) respond(teamsReq, 200, makeTeamCatalogListEnvelope());
     const verify = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`);
     assert.ok(verify);
     respond(verify, 200, {
@@ -2463,8 +2463,8 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
     return { pl, stepper };
   };
 
-  // (a) Exact T0 quota scenario: Role 1 commits v3 -> persist Role 1 COMMITTED succeeds ->
-  //     QuotaExceededError right when persisting Role 2 IN_FLIGHT -> reload -> Role 2 sends expected_version = 3!
+  // (a) Exact T0 quota scenario: Role 1 commits v3 via canonical /groups endpoint -> persist Role 1 COMMITTED succeeds ->
+  //     QuotaExceededError right when persisting Role 2 IN_FLIGHT -> reload -> Role 2 sends expected_account_version = 3!
   let failSecondRoleSnapshot = false;
   const storage = makeMemoryStorage({
     setItem(key, value, store) {
@@ -2485,12 +2485,13 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   findNode(run1.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await run1.stepper.flush();
 
-  const role1Req = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
-  assert.equal(JSON.parse(role1Req.options.body).role_code, "RECRUITER");
-  assert.equal(JSON.parse(role1Req.options.body).expected_version, 2);
+  assert.equal(requests.some((r) => r.url.endsWith("/roles")), false, "Retired /roles endpoint must never be called");
+  const role1Req = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups"));
+  assert.equal(JSON.parse(role1Req.options.body).group_id, GROUP_RECRUIT_ID);
+  assert.equal(JSON.parse(role1Req.options.body).expected_account_version, 2);
 
   failSecondRoleSnapshot = true;
-  respond(role1Req, 201, makeAssignRoleEnvelope("RECRUITER", 3));
+  respond(role1Req, 201, makeAssignGroupEnvelope(GROUP_RECRUIT_ID, 3));
   await run1.stepper.flush();
 
   // Role 1 persisted as COMMITTED WITH committed_account_version = 3; Role 2 blocked before POST!
@@ -2500,25 +2501,25 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   assert.equal(storedMid.checkpoint.step4_roles[0].committed_account_version, 3);
   assert.equal(storedMid.checkpoint.step4_roles[1].status, "IDLE");
   assert.equal(storedMid.checkpoint.step4_roles[1].payload_snapshot, null);
-  assert.equal(requests.filter((r) => r.method === "POST" && r.url.endsWith("/roles")).length, 1);
+  assert.equal(requests.filter((r) => r.method === "POST" && r.url.endsWith("/groups")).length, 1);
 
   run1.stepper.unmount();
   run1.pl.unmount();
   failSecondRoleSnapshot = false;
 
-  // Reload & resume -> 0 repeat of Person/Account/Link/RECRUITER; ADMIN MUST send expected_version = 3!
+  // Reload & resume -> 0 repeat of Person/Account/Link/RECRUITER; ADMIN MUST send expected_account_version = 3!
   const run2 = await resumeWithServerAccountVersion(storage, 3);
   findNode(run2.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await run2.stepper.flush();
 
-  const role2Req = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  const role2Req = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups"));
   const role2Body = JSON.parse(role2Req.options.body);
-  assert.equal(role2Body.role_code, "ADMIN");
-  assert.equal(role2Body.expected_version, 3);
+  assert.equal(role2Body.group_id, GROUP_ADMIN_ID);
+  assert.equal(role2Body.expected_account_version, 3);
   assert.equal(
-    requests.filter((r) => r.method === "POST" && r.url.endsWith("/roles") && JSON.parse(r.options.body).role_code === "RECRUITER").length,
+    requests.filter((r) => r.method === "POST" && r.url.endsWith("/groups") && JSON.parse(r.options.body).group_id === GROUP_RECRUIT_ID).length,
     1,
-    "RECRUITER must only be posted once",
+    "RECRUITER_OPERATIONS must only be posted once",
   );
   assert.equal(requests.some((r) => r.method === "POST" && (r.url === "/api/admin/organization/persons" || r.url === "/api/admin/access/accounts" || r.url.includes("/person-link"))), false);
 
@@ -2526,11 +2527,8 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   const rejectedRole2Key = role2Req.options.headers["Idempotency-Key"];
   respond(role2Req, 409, {
     ok: false,
-    error: {
-      code: "VERSION_CONFLICT",
-      message: "Phiên bản tài khoản vừa thay đổi.",
-      current_version: 4,
-    },
+    code: "VERSION_CONFLICT",
+    message: "Phiên bản tài khoản vừa thay đổi.",
   });
   await run2.stepper.flush();
   findButton(run2.stepper, "Tải lại dữ liệu tài khoản mới nhất").props.onClick();
@@ -2546,11 +2544,11 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   const run2Reloaded = await resumeWithServerAccountVersion(storage, 4);
   findNode(run2Reloaded.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await run2Reloaded.stepper.flush();
-  const role2AfterReload = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
-  assert.equal(JSON.parse(role2AfterReload.options.body).role_code, "ADMIN");
-  assert.equal(JSON.parse(role2AfterReload.options.body).expected_version, 4);
+  const role2AfterReload = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups"));
+  assert.equal(JSON.parse(role2AfterReload.options.body).group_id, GROUP_ADMIN_ID);
+  assert.equal(JSON.parse(role2AfterReload.options.body).expected_account_version, 4);
   assert.notEqual(role2AfterReload.options.headers["Idempotency-Key"], rejectedRole2Key);
-  respond(role2AfterReload, 201, makeAssignRoleEnvelope("ADMIN", 5));
+  respond(role2AfterReload, 201, makeAssignGroupEnvelope(GROUP_ADMIN_ID, 5));
   await run2Reloaded.stepper.flush();
   assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
   run2Reloaded.stepper.unmount();
@@ -2576,16 +2574,16 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   findNode(runSameSession.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await runSameSession.stepper.flush();
   failOnceQuota = true;
-  respond(findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles")), 201, makeAssignRoleEnvelope("RECRUITER", 3));
+  respond(findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups")), 201, makeAssignGroupEnvelope(GROUP_RECRUIT_ID, 3));
   await runSameSession.stepper.flush();
   // Free space and click Submit in the SAME session without reloading!
   failOnceQuota = false;
   findNode(runSameSession.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await runSameSession.stepper.flush();
-  const sameSessionRole2 = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
-  assert.equal(JSON.parse(sameSessionRole2.options.body).role_code, "ADMIN");
-  assert.equal(JSON.parse(sameSessionRole2.options.body).expected_version, 3);
-  respond(sameSessionRole2, 201, makeAssignRoleEnvelope("ADMIN", 4));
+  const sameSessionRole2 = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups"));
+  assert.equal(JSON.parse(sameSessionRole2.options.body).group_id, GROUP_ADMIN_ID);
+  assert.equal(JSON.parse(sameSessionRole2.options.body).expected_account_version, 3);
+  respond(sameSessionRole2, 201, makeAssignGroupEnvelope(GROUP_ADMIN_ID, 4));
   await runSameSession.stepper.flush();
   assert.equal(sameSessionStorage.store.has(ACTOR_A_STORAGE_KEY), false);
   runSameSession.stepper.unmount();
@@ -2600,7 +2598,7 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   assert.equal(resolveNextStep4AccountVersion(parsedLegacy, null), null, "Must NOT fall back to obsolete link version or guess +1");
   assert.equal(resolveNextStep4AccountVersion(parsedLegacy, 3), 3, "Must adopt verified server version 3");
 
-  // (d) Already-dispatched Role 2 UNCERTAIN (503) MUST keep exact frozen expected_version & idempotency_key even if server moved ahead!
+  // (d) Already-dispatched Role 2 UNCERTAIN (503) MUST keep exact frozen expected_account_version & idempotency_key even if server moved ahead!
   const uncertainStorage = makeMemoryStorage();
   const uncertainCp = makeTwoRolesCheckpoint();
   uncertainCp.step4_roles[0] = {
@@ -2620,9 +2618,9 @@ test("PR27-R2/P2 regression: committed Step 4 role version survives storage quot
   const runUncertain = await resumeWithServerAccountVersion(uncertainStorage, 5);
   findNode(runUncertain.stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   await runUncertain.stepper.flush();
-  const uncertainReplay = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/roles"));
+  const uncertainReplay = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/groups"));
   assert.equal(uncertainReplay.options.headers["Idempotency-Key"], frozenRole2Key);
-  assert.equal(JSON.parse(uncertainReplay.options.body).expected_version, 3, "Dispatched UNCERTAIN role MUST replay exact frozen expected_version without masking OCC");
+  assert.equal(JSON.parse(uncertainReplay.options.body).expected_account_version, 3, "Dispatched UNCERTAIN role MUST replay exact frozen expected_account_version without masking OCC");
   runUncertain.stepper.unmount();
   runUncertain.pl.unmount();
 });

@@ -7,15 +7,12 @@ import {
   projectActorAccess,
   projectActorContextOptions,
   projectApplySharedAdvanceOffsetMutation,
-  projectAssignGlobalRoleMutation,
   projectAssignProjectAccountantMutation,
   projectClassifySubLedgerMutation,
   projectCreateReconciliationMutation,
-  projectEndGlobalRoleMutation,
   projectEndProjectAccountantMutation,
   projectEvidenceSummary,
   projectFundSharedAdvanceMutation,
-  projectListGlobalRolesAdmin,
   projectListProjectAccountantsAdmin,
   projectMonthlyReport,
   projectOpeningApplyMutation,
@@ -39,13 +36,11 @@ import {
   type VendorFinanceActorAccessProjection,
   type VendorFinanceActorContextOptionsResponse,
   type VendorFinanceApplySharedAdvanceOffsetResponse,
-  type VendorFinanceAssignGlobalRoleResponse,
   type VendorFinanceAssignProjectAccountantResponse,
   type VendorFinanceBalanceFilter,
   type VendorFinanceClassifySubLedgerResponse,
   type VendorFinanceContractType,
   type VendorFinanceContractTypeFilter,
-  type VendorFinanceEndGlobalRoleResponse,
   type VendorFinanceEndProjectAccountantResponse,
   type VendorFinanceEntriesPageResponse,
   type VendorFinanceEntryProjection,
@@ -55,9 +50,7 @@ import {
   type VendorFinanceEvidenceMimeType,
   type VendorFinanceEvidenceTargetKind,
   type VendorFinanceFundSharedAdvanceResponse,
-  type VendorFinanceGlobalRoleCode,
   type VendorFinanceLedgerScope,
-  type VendorFinanceListGlobalRolesAdminResponse,
   type VendorFinanceListProjectAccountantsAdminResponse,
   type VendorFinanceMonthlyReportResponse,
   type VendorFinanceOpeningApplyResponse,
@@ -406,38 +399,6 @@ export type VendorFinanceRepository = {
       request_fingerprint: string;
     },
   ): Promise<VendorFinanceRepoResult<VendorFinanceEndProjectAccountantResponse>>;
-
-  listGlobalRolesAdmin(
-    input: VendorFinanceActorRef & {
-      search: string | null;
-      include_history: boolean;
-      page: number;
-      page_size: number;
-    },
-  ): Promise<VendorFinanceRepoResult<VendorFinanceListGlobalRolesAdminResponse>>;
-
-  assignGlobalRoleAdmin(
-    input: VendorFinanceActorRef & {
-      account_ref: string;
-      role_code: VendorFinanceGlobalRoleCode;
-      expected_version: number;
-      valid_from: string | null;
-      reason: string;
-      idempotency_key: string;
-      request_fingerprint: string;
-    },
-  ): Promise<VendorFinanceRepoResult<VendorFinanceAssignGlobalRoleResponse>>;
-
-  endGlobalRoleAdmin(
-    input: VendorFinanceActorRef & {
-      role_grant_id: string;
-      expected_version: number;
-      valid_to: string | null;
-      reason: string;
-      idempotency_key: string;
-      request_fingerprint: string;
-    },
-  ): Promise<VendorFinanceRepoResult<VendorFinanceEndGlobalRoleResponse>>;
 
   reserveEvidence(
     input: VendorFinanceActorRef & {
@@ -1351,62 +1312,6 @@ export function createVendorFinanceRepository(
           p_request_fingerprint: input.request_fingerprint,
         },
         projectEndProjectAccountantMutation,
-      );
-    },
-
-    listGlobalRolesAdmin(input) {
-      return callProjected(
-        "listGlobalRolesAdmin",
-        "read",
-        "vendor_finance_list_global_roles_admin",
-        {
-          p_auth_subject: input.auth_subject,
-          p_app_user_id: input.app_user_id,
-          p_search: input.search,
-          p_include_history: input.include_history,
-          p_page: input.page,
-          p_page_size: input.page_size,
-        },
-        projectListGlobalRolesAdmin,
-      );
-    },
-
-    assignGlobalRoleAdmin(input) {
-      return callProjected(
-        "assignGlobalRoleAdmin",
-        "mutation",
-        "vendor_finance_assign_global_role_admin",
-        {
-          p_auth_subject: input.auth_subject,
-          p_app_user_id: input.app_user_id,
-          p_target_user_id: input.account_ref,
-          p_role_code: input.role_code,
-          p_expected_version: input.expected_version,
-          p_valid_from: input.valid_from,
-          p_reason: input.reason,
-          p_idempotency_key: input.idempotency_key,
-          p_request_fingerprint: input.request_fingerprint,
-        },
-        projectAssignGlobalRoleMutation,
-      );
-    },
-
-    endGlobalRoleAdmin(input) {
-      return callProjected(
-        "endGlobalRoleAdmin",
-        "mutation",
-        "vendor_finance_end_global_role_admin",
-        {
-          p_auth_subject: input.auth_subject,
-          p_app_user_id: input.app_user_id,
-          p_role_grant_id: input.role_grant_id,
-          p_expected_version: input.expected_version,
-          p_valid_to: input.valid_to,
-          p_reason: input.reason,
-          p_idempotency_key: input.idempotency_key,
-          p_request_fingerprint: input.request_fingerprint,
-        },
-        projectEndGlobalRoleMutation,
       );
     },
 

@@ -17,7 +17,6 @@ import {
   MAX_VENDOR_FINANCE_OPENING_BATCH_JSON_BYTES,
   handleGetDownloadVendorFinanceEvidence,
   handleGetExportVendorFinanceVendors,
-  handleGetGlobalRolesAdmin,
   handleGetProjectAccountantsAdmin,
   handleGetVendorFinanceContext,
   handleGetVendorFinanceEntries,
@@ -29,10 +28,8 @@ import {
   handleGetVendorSharedAdvanceMovements,
   handlePostApplyOpeningBatch,
   handlePostApplyVendorSharedAdvanceOffset,
-  handlePostAssignGlobalRoleAdmin,
   handlePostAssignProjectAccountantAdmin,
   handlePostClassifyVendorSubLedger,
-  handlePostEndGlobalRoleAdmin,
   handlePostEndProjectAccountantAdmin,
   handlePostFinalizeVendorFinanceEvidence,
   handlePostFundVendorSharedAdvance,
@@ -69,7 +66,6 @@ const IDEM_1 = "70000000-0000-4000-8000-000000000001";
 const IDEM_2 = "70000000-0000-4000-8000-000000000002";
 const IDEM_3 = "70000000-0000-4000-8000-000000000003";
 const ASGN_ID = "80000000-0000-4000-8000-000000000001";
-const ROLE_ID = "82000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "PRJ_NORTH";
 
 const VALID_PNG = new Uint8Array([
@@ -142,13 +138,6 @@ const EXPECTED_ROUTE_METHODS = Object.freeze({
   },
   "src/app/api/vendor-finance/admin/project-accountants/[assignmentId]/end/route.ts": {
     POST: "handlePostEndProjectAccountantAdmin",
-  },
-  "src/app/api/vendor-finance/admin/global-roles/route.ts": {
-    GET: "handleGetGlobalRolesAdmin",
-    POST: "handlePostAssignGlobalRoleAdmin",
-  },
-  "src/app/api/vendor-finance/admin/global-roles/[roleGrantId]/end/route.ts": {
-    POST: "handlePostEndGlobalRoleAdmin",
   },
   "src/app/api/vendor-finance/evidence/reserve/route.ts": {
     POST: "handlePostReserveVendorFinanceEvidence",
@@ -751,46 +740,6 @@ function makeMockRepository({
           },
         };
       },
-      async listGlobalRolesAdmin(input) {
-        calls.push(["listGlobalRolesAdmin", input]);
-        return {
-          ok: true,
-          data: {
-            authorization_date: "2026-10-24",
-            page: 1,
-            page_size: 25,
-            total: 0,
-            has_more: false,
-            roles: [],
-            candidates: [],
-          },
-        };
-      },
-      async assignGlobalRoleAdmin(input) {
-        calls.push(["assignGlobalRoleAdmin", input]);
-        return {
-          ok: true,
-          data: {
-            role_grant_id: ROLE_ID,
-            account_ref: input.account_ref,
-            role_code: input.role_code,
-            version: 1,
-            replayed: false,
-          },
-        };
-      },
-      async endGlobalRoleAdmin(input) {
-        calls.push(["endGlobalRoleAdmin", input]);
-        return {
-          ok: true,
-          data: {
-            role_grant_id: input.role_grant_id,
-            account_ref: ACC_A_ID,
-            valid_to: input.valid_to ?? "2026-10-24",
-            replayed: false,
-          },
-        };
-      },
       async reserveEvidence(input) {
         calls.push(["reserveEvidence", input]);
         return {
@@ -1356,15 +1305,12 @@ test("dynamic route discovery & DIRECT_ENTRY_API_ENABLED hidden 404 gate across 
       handleGetProjectAccountantsAdmin(new Request(`${ORIGIN}/api/vendor-finance/admin/project-accountants`), disabledFlag, bombDeps),
       handlePostAssignProjectAccountantAdmin(new Request(`${ORIGIN}/api/vendor-finance/admin/project-accountants`, { method: "POST", body: untouchedBody(), duplex: "half" }), disabledFlag, bombDeps),
       handlePostEndProjectAccountantAdmin(new Request(`${ORIGIN}/api/vendor-finance/admin/project-accountants/${ASGN_ID}/end`, { method: "POST", body: untouchedBody(), duplex: "half" }), ASGN_ID, disabledFlag, bombDeps),
-      handleGetGlobalRolesAdmin(new Request(`${ORIGIN}/api/vendor-finance/admin/global-roles`), disabledFlag, bombDeps),
-      handlePostAssignGlobalRoleAdmin(new Request(`${ORIGIN}/api/vendor-finance/admin/global-roles`, { method: "POST", body: untouchedBody(), duplex: "half" }), disabledFlag, bombDeps),
-      handlePostEndGlobalRoleAdmin(new Request(`${ORIGIN}/api/vendor-finance/admin/global-roles/${ROLE_ID}/end`, { method: "POST", body: untouchedBody(), duplex: "half" }), ROLE_ID, disabledFlag, bombDeps),
       handlePostReserveVendorFinanceEvidence(new Request(`${ORIGIN}/api/vendor-finance/evidence/reserve`, { method: "POST", body: untouchedBody(), duplex: "half" }), disabledFlag, bombDeps),
       handlePostFinalizeVendorFinanceEvidence(new Request(`${ORIGIN}/api/vendor-finance/evidence/${EV_ID_1}/finalize`, { method: "POST", body: untouchedBody(), duplex: "half" }), EV_ID_1, disabledFlag, bombDeps),
       handleGetDownloadVendorFinanceEvidence(new Request(`${ORIGIN}/api/vendor-finance/evidence/${EV_ID_1}/download`), EV_ID_1, disabledFlag, bombDeps),
     ]);
 
-    assert.equal(responses.length, 29);
+    assert.equal(responses.length, 26);
     for (const res of responses) {
       assert.equal(res.status, 404);
       assert.equal(res.headers.get("cache-control"), "private, no-store");
@@ -1822,25 +1768,7 @@ test("HTTP VFIN-02 4-role authorization matrix: Full Admin, Project Accountant, 
     )).status,
     201,
   );
-  assert.equal(
-    (await handlePostAssignGlobalRoleAdmin(
-      new Request(`${ORIGIN}/api/vendor-finance/admin/global-roles`, {
-        method: "POST",
-        headers: SAME_ORIGIN_POST_HEADERS,
-        body: JSON.stringify({
-          account_ref: ACC_A_ID,
-          role_code: "CASH_HOLDER",
-          valid_from: todayVn,
-          expected_version: 0,
-          reason: "Chỉ định kế toán cầm tiền",
-          idempotency_key: IDEM_3,
-        }),
-      }),
-      "true",
-      adminDeps,
-    )).status,
-    201,
-  );
+  // PR #28 D4 / T0-R2 / UX-03: global-roles admin routes are retired (managed via Permission Groups).
 
   // 6. Catalog operator, Team Leader, retired `payment_view`/`payment_edit` -> 403 VENDOR_FINANCE_ACCESS_DENIED
   for (const deniedPersona of [

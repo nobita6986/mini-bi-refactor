@@ -31,6 +31,10 @@ import {
   type PermissionGroupSummary,
 } from "@/lib/admin/permission-group-ui-model";
 import {
+  parseActiveTeamCatalogOptions,
+  type ActiveTeamSelectOption,
+} from "@/lib/admin/team-catalog-model";
+import {
   projectUserDirectoryListEnvelope,
   resolveUserDirectoryDetailHref,
   type UserDirectoryEntrySummary,
@@ -39,13 +43,6 @@ import {
   projectDepartmentListResponse,
   type DepartmentProjection,
 } from "@/lib/departments/department-contract";
-
-type TeamOption = {
-  team_id: string;
-  code: string;
-  name: string;
-  active: boolean;
-};
 
 type LoadState =
   | { kind: "loading" }
@@ -68,31 +65,6 @@ function unwrapDepartmentsOk(payload: unknown): Record<string, unknown> | null {
   return rest;
 }
 
-function extractTeams(payload: unknown): TeamOption[] {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return [];
-  const rec = payload as Record<string, unknown>;
-  const rawList = Array.isArray(rec.teams)
-    ? rec.teams
-    : typeof rec.list === "object" &&
-        rec.list !== null &&
-        Array.isArray((rec.list as Record<string, unknown>).teams)
-      ? ((rec.list as Record<string, unknown>).teams as unknown[])
-      : [];
-  const out: TeamOption[] = [];
-  for (const item of rawList) {
-    if (typeof item !== "object" || item === null) continue;
-    const row = item as Record<string, unknown>;
-    const teamId = typeof row.team_id === "string" ? row.team_id : typeof row.id === "string" ? row.id : null;
-    const code = typeof row.code === "string" ? row.code : typeof row.team_code === "string" ? row.team_code : "";
-    const name = typeof row.name === "string" ? row.name : typeof row.team_name === "string" ? row.team_name : "";
-    const active = row.active !== false && row.is_active !== false;
-    if (teamId && name) {
-      out.push({ team_id: teamId, code, name, active });
-    }
-  }
-  return out;
-}
-
 function moduleRoleKey(role: PermissionGroupModuleRole): string {
   return `${role.module_code}:${role.role_code}`;
 }
@@ -113,7 +85,8 @@ export function PermissionGroupsManager() {
 
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [departments, setDepartments] = useState<readonly DepartmentProjection[]>([]);
-  const [teams, setTeams] = useState<readonly TeamOption[]>([]);
+  const [teams, setTeams] = useState<readonly ActiveTeamSelectOption[]>([]);
+  const [teamsLoadError, setTeamsLoadError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   const [searchInput, setSearchInput] = useState("");
@@ -257,7 +230,7 @@ export function PermissionGroupsManager() {
             signal: tracked.controller.signal,
             headers: { Accept: "application/json" },
           }),
-          fetch("/api/admin/catalog/teams?page=1&page_size=100", {
+          fetch("/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100", {
             method: "GET",
             cache: "no-store",
             signal: tracked.controller.signal,
@@ -273,10 +246,21 @@ export function PermissionGroupsManager() {
         }
         if (teamRes.status === 200) {
           const teamPayload = await teamRes.json().catch(() => null);
-          setTeams(extractTeams(teamPayload));
+          const parsedTeams = parseActiveTeamCatalogOptions(teamPayload);
+          if (parsedTeams.ok) {
+            setTeams(parsedTeams.teams);
+            setTeamsLoadError(null);
+          } else {
+            setTeams([]);
+            setTeamsLoadError("Không thể đọc danh sách tổ đội tuyển dụng từ máy chủ.");
+          }
+        } else {
+          setTeams([]);
+          setTeamsLoadError("Không tải được danh sách tổ đội tuyển dụng đang hoạt động.");
         }
       } catch {
-        // Optional dropdowns degrade cleanly.
+        if (!workspaceGuard.isActive(tracked.epoch, tracked.controller)) return;
+        setTeamsLoadError("Không thể kết nối máy chủ để tải danh sách tổ đội tuyển dụng.");
       } finally {
         tracked.release();
       }
@@ -860,7 +844,7 @@ export function PermissionGroupsManager() {
         closeDisabled={busy}
       >
         {editor ? (
-          <form onSubmit={submitGroupForm} className="space-y-4 max-h-[75vh] overflow-y-auto pr-1">
+          <form onSubmit={submitGroupForm} className="space-y-4">
             {feedback ? (
               <Alert tone={feedback.tone} role="alert" title={feedback.title}>
                 <p>{feedback.message}</p>
@@ -993,12 +977,24 @@ export function PermissionGroupsManager() {
                     className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
                   >
                     <option value="">Toàn phòng Tuyển dụng (không giới hạn tổ)</option>
+                    {editor.kind === "edit" &&
+                    editor.group.team_id &&
+                    !teams.some((t) => t.team_id === editor.group.team_id) ? (
+                      <option value={editor.group.team_id}>
+                        {editor.group.team_name ?? editor.group.team_id} (Đã ngừng hoạt động)
+                      </option>
+                    ) : null}
                     {teams.map((team) => (
                       <option key={team.team_id} value={team.team_id}>
-                        {team.name} {team.code ? `(${team.code})` : ""}
+                        {team.display_name} ({team.code})
                       </option>
                     ))}
                   </select>
+                  {teamsLoadError ? (
+                    <p className="text-xs text-warning" role="status">
+                      {teamsLoadError}
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </div>

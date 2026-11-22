@@ -162,6 +162,10 @@ export function formatResourceAssignmentKindLabel(
       return { label: "Kế toán dự án", tone: "info" };
     case "DEPARTMENT_HEAD":
       return { label: "Trưởng phòng ban", tone: "primary" };
+    case "LEAVE_DEPARTMENT_APPROVER":
+      return { label: "Người duyệt phép bộ phận", tone: "info" };
+    case "WORK_REPORT_DELEGATE":
+      return { label: "Ủy quyền duyệt báo cáo", tone: "neutral" };
   }
 }
 

@@ -207,8 +207,8 @@ export function personStatusBadge(status: PersonStatus): {
   tone: BadgeTone;
 } {
   return status === "ACTIVE"
-    ? { label: "Đang hoạt động", tone: "success" }
-    : { label: "Ngừng hoạt động", tone: "neutral" };
+    ? { label: "Đang làm việc", tone: "success" }
+    : { label: "Ngừng làm việc", tone: "neutral" };
 }
 
 export function formatPersonSourceKind(
