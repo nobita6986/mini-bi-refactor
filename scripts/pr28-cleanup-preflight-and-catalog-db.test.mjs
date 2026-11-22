@@ -46,7 +46,7 @@ import {
 } from "./lib/migration-validation.mjs";
 import { buildLegacyTechnicalIdentityManifest } from "./lib/pr28-legacy-identity-manifest.mjs";
 import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
-import { CAPABILITIES } from "../src/lib/auth/direct-entry-v2.ts";
+import { CAPABILITIES, resolveActor } from "../src/lib/auth/direct-entry-v2.ts";
 import { getAccountGroupsAdmin, listPermissionGroupsAdmin } from "../src/lib/admin/permission-group-api.ts";
 import { createServicePermissionGroupRepository } from "../src/lib/admin/permission-group-repository.ts";
 
@@ -1254,11 +1254,34 @@ test("6. PR28 Gate 3 & Gate 4 Fail-Closed Preflight: unmappable direct grants & 
     assert.ok(dirGroups.memberships.some((m) => m.group_code === "ACCOUNTING_OPERATIONS"));
     assert.ok(dirGroups.memberships.some((m) => m.group_code.startsWith("MIGRATED_TEAM_") && m.group_code.endsWith("_ENTRY_TEAM")));
 
+    const actorFix = migrations.find((m) => m.name === "20261123001000_fix_actor_session_role_projection.sql");
+    await db.exec(actorFix.sql);
+
     const ctxBefore = (
       await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [uDirect.auth])
     ).rows[0].ctx;
     assert.ok(ctxBefore.capabilities.includes("vendor_finance_view"));
     assert.ok(ctxBefore.capabilities.includes("entry_team"));
+
+    for (const [user, context] of [
+      [uDirect, ctxBefore],
+      [OWNER, (await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [OWNER.auth])).rows[0].ctx],
+    ]) {
+      const session = await resolveActor({
+        session: { auth_subject: user.auth, provider: "supabase", authenticated_at: null },
+        repository: { loadByAuthSubject: async () => context },
+        at: new Date().toISOString(),
+      });
+      assert.equal(session.ok, true, session.reason);
+      const roles = session.actor.assigned_roles.map((role) => role.role_code);
+      if (user === OWNER) {
+        assert.ok(roles.includes("ADMIN"));
+      } else {
+        assert.deepEqual(roles, []);
+        assert.ok(session.actor.effective_grants.some((grant) => grant.capability === "entry_team"));
+        assert.ok(session.actor.effective_grants.some((grant) => grant.capability === "vendor_finance_view"));
+      }
+    }
 
     let uVer = dirGroups.account_version;
     for (const mem of dirGroups.memberships) {
