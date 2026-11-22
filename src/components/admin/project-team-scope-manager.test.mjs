@@ -15,7 +15,7 @@ test("mapping manager loads project and active-team choices from their existing 
   assert.match(component, /projectTeamListForQuery\(await response\.json\(\)/);
   assert.match(component, /type="checkbox" checked=\{checked\}/);
   assert.match(component, /Tìm dự án/);
-  assert.match(component, /Tìm nhóm/);
+  assert.match(component, /Tìm tổ đội/);
   assert.match(component, /selectedProjectIds/);
   assert.match(component, /setProjectPage/);
   assert.match(component, /setTeamPage/);
@@ -47,12 +47,12 @@ test("mapping page/nav stay Full Admin restricted and existing history/filter/er
   assert.match(page, /decideAccountAccessPageAccess\(\{ actor \}\)/);
   assert.doesNotMatch(page, /decideAdminAreaAccess/);
   assert.match(navigation, /project-team-scopes[^\n]*visible:\s*adminSecurityNavPredicate/);
-  assert.match(component, /Chỉ Full Admin/);
+  assert.match(component, /Chỉ Quản trị viên/);
   assert.match(component, /searchInput/);
   assert.match(component, /searchFilter/);
   assert.match(component, /includeHistory/);
   assert.match(component, /setPage\(/);
-  assert.match(component, /Chưa có mapping nào/);
+  assert.match(component, /Chưa có phân công nào/);
   assert.match(component, /state === "denied"/);
   assert.match(component, /state === "error"/);
   assert.match(component, /Thu hồi/);
@@ -62,7 +62,7 @@ test("mapping page/nav stay Full Admin restricted and existing history/filter/er
 
 test("mapping search is one fuzzy box that debounces instead of firing per keystroke", () => {
   // One search box replaces the exact Project ID / Team ID inputs.
-  assert.match(component, /Tìm dự án hoặc nhóm/);
+  assert.match(component, /Tìm dự án hoặc tổ đội/);
   assert.match(component, /buildMappingListQuery\(\{ search: searchFilter, includeHistory, page \}\)/);
   assert.doesNotMatch(component, /projectIdFilter/);
   assert.doesNotMatch(component, /teamIdFilter/);
