@@ -1,23 +1,31 @@
--- Migration #237: PR #28 — Fail-closed legacy identity preflight, SQL reader cutover,
--- obsolete integration/account-type RPC retirement, and legacy column cleanup.
+-- Migration #237: PR #28 — Fail-closed preflight, atomic group-only authorization cutover,
+-- obsolete integration/per-account-role/module-grant RPC retirement, and legacy column cleanup.
 --
--- Preconditions enforced atomically before ANY DDL:
+-- Preconditions enforced atomically before ANY DDL or DML:
 --   1. Zero rows in public.direct_entry_app_users with account_type IN ('SHARED', 'SERVICE').
 --   2. Zero rows in public.leave_employee_profiles with is_shared_non_employee = true.
+--   3. Zero unmappable active rows in public.authz_direct_capability_grants outside D1 group ceiling.
+--   4. Zero enabled uncutover rows (authz_managed = false) with active direct_entry_capability_grants.
 --
--- Audit table CHECK constraints preserving historical 'ACCOUNT_TYPE_UPDATED' action rows
--- remain untouched for immutable audit history compatibility.
+-- Historical tables (authz_account_role_assignments, authz_direct_capability_grants,
+-- vendor_finance_global_roles, leave_module_grants) and audit CHECK constraints preserving
+-- 'ACCOUNT_TYPE_UPDATED' remain 100% intact for immutable history; runtime readers & writers
+-- cut over exclusively to permission groups + independent business resource assignments.
 
 begin;
 
 -- ============================================================================
--- 1. FAIL-CLOSED PREFLIGHT GATE (aborts with 0 DDL if legacy technical rows remain)
+-- 1. FAIL-CLOSED PREFLIGHT GATES (aborts with 0 DDL/DML if preconditions fail)
 -- ============================================================================
 do $$
 declare
+  v_now timestamptz := pg_catalog.clock_timestamp();
   v_legacy_acct_count integer := 0;
   v_legacy_shared_profile_count integer := 0;
+  v_unmappable_direct_count integer := 0;
+  v_uncutover_legacy_count integer := 0;
 begin
+  -- Gate 1: Unresolved legacy technical account types
   if exists (
     select 1
       from information_schema.columns
@@ -33,6 +41,7 @@ begin
     end if;
   end if;
 
+  -- Gate 2: Unresolved legacy shared leave employee profiles
   if exists (
     select 1
       from information_schema.columns
@@ -47,6 +56,145 @@ begin
         using errcode = 'P0001';
     end if;
   end if;
+
+  -- Gate 3: Unmappable active authz_direct_capability_grants outside D1 group ceiling
+  -- (never auto-upgrades non-Admin report-only or project/department exceptions to Admin,
+  --  never silently drops them, and never retains infinite legacy fallback).
+  select count(*)::integer
+    into v_unmappable_direct_count
+    from public.authz_direct_capability_grants dg
+   where dg.ended_at is null
+     and dg.started_at <= v_now
+     -- Ignore grants already satisfied by an existing active group OR a role assignment about to be backfilled
+     and not exists (
+       select 1
+         from public.authz_user_group_members m
+         join public.authz_user_groups g on g.group_id = m.group_id and g.active = true
+         join public.organization_departments d on d.department_id = g.department_id and d.is_active = true
+         left join public.teams t on t.team_id = g.team_id and t.active = true and t.code <> '__system_vendor__'
+         join public.authz_user_group_capabilities gc
+           on gc.group_id = g.group_id
+          and gc.ended_at is null
+          and gc.started_at <= v_now
+          and gc.capability = dg.capability
+        where m.app_user_id = dg.app_user_id
+          and m.ended_at is null
+          and m.started_at <= v_now
+          and (g.team_id is null or t.team_id is not null)
+          and (
+            (dg.scope_kind = 'ALL' and dg.scope_id is null and g.team_id is null and (
+              g.is_system_admin
+              or gc.capability not in (
+                'entry_create', 'entry_own', 'submission_create', 'document_upload',
+                'document_view', 'change_request_create', 'employment_status.request'
+              )
+              or (
+                gc.capability = 'document_view'
+                and exists (
+                  select 1 from public.authz_user_group_capabilities gc2
+                   where gc2.group_id = g.group_id
+                     and gc2.ended_at is null
+                     and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
+                )
+              )
+            ))
+            or (dg.scope_kind = 'OWN' and dg.scope_id is null and gc.capability in (
+              'entry_create', 'entry_own', 'submission_create', 'document_upload',
+              'document_view', 'change_request_create', 'employment_status.request'
+            ))
+            or (dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = dg.scope_id)
+          )
+     )
+     and not exists (
+       select 1
+         from public.authz_account_role_assignments ara
+         join public.authz_role_capabilities rc on rc.role_code = ara.role_code
+        where ara.app_user_id = dg.app_user_id
+          and ara.ended_at is null
+          and ara.started_at <= v_now
+          and ara.role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')
+          and rc.capability = dg.capability
+          and rc.scope_template = dg.scope_kind
+          and dg.scope_id is null
+     )
+     -- Ignore grants that ARE cleanly D1-mappable by direct_entry_authz__internal_backfill_legacy_to_groups()
+     and not (
+       (dg.capability = 'vendor_finance_view' and dg.scope_kind = 'ALL' and dg.scope_id is null)
+       or (
+         dg.scope_kind = 'CONTEXT_TEAM'
+         and dg.scope_id ~ '^[0-9a-fA-F-]{36}$'
+         and dg.capability in (
+           'entry_team', 'team_manager_assign', 'change_review',
+           'report_view', 'report_analytics_view', 'report_assign',
+           'report_review', 'report_delegate', 'worker_edit_history_view'
+         )
+         and exists (
+           select 1 from public.teams t
+            where t.team_id = dg.scope_id::uuid
+              and t.active = true
+              and t.code <> '__system_vendor__'
+         )
+       )
+       or (
+         dg.scope_kind = 'OWN'
+         and dg.scope_id is null
+         and dg.capability in (
+           'entry_create', 'entry_own', 'submission_create', 'document_upload',
+           'document_view', 'change_request_create', 'employment_status.request'
+         )
+       )
+       or (
+         dg.scope_kind = 'ALL'
+         and dg.scope_id is null
+         and dg.capability in (
+           'recruiter_master_manage', 'team_master_manage', 'audit_view',
+           'catalog_master_manage', 'report_form_manage', 'report_assign',
+           'report_review', 'report_delegate', 'duplicate_cccd_withdraw',
+           'worker_edit_history_view'
+         )
+       )
+     );
+
+  if v_unmappable_direct_count > 0 then
+    raise exception 'PR28_CLEANUP_BLOCKED_UNMAPPABLE_DIRECT_GRANTS: % active authz_direct_capability_grants row(s) cannot map to D1 permission groups without T0/Owner decision', v_unmappable_direct_count
+      using errcode = 'P0001';
+  end if;
+
+  -- Gate 4: Enabled uncutover legacy users still relying on pre-WP5 direct_entry_capability_grants
+  select count(distinct u.app_user_id)::integer
+    into v_uncutover_legacy_count
+    from public.direct_entry_app_users u
+    join public.direct_entry_capability_grants cg
+      on cg.app_user_id = u.app_user_id
+     and cg.is_current = true
+   where u.enabled = true
+     and not coalesce(u.authz_managed, false);
+
+  if v_uncutover_legacy_count > 0 then
+    raise exception 'PR28_CLEANUP_BLOCKED_UNCUTOVER_LEGACY_GRANTS: % enabled user(s) still have authz_managed = false with active direct_entry_capability_grants', v_uncutover_legacy_count
+      using errcode = 'P0001';
+  end if;
+end;
+$$;
+
+-- ============================================================================
+-- 1B. IDEMPOTENT CATCH-UP BACKFILL BEFORE GROUP-ONLY CUTOVER
+-- ============================================================================
+do $$
+begin
+  perform public.direct_entry_authz__internal_backfill_legacy_to_groups();
+
+  -- Mark any account that holds a backfilled or admin-assigned group membership as authz_managed = true
+  update public.direct_entry_app_users u
+     set authz_managed = true,
+         updated_at = pg_catalog.clock_timestamp()
+   where not coalesce(u.authz_managed, false)
+     and exists (
+       select 1
+         from public.authz_user_group_members m
+        where m.app_user_id = u.app_user_id
+          and m.ended_at is null
+     );
 end;
 $$;
 
@@ -650,12 +798,15 @@ begin
     v_auto_reason := 'Auto-granted upon personnel creation';
   end if;
 
-  insert into public.authz_account_role_assignments (
-    app_user_id, role_code, scope_kind, scope_ref, source_kind, reason, started_at, assigned_by_app_user_id
-  ) values
-    (p_account_ref, 'EMPLOYEE_BASE', 'GLOBAL', null, 'PERSONNEL_LINK_AUTO', v_auto_reason, v_now, p_actor_app_user_id),
-    (p_account_ref, 'RECRUITER', 'GLOBAL', null, 'PERSONNEL_LINK_AUTO', v_auto_reason, v_now, p_actor_app_user_id)
-  on conflict do nothing;
+  insert into public.authz_user_group_members (
+    group_id, app_user_id, source_kind, reason, started_at, assigned_by_app_user_id, is_protected, protected_reason
+  )
+  select
+    g.group_id, p_account_ref, 'ADMIN_ASSIGNMENT', v_auto_reason, v_now, p_actor_app_user_id, false, null
+    from public.authz_user_groups g
+   where g.code = 'RECRUITER_OPERATIONS'
+     and g.active = true
+  on conflict (group_id, app_user_id) where ended_at is null do nothing;
 
   update public.direct_entry_app_users
      set version = version + 1,
@@ -926,16 +1077,12 @@ begin
           from public.direct_entry_capability_grants g
          where g.app_user_id = p_account_ref
         union
-        select rc.capability
-          from public.authz_account_role_assignments ara
-          join public.authz_role_capabilities rc on rc.role_code = ara.role_code
-         where ara.app_user_id = p_account_ref
-           and ara.ended_at is null
-        union
-        select dg.capability
-          from public.authz_direct_capability_grants dg
-         where dg.app_user_id = p_account_ref
-           and dg.ended_at is null
+        select gc.capability
+          from public.authz_user_group_members m
+          join public.authz_user_groups g on g.group_id = m.group_id and g.active = true
+          join public.authz_user_group_capabilities gc on gc.group_id = g.group_id and gc.ended_at is null
+         where m.app_user_id = p_account_ref
+           and m.ended_at is null
         union
         select unnest(array[
           'entry_create', 'entry_own', 'submission_create', 'change_request_create',
@@ -1134,12 +1281,15 @@ begin
     v_auto_reason := 'Auto-granted upon recruiter account link';
   end if;
 
-  insert into public.authz_account_role_assignments (
-    app_user_id, role_code, scope_kind, scope_ref, source_kind, reason, started_at, assigned_by_app_user_id
-  ) values
-    (p_account_ref, 'EMPLOYEE_BASE', 'GLOBAL', null, 'PERSONNEL_LINK_AUTO', v_auto_reason, v_now, p_actor_app_user_id),
-    (p_account_ref, 'RECRUITER', 'GLOBAL', null, 'PERSONNEL_LINK_AUTO', v_auto_reason, v_now, p_actor_app_user_id)
-  on conflict do nothing;
+  insert into public.authz_user_group_members (
+    group_id, app_user_id, source_kind, reason, started_at, assigned_by_app_user_id, is_protected, protected_reason
+  )
+  select
+    g.group_id, p_account_ref, 'ADMIN_ASSIGNMENT', v_auto_reason, v_now, p_actor_app_user_id, false, null
+    from public.authz_user_groups g
+   where g.code = 'RECRUITER_OPERATIONS'
+     and g.active = true
+  on conflict (group_id, app_user_id) where ended_at is null do nothing;
 
   update public.direct_entry_app_users
      set version = version + 1,
@@ -1654,66 +1804,6 @@ begin
       and m.started_at <= v_now
       and (g.team_id is null or t.team_id is not null)
   ),
-  role_bundle_grants as (
-    select
-      rc.capability,
-      rc.scope_template as scope_kind,
-      null::text as scope_id,
-      'ROLE_BUNDLE'::text as source_type,
-      ara.assignment_id::text as source_id,
-      rc.scope_template as scope_label
-    from public.authz_account_role_assignments ara
-    join public.authz_role_definitions rd
-      on rd.role_code = ara.role_code
-    join public.authz_role_capabilities rc
-      on rc.role_code = ara.role_code
-    where ara.app_user_id = p_app_user_id
-      and ara.ended_at is null
-      and ara.started_at <= v_now
-      and (not rd.requires_active_person or coalesce(v_has_active_person, false))
-      -- Deduplicate against group_bundle_grants when same capability+scope already comes from a group
-      and not exists (
-        select 1
-          from group_bundle_grants gg
-         where gg.capability = rc.capability
-           and gg.scope_kind = rc.scope_template
-           and gg.scope_id is null
-      )
-  ),
-  direct_grant_items as (
-    select
-      g.capability,
-      g.scope_kind,
-      g.scope_id,
-      'DIRECT_GRANT'::text as source_type,
-      g.direct_grant_id::text as source_id,
-      case
-        when g.scope_kind in ('OWN', 'ALL') then g.scope_kind
-        when g.scope_kind = 'CONTEXT_TEAM' then coalesce(tm.display_name, tm.code, g.scope_id)
-        when g.scope_kind = 'CONTEXT_PROJECT' then coalesce(pr.display_name, g.scope_id)
-        when g.scope_kind = 'CONTEXT_DEPARTMENT' then coalesce(dm.name, dm.code, g.scope_id)
-        else g.scope_kind
-      end as scope_label
-    from public.authz_direct_capability_grants g
-    left join public.teams tm
-      on g.scope_kind = 'CONTEXT_TEAM'
-     and tm.team_id::text = g.scope_id
-    left join public.direct_entry_projects pr
-      on g.scope_kind = 'CONTEXT_PROJECT'
-     and pr.project_id = g.scope_id
-    left join public.organization_departments dm
-      on g.scope_kind = 'CONTEXT_DEPARTMENT'
-     and dm.department_id::text = g.scope_id
-    where g.app_user_id = p_app_user_id
-      and g.ended_at is null
-      and g.started_at <= v_now
-      and (
-        g.scope_kind in ('OWN', 'ALL')
-        or (g.scope_kind = 'CONTEXT_TEAM' and tm.team_id is not null and tm.active)
-        or (g.scope_kind = 'CONTEXT_PROJECT' and pr.project_id is not null and pr.active)
-        or (g.scope_kind = 'CONTEXT_DEPARTMENT' and dm.department_id is not null and dm.is_active)
-      )
-  ),
   contextual_tl_grants as (
     select
       rc.capability,
@@ -1866,10 +1956,6 @@ begin
   canonical_items as (
     select * from group_bundle_grants
     union all
-    select * from role_bundle_grants
-    union all
-    select * from direct_grant_items
-    union all
     select * from contextual_tl_grants
     union all
     select * from contextual_tl_wr_review_grants
@@ -1920,1089 +2006,6 @@ begin
     from all_grants g;
 
   return coalesce(v_result, '[]'::jsonb);
-end;
-$function$
-;
-
--- direct_entry_authz_assign_global_role_admin(uuid,uuid,uuid,text,integer,text,uuid,text)
-CREATE OR REPLACE FUNCTION public.direct_entry_authz_assign_global_role_admin(p_auth_subject uuid, p_actor_app_user_id uuid, p_target_app_user_id uuid, p_role_code text, p_expected_account_version integer, p_reason text, p_idempotency_key uuid, p_request_hash text)
- RETURNS jsonb
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-declare
-  v_op text := 'AUTHZ_GLOBAL_ROLE_ASSIGNED';
-  v_reason text := nullif(pg_catalog.btrim(p_reason), '');
-  v_role_code text := nullif(pg_catalog.btrim(p_role_code), '');
-  v_role_def public.authz_role_definitions%rowtype;
-  v_locked_id uuid;
-  v_actor public.direct_entry_app_users%rowtype;
-  v_target public.direct_entry_app_users%rowtype;
-  v_cutover_ready boolean := false;
-  v_replay jsonb;
-  v_now timestamptz;
-  v_new_version integer;
-  v_inserted public.authz_account_role_assignments%rowtype;
-  v_assignment_json jsonb;
-  v_result jsonb;
-  v_has_active_person boolean := false;
-begin
-  if p_auth_subject is null or p_actor_app_user_id is null then
-    raise exception 'AUTHZ_FORBIDDEN' using errcode = '42501';
-  end if;
-  if p_target_app_user_id is null
-     or p_expected_account_version is null
-     or p_expected_account_version < 1
-     or p_idempotency_key is null
-     or p_request_hash is null
-     or p_request_hash !~ '^[a-f0-9]{64}$' then
-    raise exception 'AUTHZ_VALIDATION_ERROR' using errcode = '22023';
-  end if;
-  if v_reason is null or pg_catalog.length(v_reason) not between 3 and 500 then
-    raise exception 'AUTHZ_REASON_INVALID' using errcode = '22023';
-  end if;
-  if v_role_code is null then
-    raise exception 'ROLE_CODE_INVALID' using errcode = '22023';
-  end if;
-
-  select d.* into v_role_def
-    from public.authz_role_definitions d
-   where d.role_code = v_role_code;
-  if not found then
-    raise exception 'ROLE_CODE_INVALID' using errcode = '22023';
-  end if;
-  if v_role_def.assignment_mode <> 'GLOBAL' or not v_role_def.is_assignable_global then
-    raise exception 'CONTEXTUAL_ROLE_NOT_GLOBALLY_ASSIGNABLE' using errcode = '22023';
-  end if;
-
-  -- Lock actor and target rows in deterministic ascending UUID order (LEAST/GREATEST)
-  for v_locked_id in
-    select u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id in (p_actor_app_user_id, p_target_app_user_id)
-     order by u.app_user_id asc
-     for update
-  loop
-    null;
-  end loop;
-
-  -- Re-assert Full Admin strictly under lock
-  perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
-
-  select s.cutover_ready into v_cutover_ready
-    from public.authz_system_state s
-   where s.singleton_id = true;
-  if not coalesce(v_cutover_ready, false) then
-    raise exception 'AUTHZ_CUTOVER_NOT_READY' using errcode = 'PT409';
-  end if;
-
-  select u.* into v_actor
-    from public.direct_entry_app_users u
-   where u.app_user_id = p_actor_app_user_id;
-
-  select u.* into v_target
-    from public.direct_entry_app_users u
-   where u.app_user_id = p_target_app_user_id;
-  if not found then
-    raise exception 'ACCOUNT_NOT_FOUND' using errcode = 'P0002';
-  end if;
-
-  -- Idempotency check BEFORE OCC so replays succeed even after version bumped
-  v_replay := public.direct_entry_authz__internal_assert_idempotency(
-    p_actor_app_user_id,
-    p_target_app_user_id,
-    v_op,
-    v_role_code,
-    p_idempotency_key::text,
-    p_request_hash
-  );
-  if v_replay is not null then
-    return v_replay;
-  end if;
-
-  if v_target.version <> p_expected_account_version then
-    raise exception 'VERSION_CONFLICT'
-      using errcode = 'PT409',
-            detail = pg_catalog.jsonb_build_object('current_version', v_target.version)::text;
-  end if;
-
-  if not v_target.enabled then
-    raise exception 'ACCOUNT_DISABLED' using errcode = 'PT409';
-  end if;
-
-  if exists (
-    select 1
-      from public.authz_account_role_assignments ara
-     where ara.app_user_id = p_target_app_user_id
-       and ara.role_code = v_role_code
-       and ara.ended_at is null
-  ) then
-    raise exception 'ROLE_ALREADY_ASSIGNED' using errcode = 'PT409';
-  end if;
-
-  v_now := pg_catalog.clock_timestamp();
-
-  insert into public.authz_account_role_assignments (
-    app_user_id,
-    role_code,
-    scope_kind,
-    scope_ref,
-    source_kind,
-    reason,
-    started_at,
-    assigned_by_app_user_id,
-    is_protected,
-    protected_reason,
-    created_at
-  ) values (
-    p_target_app_user_id,
-    v_role_code,
-    'GLOBAL',
-    null,
-    'ADMIN_ASSIGNMENT',
-    v_reason,
-    v_now,
-    p_actor_app_user_id,
-    false,
-    null,
-    v_now
-  ) returning * into v_inserted;
-
-  update public.direct_entry_app_users u
-     set authz_managed = true,
-         version = u.version + 1,
-         updated_at = v_now
-   where u.app_user_id = p_target_app_user_id
-  returning u.version into v_new_version;
-
-  insert into public.authz_audit_events (
-    actor_auth_subject,
-    actor_app_user_id,
-    target_app_user_id,
-    operation_name,
-    assignment_id,
-    before_payload,
-    after_payload,
-    reason,
-    created_at
-  ) values (
-    p_auth_subject,
-    p_actor_app_user_id,
-    p_target_app_user_id,
-    v_op,
-    v_inserted.assignment_id,
-    null,
-    pg_catalog.jsonb_build_object(
-      'assignment_id', v_inserted.assignment_id,
-      'role_code', v_inserted.role_code,
-      'source_kind', v_inserted.source_kind,
-      'is_protected', v_inserted.is_protected
-    ),
-    v_reason,
-    v_now
-  );
-
-  perform public.direct_entry_authz__internal_sync_legacy_grants(p_target_app_user_id);
-
-  select exists (
-    select 1
-      from public.organization_account_person_links l
-      join public.organization_persons p on p.person_id = l.person_id and p.status = 'ACTIVE'
-     where l.app_user_id = p_target_app_user_id and l.ended_at is null
-  ) into v_has_active_person;
-
-  v_assignment_json := pg_catalog.jsonb_build_object(
-    'assignment_id', v_inserted.assignment_id,
-    'role_code', v_inserted.role_code,
-    'display_name', v_role_def.display_name,
-    'source_kind', v_inserted.source_kind,
-    'reason', v_inserted.reason,
-    'started_at', pg_catalog.to_char(v_inserted.started_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00',
-    'ended_at', null,
-    'ended_reason', null,
-    'assigned_by_display', v_actor.display_name,
-    'is_effective', (not v_role_def.requires_active_person or coalesce(v_has_active_person, false)),
-    'inactive_reason', case
-      when v_role_def.requires_active_person and not coalesce(v_has_active_person, false) then 'PERSON_INACTIVE'
-      else null
-    end,
-    'is_protected', false,
-    'can_revoke', true,
-    'cannot_revoke_reason', null
-  );
-
-  v_result := pg_catalog.jsonb_build_object(
-    'replayed', false,
-    'account_ref', p_target_app_user_id,
-    'account_version', v_new_version,
-    'assignment', v_assignment_json
-  );
-
-  insert into public.authz_idempotency (
-    actor_app_user_id,
-    target_app_user_id,
-    operation_name,
-    target_key,
-    idempotency_key,
-    request_hash,
-    response_payload,
-    created_at
-  ) values (
-    p_actor_app_user_id,
-    p_target_app_user_id,
-    v_op,
-    v_role_code,
-    p_idempotency_key::text,
-    p_request_hash,
-    v_result,
-    v_now
-  );
-
-  return v_result;
-end;
-$function$
-;
-
--- direct_entry_authz_get_account_access_admin(uuid,uuid,uuid)
-CREATE OR REPLACE FUNCTION public.direct_entry_authz_get_account_access_admin(p_auth_subject uuid, p_actor_app_user_id uuid, p_target_app_user_id uuid)
- RETURNS jsonb
- LANGUAGE plpgsql
- STABLE SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-declare
-  v_now timestamptz := pg_catalog.clock_timestamp();
-  v_today date := public.direct_entry_authorization_date();
-  v_user public.direct_entry_app_users%rowtype;
-  v_login_id text;
-  v_person_json jsonb := null;
-  v_person_id uuid := null;
-  v_has_active_person boolean := false;
-  v_global_roles jsonb := '[]'::jsonb;
-  v_direct_exceptions jsonb := '[]'::jsonb;
-  v_contextual_assignments jsonb := '[]'::jsonb;
-  v_module_authorities jsonb := '[]'::jsonb;
-  v_effective_grants jsonb := '[]'::jsonb;
-begin
-  perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
-
-  if p_target_app_user_id is null then
-    raise exception 'AUTHZ_VALIDATION_ERROR' using errcode = '22023';
-  end if;
-
-  select u.* into v_user
-    from public.direct_entry_app_users u
-   where u.app_user_id = p_target_app_user_id;
-  if not found then
-    raise exception 'ACCOUNT_NOT_FOUND' using errcode = 'P0002';
-  end if;
-
-  select coalesce(
-    nullif(pg_catalog.btrim(split_part(au.email, pg_catalog.chr(64), 1)), ''),
-    v_user.display_name
-  )
-    into v_login_id
-    from auth.users au
-   where au.id = v_user.auth_subject;
-
-  v_login_id := coalesce(v_login_id, v_user.display_name);
-
-  select
-    p.person_id,
-    coalesce(p.status = 'ACTIVE', false),
-    pg_catalog.jsonb_build_object(
-      'person_id', p.person_id,
-      'employee_code', p.employee_code,
-      'full_name', p.full_name,
-      'status', p.status,
-      'department_id', d.department_id,
-      'department_name', d.name
-    )
-    into v_person_id, v_has_active_person, v_person_json
-    from public.organization_account_person_links apl
-    join public.organization_persons p
-      on p.person_id = apl.person_id
-    left join public.organization_person_department_memberships pdm
-      on pdm.person_id = p.person_id
-     and pdm.ended_at is null
-    left join public.organization_departments d
-      on d.department_id = pdm.department_id
-   where apl.app_user_id = p_target_app_user_id
-     and apl.ended_at is null
-   order by apl.started_at desc, apl.link_id desc
-   limit 1;
-
-  select coalesce(
-    pg_catalog.jsonb_agg(
-      pg_catalog.jsonb_build_object(
-        'assignment_id', ara.assignment_id,
-        'role_code', ara.role_code,
-        'display_name', rd.display_name,
-        'source_kind', ara.source_kind,
-        'reason', ara.reason,
-        'started_at', pg_catalog.to_char(ara.started_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00',
-        'ended_at', case
-          when ara.ended_at is null then null
-          else pg_catalog.to_char(ara.ended_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00'
-        end,
-        'ended_reason', ara.ended_reason,
-        'assigned_by_display', aby.display_name,
-        'is_effective', (
-          ara.ended_at is null
-          and v_user.enabled
-          and ara.started_at <= v_now
-          and (not rd.requires_active_person or coalesce(v_has_active_person, false))
-        ),
-        'inactive_reason', case
-          when ara.ended_at is not null then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when rd.requires_active_person and not coalesce(v_has_active_person, false) then 'PERSON_INACTIVE'
-          else null
-        end,
-        'is_protected', ara.is_protected,
-        'can_revoke', (ara.ended_at is null and not ara.is_protected),
-        'cannot_revoke_reason', case
-          when ara.ended_at is null and ara.is_protected then 'PROTECTED_OWNER_ADMIN'
-          else null
-        end
-      )
-      order by (ara.ended_at is null) desc, rd.sort_order, ara.started_at desc, ara.assignment_id
-    ),
-    '[]'::jsonb
-  )
-    into v_global_roles
-    from public.authz_account_role_assignments ara
-    join public.authz_role_definitions rd on rd.role_code = ara.role_code
-    left join public.direct_entry_app_users aby on aby.app_user_id = ara.assigned_by_app_user_id
-   where ara.app_user_id = p_target_app_user_id;
-
-  select coalesce(
-    pg_catalog.jsonb_agg(
-      pg_catalog.jsonb_build_object(
-        'direct_grant_id', g.direct_grant_id,
-        'capability', g.capability,
-        'scope_kind', g.scope_kind,
-        'scope_id', g.scope_id,
-        'scope_label', case
-          when g.scope_kind in ('OWN', 'ALL') then g.scope_kind
-          when g.scope_kind = 'CONTEXT_TEAM' then coalesce(tm.display_name, tm.code, g.scope_id)
-          when g.scope_kind = 'CONTEXT_PROJECT' then coalesce(pr.display_name, g.scope_id)
-          when g.scope_kind = 'CONTEXT_DEPARTMENT' then coalesce(dm.name, dm.code, g.scope_id)
-          else g.scope_kind
-        end,
-        'source_kind', g.source_kind,
-        'reason', g.reason,
-        'started_at', pg_catalog.to_char(g.started_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00',
-        'ended_at', case
-          when g.ended_at is null then null
-          else pg_catalog.to_char(g.ended_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00'
-        end,
-        'ended_reason', g.ended_reason,
-        'granted_by_display', gby.display_name,
-        'is_effective', (
-          g.ended_at is null
-          and v_user.enabled
-          and g.started_at <= v_now
-          and (
-            g.scope_kind in ('OWN', 'ALL')
-            or (g.scope_kind = 'CONTEXT_TEAM' and tm.team_id is not null and tm.active)
-            or (g.scope_kind = 'CONTEXT_PROJECT' and pr.project_id is not null and pr.active)
-            or (g.scope_kind = 'CONTEXT_DEPARTMENT' and dm.department_id is not null and dm.is_active)
-          )
-        ),
-        'inactive_reason', case
-          when g.ended_at is not null then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when g.scope_kind = 'CONTEXT_TEAM' and (tm.team_id is null or not tm.active) then 'TEAM_INACTIVE'
-          when g.scope_kind = 'CONTEXT_PROJECT' and (pr.project_id is null or not pr.active) then 'PROJECT_INACTIVE'
-          when g.scope_kind = 'CONTEXT_DEPARTMENT' and (dm.department_id is null or not dm.is_active) then 'DEPARTMENT_INACTIVE'
-          else null
-        end
-      )
-      order by (g.ended_at is null) desc, g.started_at desc, g.direct_grant_id
-    ),
-    '[]'::jsonb
-  )
-    into v_direct_exceptions
-    from public.authz_direct_capability_grants g
-    left join public.direct_entry_app_users gby on gby.app_user_id = g.granted_by_app_user_id
-    left join public.teams tm on g.scope_kind = 'CONTEXT_TEAM' and tm.team_id::text = g.scope_id
-    left join public.direct_entry_projects pr on g.scope_kind = 'CONTEXT_PROJECT' and pr.project_id = g.scope_id
-    left join public.organization_departments dm on g.scope_kind = 'CONTEXT_DEPARTMENT' and dm.department_id::text = g.scope_id
-   where g.app_user_id = p_target_app_user_id;
-
-  select coalesce(
-    pg_catalog.jsonb_agg(
-      pg_catalog.jsonb_build_object(
-        'role_code', c.role_code,
-        'display_name', c.display_name,
-        'target_kind', c.target_kind,
-        'target_ref', c.target_ref,
-        'target_label', c.target_label,
-        'scope_kind', c.scope_kind,
-        'scope_id', c.scope_id,
-        'assignment_id', c.assignment_id,
-        'started_at', c.started_at_iso,
-        'is_effective', c.is_effective,
-        'inactive_reason', c.inactive_reason,
-        'derived_capabilities', c.derived_capabilities,
-        'can_revoke', false,
-        'cannot_revoke_reason', 'MANAGED_IN_SOURCE_MODULE'
-      )
-      order by c.sort_order, c.target_label, c.target_ref
-    ),
-    '[]'::jsonb
-  )
-    into v_contextual_assignments
-    from (
-      select
-        1 as sort_order,
-        'TEAM_LEADER'::text as role_code,
-        'Trưởng nhóm (Team Leader)'::text as display_name,
-        'TEAM'::text as target_kind,
-        t.team_id::text as target_ref,
-        coalesce(t.display_name, t.code) as target_label,
-        'CONTEXT_TEAM'::text as scope_kind,
-        t.team_id::text as scope_id,
-        tla.assignment_id,
-        pg_catalog.to_char((tla.valid_from::timestamp at time zone 'Asia/Ho_Chi_Minh') at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00' as started_at_iso,
-        (v_user.enabled and public.direct_entry__internal_team_leader_assignment_effective(tla.assignment_id, v_today)) as is_effective,
-        case
-          when tla.valid_to is not null and v_today >= tla.valid_to then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when not t.active then 'TEAM_INACTIVE'
-          when not r.active then 'PERSON_INACTIVE'
-          else null
-        end as inactive_reason,
-        coalesce((
-          select pg_catalog.jsonb_agg(rc.capability order by rc.sort_order, rc.capability)
-            from public.authz_role_capabilities rc
-           where rc.role_code = 'TEAM_LEADER'
-        ), '[]'::jsonb) as derived_capabilities
-      from public.direct_entry_team_leader_assignments tla
-      join public.teams t on t.team_id = tla.team_id and t.code <> '__system_vendor__'
-      join public.recruiters r on r.recruiter_id = tla.leader_recruiter_id
-      where tla.leader_app_user_id = p_target_app_user_id
-        and (tla.valid_to is null or v_today < tla.valid_to)
-        and (tla.valid_to is null or tla.valid_to > tla.valid_from)
-        and (tla.is_current or tla.suspended_by_account_disable)
-      union all
-      select
-        2 as sort_order,
-        'DEPARTMENT_HEAD'::text as role_code,
-        'Trưởng phòng ban'::text as display_name,
-        'DEPARTMENT'::text as target_kind,
-        dm.department_id::text as target_ref,
-        dm.name as target_label,
-        'CONTEXT_DEPARTMENT'::text as scope_kind,
-        dm.department_id::text as scope_id,
-        dh.head_assignment_id as assignment_id,
-        pg_catalog.to_char(dh.started_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00' as started_at_iso,
-        (v_user.enabled and dm.is_active and coalesce(v_has_active_person, false) and dh.ended_at is null and dh.started_at <= v_now) as is_effective,
-        case
-          when dh.ended_at is not null then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when not dm.is_active then 'DEPARTMENT_INACTIVE'
-          when not coalesce(v_has_active_person, false) then 'PERSON_INACTIVE'
-          else null
-        end as inactive_reason,
-        '[]'::jsonb as derived_capabilities
-      from public.organization_department_heads dh
-      join public.organization_departments dm on dm.department_id = dh.department_id
-      where v_person_id is not null
-        and dh.person_id = v_person_id
-        and dh.ended_at is null
-        and dh.started_at <= v_now
-      union all
-      select
-        3 as sort_order,
-        'PROJECT_MANAGER'::text as role_code,
-        'Quản lý dự án (PM)'::text as display_name,
-        'PROJECT'::text as target_kind,
-        pr.project_id as target_ref,
-        coalesce(pr.display_name, pr.project_id) as target_label,
-        'CONTEXT_PROJECT'::text as scope_kind,
-        pr.project_id as scope_id,
-        pma.assignment_id,
-        pg_catalog.to_char(pma.created_at at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00' as started_at_iso,
-        (
-          v_user.enabled
-          and pr.active
-          and pma.is_current
-          and pma.revoked_at is null
-          and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
-          and pma.valid_from <= v_today
-          and public.direct_entry_actor_is_assigned_project_manager(p_target_app_user_id, pr.project_id)
-        ) as is_effective,
-        case
-          when pma.revoked_at is not null or (pma.valid_to is not null and (pma.valid_to <= pma.valid_from or v_today >= pma.valid_to)) then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when not pr.active then 'PROJECT_INACTIVE'
-          when not r.active then 'RECRUITER_INACTIVE'
-          when not pma.is_current
-            or not rl.is_current
-            or not public.direct_entry_actor_is_assigned_project_manager(p_target_app_user_id, pr.project_id)
-            then 'REVOKED'
-          else null
-        end as inactive_reason,
-        '[]'::jsonb as derived_capabilities
-      from public.direct_entry_project_manager_assignments pma
-      join public.direct_entry_projects pr on pr.project_id = pma.project_id
-      join public.recruiters r on r.recruiter_id = pma.manager_recruiter_id
-      join public.direct_entry_app_user_recruiter_links rl
-        on rl.recruiter_id = pma.manager_recruiter_id
-       and rl.app_user_id = p_target_app_user_id
-       and rl.verified = true
-       and rl.valid_from <= v_today
-       and (rl.valid_to is null or (rl.valid_to > rl.valid_from and v_today < rl.valid_to))
-       and (rl.is_current or rl.suspended_by_account_disable or not v_user.enabled)
-      where pma.revoked_at is null
-        and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
-        and pma.valid_from <= v_today
-        and (
-          pma.is_current
-          or (not v_user.enabled and rl.suspended_by_account_disable)
-        )
-        and not exists (
-          select 1
-            from public.direct_entry_app_user_recruiter_links other
-           where other.link_id <> rl.link_id
-             and (other.is_current or other.suspended_by_account_disable)
-             and (
-               other.app_user_id = p_target_app_user_id
-               or (other.verified and other.recruiter_id = pma.manager_recruiter_id)
-             )
-        )
-      union all
-      select
-        4 as sort_order,
-        'PROJECT_ACCOUNTANT'::text as role_code,
-        'Kế toán dự án'::text as display_name,
-        'PROJECT'::text as target_kind,
-        pa.project_id as target_ref,
-        coalesce(pr.display_name, pa.project_id) as target_label,
-        'CONTEXT_PROJECT'::text as scope_kind,
-        pa.project_id as scope_id,
-        pa.assignment_id,
-        pg_catalog.to_char((pa.valid_from::timestamp at time zone 'Asia/Ho_Chi_Minh') at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00' as started_at_iso,
-        (v_user.enabled and pr.active) as is_effective,
-        case
-          when pa.ended_at is not null or (pa.valid_to is not null and v_today >= pa.valid_to) then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when not pr.active then 'PROJECT_INACTIVE'
-          else null
-        end as inactive_reason,
-        '["vendor_finance_view"]'::jsonb as derived_capabilities
-      from public.vendor_finance_project_accountants pa
-      join public.direct_entry_projects pr on pr.project_id = pa.project_id
-      where pa.accountant_user_id = p_target_app_user_id
-        and pa.ended_at is null
-        and pa.valid_from <= v_today
-        and (pa.valid_to is null or (pa.valid_to > pa.valid_from and v_today < pa.valid_to))
-    ) c;
-
-  select coalesce(
-    pg_catalog.jsonb_agg(
-      pg_catalog.jsonb_build_object(
-        'module', ma.module_code,
-        'authority_code', ma.authority_code,
-        'display_name', ma.display_name,
-        'scope_kind', ma.scope_kind,
-        'scope_ref', ma.scope_ref,
-        'scope_label', ma.scope_label,
-        'is_effective', ma.is_effective,
-        'inactive_reason', ma.inactive_reason
-      )
-      order by ma.module_code, ma.authority_code, ma.scope_kind, ma.scope_ref nulls first
-    ),
-    '[]'::jsonb
-  )
-    into v_module_authorities
-    from (
-      select
-        'vendor_finance'::text as module_code,
-        r.role_code as authority_code,
-        ('Vendor Finance Global (' || r.role_code || ')')::text as display_name,
-        'ALL'::text as scope_kind,
-        null::text as scope_ref,
-        'ALL'::text as scope_label,
-        (v_user.enabled and r.ended_at is null and r.valid_from <= v_today and (r.valid_to is null or (r.valid_to > r.valid_from and v_today < r.valid_to))) as is_effective,
-        case
-          when r.ended_at is not null or (r.valid_to is not null and v_today >= r.valid_to) then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          else null
-        end as inactive_reason
-      from public.vendor_finance_global_roles r
-      where r.app_user_id = p_target_app_user_id
-        and r.ended_at is null
-        and r.valid_from <= v_today
-        and (r.valid_to is null or (r.valid_to > r.valid_from and v_today < r.valid_to))
-      union all
-      select
-        'leave'::text as module_code,
-        g.role_code as authority_code,
-        ('Leave Module (' || g.role_code || ')')::text as display_name,
-        'ALL'::text as scope_kind,
-        null::text as scope_ref,
-        'ALL'::text as scope_label,
-        (v_user.enabled and g.is_current and g.valid_from <= v_today and (g.valid_to is null or (g.valid_to > g.valid_from and v_today < g.valid_to))) as is_effective,
-        case
-          when not g.is_current or (g.valid_to is not null and v_today >= g.valid_to) then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          else null
-        end as inactive_reason
-      from public.leave_module_grants g
-      where g.app_user_id = p_target_app_user_id
-        and g.is_current = true
-        and g.valid_from <= v_today
-        and (g.valid_to is null or (g.valid_to > g.valid_from and v_today < g.valid_to))
-      union all
-      select
-        'leave'::text as module_code,
-        'LEAVE_DEPT_APPROVER'::text as authority_code,
-        ('Leave Approver (' || a.unit_kind || ')')::text as display_name,
-        'CONTEXT_DEPARTMENT'::text as scope_kind,
-        a.unit_kind as scope_ref,
-        a.unit_kind as scope_label,
-        (v_user.enabled and a.is_current and a.valid_from <= v_today and (a.valid_to is null or (a.valid_to > a.valid_from and v_today < a.valid_to))) as is_effective,
-        case
-          when not a.is_current or (a.valid_to is not null and v_today >= a.valid_to) then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          else null
-        end as inactive_reason
-      from public.leave_department_approvers a
-      where a.approver_app_user_id = p_target_app_user_id
-        and a.is_current = true
-        and a.valid_from <= v_today
-        and (a.valid_to is null or (a.valid_to > a.valid_from and v_today < a.valid_to))
-      union all
-      select
-        'work_reports'::text as module_code,
-        case when d.capability = 'report_review' then 'REPORT_REVIEWER' else 'REPORT_ASSIGN_DELEGATE' end as authority_code,
-        case when d.capability = 'report_review' then 'Work Report Reviewer' else 'Work Report Assign Delegate' end as display_name,
-        case when d.scope_kind = 'all' then 'ALL' else 'CONTEXT_TEAM' end as scope_kind,
-        case when d.scope_kind = 'team' then d.scope_team_id::text else null end as scope_ref,
-        case when d.scope_kind = 'all' then 'ALL' else coalesce(tm.display_name, tm.code, 'Team') end as scope_label,
-        (v_user.enabled and public.work_report__internal_is_delegation_effective(d.delegation_id, v_now)) as is_effective,
-        case
-          when not d.is_current or d.state <> 'ACTIVE' or d.revoked_at is not null or (d.effective_to is not null and v_now > d.effective_to) then 'REVOKED'
-          when not v_user.enabled then 'ACCOUNT_DISABLED'
-          when tm.team_id is not null and not tm.active then 'TEAM_INACTIVE'
-          else null
-        end as inactive_reason
-      from public.work_report_delegations d
-      left join public.teams tm on tm.team_id = d.scope_team_id
-      where d.delegate_app_user_id = p_target_app_user_id
-        and d.state = 'ACTIVE'
-        and d.is_current = true
-        and d.revoked_at is null
-        and (d.effective_to is null or v_now <= d.effective_to)
-    ) ma;
-
-  if v_user.enabled then
-    v_effective_grants := public.direct_entry_authz__internal_resolve_effective_grants(p_target_app_user_id);
-  else
-    v_effective_grants := '[]'::jsonb;
-  end if;
-
-  return pg_catalog.jsonb_build_object(
-    'as_of', pg_catalog.to_char(v_now at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00',
-    'account', pg_catalog.jsonb_build_object(
-      'account_ref', v_user.app_user_id,
-      'login_id', v_login_id,
-      'display_name', v_user.display_name,
-      'enabled', v_user.enabled,
-      'authz_managed', v_user.authz_managed,
-      'version', v_user.version,
-      'person', v_person_json
-    ),
-    'blocking_reasons', case
-      when not v_user.enabled then '["ACCOUNT_DISABLED"]'::jsonb
-      else '[]'::jsonb
-    end,
-    'assigned_global_roles', coalesce(v_global_roles, '[]'::jsonb),
-    'direct_exceptions', coalesce(v_direct_exceptions, '[]'::jsonb),
-    'contextual_assignments', coalesce(v_contextual_assignments, '[]'::jsonb),
-    'module_authorities', coalesce(v_module_authorities, '[]'::jsonb),
-    'effective_grants', coalesce(v_effective_grants, '[]'::jsonb)
-  );
-end;
-$function$
-;
-
--- direct_entry_authz_list_accounts_summary_admin(uuid,uuid,text,text,text,integer,integer)
-CREATE OR REPLACE FUNCTION public.direct_entry_authz_list_accounts_summary_admin(p_auth_subject uuid, p_actor_app_user_id uuid, p_search text DEFAULT NULL::text, p_enabled text DEFAULT 'all'::text, p_role_code text DEFAULT NULL::text, p_page integer DEFAULT 1, p_page_size integer DEFAULT 25)
- RETURNS jsonb
- LANGUAGE plpgsql
- STABLE SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-declare
-  v_now timestamptz := pg_catalog.clock_timestamp();
-  v_today date := public.direct_entry_authorization_date();
-  v_search text := nullif(pg_catalog.btrim(p_search), '');
-  v_enabled text := coalesce(nullif(pg_catalog.btrim(p_enabled), ''), 'all');
-  v_role_code text := nullif(pg_catalog.btrim(p_role_code), '');
-  v_page integer := coalesce(p_page, 1);
-  v_page_size integer := coalesce(p_page_size, 25);
-  v_offset integer;
-  v_total integer := 0;
-  v_accounts jsonb := '[]'::jsonb;
-begin
-  perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
-
-  if v_search is not null and pg_catalog.length(v_search) > 256 then
-    raise exception 'AUTHZ_VALIDATION_ERROR' using errcode = '22023';
-  end if;
-  if v_enabled not in ('all', 'true', 'false') then
-    raise exception 'AUTHZ_VALIDATION_ERROR' using errcode = '22023';
-  end if;
-  if v_role_code is not null and not exists (
-    select 1 from public.authz_role_definitions rd where rd.role_code = v_role_code
-  ) then
-    raise exception 'ROLE_CODE_INVALID' using errcode = '22023';
-  end if;
-  if v_page < 1 or v_page > 1000 or v_page_size < 1 or v_page_size > 100 then
-    raise exception 'AUTHZ_VALIDATION_ERROR' using errcode = '22023';
-  end if;
-
-  v_offset := (v_page - 1) * v_page_size;
-
-  with base_accounts as (
-    select
-      u.app_user_id,
-      coalesce(
-        nullif(pg_catalog.btrim(split_part(au.email, pg_catalog.chr(64), 1)), ''),
-        u.display_name
-      ) as login_id,
-      u.display_name,
-      u.enabled,
-      u.authz_managed,
-      u.version,
-      u.created_at,
-      p.person_id,
-      p.employee_code,
-      p.full_name as person_full_name,
-      p.status as person_status,
-      d.department_id,
-      d.name as department_name,
-      coalesce(p.status = 'ACTIVE', false) as has_active_person
-    from public.direct_entry_app_users u
-    left join auth.users au
-      on au.id = u.auth_subject
-    left join public.organization_account_person_links apl
-      on apl.app_user_id = u.app_user_id
-     and apl.ended_at is null
-    left join public.organization_persons p
-      on p.person_id = apl.person_id
-    left join public.organization_person_department_memberships pdm
-      on pdm.person_id = p.person_id
-     and pdm.ended_at is null
-    left join public.organization_departments d
-      on d.department_id = pdm.department_id
-    where (
-      v_enabled = 'all'
-      or (v_enabled = 'true' and u.enabled = true)
-      or (v_enabled = 'false' and u.enabled = false)
-    )
-    and (
-      v_search is null
-      or lower(u.display_name) like '%' || lower(v_search) || '%'
-      or lower(coalesce(split_part(au.email, pg_catalog.chr(64), 1), '')) like '%' || lower(v_search) || '%'
-      or lower(coalesce(p.employee_code, '')) like '%' || lower(v_search) || '%'
-      or lower(coalesce(p.full_name, '')) like '%' || lower(v_search) || '%'
-    )
-    and (
-      v_role_code is null
-      or exists (
-        select 1
-          from public.authz_account_role_assignments ara
-         where ara.app_user_id = u.app_user_id
-           and ara.role_code = v_role_code
-           and ara.ended_at is null
-      )
-      or (
-        v_role_code = 'TEAM_LEADER'
-        and exists (
-          select 1
-            from public.direct_entry_team_leader_assignments tla
-            join public.teams t
-              on t.team_id = tla.team_id
-             and t.code <> '__system_vendor__'
-           where tla.leader_app_user_id = u.app_user_id
-             and tla.valid_from <= v_today
-             and (tla.valid_to is null or v_today < tla.valid_to)
-             and (tla.valid_to is null or tla.valid_to > tla.valid_from)
-             and (tla.is_current or tla.suspended_by_account_disable)
-        )
-      )
-      or (
-        v_role_code = 'DEPARTMENT_HEAD'
-        and p.person_id is not null
-        and exists (
-          select 1
-            from public.organization_department_heads dh
-           where dh.person_id = p.person_id
-             and dh.ended_at is null
-             and dh.started_at <= v_now
-        )
-      )
-      or (
-        v_role_code = 'PROJECT_MANAGER'
-        and exists (
-          select 1
-            from public.direct_entry_project_manager_assignments pma
-            join public.direct_entry_projects pr
-              on pr.project_id = pma.project_id
-             and pr.active = true
-            join public.recruiters r
-              on r.recruiter_id = pma.manager_recruiter_id
-             and r.active = true
-            join public.direct_entry_app_user_recruiter_links rl
-              on rl.recruiter_id = pma.manager_recruiter_id
-             and rl.app_user_id = u.app_user_id
-             and rl.verified = true
-             and rl.valid_from <= v_today
-             and (rl.valid_to is null or (rl.valid_to > rl.valid_from and v_today < rl.valid_to))
-             and (rl.is_current or rl.suspended_by_account_disable)
-           where pma.revoked_at is null
-             and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
-             and pma.valid_from <= v_today
-             and (
-               (u.enabled and public.direct_entry_actor_is_assigned_project_manager(u.app_user_id, pr.project_id))
-               or (
-                 not u.enabled
-                 and u.auth_subject is not null
-                 and pma.is_current = true
-                 and rl.suspended_by_account_disable = true
-                 and not exists (
-                   select 1
-                     from public.direct_entry_app_user_recruiter_links other
-                    where other.link_id <> rl.link_id
-                      and (other.is_current or other.suspended_by_account_disable)
-                      and (
-                        other.app_user_id = u.app_user_id
-                        or (other.verified and other.recruiter_id = pma.manager_recruiter_id)
-                      )
-                 )
-               )
-             )
-        )
-      )
-      or (
-        v_role_code = 'PROJECT_ACCOUNTANT'
-        and exists (
-          select 1
-            from public.vendor_finance_project_accountants pa
-           where pa.accountant_user_id = u.app_user_id
-             and pa.ended_at is null
-             and pa.valid_from <= v_today
-             and (pa.valid_to is null or (pa.valid_to > pa.valid_from and v_today < pa.valid_to))
-        )
-      )
-    )
-  ),
-  counted as (
-    select count(*)::integer as total_cnt from base_accounts
-  ),
-  paged as (
-    select *
-      from base_accounts
-     order by lower(display_name), lower(login_id), app_user_id
-     limit v_page_size offset v_offset
-  )
-  select
-    (select total_cnt from counted),
-    coalesce(
-      pg_catalog.jsonb_agg(
-        pg_catalog.jsonb_build_object(
-          'account_ref', b.app_user_id,
-          'login_id', b.login_id,
-          'display_name', b.display_name,
-          'enabled', b.enabled,
-          'authz_managed', b.authz_managed,
-          'version', b.version,
-          'person', case
-            when b.person_id is null then null
-            else pg_catalog.jsonb_build_object(
-              'person_id', b.person_id,
-              'employee_code', b.employee_code,
-              'full_name', b.person_full_name,
-              'status', b.person_status,
-              'department_id', b.department_id,
-              'department_name', b.department_name
-            )
-          end,
-          'global_roles', coalesce((
-            select pg_catalog.jsonb_agg(
-              pg_catalog.jsonb_build_object(
-                'assignment_id', ara.assignment_id,
-                'role_code', ara.role_code,
-                'display_name', rd.display_name,
-                'is_effective', (
-                  b.enabled
-                  and ara.ended_at is null
-                  and ara.started_at <= v_now
-                  and (not rd.requires_active_person or b.has_active_person)
-                ),
-                'is_protected', ara.is_protected,
-                'can_revoke', (ara.ended_at is null and not ara.is_protected),
-                'cannot_revoke_reason', case
-                  when ara.ended_at is null and ara.is_protected then 'PROTECTED_OWNER_ADMIN'
-                  else null
-                end
-              )
-              order by rd.sort_order, ara.started_at, ara.assignment_id
-            )
-            from public.authz_account_role_assignments ara
-            join public.authz_role_definitions rd on rd.role_code = ara.role_code
-            where ara.app_user_id = b.app_user_id
-              and ara.ended_at is null
-          ), '[]'::jsonb),
-          'contextual_roles', coalesce((
-            select pg_catalog.jsonb_agg(
-              pg_catalog.jsonb_build_object(
-                'role_code', cr.role_code,
-                'display_name', cr.display_name,
-                'target_kind', cr.target_kind,
-                'target_ref', cr.target_ref,
-                'target_label', cr.target_label,
-                'is_effective', cr.is_effective
-              )
-              order by cr.sort_order, cr.target_label, cr.target_ref
-            )
-            from (
-              select
-                1 as sort_order,
-                'TEAM_LEADER'::text as role_code,
-                'Trưởng nhóm (Team Leader)'::text as display_name,
-                'TEAM'::text as target_kind,
-                t.team_id::text as target_ref,
-                coalesce(t.display_name, t.code) as target_label,
-                (b.enabled and public.direct_entry__internal_team_leader_assignment_effective(tla.assignment_id, v_today)) as is_effective
-              from public.direct_entry_team_leader_assignments tla
-              join public.teams t on t.team_id = tla.team_id and t.code <> '__system_vendor__'
-              where tla.leader_app_user_id = b.app_user_id
-                and (tla.valid_to is null or v_today < tla.valid_to)
-                and (tla.valid_to is null or tla.valid_to > tla.valid_from)
-                and (tla.is_current or tla.suspended_by_account_disable)
-              union all
-              select
-                2 as sort_order,
-                'DEPARTMENT_HEAD'::text as role_code,
-                'Trưởng phòng ban'::text as display_name,
-                'DEPARTMENT'::text as target_kind,
-                d2.department_id::text as target_ref,
-                d2.name as target_label,
-                (
-                  b.enabled
-                  and d2.is_active
-                  and b.has_active_person
-                  and dh.ended_at is null
-                  and dh.started_at <= v_now
-                ) as is_effective
-              from public.organization_department_heads dh
-              join public.organization_departments d2 on d2.department_id = dh.department_id
-              where b.person_id is not null
-                and dh.person_id = b.person_id
-                and dh.ended_at is null
-                and dh.started_at <= v_now
-              union all
-              select
-                3 as sort_order,
-                'PROJECT_MANAGER'::text as role_code,
-                'Quản lý dự án (PM)'::text as display_name,
-                'PROJECT'::text as target_kind,
-                pr.project_id as target_ref,
-                coalesce(pr.display_name, pr.project_id) as target_label,
-                (
-                  b.enabled
-                  and pr.active
-                  and pma.is_current
-                  and pma.revoked_at is null
-                  and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
-                  and pma.valid_from <= v_today
-                  and public.direct_entry_actor_is_assigned_project_manager(b.app_user_id, pr.project_id)
-                ) as is_effective
-              from public.direct_entry_project_manager_assignments pma
-              join public.direct_entry_projects pr on pr.project_id = pma.project_id
-              join public.recruiters r on r.recruiter_id = pma.manager_recruiter_id
-              join public.direct_entry_app_user_recruiter_links rl
-                on rl.recruiter_id = pma.manager_recruiter_id
-               and rl.app_user_id = b.app_user_id
-               and rl.verified = true
-               and rl.valid_from <= v_today
-               and (rl.valid_to is null or (rl.valid_to > rl.valid_from and v_today < rl.valid_to))
-               and (rl.is_current or rl.suspended_by_account_disable)
-              where pma.revoked_at is null
-                and (pma.valid_to is null or (pma.valid_to > pma.valid_from and v_today < pma.valid_to))
-                and pma.valid_from <= v_today
-                and (
-                  pma.is_current
-                  or (not b.enabled and rl.suspended_by_account_disable)
-                )
-                and not exists (
-                  select 1
-                    from public.direct_entry_app_user_recruiter_links other
-                   where other.link_id <> rl.link_id
-                     and (other.is_current or other.suspended_by_account_disable)
-                     and (
-                       other.app_user_id = b.app_user_id
-                       or (other.verified and other.recruiter_id = pma.manager_recruiter_id)
-                     )
-                )
-              union all
-              select
-                4 as sort_order,
-                'PROJECT_ACCOUNTANT'::text as role_code,
-                'Kế toán dự án'::text as display_name,
-                'PROJECT'::text as target_kind,
-                pa.project_id as target_ref,
-                coalesce(pr.display_name, pa.project_id) as target_label,
-                (b.enabled and pr.active) as is_effective
-              from public.vendor_finance_project_accountants pa
-              join public.direct_entry_projects pr on pr.project_id = pa.project_id
-              where pa.accountant_user_id = b.app_user_id
-                and pa.ended_at is null
-                and pa.valid_from <= v_today
-                and (pa.valid_to is null or (pa.valid_to > pa.valid_from and v_today < pa.valid_to))
-            ) cr
-          ), '[]'::jsonb),
-          'direct_exception_count', (
-            select count(*)::integer
-              from public.authz_direct_capability_grants dcg
-             where dcg.app_user_id = b.app_user_id
-               and dcg.ended_at is null
-          ),
-          'effective_grant_count', case
-            when not b.enabled then 0
-            else pg_catalog.jsonb_array_length(
-              public.direct_entry_authz__internal_resolve_effective_grants(b.app_user_id)
-            )
-          end,
-          'blocking_reasons', case
-            when not b.enabled then '["ACCOUNT_DISABLED"]'::jsonb
-            else '[]'::jsonb
-          end
-        )
-        order by lower(b.display_name), lower(b.login_id), b.app_user_id
-      ),
-      '[]'::jsonb
-    )
-    into v_total, v_accounts
-    from paged b;
-
-  return pg_catalog.jsonb_build_object(
-    'as_of', pg_catalog.to_char(v_now at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD"T"HH24:MI:SS.MS') || '+07:00',
-    'search', v_search,
-    'enabled', v_enabled,
-    'role_code', v_role_code,
-    'page', v_page,
-    'page_size', v_page_size,
-    'total', coalesce(v_total, 0),
-    'accounts', coalesce(v_accounts, '[]'::jsonb)
-  );
 end;
 $function$
 ;
@@ -3613,16 +2616,12 @@ begin
           from public.direct_entry_capability_grants g
          where g.app_user_id = p_target_app_user_id
         union
-        select rc.capability
-          from public.authz_account_role_assignments ara
-          join public.authz_role_capabilities rc on rc.role_code = ara.role_code
-         where ara.app_user_id = p_target_app_user_id
-           and ara.ended_at is null
-        union
-        select dg.capability
-          from public.authz_direct_capability_grants dg
-         where dg.app_user_id = p_target_app_user_id
-           and dg.ended_at is null
+        select gc.capability
+          from public.authz_user_group_members m
+          join public.authz_user_groups g on g.group_id = m.group_id and g.active = true
+          join public.authz_user_group_capabilities gc on gc.group_id = g.group_id and gc.ended_at is null
+         where m.app_user_id = p_target_app_user_id
+           and m.ended_at is null
         union
         select unnest(array[
           'team_manager_assign',
@@ -3821,18 +2820,13 @@ begin
          )
          or exists (
            select 1
-             from public.authz_account_role_assignments ara
-             join public.authz_role_capabilities rc on rc.role_code = ara.role_code
-            where ara.app_user_id = p_target_app_user_id
-              and ara.ended_at is null
-              and rc.capability = g.capability
-         )
-         or exists (
-           select 1
-             from public.authz_direct_capability_grants dg
-            where dg.app_user_id = p_target_app_user_id
-              and dg.ended_at is null
-              and dg.capability = g.capability
+             from public.authz_user_group_members m
+             join public.authz_user_groups grp on grp.group_id = m.group_id and grp.active = true
+             join public.organization_departments dept on dept.department_id = grp.department_id and dept.is_active = true
+             join public.authz_user_group_capabilities gc on gc.group_id = grp.group_id and gc.ended_at is null
+            where m.app_user_id = p_target_app_user_id
+              and m.ended_at is null
+              and gc.capability = g.capability
          )
        );
 
@@ -4324,22 +3318,36 @@ begin
       into v_assigned_roles
       from (
         select
-          rd.sort_order,
-          ara.role_code,
-          rd.display_name,
-          'GLOBAL'::text as assignment_mode,
-          null::text as scope_kind,
-          null::text as scope_id,
-          ara.assignment_id::text as assignment_id,
-          ara.is_protected,
-          (not ara.is_protected) as can_revoke,
-          case when ara.is_protected then 'PROTECTED_OWNER_ADMIN' else null end as cannot_revoke_reason
-        from public.authz_account_role_assignments ara
-        join public.authz_role_definitions rd on rd.role_code = ara.role_code
-        where ara.app_user_id = v_app_user_id
-          and ara.ended_at is null
-          and ara.started_at <= v_now
-          and (not rd.requires_active_person or coalesce(v_has_active_person, false))
+          case
+            when g.is_system_admin then 4
+            when g.code = 'HR_CATALOG_OPERATOR' then 3
+            when g.code = 'RECRUITER_OPERATIONS' then 2
+            else 1
+          end as sort_order,
+          case
+            when g.is_system_admin then 'ADMIN'::text
+            when g.code = 'HR_CATALOG_OPERATOR' then 'HR_OPERATOR'::text
+            when g.code = 'RECRUITER_OPERATIONS' then 'RECRUITER'::text
+            else g.code
+          end as role_code,
+          g.name as display_name,
+          case when g.team_id is not null then 'CONTEXTUAL'::text else 'GLOBAL'::text end as assignment_mode,
+          case when g.team_id is not null then 'CONTEXT_TEAM'::text else null::text end as scope_kind,
+          g.team_id::text as scope_id,
+          m.membership_id::text as assignment_id,
+          m.is_protected,
+          (not m.is_protected) as can_revoke,
+          case when m.is_protected then 'PROTECTED_OWNER_ADMIN' else null end as cannot_revoke_reason
+        from public.authz_user_group_members m
+        join public.authz_user_groups g
+          on g.group_id = m.group_id
+         and g.active = true
+        join public.organization_departments d
+          on d.department_id = g.department_id
+         and d.is_active = true
+        where m.app_user_id = v_app_user_id
+          and m.ended_at is null
+          and m.started_at <= v_now
         union all
         select
           5 as sort_order,
@@ -5153,47 +4161,16 @@ begin
       )
     );
 
-    select (
-             exists (
-               select 1
-                 from public.leave_module_grants g
-                where g.app_user_id = p_app_user_id
-                  and g.role_code = 'LEAVE_ADMIN_BOD_APPROVER'
-                  and g.is_current = true
-                  and g.valid_from <= v_today
-                  and (g.valid_to is null or v_today < g.valid_to)
-             )
-             or public.direct_entry_authz__internal_group_has_module_role(
-               p_app_user_id, 'leave', 'LEAVE_ADMIN_BOD_APPROVER'
-             )
+    -- D4 cutover: Leave module roles resolve EXCLUSIVELY from active permission groups
+    -- (historical leave_module_grants rows stay preserved for audit, never read as runtime fallback).
+    select public.direct_entry_authz__internal_group_has_module_role(
+             p_app_user_id, 'leave', 'LEAVE_ADMIN_BOD_APPROVER'
            ),
-           (
-             exists (
-               select 1
-                 from public.leave_module_grants g
-                where g.app_user_id = p_app_user_id
-                  and g.role_code = 'HR_LEAVE_OPERATOR'
-                  and g.is_current = true
-                  and g.valid_from <= v_today
-                  and (g.valid_to is null or v_today < g.valid_to)
-             )
-             or public.direct_entry_authz__internal_group_has_module_role(
-               p_app_user_id, 'leave', 'HR_LEAVE_OPERATOR'
-             )
+           public.direct_entry_authz__internal_group_has_module_role(
+             p_app_user_id, 'leave', 'HR_LEAVE_OPERATOR'
            ),
-           (
-             exists (
-               select 1
-                 from public.leave_module_grants g
-                where g.app_user_id = p_app_user_id
-                  and g.role_code = 'HR_REPORT_VIEWER'
-                  and g.is_current = true
-                  and g.valid_from <= v_today
-                  and (g.valid_to is null or v_today < g.valid_to)
-             )
-             or public.direct_entry_authz__internal_group_has_module_role(
-               p_app_user_id, 'leave', 'HR_REPORT_VIEWER'
-             )
+           public.direct_entry_authz__internal_group_has_module_role(
+             p_app_user_id, 'leave', 'HR_REPORT_VIEWER'
            )
       into v_is_admin_bod_grant, v_is_hr_operator, v_is_hr_report_viewer;
 
@@ -7581,26 +6558,41 @@ begin
     from public.leave_department_approvers da
    where da.is_current = true;
 
+  -- D4 cutover: project active group-managed Leave module roles (read-only in Leave admin overview)
   select coalesce(
            pg_catalog.jsonb_agg(
              pg_catalog.jsonb_build_object(
-               'grant_id', g.grant_id,
-               'app_user_id', g.app_user_id,
-               'account', public.leave_management__internal_account_summary(g.app_user_id),
-               'role_code', g.role_code,
-               'valid_from', g.valid_from,
-               'valid_to', g.valid_to,
-               'is_current', g.is_current,
-               'reason', g.reason,
-               'row_version', g.row_version
+               'grant_id', m.membership_id,
+               'app_user_id', m.app_user_id,
+               'account', public.leave_management__internal_account_summary(m.app_user_id),
+               'role_code', mr.role_code,
+               'valid_from', (m.started_at at time zone 'Asia/Ho_Chi_Minh')::date,
+               'valid_to', null,
+               'is_current', true,
+               'reason', 'Qua nhóm quyền: ' || grp.name,
+               'row_version', grp.version
              )
-             order by g.role_code asc, g.created_at desc
+             order by mr.role_code asc, m.created_at desc, m.membership_id asc
            ),
            '[]'::jsonb
          )
     into v_module_grants
-    from public.leave_module_grants g
-   where g.is_current = true;
+    from public.authz_user_group_members m
+    join public.authz_user_groups grp
+      on grp.group_id = m.group_id
+     and grp.active = true
+     and grp.team_id is null
+     and grp.is_system_admin = false
+    join public.organization_departments dept
+      on dept.department_id = grp.department_id
+     and dept.is_active = true
+    join public.authz_user_group_module_roles mr
+      on mr.group_id = grp.group_id
+     and mr.ended_at is null
+     and mr.started_at <= v_now
+     and mr.module_code = 'leave'
+   where m.ended_at is null
+     and m.started_at <= v_now;
 
   select count(*)::integer
     into v_total_employees
@@ -10613,33 +9605,10 @@ begin
       v_today
     );
 
-    select gr.role_code
-      into v_direct_global_role
-      from public.vendor_finance_global_roles gr
-     where gr.app_user_id = p_app_user_id
-       and gr.valid_from <= v_today
-       and (gr.valid_to is null or gr.valid_to > v_today)
-       and (gr.valid_to is null or gr.valid_to > gr.valid_from)
-     order by gr.valid_from desc, gr.version desc
-     limit 1;
-
-    -- D4: read-time union with group-managed vendor_finance module roles (exact lattice order)
-    v_group_global_role := public.direct_entry_authz__internal_group_vfin_global_role(p_app_user_id);
-
-    select role_code
-      into v_global_role
-      from (
-        values (v_direct_global_role), (v_group_global_role)
-      ) as cand(role_code)
-     where role_code is not null
-     order by case role_code
-       when 'CASH_HOLDER_RECORD_BEHALF' then 4
-       when 'CASH_HOLDER' then 3
-       when 'GLOBAL_RECONCILER' then 2
-       when 'GLOBAL_VIEWER' then 1
-       else 0
-     end desc
-     limit 1;
+  -- D4 cutover: Vendor Finance global module role resolves EXCLUSIVELY from active permission groups
+  -- (historical vendor_finance_global_roles rows stay preserved for audit; PROJECT_ACCOUNTANT stays per-project).
+  v_group_global_role := public.direct_entry_authz__internal_group_vfin_global_role(p_app_user_id);
+  v_global_role := v_group_global_role;
 
   if v_accounting_member then
     select count(*)::integer
@@ -10736,183 +9705,6 @@ begin
     'active_assigned_project_count', v_assigned_project_count,
     'authorization_date', v_today::text
   );
-end;
-$function$
-;
-
--- vendor_finance_assign_global_role_admin(uuid,uuid,uuid,text,integer,date,text,uuid,text)
-CREATE OR REPLACE FUNCTION public.vendor_finance_assign_global_role_admin(p_auth_subject uuid, p_app_user_id uuid, p_target_user_id uuid, p_role_code text, p_expected_version integer, p_valid_from date, p_reason text, p_idempotency_key uuid, p_request_fingerprint text)
- RETURNS jsonb
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-declare
-  v_today date;
-  v_existing_idem public.vendor_finance_idempotency%rowtype;
-  v_target_user public.direct_entry_app_users%rowtype;
-  v_valid_from date;
-  v_reason text;
-  v_max_version integer;
-  v_inserted public.vendor_finance_global_roles%rowtype;
-  v_base_payload jsonb;
-begin
-  perform public.vendor_finance__internal_assert_authority(p_auth_subject, p_app_user_id, 'admin');
-  v_today := public.direct_entry_authorization_date();
-
-  if p_idempotency_key is null
-     or p_request_fingerprint is null
-     or p_request_fingerprint !~ '^[0-9a-f]{64}$' then
-    raise exception 'VENDOR_FINANCE_IDEMPOTENCY_INVALID'
-      using errcode = '22023';
-  end if;
-
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('vfin_idem:' || p_app_user_id::text || ':' || p_idempotency_key::text, 0)
-  );
-
-  select i.*
-    into v_existing_idem
-    from public.vendor_finance_idempotency i
-   where i.actor_user_id = p_app_user_id
-     and i.idempotency_key = p_idempotency_key;
-
-  if found then
-    if v_existing_idem.action <> 'ASSIGN_GLOBAL_ROLE'
-       or v_existing_idem.request_fingerprint <> p_request_fingerprint then
-      raise exception 'VENDOR_FINANCE_IDEMPOTENCY_CONFLICT'
-        using errcode = '23505';
-    end if;
-    return v_existing_idem.result_payload || pg_catalog.jsonb_build_object('replayed', true);
-  end if;
-
-  if p_target_user_id is null
-     or p_role_code is null
-     or p_role_code not in ('GLOBAL_VIEWER', 'GLOBAL_RECONCILER', 'CASH_HOLDER', 'CASH_HOLDER_RECORD_BEHALF')
-     or p_expected_version is null or p_expected_version < 0 then
-    raise exception 'VENDOR_FINANCE_GLOBAL_ROLE_INVALID'
-      using errcode = '22023';
-  end if;
-
-  v_valid_from := coalesce(p_valid_from, v_today);
-  if v_valid_from <> v_today
-     or pg_catalog.date_part('year', v_valid_from)::integer not between 1970 and 2999 then
-    raise exception 'VENDOR_FINANCE_DATE_INVALID'
-      using errcode = '22023';
-  end if;
-
-  v_reason := public.vendor_finance__internal_validate_reason(p_reason);
-
-  -- Canonical DAG [4]: lock target global role slot
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('vfin_global_role:' || p_target_user_id::text, 0)
-  );
-
-  -- Canonical DAG [5]: lock actor & target in ascending app_user_id order FOR SHARE
-  perform u.app_user_id
-    from public.direct_entry_app_users u
-   where u.app_user_id in (p_app_user_id, p_target_user_id)
-   order by u.app_user_id asc
-   for share;
-
-  perform public.vendor_finance__internal_assert_authority(p_auth_subject, p_app_user_id, 'admin');
-
-  select u.*
-    into v_target_user
-    from public.direct_entry_app_users u
-   where u.app_user_id = p_target_user_id;
-
-  if not found
-     or not v_target_user.enabled
-     then
-    raise exception 'VENDOR_FINANCE_ACCOUNT_NOT_ELIGIBLE'
-      using errcode = '42200';
-  end if;
-
-  select coalesce(max(gr.version), 0)::integer
-    into v_max_version
-    from public.vendor_finance_global_roles gr
-   where gr.app_user_id = p_target_user_id;
-
-  if v_max_version <> p_expected_version then
-    raise exception 'VENDOR_FINANCE_GLOBAL_ROLE_VERSION_CONFLICT'
-      using errcode = 'PT409';
-  end if;
-
-  if exists (
-    select 1
-      from public.vendor_finance_global_roles gr
-     where gr.app_user_id = p_target_user_id
-       and gr.valid_to is null
-  ) then
-    raise exception 'VENDOR_FINANCE_GLOBAL_ROLE_ALREADY_ASSIGNED'
-      using errcode = '23505';
-  end if;
-
-  perform pg_catalog.set_config('vendor_finance.admin_write_marker', 'on', true);
-
-  insert into public.vendor_finance_global_roles (
-    app_user_id,
-    role_code,
-    version,
-    valid_from,
-    granted_by_user_id,
-    grant_reason
-  ) values (
-    p_target_user_id,
-    p_role_code,
-    v_max_version + 1,
-    v_valid_from,
-    p_app_user_id,
-    v_reason
-  )
-  returning * into v_inserted;
-
-  insert into public.vendor_finance_audit_events (
-    global_role_grant_id,
-    actor_user_id,
-    authority_source,
-    action,
-    reason,
-    metadata,
-    idempotency_key
-  ) values (
-    v_inserted.role_grant_id,
-    p_app_user_id,
-    'full_admin',
-    'GLOBAL_ROLE_ASSIGNED',
-    v_reason,
-    pg_catalog.jsonb_build_object(
-      'target_user_id', v_inserted.app_user_id,
-      'role_code', v_inserted.role_code,
-      'valid_from', v_inserted.valid_from::text,
-      'version', v_inserted.version
-    ),
-    p_idempotency_key
-  );
-
-  v_base_payload := pg_catalog.jsonb_build_object(
-    'role_grant_id', v_inserted.role_grant_id,
-    'account_ref', v_inserted.app_user_id,
-    'role_code', v_inserted.role_code,
-    'version', v_inserted.version
-  );
-
-  insert into public.vendor_finance_idempotency (
-    actor_user_id,
-    idempotency_key,
-    action,
-    request_fingerprint,
-    result_payload
-  ) values (
-    p_app_user_id,
-    p_idempotency_key,
-    'ASSIGN_GLOBAL_ROLE',
-    p_request_fingerprint,
-    v_base_payload
-  );
-
-  return v_base_payload || pg_catalog.jsonb_build_object('replayed', false);
 end;
 $function$
 ;
@@ -11535,144 +10327,6 @@ begin
     'project_accountant_summaries', v_project_summaries,
     'rows', v_rows,
     'legacy_unallocated_rows', v_legacy_rows
-  );
-end;
-$function$
-;
-
--- vendor_finance_list_global_roles_admin(uuid,uuid,text,boolean,integer,integer)
-CREATE OR REPLACE FUNCTION public.vendor_finance_list_global_roles_admin(p_auth_subject uuid, p_app_user_id uuid, p_search text DEFAULT NULL::text, p_include_history boolean DEFAULT true, p_page integer DEFAULT 1, p_page_size integer DEFAULT 25)
- RETURNS jsonb
- LANGUAGE plpgsql
- STABLE SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public'
-AS $function$
-declare
-  v_today date;
-  v_search text := null;
-  v_offset integer;
-  v_total integer;
-  v_roles jsonb;
-  v_candidates jsonb;
-begin
-  perform public.vendor_finance__internal_assert_authority(p_auth_subject, p_app_user_id, 'admin');
-  v_today := public.direct_entry_authorization_date();
-
-  if p_include_history is null
-     or p_page is null or p_page < 1 or p_page > 1000
-     or p_page_size is null or p_page_size < 1 or p_page_size > 100 then
-    raise exception 'VENDOR_FINANCE_QUERY_INVALID'
-      using errcode = '22023';
-  end if;
-
-  if p_search is not null then
-    v_search := pg_catalog.btrim(p_search);
-    if v_search = '' or pg_catalog.length(v_search) > 120 or v_search ~ '[\x00-\x1F\x7F]' then
-      raise exception 'VENDOR_FINANCE_SEARCH_INVALID'
-        using errcode = '22023';
-    end if;
-  end if;
-
-  v_offset := (p_page - 1) * p_page_size;
-
-  with role_rows as (
-    select gr.*,
-           public.org_department__internal_account_summary(gr.app_user_id) as acct_summary,
-           (
-             select max(gr2.version)::integer
-               from public.vendor_finance_global_roles gr2
-              where gr2.app_user_id = gr.app_user_id
-           ) as pair_version
-      from public.vendor_finance_global_roles gr
-     where p_include_history or gr.valid_to is null
-  ),
-  filtered as (
-    select rr.*
-      from role_rows rr
-     where v_search is null
-        or coalesce(rr.acct_summary->>'display_name', '') ilike '%' || v_search || '%'
-        or coalesce(rr.acct_summary->>'login_id', '') ilike '%' || v_search || '%'
-        or coalesce(rr.acct_summary->>'personnel_code', '') ilike '%' || v_search || '%'
-  )
-  select (select count(*)::integer from filtered),
-         coalesce(
-           (
-             select pg_catalog.jsonb_agg(
-                      pg_catalog.jsonb_build_object(
-                        'role_grant_id', page_row.role_grant_id,
-                        'account', page_row.acct_summary,
-                        'role_code', page_row.role_code,
-                        'version', page_row.pair_version,
-                        'valid_from', page_row.valid_from::text,
-                        'valid_to', case when page_row.valid_to is null then null else page_row.valid_to::text end,
-                        'state', case
-                          when page_row.valid_to is not null and page_row.valid_to = page_row.valid_from then 'CANCELLED'
-                          when page_row.valid_to is not null and page_row.valid_to <= v_today then 'ENDED'
-                          when page_row.valid_from > v_today then 'SCHEDULED'
-                          else 'ACTIVE'
-                        end,
-                        'grant_reason', page_row.grant_reason,
-                        'end_reason', page_row.end_reason,
-                        'created_at', pg_catalog.to_jsonb(page_row.created_at)
-                      )
-                      order by (page_row.valid_to is not null) asc, page_row.created_at desc, page_row.role_grant_id desc
-                    )
-               from (
-                 select f.*
-                   from filtered f
-                  order by (f.valid_to is not null) asc, f.created_at desc, f.role_grant_id desc
-                  limit p_page_size offset v_offset
-               ) page_row
-           ),
-           '[]'::jsonb
-         )
-    into v_total, v_roles;
-
-  select coalesce(
-           pg_catalog.jsonb_agg(
-             pg_catalog.jsonb_build_object(
-               'account', c.acct_summary,
-               'next_version', coalesce(c.max_version, 0) + 1,
-               'has_open_role', c.has_open_role
-             )
-             order by pg_catalog.lower(coalesce(c.acct_summary->>'display_name', '')), (c.acct_summary->>'account_ref')
-           ),
-           '[]'::jsonb
-         )
-    into v_candidates
-    from (
-      select public.org_department__internal_account_summary(u.app_user_id) as acct_summary,
-             (
-               select max(gr.version)::integer
-                 from public.vendor_finance_global_roles gr
-                where gr.app_user_id = u.app_user_id
-             ) as max_version,
-             exists (
-               select 1
-                 from public.vendor_finance_global_roles gr
-                where gr.app_user_id = u.app_user_id
-                  and gr.valid_to is null
-             ) as has_open_role
-        from public.direct_entry_app_users u
-       where u.enabled = true
-    ) c
-   where not c.has_open_role
-     and (
-       v_search is null
-       or coalesce(c.acct_summary->>'display_name', '') ilike '%' || v_search || '%'
-       or coalesce(c.acct_summary->>'login_id', '') ilike '%' || v_search || '%'
-       or coalesce(c.acct_summary->>'personnel_code', '') ilike '%' || v_search || '%'
-     )
-   limit 50;
-
-  return pg_catalog.jsonb_build_object(
-    'authorization_date', v_today::text,
-    'page', p_page,
-    'page_size', p_page_size,
-    'total', coalesce(v_total, 0),
-    'has_more', (v_offset + p_page_size) < coalesce(v_total, 0),
-    'roles', v_roles,
-    'candidates', v_candidates
   );
 end;
 $function$
@@ -13018,7 +11672,839 @@ grant execute on function public.leave_management_upsert_employee_profile_admin(
 ) to service_role;
 
 -- ============================================================================
--- 4. RETIRE OBSOLETE INTEGRATION, SHADOW, AND ACCOUNT-TYPE RPCS
+-- 3B. GROUP-ONLY CUTOVER FOR LEGACY MIRROR SYNC, GROUP REMOVAL, ACCOUNT CREATE & TL TRIGGER
+-- ============================================================================
+
+-- Post-cutover legacy mirror sync: reads STRICTLY permission groups + independent TL assignments
+-- (ZERO read from historical authz_account_role_assignments or authz_direct_capability_grants).
+create or replace function public.direct_entry_authz__internal_sync_legacy_grants(
+  p_app_user_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_user public.direct_entry_app_users%rowtype;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_today date := public.direct_entry_authorization_date();
+  v_desired_caps text[];
+  v_desired_scopes text[];
+  v_cap text;
+  v_scope text;
+  v_next_start date;
+  v_lock_key text;
+  v_prev_marker text := pg_catalog.current_setting('direct_entry.team_leader_marker', true);
+begin
+  if p_app_user_id is null then
+    return;
+  end if;
+
+  select u.* into v_user
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_app_user_id
+   for update;
+
+  if not found or not v_user.authz_managed then
+    return;
+  end if;
+
+  with tl_open_caps as (
+    select g.capability
+      from public.work_report_team_leader_capability_grants x
+      join public.direct_entry_team_leader_assignments tla
+        on tla.assignment_id = x.leader_assignment_id
+       and tla.leader_app_user_id = p_app_user_id
+       and (tla.valid_to is null or tla.valid_to > v_today)
+      join public.direct_entry_capability_grants g
+        on g.grant_id = x.capability_grant_id
+    union
+    select 'team_manager_assign'::text as capability
+     where exists (
+       select 1
+         from public.direct_entry_team_leader_assignments tla
+        where tla.leader_app_user_id = p_app_user_id
+          and (tla.valid_to is null or tla.valid_to > v_today)
+          and (tla.is_current or tla.suspended_by_account_disable)
+     )
+    union
+    select rc.capability
+      from public.direct_entry_team_leader_assignments tla
+      join public.authz_role_capabilities rc
+        on rc.role_code = 'TEAM_LEADER'
+     where tla.leader_app_user_id = p_app_user_id
+       and (tla.valid_to is null or tla.valid_to > v_today)
+       and (tla.is_current or tla.suspended_by_account_disable)
+  ),
+  group_active_caps as (
+    select
+      gc.capability,
+      grp.is_system_admin,
+      grp.team_id,
+      grp.group_id
+    from public.authz_user_group_members m
+    join public.authz_user_groups grp
+      on grp.group_id = m.group_id
+     and grp.active = true
+    join public.organization_departments dept
+      on dept.department_id = grp.department_id
+     and dept.is_active = true
+    left join public.teams t
+      on t.team_id = grp.team_id
+     and t.active = true
+     and t.code <> '__system_vendor__'
+    join public.authz_user_group_capabilities gc
+      on gc.group_id = grp.group_id
+     and gc.ended_at is null
+     and gc.started_at <= v_now
+    where m.app_user_id = p_app_user_id
+      and m.ended_at is null
+      and m.started_at <= v_now
+      and (grp.team_id is null or t.team_id is not null)
+  ),
+  desired_cap_set as (
+    select gac.capability from group_active_caps gac
+    union
+    select tc.capability from tl_open_caps tc
+  ),
+  desired_scope_set as (
+    select case
+      when gac.is_system_admin then
+        case when gac.capability = 'entry_own' then 'own' else 'all' end
+      when gac.team_id is not null then
+        case
+          when gac.capability in (
+            'entry_create',
+            'entry_own',
+            'submission_create',
+            'document_upload',
+            'document_view',
+            'change_request_create',
+            'employment_status.request'
+          ) then 'own'
+          else null
+        end
+      else
+        case
+          when gac.capability in (
+            'entry_create',
+            'entry_own',
+            'submission_create',
+            'document_upload',
+            'change_request_create',
+            'employment_status.request'
+          ) then 'own'
+          when gac.capability = 'document_view' then
+            case
+              when exists (
+                select 1
+                  from public.authz_user_group_capabilities gc2
+                 where gc2.group_id = gac.group_id
+                   and gc2.ended_at is null
+                   and gc2.started_at <= v_now
+                   and gc2.capability in (
+                     'recruiter_master_manage',
+                     'team_master_manage',
+                     'catalog_master_manage',
+                     'audit_view'
+                   )
+              ) then 'all'
+              else 'own'
+            end
+          else 'all'
+        end
+    end as scope_kind
+    from group_active_caps gac
+  )
+  select
+    coalesce(array(select capability from desired_cap_set where capability is not null order by 1), array[]::text[]),
+    coalesce(array(select scope_kind from desired_scope_set where scope_kind is not null order by 1), array[]::text[])
+    into v_desired_caps, v_desired_scopes;
+
+  perform pg_catalog.set_config('direct_entry.team_leader_marker', 'on', true);
+
+  perform s.grant_id
+    from public.direct_entry_scope_grants s
+   where s.app_user_id = p_app_user_id
+     and s.scope_kind in ('own', 'all')
+   order by s.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct k
+      from unnest(array[
+        'scope:' || p_app_user_id::text || ':all:' || p_app_user_id::text,
+        'scope:' || p_app_user_id::text || ':own:' || p_app_user_id::text
+      ]) as t(k)
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  perform g.grant_id
+    from public.direct_entry_capability_grants g
+   where g.app_user_id = p_app_user_id
+   order by g.grant_id asc
+   for update;
+
+  for v_lock_key in
+    select distinct 'capability:' || p_app_user_id::text || ':' || cap as k
+      from (
+        select unnest(coalesce(v_desired_caps, array[]::text[])) as cap
+        union
+        select g.capability as cap
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = p_app_user_id
+      ) caps
+     where cap is not null
+     order by k asc
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+  end loop;
+
+  update public.direct_entry_scope_grants s
+     set valid_to = greatest(v_today, s.valid_from),
+         is_current = false,
+         suspended_by_account_disable = false
+   where s.app_user_id = p_app_user_id
+     and s.scope_kind in ('own', 'all')
+     and (s.is_current or s.valid_to is null or s.valid_to > v_today)
+     and s.valid_from <= v_today
+     and not (s.scope_kind = any(v_desired_scopes));
+
+  update public.direct_entry_capability_grants g
+     set valid_to = greatest(v_today, g.valid_from),
+         is_current = false,
+         suspended_by_account_disable = false
+   where g.app_user_id = p_app_user_id
+     and (g.is_current or g.valid_to is null or g.valid_to > v_today)
+     and g.valid_from <= v_today
+     and not (g.capability = any(v_desired_caps));
+
+  if v_user.enabled then
+    foreach v_scope in array v_desired_scopes loop
+      if not exists (
+        select 1 from public.direct_entry_scope_grants s
+         where s.app_user_id = p_app_user_id
+           and s.scope_kind = v_scope
+           and s.is_current
+      ) then
+        update public.direct_entry_scope_grants s
+           set is_current = true,
+               suspended_by_account_disable = false
+         where s.grant_id = (
+           select s2.grant_id
+             from public.direct_entry_scope_grants s2
+            where s2.app_user_id = p_app_user_id
+              and s2.scope_kind = v_scope
+              and s2.valid_from <= v_today
+              and (s2.valid_to is null or (s2.valid_to > s2.valid_from and v_today < s2.valid_to))
+            order by s2.valid_from desc, s2.grant_id desc
+            limit 1
+         );
+
+        if not found then
+          select min(s.valid_from)
+            into v_next_start
+            from public.direct_entry_scope_grants s
+           where s.app_user_id = p_app_user_id
+             and s.scope_kind = v_scope
+             and s.valid_from > v_today
+             and (s.valid_to is null or s.valid_to > s.valid_from);
+
+          insert into public.direct_entry_scope_grants (
+            app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable
+          ) values (
+            p_app_user_id, v_scope, null, v_today, v_next_start, true, false
+          )
+          on conflict do nothing;
+        end if;
+      end if;
+    end loop;
+
+    foreach v_cap in array v_desired_caps loop
+      if not exists (
+        select 1 from public.direct_entry_capability_grants g
+         where g.app_user_id = p_app_user_id
+           and g.capability = v_cap
+           and g.is_current
+      ) then
+        update public.direct_entry_capability_grants g
+           set is_current = true,
+               suspended_by_account_disable = false
+         where g.grant_id = (
+           select g2.grant_id
+             from public.direct_entry_capability_grants g2
+            where g2.app_user_id = p_app_user_id
+              and g2.capability = v_cap
+              and g2.valid_from <= v_today
+              and (g2.valid_to is null or (g2.valid_to > g2.valid_from and v_today < g2.valid_to))
+            order by g2.valid_from desc, g2.grant_id desc
+            limit 1
+         );
+
+        if not found then
+          select min(g.valid_from)
+            into v_next_start
+            from public.direct_entry_capability_grants g
+           where g.app_user_id = p_app_user_id
+             and g.capability = v_cap
+             and g.valid_from > v_today
+             and (g.valid_to is null or g.valid_to > g.valid_from);
+
+          insert into public.direct_entry_capability_grants (
+            app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable
+          ) values (
+            p_app_user_id, v_cap, v_today, v_next_start, true, false
+          )
+          on conflict do nothing;
+        end if;
+      end if;
+    end loop;
+  end if;
+
+  perform pg_catalog.set_config('direct_entry.team_leader_marker', coalesce(v_prev_marker, ''), true);
+exception
+  when others then
+    perform pg_catalog.set_config('direct_entry.team_leader_marker', coalesce(v_prev_marker, ''), true);
+    raise;
+end;
+$function$;
+
+revoke all on function public.direct_entry_authz__internal_sync_legacy_grants(uuid)
+  from public, anon, authenticated, service_role;
+
+-- Post-cutover remove_group_member_admin: Owner protection strictly enforced via
+-- authz_user_group_members.is_protected + DB trigger; no write to retired role table.
+create or replace function public.direct_entry_authz_remove_group_member_admin(
+  p_auth_subject uuid,
+  p_actor_app_user_id uuid,
+  p_target_app_user_id uuid,
+  p_membership_id uuid,
+  p_expected_account_version integer,
+  p_reason text,
+  p_idempotency_key uuid,
+  p_request_hash text
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_op text := 'AUTHZ_GROUP_MEMBER_REMOVED';
+  v_reason text := nullif(pg_catalog.btrim(p_reason), '');
+  v_locked_id uuid;
+  v_target public.direct_entry_app_users%rowtype;
+  v_membership public.authz_user_group_members%rowtype;
+  v_group public.authz_user_groups%rowtype;
+  v_existing_idem public.authz_group_idempotency%rowtype;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_new_version integer;
+  v_result jsonb;
+begin
+  if p_auth_subject is null or p_actor_app_user_id is null then
+    raise exception 'AUTHZ_FORBIDDEN' using errcode = '42501';
+  end if;
+  if p_target_app_user_id is null
+     or p_membership_id is null
+     or p_expected_account_version is null
+     or p_expected_account_version < 1
+     or p_idempotency_key is null
+     or p_request_hash is null
+     or p_request_hash !~ '^[a-f0-9]{64}$' then
+    raise exception 'AUTHZ_VALIDATION_ERROR' using errcode = '22023';
+  end if;
+  if v_reason is not null and pg_catalog.length(v_reason) not between 3 and 500 then
+    raise exception 'AUTHZ_REASON_INVALID' using errcode = '22023';
+  end if;
+
+  perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
+
+  for v_locked_id in
+    select u.app_user_id
+      from public.direct_entry_app_users u
+     where u.app_user_id in (p_actor_app_user_id, p_target_app_user_id)
+     order by u.app_user_id asc
+     for update
+  loop
+    null;
+  end loop;
+
+  perform public.direct_entry_authz__internal_assert_full_admin(p_auth_subject, p_actor_app_user_id);
+
+  select u.* into v_target
+    from public.direct_entry_app_users u
+   where u.app_user_id = p_target_app_user_id;
+  if not found then
+    raise exception 'ACCOUNT_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  select i.* into v_existing_idem
+    from public.authz_group_idempotency i
+   where i.actor_app_user_id = p_actor_app_user_id
+     and i.operation_name = v_op
+     and i.target_key = p_target_app_user_id::text || ':' || p_membership_id::text
+     and i.idempotency_key = p_idempotency_key::text
+   for update;
+
+  if found then
+    if v_existing_idem.request_hash <> p_request_hash then
+      raise exception 'IDEMPOTENCY_CONFLICT' using errcode = 'PT409';
+    end if;
+    return v_existing_idem.response_payload || pg_catalog.jsonb_build_object('replayed', true);
+  end if;
+
+  select m.* into v_membership
+    from public.authz_user_group_members m
+   where m.membership_id = p_membership_id
+     and m.app_user_id = p_target_app_user_id
+   for update;
+
+  if not found then
+    raise exception 'GROUP_MEMBERSHIP_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  if v_membership.is_protected then
+    raise exception 'AUTHZ_PROTECTED_ASSIGNMENT' using errcode = 'PT409';
+  end if;
+
+  if v_membership.ended_at is not null then
+    raise exception 'GROUP_MEMBERSHIP_ALREADY_ENDED' using errcode = 'PT409';
+  end if;
+
+  if v_target.version <> p_expected_account_version then
+    raise exception 'VERSION_CONFLICT'
+      using errcode = 'PT409',
+            detail = pg_catalog.jsonb_build_object('current_version', v_target.version)::text;
+  end if;
+
+  select g.* into v_group
+    from public.authz_user_groups g
+   where g.group_id = v_membership.group_id;
+
+  update public.authz_user_group_members m
+     set ended_at = v_now,
+         ended_reason = v_reason,
+         ended_by_app_user_id = p_actor_app_user_id
+   where m.membership_id = p_membership_id;
+
+  update public.direct_entry_app_users u
+     set authz_managed = true,
+         version = u.version + 1,
+         updated_at = v_now
+   where u.app_user_id = p_target_app_user_id
+  returning u.version into v_new_version;
+
+  perform public.direct_entry_authz__internal_sync_legacy_grants(p_target_app_user_id);
+
+  v_result := pg_catalog.jsonb_build_object(
+    'membership_id', p_membership_id,
+    'group_id', v_group.group_id,
+    'group_code', v_group.code,
+    'group_name', v_group.name,
+    'account_ref', p_target_app_user_id,
+    'account_version', v_new_version,
+    'ended_at', public.org_department__internal_iso_utc(v_now),
+    'replayed', false
+  );
+
+  insert into public.authz_group_audit_events (
+    actor_auth_subject, actor_app_user_id, group_id, target_app_user_id,
+    membership_id, operation_name, before_payload, after_payload, reason, created_at
+  ) values (
+    p_auth_subject, p_actor_app_user_id, v_group.group_id, p_target_app_user_id,
+    p_membership_id, v_op,
+    pg_catalog.jsonb_build_object(
+      'account_version', v_target.version,
+      'group_id', v_group.group_id,
+      'group_code', v_group.code
+    ),
+    v_result, v_reason, v_now
+  );
+
+  insert into public.authz_group_idempotency (
+    actor_app_user_id, operation_name, target_key, idempotency_key,
+    request_hash, response_payload, created_at
+  ) values (
+    p_actor_app_user_id, v_op,
+    p_target_app_user_id::text || ':' || p_membership_id::text,
+    p_idempotency_key::text, p_request_hash, v_result, v_now
+  );
+
+  return v_result;
+end;
+$function$;
+
+revoke all on function public.direct_entry_authz_remove_group_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.direct_entry_authz_remove_group_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)
+  to service_role;
+
+-- Post-cutover finalize_create: creates authz_managed account without writing to retired role table
+create or replace function public.direct_entry_account_operation_finalize_create(
+  p_auth_subject uuid,
+  p_actor_app_user_id uuid,
+  p_intent_id uuid,
+  p_intent_token uuid,
+  p_created_auth_subject uuid,
+  p_idempotency_key text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'pg_catalog', 'public'
+as $function$
+declare
+  v_action text := 'account_created';
+  v_intent public.direct_entry_account_operation_intents;
+  v_payload_hash text;
+  v_prior jsonb;
+  v_reason_id uuid;
+  v_app_user public.direct_entry_app_users;
+  v_revision_id uuid;
+  v_cutover_ready boolean := false;
+begin
+  if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
+    raise exception 'idempotency key required' using errcode = '22023';
+  end if;
+  if p_created_auth_subject is null or p_intent_id is null or p_intent_token is null then
+    raise exception 'intent, token and auth subject required' using errcode = '22023';
+  end if;
+
+  select coalesce(s.cutover_ready, false)
+    into v_cutover_ready
+    from public.authz_system_state s
+   where s.singleton_id = true
+   for share;
+  v_cutover_ready := coalesce(v_cutover_ready, false);
+
+  perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_actor_app_user_id);
+
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'intent_id', p_intent_id, 'intent_token', p_intent_token,
+    'auth_subject', p_created_auth_subject
+  ));
+  v_prior := public.direct_entry_idempotency_begin(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  v_intent := public.direct_entry_lock_account_operation(p_intent_id);
+  if v_intent.kind <> 'CREATE_ACCOUNT' then
+    raise exception 'account operation kind mismatch' using errcode = '22023';
+  end if;
+
+  if v_intent.state in ('APPLIED', 'FAILED', 'EXPIRED', 'BLOCKED', 'CONFLICT') then
+    v_prior := jsonb_build_object(
+      'intent_id', v_intent.intent_id,
+      'intent_state', v_intent.state,
+      'account_ref', v_intent.account_ref
+    );
+    perform public.direct_entry_idempotency_finish(
+      p_actor_app_user_id, v_action, p_idempotency_key, v_prior
+    );
+    return v_prior;
+  end if;
+  if v_intent.state not in ('IN_FLIGHT', 'INDETERMINATE') then
+    raise exception 'account operation is not claimable' using errcode = '22023';
+  end if;
+
+  if v_intent.intent_token <> p_intent_token then
+    update public.direct_entry_account_operation_intents
+       set state = 'BLOCKED', resolved_at = now(), updated_at = now()
+     where intent_id = p_intent_id;
+    insert into public.direct_entry_audit_events (
+      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, denial_code, reason_id
+    ) values (
+      p_auth_subject, p_actor_app_user_id, 'account_operation_finish', 'entry_admin',
+      p_intent_id::text, 'all', 'REJECTED', 'provenance_mismatch', v_intent.reason_id
+    );
+    v_prior := jsonb_build_object(
+      'intent_id', p_intent_id, 'intent_state', 'BLOCKED', 'account_ref', null
+    );
+    perform public.direct_entry_idempotency_finish(
+      p_actor_app_user_id, v_action, p_idempotency_key, v_prior
+    );
+    return v_prior;
+  end if;
+
+  v_reason_id := v_intent.reason_id;
+  insert into public.direct_entry_app_users (auth_subject, enabled, display_name, authz_managed)
+  values (p_created_auth_subject, true, v_intent.display_name, true)
+  returning * into v_app_user;
+
+  perform public.direct_entry_authz__internal_sync_legacy_grants(v_app_user.app_user_id);
+
+  insert into public.direct_entry_app_user_revisions (
+    app_user_id, version, actor_user_id, action, before_snapshot, after_snapshot, reason_id
+  ) values (
+    v_app_user.app_user_id, v_app_user.version, p_actor_app_user_id, v_action,
+    null, jsonb_build_object('display_name', v_app_user.display_name, 'enabled', true), v_reason_id
+  ) returning revision_id into v_revision_id;
+
+  insert into public.direct_entry_audit_events (
+    auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id,
+    changed_fields, app_user_revision_id
+  ) values (
+    p_auth_subject, p_actor_app_user_id, v_action, 'entry_admin',
+    v_app_user.app_user_id::text, 'all', 'APPLIED', v_reason_id,
+    array['auth_subject', 'enabled', 'display_name'], v_revision_id
+  );
+
+  update public.direct_entry_account_operation_intents
+     set state = 'APPLIED', resolved_at = now(), updated_at = now(),
+         auth_subject = p_created_auth_subject,
+         account_ref = v_app_user.app_user_id
+   where intent_id = p_intent_id;
+
+  v_prior := jsonb_build_object(
+    'app_user_id', v_app_user.app_user_id,
+    'auth_subject', v_app_user.auth_subject,
+    'display_name', v_app_user.display_name,
+    'version', v_app_user.version,
+    'revision_id', v_revision_id,
+    'intent_id', p_intent_id,
+    'intent_state', 'APPLIED'
+  );
+  perform public.direct_entry_idempotency_finish(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_prior
+  );
+  return v_prior;
+end;
+$function$;
+
+-- Post-cutover Team Leader capability trigger: checks active permission groups instead of legacy tables
+create or replace function public.work_report_sync_team_leader_capabilities()
+returns trigger
+language plpgsql
+security definer
+set search_path to 'pg_catalog', 'public'
+as $function$
+declare
+  v_capability text;
+  v_grant_id uuid;
+  v_grant_from date;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_lock_key text;
+  v_leader_ids uuid[];
+begin
+  v_leader_ids := array_remove(array[
+    case when tg_op = 'UPDATE' then old.leader_app_user_id end,
+    new.leader_app_user_id
+  ]::uuid[], null);
+
+  if new.is_current or (
+    tg_op = 'UPDATE' and (
+      (old.is_current and not new.is_current)
+      or (new.valid_to is not null and old.valid_to is distinct from new.valid_to)
+    )
+  ) then
+    perform g.grant_id
+      from public.direct_entry_capability_grants g
+     where g.app_user_id = any(v_leader_ids)
+       and (
+         g.capability in ('report_analytics_view', 'report_assign', 'report_review', 'report_view')
+         or g.grant_id in (
+           select x.capability_grant_id
+             from public.work_report_team_leader_capability_grants x
+            where x.leader_assignment_id = coalesce(new.assignment_id, case when tg_op = 'UPDATE' then old.assignment_id end)
+         )
+       )
+     order by g.grant_id asc
+     for update;
+
+    for v_lock_key in
+      select distinct 'capability:' || uid::text || ':' || cap as k
+        from unnest(v_leader_ids) as uid
+        cross join unnest(array[
+          'report_analytics_view',
+          'report_assign',
+          'report_review',
+          'report_view'
+        ]::text[]) as cap
+       order by k asc
+    loop
+      perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
+    end loop;
+  end if;
+
+  if new.is_current then
+    if tg_op = 'UPDATE'
+       and old.valid_to is null
+       and new.valid_to is not null
+       and new.valid_to > new.valid_from then
+      update public.direct_entry_capability_grants g
+         set valid_to = greatest(new.valid_to, g.valid_from)
+        from public.work_report_team_leader_capability_grants x
+       where x.leader_assignment_id = new.assignment_id
+         and x.capability_grant_id = g.grant_id
+         and g.valid_to is null
+         and not exists (
+           select 1
+             from public.authz_user_group_members m
+             join public.authz_user_groups grp on grp.group_id = m.group_id and grp.active = true
+             join public.organization_departments dept on dept.department_id = grp.department_id and dept.is_active = true
+             join public.authz_user_group_capabilities gc on gc.group_id = grp.group_id and gc.ended_at is null and gc.started_at <= v_now
+            where m.app_user_id = g.app_user_id
+              and m.ended_at is null
+              and m.started_at <= v_now
+              and gc.capability = g.capability
+         );
+    elsif tg_op = 'UPDATE'
+       and old.valid_to is not null
+       and old.valid_to > old.valid_from
+       and new.valid_to is null then
+      update public.direct_entry_capability_grants g
+         set valid_to = null,
+             is_current = true,
+             suspended_by_account_disable = false
+        from public.work_report_team_leader_capability_grants x
+       where x.leader_assignment_id = new.assignment_id
+         and x.capability_grant_id = g.grant_id
+         and g.valid_to = old.valid_to
+         and g.valid_to > g.valid_from
+         and not exists (
+           select 1
+             from public.direct_entry_capability_grants other
+            where other.app_user_id = g.app_user_id
+              and other.capability = g.capability
+              and other.grant_id <> g.grant_id
+              and (
+                other.is_current
+                or (
+                  (other.valid_to is null or other.valid_to > other.valid_from)
+                  and daterange(other.valid_from, other.valid_to, '[)')
+                      && daterange(g.valid_from, null, '[)')
+                )
+              )
+         );
+    end if;
+
+    update public.direct_entry_capability_grants g
+       set is_current = true,
+           suspended_by_account_disable = false
+      from public.work_report_team_leader_capability_grants x
+     where x.leader_assignment_id = new.assignment_id
+       and x.capability_grant_id = g.grant_id
+       and not g.is_current
+       and g.valid_to is null
+       and g.valid_from <= public.direct_entry_authorization_date()
+       and not exists (
+         select 1
+           from public.direct_entry_capability_grants other
+          where other.app_user_id = g.app_user_id
+            and other.capability = g.capability
+            and other.grant_id <> g.grant_id
+            and other.is_current
+       );
+
+    foreach v_capability in array array['report_view', 'report_analytics_view', 'report_assign', 'report_review'] loop
+      if not exists (
+        select 1 from public.direct_entry_capability_grants g
+         where g.app_user_id = new.leader_app_user_id
+           and g.capability = v_capability
+           and g.is_current
+      ) then
+        if exists (
+          select 1 from public.direct_entry_capability_grants g
+           where g.app_user_id = new.leader_app_user_id
+             and g.capability = v_capability
+             and not g.is_current
+             and g.valid_to is null
+        ) then
+          perform set_config('direct_entry.team_leader_marker', 'on', true);
+          update public.direct_entry_capability_grants g
+             set valid_to = greatest(new.valid_from, g.valid_from),
+                 suspended_by_account_disable = false
+           where g.app_user_id = new.leader_app_user_id
+             and g.capability = v_capability
+             and not g.is_current
+             and g.valid_to is null;
+        end if;
+
+        select greatest(new.valid_from, coalesce(max(g.valid_to), new.valid_from))
+          into v_grant_from
+          from public.direct_entry_capability_grants g
+         where g.app_user_id = new.leader_app_user_id
+           and g.capability = v_capability
+           and not g.is_current
+           and g.valid_to is not null
+           and g.valid_to > g.valid_from
+           and daterange(g.valid_from, g.valid_to, '[)') && daterange(new.valid_from, null, '[)');
+
+        insert into public.direct_entry_capability_grants
+          (app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable)
+        values (new.leader_app_user_id, v_capability, v_grant_from, null, true, false)
+        returning grant_id into v_grant_id;
+
+        insert into public.work_report_team_leader_capability_grants
+          (leader_assignment_id, capability, capability_grant_id)
+        values (new.assignment_id, v_capability, v_grant_id)
+        on conflict (leader_assignment_id, capability) do update
+          set capability_grant_id = excluded.capability_grant_id;
+      end if;
+    end loop;
+  elsif tg_op = 'UPDATE' and old.is_current and not new.is_current and new.valid_to is null and new.suspended_by_account_disable then
+    update public.direct_entry_capability_grants g
+       set is_current = false,
+           suspended_by_account_disable = true
+      from public.work_report_team_leader_capability_grants x
+     where x.leader_assignment_id = old.assignment_id
+       and x.capability_grant_id = g.grant_id
+       and g.is_current = true
+       and g.valid_to is null;
+  elsif tg_op = 'UPDATE' and (
+    (old.is_current and not new.is_current and not new.suspended_by_account_disable)
+    or (new.valid_to is not null and old.valid_to is distinct from new.valid_to)
+  ) then
+    perform set_config('direct_entry.team_leader_marker', 'on', true);
+    update public.direct_entry_capability_grants g
+       set is_current = false,
+           suspended_by_account_disable = false,
+           valid_to = greatest(coalesce(new.valid_to, g.valid_from), g.valid_from)
+      from public.work_report_team_leader_capability_grants x
+     where x.leader_assignment_id = old.assignment_id
+       and x.capability_grant_id = g.grant_id
+       and (g.is_current or g.valid_to is null)
+       and not exists (
+         select 1
+           from public.authz_user_group_members m
+           join public.authz_user_groups grp on grp.group_id = m.group_id and grp.active = true
+           join public.organization_departments dept on dept.department_id = grp.department_id and dept.is_active = true
+           join public.authz_user_group_capabilities gc on gc.group_id = grp.group_id and gc.ended_at is null and gc.started_at <= v_now
+          where m.app_user_id = g.app_user_id
+            and m.ended_at is null
+            and m.started_at <= v_now
+            and gc.capability = g.capability
+       );
+  end if;
+  return new;
+end;
+$function$;
+
+-- Sync legacy mirrors for all managed users to match pure group-only state immediately
+do $$
+declare
+  v_uid uuid;
+begin
+  for v_uid in
+    select u.app_user_id
+      from public.direct_entry_app_users u
+     where u.authz_managed = true
+     order by u.app_user_id asc
+  loop
+    perform public.direct_entry_authz__internal_sync_legacy_grants(v_uid);
+  end loop;
+end;
+$$;
+
+-- ============================================================================
+-- 4. RETIRE OBSOLETE INTEGRATION, SHADOW, ACCOUNT-TYPE & PER-ACCOUNT ROLE/MODULE RPCS
 -- ============================================================================
 revoke all on function public.hrp_sync_catalog(uuid, uuid, uuid)
   from public, anon, authenticated, service_role;
@@ -13029,6 +12515,13 @@ revoke all on function public.org_department_set_account_type_admin(
 ) from public, anon, authenticated, service_role;
 drop function public.org_department_set_account_type_admin(
   uuid, uuid, uuid, text, integer, text, uuid, text
+) restrict;
+
+revoke all on function public.org_department__internal_has_personal_assignments(
+  uuid, timestamp with time zone
+) from public, anon, authenticated, service_role;
+drop function public.org_department__internal_has_personal_assignments(
+  uuid, timestamp with time zone
 ) restrict;
 
 revoke all on function public.direct_entry_authz_resolve_candidate_access(
@@ -13045,6 +12538,13 @@ drop function public.direct_entry_authz_compare_shadow_access(
   timestamp with time zone, uuid
 ) restrict;
 
+revoke all on function public.direct_entry_authz_resolve_current_snapshot(
+  timestamp with time zone, uuid
+) from public, anon, authenticated, service_role;
+drop function public.direct_entry_authz_resolve_current_snapshot(
+  timestamp with time zone, uuid
+) restrict;
+
 revoke all on function public.direct_entry_list_app_users_filtered_admin(
   uuid, uuid, text, text, integer, integer, text, text
 ) from public, anon, authenticated, service_role;
@@ -13057,6 +12557,69 @@ revoke all on function public.leave_management_get_admin_overview(
 ) from public, anon, authenticated, service_role;
 drop function public.leave_management_get_admin_overview(
   uuid, uuid, text, integer, integer
+) restrict;
+
+revoke all on function public.direct_entry_authz_assign_global_role_admin(
+  uuid, uuid, uuid, text, integer, text, uuid, text
+) from public, anon, authenticated, service_role;
+drop function public.direct_entry_authz_assign_global_role_admin(
+  uuid, uuid, uuid, text, integer, text, uuid, text
+) restrict;
+
+revoke all on function public.direct_entry_authz_revoke_global_role_admin(
+  uuid, uuid, uuid, uuid, integer, text, uuid, text
+) from public, anon, authenticated, service_role;
+drop function public.direct_entry_authz_revoke_global_role_admin(
+  uuid, uuid, uuid, uuid, integer, text, uuid, text
+) restrict;
+
+revoke all on function public.direct_entry_authz_list_roles_admin(
+  uuid, uuid
+) from public, anon, authenticated, service_role;
+drop function public.direct_entry_authz_list_roles_admin(
+  uuid, uuid
+) restrict;
+
+revoke all on function public.direct_entry_authz_list_accounts_summary_admin(
+  uuid, uuid, text, text, text, integer, integer
+) from public, anon, authenticated, service_role;
+drop function public.direct_entry_authz_list_accounts_summary_admin(
+  uuid, uuid, text, text, text, integer, integer
+) restrict;
+
+revoke all on function public.direct_entry_authz_get_account_access_admin(
+  uuid, uuid, uuid
+) from public, anon, authenticated, service_role;
+drop function public.direct_entry_authz_get_account_access_admin(
+  uuid, uuid, uuid
+) restrict;
+
+revoke all on function public.vendor_finance_assign_global_role_admin(
+  uuid, uuid, uuid, text, integer, date, text, uuid, text
+) from public, anon, authenticated, service_role;
+drop function public.vendor_finance_assign_global_role_admin(
+  uuid, uuid, uuid, text, integer, date, text, uuid, text
+) restrict;
+
+revoke all on function public.vendor_finance_end_global_role_admin(
+  uuid, uuid, uuid, integer, date, text, uuid, text
+) from public, anon, authenticated, service_role;
+drop function public.vendor_finance_end_global_role_admin(
+  uuid, uuid, uuid, integer, date, text, uuid, text
+) restrict;
+
+revoke all on function public.vendor_finance_list_global_roles_admin(
+  uuid, uuid, text, boolean, integer, integer
+) from public, anon, authenticated, service_role;
+drop function public.vendor_finance_list_global_roles_admin(
+  uuid, uuid, text, boolean, integer, integer
+) restrict;
+
+revoke all on function public.leave_management_manage_module_grant_admin(
+  uuid, uuid, text, uuid, text, integer, text, text, text
+) from public, anon, authenticated, service_role;
+drop function public.leave_management_manage_module_grant_admin(
+  uuid, uuid, text, uuid, text, integer, text, text, text
 ) restrict;
 
 -- ============================================================================

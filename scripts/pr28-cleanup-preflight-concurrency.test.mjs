@@ -24,6 +24,7 @@ import { Client } from "pg";
 import {
   PR28_CLEANUP_MIGRATION_NAME,
   PR28_CLEANUP_RETIRED_RPC_SIGNATURES,
+  PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME,
   S0_T1_C_MIGRATION_NAME,
   verifyS0T1CSecurityPostconditions,
 } from "./lib/migration-validation.mjs";
@@ -174,13 +175,56 @@ test("PR #28 #237 PG18: fail-closed preflight, S0-T1-C postconditions, and post-
     `);
 
     const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const grpIdx = names.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
     const cleanupIdx = names.indexOf(PR28_CLEANUP_MIGRATION_NAME);
-    assert.ok(cleanupIdx > 0, `${PR28_CLEANUP_MIGRATION_NAME} must exist`);
+    assert.ok(grpIdx > 0 && cleanupIdx > grpIdx, `${PR28_CLEANUP_MIGRATION_NAME} must follow ${PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME}`);
     const s0Sql = await readFile(path.join(MIGRATION_DIR, S0_T1_C_MIGRATION_NAME), "utf8");
     const cleanupSql = await readFile(path.join(MIGRATION_DIR, PR28_CLEANUP_MIGRATION_NAME), "utf8");
 
+    // Mirror real production rollout path: #001..#235 -> WP5 cutover -> #236 -> preflight Gate 1 -> #237
     const applied = new Set();
-    for (let i = 0; i < cleanupIdx; i += 1) {
+    for (let i = 0; i < grpIdx; i += 1) {
+      await admin.query(await readFile(path.join(MIGRATION_DIR, names[i]), "utf8"));
+      applied.add(names[i]);
+    }
+
+    for (const u of [OWNER, LUANPT, LIENVU, NGATTT, TARGET]) {
+      await admin.query("insert into auth.users (id, email) values ($1::uuid, $2)", [u.auth, u.email]);
+      await admin.query(
+        "insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled) values ($1::uuid, $2::uuid, $3, true)",
+        [u.app, u.auth, u.name],
+      );
+    }
+    for (const adm of [OWNER, LUANPT, LIENVU, NGATTT]) {
+      await admin.query(
+        "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1::uuid, 'all', null, '2020-01-01', true), ($1::uuid, 'own', null, '2020-01-01', true)",
+        [adm.app],
+      );
+      for (const cap of [
+        "entry_admin", "entry_team", "entry_own", "entry_create", "submission_create",
+        "entry_privileged_edit", "entry_restore", "recruiter_master_manage", "team_master_manage",
+        "audit_view", "worker_edit_history_view", "document_upload", "document_view",
+        "employment_status.review", "employment_status.apply", "change_request_create",
+        "change_review", "employment_status.request", "duplicate_cccd_withdraw",
+      ]) {
+        await admin.query(
+          "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1::uuid, $2, '2020-01-01', true)",
+          [adm.app, cap],
+        );
+      }
+    }
+
+    const plan = await runWp5Cutover(admin, { mode: "read-only-plan" });
+    await runWp5Cutover(admin, {
+      mode: "apply",
+      confirmApply: true,
+      expectedFingerprint: plan.manifest_fingerprint,
+      actorAppUserId: OWNER.app,
+      reason: "PG18 pre-#236 WP5 cutover setup",
+    });
+
+    // Apply #236 (backfills Owner & BoD/Admin into SYSTEM_ADMIN group)
+    for (let i = grpIdx; i < cleanupIdx; i += 1) {
       await admin.query(await readFile(path.join(MIGRATION_DIR, names[i]), "utf8"));
       applied.add(names[i]);
     }
@@ -215,42 +259,6 @@ test("PR #28 #237 PG18: fail-closed preflight, S0-T1-C postconditions, and post-
       const { rows } = await admin.query("select to_regprocedure($1)::text as reg", [sig]);
       assert.equal(rows[0].reg, null, `retired signature must be absent on PG18: ${sig}`);
     }
-
-    // 3. Seed users & run WP5 cutover cleanly on post-#237 PG18
-    for (const u of [OWNER, LUANPT, LIENVU, NGATTT, TARGET]) {
-      await admin.query("insert into auth.users (id, email) values ($1::uuid, $2)", [u.auth, u.email]);
-      await admin.query(
-        "insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled) values ($1::uuid, $2::uuid, $3, true)",
-        [u.app, u.auth, u.name],
-      );
-    }
-    for (const adm of [OWNER, LUANPT, LIENVU, NGATTT]) {
-      await admin.query(
-        "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1::uuid, 'all', null, '2020-01-01', true), ($1::uuid, 'own', null, '2020-01-01', true)",
-        [adm.app],
-      );
-      for (const cap of [
-        "entry_admin", "entry_team", "entry_own", "entry_create", "submission_create",
-        "entry_privileged_edit", "entry_restore", "recruiter_master_manage", "team_master_manage",
-        "audit_view", "worker_edit_history_view", "document_upload", "document_view",
-        "employment_status.review", "employment_status.apply", "change_request_create",
-        "change_review", "employment_status.request", "duplicate_cccd_withdraw",
-      ]) {
-        await admin.query(
-          "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1::uuid, $2, '2020-01-01', true)",
-          [adm.app, cap],
-        );
-      }
-    }
-
-    const plan = await runWp5Cutover(admin, { mode: "read-only-plan" });
-    await runWp5Cutover(admin, {
-      mode: "apply",
-      confirmApply: true,
-      expectedFingerprint: plan.manifest_fingerprint,
-      actorAppUserId: OWNER.app,
-      reason: "PG18 post-#237 concurrency setup",
-    });
 
     // 4. Concurrent 13-arg leave_management_upsert_employee_profile_admin (same idempotency key -> replay-safe, 0 deadlocks)
     const sameProfileKey = `pg18-13arg-${nextUuid()}`;

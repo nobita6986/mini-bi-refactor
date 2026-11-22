@@ -181,6 +181,18 @@ create table if not exists public.authz_user_group_members (
   source_kind text not null default 'ADMIN_ASSIGNMENT'
     constraint authz_user_group_members_source_chk
     check (source_kind in ('ADMIN_ASSIGNMENT', 'BACKFILL_MIGRATION')),
+  migrated_from_source text
+    constraint authz_user_group_members_migrated_source_chk
+    check (
+      migrated_from_source is null
+      or migrated_from_source in (
+        'authz_account_role_assignments',
+        'authz_direct_capability_grants',
+        'vendor_finance_global_roles',
+        'leave_module_grants'
+      )
+    ),
+  migrated_from_id uuid,
   reason text
     constraint authz_user_group_members_reason_chk
     check (
@@ -213,8 +225,16 @@ create table if not exists public.authz_user_group_members (
   constraint authz_user_group_members_end_invariant_chk check (
     (ended_at is null and ended_reason is null and ended_by_app_user_id is null)
     or (ended_at is not null and ended_by_app_user_id is not null)
+  ),
+  constraint authz_user_group_members_provenance_chk check (
+    (source_kind = 'ADMIN_ASSIGNMENT' and migrated_from_source is null and migrated_from_id is null)
+    or (source_kind = 'BACKFILL_MIGRATION' and migrated_from_source is not null and migrated_from_id is not null)
   )
 );
+
+create index if not exists authz_user_group_members_provenance_idx
+  on public.authz_user_group_members (migrated_from_source, migrated_from_id)
+  where migrated_from_source is not null and migrated_from_id is not null;
 
 create unique index if not exists authz_user_group_members_open_uidx
   on public.authz_user_group_members (group_id, app_user_id)
@@ -573,6 +593,8 @@ begin
      or old.app_user_id <> new.app_user_id
      or old.started_at <> new.started_at
      or old.source_kind <> new.source_kind
+     or old.migrated_from_source is distinct from new.migrated_from_source
+     or old.migrated_from_id is distinct from new.migrated_from_id
      or old.is_protected <> new.is_protected then
     raise exception 'AUTHZ_GROUP_MEMBER_HISTORY_IMMUTABLE' using errcode = '55000';
   end if;
@@ -600,8 +622,369 @@ create trigger authz_group_idempotency_immutable_trg
   for each row execute function public.direct_entry_reject_immutable_change();
 
 -- -----------------------------------------------------------------------------
--- 3. Seed Canonical Permission Groups & Idempotent Backfill from Active Roles
+-- 3. Seed 11 Canonical 1:1 Permission Groups & Idempotent Backfill Helper
 -- -----------------------------------------------------------------------------
+create or replace function public.direct_entry_authz__internal_backfill_legacy_to_groups()
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_today date := public.direct_entry_authorization_date();
+  v_dept_bod uuid;
+  v_dept_rec uuid;
+  v_dept_acc uuid;
+  v_grp_admin uuid;
+  v_grp_hr uuid;
+  v_grp_rec uuid;
+  v_grp_acc uuid;
+  v_grp_vfin_viewer uuid;
+  v_grp_vfin_reconciler uuid;
+  v_grp_vfin_cash uuid;
+  v_grp_vfin_behalf uuid;
+  v_grp_leave_hr uuid;
+  v_grp_leave_viewer uuid;
+  v_grp_leave_bod uuid;
+  v_dg record;
+  v_team record;
+  v_target_group_id uuid;
+  v_code text;
+  v_name text;
+  v_cap_sanitized text;
+  v_already_covered boolean;
+begin
+  select department_id into v_dept_bod
+    from public.organization_departments
+   where system_key = 'MANAGEMENT_BOD'
+   limit 1;
+  select department_id into v_dept_rec
+    from public.organization_departments
+   where system_key = 'RECRUITMENT'
+   limit 1;
+  select department_id into v_dept_acc
+    from public.organization_departments
+   where system_key = 'ACCOUNTING'
+   limit 1;
+
+  if v_dept_bod is null or v_dept_rec is null or v_dept_acc is null then
+    raise exception 'PR28_SEED_MISSING_CANONICAL_DEPARTMENTS';
+  end if;
+
+  select group_id into v_grp_admin from public.authz_user_groups where code = 'SYSTEM_ADMIN';
+  select group_id into v_grp_hr from public.authz_user_groups where code = 'HR_CATALOG_OPERATOR';
+  select group_id into v_grp_rec from public.authz_user_groups where code = 'RECRUITER_OPERATIONS';
+  select group_id into v_grp_acc from public.authz_user_groups where code = 'ACCOUNTING_OPERATIONS';
+  select group_id into v_grp_vfin_viewer from public.authz_user_groups where code = 'VFIN_GLOBAL_VIEWER';
+  select group_id into v_grp_vfin_reconciler from public.authz_user_groups where code = 'VFIN_GLOBAL_RECONCILER';
+  select group_id into v_grp_vfin_cash from public.authz_user_groups where code = 'VFIN_CASH_HOLDER';
+  select group_id into v_grp_vfin_behalf from public.authz_user_groups where code = 'VFIN_CASH_HOLDER_RECORD_BEHALF';
+  select group_id into v_grp_leave_hr from public.authz_user_groups where code = 'LEAVE_HR_OPERATIONS';
+  select group_id into v_grp_leave_viewer from public.authz_user_groups where code = 'LEAVE_REPORT_VIEWER';
+  select group_id into v_grp_leave_bod from public.authz_user_groups where code = 'LEAVE_BOD_APPROVER';
+
+  -- 3.1 Backfill active global role assignments (ADMIN, HR_OPERATOR, RECRUITER)
+  -- Each assignment_id is migrated AT MOST ONCE (removing a group membership later never resurrects it).
+  -- Preserves exact Owner is_protected flag on SYSTEM_ADMIN; never auto-upgrades report-only grants!
+  insert into public.authz_user_group_members (
+    group_id,
+    app_user_id,
+    source_kind,
+    migrated_from_source,
+    migrated_from_id,
+    reason,
+    started_at,
+    assigned_by_app_user_id,
+    is_protected,
+    protected_reason
+  )
+  select
+    case ara.role_code
+      when 'ADMIN' then v_grp_admin
+      when 'HR_OPERATOR' then v_grp_hr
+      when 'RECRUITER' then v_grp_rec
+    end as group_id,
+    ara.app_user_id,
+    'BACKFILL_MIGRATION',
+    'authz_account_role_assignments',
+    ara.assignment_id,
+    'Chuyển tiếp tự động từ vai trò toàn cục hiện hữu sang nhóm quyền',
+    least(ara.started_at, v_now),
+    ara.assigned_by_app_user_id,
+    case when ara.role_code = 'ADMIN' then ara.is_protected else false end,
+    case when ara.role_code = 'ADMIN' then ara.protected_reason else null end
+  from public.authz_account_role_assignments ara
+  where ara.ended_at is null
+    and ara.started_at <= v_now
+    and ara.role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')
+    and not exists (
+      select 1
+        from public.authz_user_group_members m_prev
+       where m_prev.migrated_from_source = 'authz_account_role_assignments'
+         and m_prev.migrated_from_id = ara.assignment_id
+    )
+  on conflict (group_id, app_user_id) where ended_at is null do nothing;
+
+  -- 3.2 Backfill active Vendor Finance global module roles (exact 1:1 D4 mapping)
+  insert into public.authz_user_group_members (
+    group_id,
+    app_user_id,
+    source_kind,
+    migrated_from_source,
+    migrated_from_id,
+    reason,
+    started_at,
+    assigned_by_app_user_id,
+    is_protected,
+    protected_reason
+  )
+  select
+    case gr.role_code
+      when 'GLOBAL_VIEWER' then v_grp_vfin_viewer
+      when 'GLOBAL_RECONCILER' then v_grp_vfin_reconciler
+      when 'CASH_HOLDER' then v_grp_vfin_cash
+      when 'CASH_HOLDER_RECORD_BEHALF' then v_grp_vfin_behalf
+    end as group_id,
+    gr.app_user_id,
+    'BACKFILL_MIGRATION',
+    'vendor_finance_global_roles',
+    gr.role_grant_id,
+    'Chuyển tiếp tự động vai trò Tài chính NCC toàn công ty sang nhóm quyền',
+    least(coalesce(gr.created_at, v_now), v_now),
+    gr.granted_by_user_id,
+    false,
+    null
+  from public.vendor_finance_global_roles gr
+  where gr.valid_from <= v_today
+    and (gr.valid_to is null or (gr.valid_to > gr.valid_from and gr.valid_to > v_today))
+    and gr.role_code in ('GLOBAL_VIEWER', 'GLOBAL_RECONCILER', 'CASH_HOLDER', 'CASH_HOLDER_RECORD_BEHALF')
+    and not exists (
+      select 1
+        from public.authz_user_group_members m_prev
+       where m_prev.migrated_from_source = 'vendor_finance_global_roles'
+         and m_prev.migrated_from_id = gr.role_grant_id
+    )
+  on conflict (group_id, app_user_id) where ended_at is null do nothing;
+
+  -- 3.3 Backfill active Leave module grants (exact 1:1 D4 mapping, zero escalation)
+  insert into public.authz_user_group_members (
+    group_id,
+    app_user_id,
+    source_kind,
+    migrated_from_source,
+    migrated_from_id,
+    reason,
+    started_at,
+    assigned_by_app_user_id,
+    is_protected,
+    protected_reason
+  )
+  select
+    case lmg.role_code
+      when 'HR_LEAVE_OPERATOR' then v_grp_leave_hr
+      when 'HR_REPORT_VIEWER' then v_grp_leave_viewer
+      when 'LEAVE_ADMIN_BOD_APPROVER' then v_grp_leave_bod
+    end as group_id,
+    lmg.app_user_id,
+    'BACKFILL_MIGRATION',
+    'leave_module_grants',
+    lmg.grant_id,
+    'Chuyển tiếp tự động vai trò Nghỉ phép sang nhóm quyền',
+    least(coalesce(lmg.created_at, v_now), v_now),
+    lmg.updated_by_app_user_id,
+    false,
+    null
+  from public.leave_module_grants lmg
+  where lmg.is_current = true
+    and lmg.valid_from <= v_today
+    and (lmg.valid_to is null or (lmg.valid_to > lmg.valid_from and lmg.valid_to > v_today))
+    and lmg.role_code in ('HR_LEAVE_OPERATOR', 'HR_REPORT_VIEWER', 'LEAVE_ADMIN_BOD_APPROVER')
+    and not exists (
+      select 1
+        from public.authz_user_group_members m_prev
+       where m_prev.migrated_from_source = 'leave_module_grants'
+         and m_prev.migrated_from_id = lmg.grant_id
+    )
+  on conflict (group_id, app_user_id) where ended_at is null do nothing;
+
+  -- 3.4 Backfill D1-mappable active direct capability grants (never auto-upgrades unmappable exceptions!)
+  for v_dg in
+    select dg.*
+      from public.authz_direct_capability_grants dg
+     where dg.ended_at is null
+       and dg.started_at <= v_now
+       and not exists (
+         select 1
+           from public.authz_user_group_members m_prev
+          where m_prev.migrated_from_source = 'authz_direct_capability_grants'
+            and m_prev.migrated_from_id = dg.direct_grant_id
+       )
+     order by dg.created_at asc, dg.direct_grant_id asc
+  loop
+    -- Skip if already satisfied by an active group membership of this user
+    select exists (
+      select 1
+        from public.authz_user_group_members m
+        join public.authz_user_groups g
+          on g.group_id = m.group_id
+         and g.active = true
+        join public.organization_departments d
+          on d.department_id = g.department_id
+         and d.is_active = true
+        left join public.teams t
+          on t.team_id = g.team_id
+         and t.active = true
+         and t.code <> '__system_vendor__'
+        join public.authz_user_group_capabilities gc
+          on gc.group_id = g.group_id
+         and gc.ended_at is null
+         and gc.started_at <= v_now
+         and gc.capability = v_dg.capability
+       where m.app_user_id = v_dg.app_user_id
+         and m.ended_at is null
+         and m.started_at <= v_now
+         and (g.team_id is null or t.team_id is not null)
+         and (
+           (v_dg.scope_kind = 'ALL' and v_dg.scope_id is null and g.team_id is null and (
+             g.is_system_admin
+             or (
+               gc.capability not in (
+                 'entry_create', 'entry_own', 'submission_create', 'document_upload',
+                 'document_view', 'change_request_create', 'employment_status.request'
+               )
+             )
+             or (
+               gc.capability = 'document_view'
+               and exists (
+                 select 1
+                   from public.authz_user_group_capabilities gc2
+                  where gc2.group_id = g.group_id
+                    and gc2.ended_at is null
+                    and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
+               )
+             )
+           ))
+           or (v_dg.scope_kind = 'OWN' and v_dg.scope_id is null and gc.capability in (
+             'entry_create', 'entry_own', 'submission_create', 'document_upload',
+             'document_view', 'change_request_create', 'employment_status.request'
+           ))
+           or (v_dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = v_dg.scope_id)
+         )
+    ) into v_already_covered;
+
+    if v_already_covered then
+      continue;
+    end if;
+
+    v_target_group_id := null;
+    v_cap_sanitized := pg_catalog.replace(pg_catalog.upper(v_dg.capability), '.', '_');
+
+    if v_dg.capability = 'vendor_finance_view' and v_dg.scope_kind = 'ALL' and v_dg.scope_id is null then
+      v_target_group_id := v_grp_acc;
+    elsif v_dg.scope_kind = 'CONTEXT_TEAM'
+          and v_dg.scope_id ~ '^[0-9a-fA-F-]{36}$'
+          and v_dg.capability in (
+            'entry_team', 'team_manager_assign', 'change_review',
+            'report_view', 'report_analytics_view', 'report_assign',
+            'report_review', 'report_delegate', 'worker_edit_history_view'
+          ) then
+      select t.* into v_team
+        from public.teams t
+       where t.team_id = v_dg.scope_id::uuid
+         and t.active = true
+         and t.code <> '__system_vendor__';
+      if found then
+        v_code := 'MIGRATED_TEAM_' || pg_catalog.upper(pg_catalog.substr(pg_catalog.replace(v_team.team_id::text, '-', ''), 1, 8)) || '_' || v_cap_sanitized;
+        v_name := pg_catalog.btrim(pg_catalog.left('Nhóm chuyển đổi ' || coalesce(v_team.display_name, v_team.code) || ' (' || v_dg.capability || ')', 128));
+        insert into public.authz_user_groups (
+          code, name, description, department_id, team_id, is_system_admin, active
+        ) values (
+          v_code, v_name, 'Nhóm quyền theo đội được chuyển đổi tự động từ quyền trực tiếp hiện hữu.',
+          v_dept_rec, v_team.team_id, false, true
+        )
+        on conflict (code) do nothing;
+        select group_id into v_target_group_id from public.authz_user_groups where code = v_code;
+        insert into public.authz_user_group_capabilities (group_id, capability, reason)
+        values (v_target_group_id, v_dg.capability, 'Chuyển đổi từ quyền trực tiếp theo đội')
+        on conflict (group_id, capability) where ended_at is null do nothing;
+      end if;
+    elsif v_dg.scope_kind = 'OWN'
+          and v_dg.scope_id is null
+          and v_dg.capability in (
+            'entry_create', 'entry_own', 'submission_create', 'document_upload',
+            'document_view', 'change_request_create', 'employment_status.request'
+          ) then
+      v_code := 'MIGRATED_OWN_' || v_cap_sanitized;
+      v_name := pg_catalog.left('Nhóm chuyển đổi cá nhân (' || v_dg.capability || ')', 128);
+      insert into public.authz_user_groups (
+        code, name, description, department_id, team_id, is_system_admin, active
+      ) values (
+        v_code, v_name, 'Nhóm quyền cá nhân được chuyển đổi tự động từ quyền trực tiếp hiện hữu.',
+        v_dept_rec, null, false, true
+      )
+      on conflict (code) do nothing;
+      select group_id into v_target_group_id from public.authz_user_groups where code = v_code;
+      insert into public.authz_user_group_capabilities (group_id, capability, reason)
+      values (v_target_group_id, v_dg.capability, 'Chuyển đổi từ quyền trực tiếp cá nhân')
+      on conflict (group_id, capability) where ended_at is null do nothing;
+    elsif v_dg.scope_kind = 'ALL'
+          and v_dg.scope_id is null
+          and v_dg.capability in (
+            'recruiter_master_manage', 'team_master_manage', 'audit_view',
+            'catalog_master_manage', 'report_form_manage', 'report_assign',
+            'report_review', 'report_delegate', 'duplicate_cccd_withdraw',
+            'worker_edit_history_view'
+          ) then
+      v_code := 'MIGRATED_DEPT_' || v_cap_sanitized;
+      v_name := pg_catalog.left('Nhóm chuyển đổi phòng ban (' || v_dg.capability || ')', 128);
+      insert into public.authz_user_groups (
+        code, name, description, department_id, team_id, is_system_admin, active
+      ) values (
+        v_code, v_name, 'Nhóm quyền phòng ban được chuyển đổi tự động từ quyền trực tiếp hiện hữu.',
+        v_dept_rec, null, false, true
+      )
+      on conflict (code) do nothing;
+      select group_id into v_target_group_id from public.authz_user_groups where code = v_code;
+      insert into public.authz_user_group_capabilities (group_id, capability, reason)
+      values (v_target_group_id, v_dg.capability, 'Chuyển đổi từ quyền trực tiếp phòng ban')
+      on conflict (group_id, capability) where ended_at is null do nothing;
+    end if;
+
+    if v_target_group_id is not null then
+      insert into public.authz_user_group_members (
+        group_id,
+        app_user_id,
+        source_kind,
+        migrated_from_source,
+        migrated_from_id,
+        reason,
+        started_at,
+        assigned_by_app_user_id,
+        is_protected,
+        protected_reason
+      ) values (
+        v_target_group_id,
+        v_dg.app_user_id,
+        'BACKFILL_MIGRATION',
+        'authz_direct_capability_grants',
+        v_dg.direct_grant_id,
+        'Chuyển tiếp tự động quyền trực tiếp hợp lệ sang nhóm quyền',
+        least(v_dg.started_at, v_now),
+        v_dg.granted_by_app_user_id,
+        false,
+        null
+      )
+      on conflict (group_id, app_user_id) where ended_at is null do nothing;
+    end if;
+  end loop;
+end;
+$function$;
+
+revoke all on function public.direct_entry_authz__internal_backfill_legacy_to_groups()
+  from public, anon, authenticated, service_role;
+
 do $seed$
 declare
   v_dept_bod uuid;
@@ -611,7 +994,13 @@ declare
   v_grp_hr uuid;
   v_grp_rec uuid;
   v_grp_acc uuid;
+  v_grp_vfin_viewer uuid;
+  v_grp_vfin_reconciler uuid;
+  v_grp_vfin_cash uuid;
+  v_grp_vfin_behalf uuid;
   v_grp_leave_hr uuid;
+  v_grp_leave_viewer uuid;
+  v_grp_leave_bod uuid;
 begin
   select department_id into v_dept_bod
     from public.organization_departments
@@ -696,13 +1085,13 @@ begin
    where rc.role_code = 'RECRUITER'
   on conflict (group_id, capability) where ended_at is null do nothing;
 
-  -- 4) ACCOUNTING_OPERATIONS ("Kế toán & Tài chính NCC") bound to ACCOUNTING
+  -- 4) ACCOUNTING_OPERATIONS ("Kế toán & Tài chính NCC") bound to ACCOUNTING, 1 cap (vendor_finance_view)
   insert into public.authz_user_groups (
     code, name, description, department_id, team_id, is_system_admin, active
   ) values (
     'ACCOUNTING_OPERATIONS',
     'Kế toán & Tài chính NCC',
-    'Xem và ghi nhận sổ công nợ, đối soát tài chính nhà cung cấp.',
+    'Xem sổ công nợ và báo cáo tài chính nhà cung cấp.',
     v_dept_acc,
     null,
     false,
@@ -717,57 +1106,51 @@ begin
     (v_grp_acc, 'vendor_finance_view', 'Khởi tạo quyền xem Tài chính NCC')
   on conflict (group_id, capability) where ended_at is null do nothing;
 
-  -- 5) LEAVE_HR_OPERATIONS ("Quản trị Nghỉ phép HR") bound to RECRUITMENT (D4 module roles)
+  -- 5..8) Exact 1:1 D4 Vendor Finance Global Module Role groups (bound to ACCOUNTING)
   insert into public.authz_user_groups (
     code, name, description, department_id, team_id, is_system_admin, active
-  ) values (
-    'LEAVE_HR_OPERATIONS',
-    'Quản trị Nghỉ phép HR',
-    'Vận hành phép năm, số dư nghỉ phép và xem báo cáo nghỉ phép toàn công ty.',
-    v_dept_rec,
-    null,
-    false,
-    true
-  )
+  ) values
+    ('VFIN_GLOBAL_VIEWER', 'Xem Tài chính NCC toàn công ty', 'Xem công nợ, tạm ứng và báo cáo Tài chính NCC của toàn bộ dự án.', v_dept_acc, null, false, true),
+    ('VFIN_GLOBAL_RECONCILER', 'Đối soát Tài chính NCC toàn công ty', 'Xem và đối soát công nợ, tạm ứng nhà cung cấp toàn công ty.', v_dept_acc, null, false, true),
+    ('VFIN_CASH_HOLDER', 'Thủ quỹ Tài chính NCC', 'Xem, đối soát, cấp vốn tạm ứng và ghi nhận hoàn ứng Tài chính NCC toàn công ty.', v_dept_acc, null, false, true),
+    ('VFIN_CASH_HOLDER_RECORD_BEHALF', 'Thủ quỹ & Ghi sổ thay Tài chính NCC', 'Thủ quỹ toàn công ty kèm quyền ghi sổ thanh toán thay kế toán dự án.', v_dept_acc, null, false, true)
+  on conflict (code) do nothing;
+
+  select group_id into v_grp_vfin_viewer from public.authz_user_groups where code = 'VFIN_GLOBAL_VIEWER';
+  select group_id into v_grp_vfin_reconciler from public.authz_user_groups where code = 'VFIN_GLOBAL_RECONCILER';
+  select group_id into v_grp_vfin_cash from public.authz_user_groups where code = 'VFIN_CASH_HOLDER';
+  select group_id into v_grp_vfin_behalf from public.authz_user_groups where code = 'VFIN_CASH_HOLDER_RECORD_BEHALF';
+
+  insert into public.authz_user_group_module_roles (group_id, module_code, role_code, reason)
+  values
+    (v_grp_vfin_viewer, 'vendor_finance', 'GLOBAL_VIEWER', 'Khởi tạo nhóm xem Tài chính NCC toàn công ty'),
+    (v_grp_vfin_reconciler, 'vendor_finance', 'GLOBAL_RECONCILER', 'Khởi tạo nhóm đối soát Tài chính NCC toàn công ty'),
+    (v_grp_vfin_cash, 'vendor_finance', 'CASH_HOLDER', 'Khởi tạo nhóm Thủ quỹ Tài chính NCC'),
+    (v_grp_vfin_behalf, 'vendor_finance', 'CASH_HOLDER_RECORD_BEHALF', 'Khởi tạo nhóm Thủ quỹ ghi sổ thay Tài chính NCC')
+  on conflict (group_id, module_code, role_code) where ended_at is null do nothing;
+
+  -- 9..11) Exact 1:1 D4 Leave Module Role groups (zero escalation between viewer & operator!)
+  insert into public.authz_user_groups (
+    code, name, description, department_id, team_id, is_system_admin, active
+  ) values
+    ('LEAVE_HR_OPERATIONS', 'Quản trị Nghỉ phép HR', 'Cấu hình phép năm, quản trị số dư nghỉ phép và xem báo cáo nghỉ phép toàn công ty.', v_dept_rec, null, false, true),
+    ('LEAVE_REPORT_VIEWER', 'Xem báo cáo Nghỉ phép HR', 'Chỉ xem báo cáo tổng hợp nghỉ phép hàng tháng toàn công ty.', v_dept_rec, null, false, true),
+    ('LEAVE_BOD_APPROVER', 'Duyệt Nghỉ phép cấp Ban Giám đốc', 'Duyệt đơn nghỉ phép và giải trình chấm công cấp Ban Giám đốc.', v_dept_bod, null, false, true)
   on conflict (code) do nothing;
 
   select group_id into v_grp_leave_hr from public.authz_user_groups where code = 'LEAVE_HR_OPERATIONS';
+  select group_id into v_grp_leave_viewer from public.authz_user_groups where code = 'LEAVE_REPORT_VIEWER';
+  select group_id into v_grp_leave_bod from public.authz_user_groups where code = 'LEAVE_BOD_APPROVER';
 
   insert into public.authz_user_group_module_roles (group_id, module_code, role_code, reason)
   values
     (v_grp_leave_hr, 'leave', 'HR_LEAVE_OPERATOR', 'Khởi tạo quyền vận hành phép năm qua nhóm'),
-    (v_grp_leave_hr, 'leave', 'HR_REPORT_VIEWER', 'Khởi tạo quyền xem báo cáo nghỉ phép qua nhóm')
+    (v_grp_leave_viewer, 'leave', 'HR_REPORT_VIEWER', 'Khởi tạo quyền chỉ xem báo cáo nghỉ phép qua nhóm'),
+    (v_grp_leave_bod, 'leave', 'LEAVE_ADMIN_BOD_APPROVER', 'Khởi tạo quyền duyệt nghỉ phép cấp Ban Giám đốc qua nhóm')
   on conflict (group_id, module_code, role_code) where ended_at is null do nothing;
 
-  -- Idempotent backfill of existing active role assignments into corresponding groups.
-  -- Preserves exact Owner is_protected flag on SYSTEM_ADMIN; never auto-upgrades report-only grants!
-  insert into public.authz_user_group_members (
-    group_id,
-    app_user_id,
-    source_kind,
-    reason,
-    started_at,
-    assigned_by_app_user_id,
-    is_protected,
-    protected_reason
-  )
-  select
-    case ara.role_code
-      when 'ADMIN' then v_grp_admin
-      when 'HR_OPERATOR' then v_grp_hr
-      when 'RECRUITER' then v_grp_rec
-    end as group_id,
-    ara.app_user_id,
-    'BACKFILL_MIGRATION',
-    'Chuyển tiếp tự động từ phân quyền hiện hữu sang nhóm quyền',
-    ara.started_at,
-    ara.assigned_by_app_user_id,
-    case when ara.role_code = 'ADMIN' then ara.is_protected else false end,
-    case when ara.role_code = 'ADMIN' then ara.protected_reason else null end
-  from public.authz_account_role_assignments ara
-  where ara.ended_at is null
-    and ara.role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')
-  on conflict (group_id, app_user_id) where ended_at is null do nothing;
+  -- Run idempotent backfill for all pre-existing roles, module grants, and D1-mappable direct grants
+  perform public.direct_entry_authz__internal_backfill_legacy_to_groups();
 end;
 $seed$;
 
@@ -2735,7 +3118,7 @@ begin
          and gc.capability in (
            'entry_admin', 'entry_team', 'entry_restore', 'entry_privileged_edit',
            'change_review', 'employment_status.review', 'employment_status.apply',
-           'team_manager_assign'
+           'team_manager_assign', 'report_view', 'report_analytics_view', 'vendor_finance_record'
          )
     ) then
       raise exception 'GROUP_CAPABILITY_FORBIDDEN_FOR_DEPARTMENT_GROUP' using errcode = '22023';
@@ -3392,6 +3775,41 @@ begin
      and l.ended_at is null
     where dh.started_at <= v_now
       and (dh.ended_at is null or (dh.ended_at > dh.started_at and v_now < dh.ended_at))
+    union all
+    select
+      'LEAVE_DEPARTMENT_APPROVER'::text as assignment_kind,
+      da.unit_kind as resource_ref,
+      case da.unit_kind
+        when 'MARKETING' then 'Marketing'
+        when 'IT' then 'IT'
+        when 'ACCOUNTING' then 'Kế toán'
+        else da.unit_kind
+      end as resource_label
+    from public.leave_department_approvers da
+    where da.approver_app_user_id = p_target_app_user_id
+      and da.valid_from <= v_today
+      and (da.valid_to is null or (da.valid_to > da.valid_from and v_today < da.valid_to))
+      and not exists (
+        select 1
+          from public.organization_departments d
+         where d.system_key = da.unit_kind
+           and d.is_active = true
+           and public.leave_management__internal_has_open_department_head(d.department_id, v_now)
+      )
+    union all
+    select
+      'WORK_REPORT_DELEGATE'::text as assignment_kind,
+      wd.delegation_id::text as resource_ref,
+      coalesce(wt.display_name, wt.template_code) || ' (' ||
+        case when wd.scope_kind = 'all' then 'Toàn công ty' else coalesce(tm.display_name, tm.code, 'Đội') end
+        || ')' as resource_label
+    from public.work_report_delegations wd
+    join public.work_report_templates wt
+      on wt.template_id = wd.template_id
+    left join public.teams tm
+      on tm.team_id = wd.scope_team_id
+    where wd.delegate_app_user_id = p_target_app_user_id
+      and public.work_report__internal_is_delegation_effective(wd.delegation_id, v_now)
   )
   select coalesce(
     pg_catalog.jsonb_agg(

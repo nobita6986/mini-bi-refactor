@@ -284,6 +284,187 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
     });
   }
 
+  // Authorization cutover manifest (PR28-T0-R1 / PR28-T0-R2):
+  // Mirrors #237 Gate 3 (unmappable active authz_direct_capability_grants) and Gate 4
+  // (enabled authz_managed = false with active direct_entry_capability_grants), plus counts
+  // of legacy role/module rows awaiting or completed in group backfill.
+  const { rows: legacyRoleCounts } = await client.query(`
+    select
+      (select count(*)::int from public.authz_account_role_assignments
+        where ended_at is null and started_at <= pg_catalog.clock_timestamp()
+          and role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')) as active_global_roles,
+      (select count(*)::int from public.vendor_finance_global_roles gr
+        where gr.valid_from <= public.direct_entry_authorization_date()
+          and (gr.valid_to is null or (gr.valid_to > gr.valid_from and gr.valid_to > public.direct_entry_authorization_date()))
+          and gr.role_code in ('GLOBAL_VIEWER', 'GLOBAL_RECONCILER', 'CASH_HOLDER', 'CASH_HOLDER_RECORD_BEHALF')) as active_vfin_global_roles,
+      (select count(*)::int from public.leave_module_grants lmg
+        where lmg.is_current = true
+          and lmg.valid_from <= public.direct_entry_authorization_date()
+          and (lmg.valid_to is null or (lmg.valid_to > lmg.valid_from and lmg.valid_to > public.direct_entry_authorization_date()))
+          and lmg.role_code in ('HR_LEAVE_OPERATOR', 'HR_REPORT_VIEWER', 'LEAVE_ADMIN_BOD_APPROVER')) as active_leave_module_grants
+  `);
+
+  const groupCoverageSql = hasGroupMembers
+    ? `exists (
+         select 1
+           from public.authz_user_group_members m
+           join public.authz_user_groups g on g.group_id = m.group_id and g.active = true
+           join public.organization_departments d on d.department_id = g.department_id and d.is_active = true
+           left join public.teams t on t.team_id = g.team_id and t.active = true and t.code <> '__system_vendor__'
+           join public.authz_user_group_capabilities gc
+             on gc.group_id = g.group_id
+            and gc.ended_at is null
+            and gc.started_at <= pg_catalog.clock_timestamp()
+            and gc.capability = dg.capability
+          where m.app_user_id = dg.app_user_id
+            and m.ended_at is null
+            and m.started_at <= pg_catalog.clock_timestamp()
+            and (g.team_id is null or t.team_id is not null)
+            and (
+              (dg.scope_kind = 'ALL' and dg.scope_id is null and g.team_id is null and (
+                g.is_system_admin
+                or gc.capability not in (
+                  'entry_create', 'entry_own', 'submission_create', 'document_upload',
+                  'document_view', 'change_request_create', 'employment_status.request'
+                )
+                or (
+                  gc.capability = 'document_view'
+                  and exists (
+                    select 1 from public.authz_user_group_capabilities gc2
+                     where gc2.group_id = g.group_id
+                       and gc2.ended_at is null
+                       and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
+                  )
+                )
+              ))
+              or (dg.scope_kind = 'OWN' and dg.scope_id is null and gc.capability in (
+                'entry_create', 'entry_own', 'submission_create', 'document_upload',
+                'document_view', 'change_request_create', 'employment_status.request'
+              ))
+              or (dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = dg.scope_id)
+            )
+       )`
+    : "false";
+
+  const { rows: directGrantRows } = await client.query(`
+    select
+      dg.direct_grant_id,
+      dg.app_user_id,
+      u.display_name,
+      u.enabled,
+      dg.capability,
+      dg.scope_kind,
+      dg.scope_id,
+      ${groupCoverageSql} as covered_by_group,
+      exists (
+        select 1
+          from public.authz_account_role_assignments ara
+          join public.authz_role_capabilities rc on rc.role_code = ara.role_code
+         where ara.app_user_id = dg.app_user_id
+           and ara.ended_at is null
+           and ara.started_at <= pg_catalog.clock_timestamp()
+           and ara.role_code in ('ADMIN', 'HR_OPERATOR', 'RECRUITER')
+           and rc.capability = dg.capability
+           and rc.scope_template = dg.scope_kind
+           and dg.scope_id is null
+      ) as covered_by_mappable_role,
+      (
+        (dg.capability = 'vendor_finance_view' and dg.scope_kind = 'ALL' and dg.scope_id is null)
+        or (
+          dg.scope_kind = 'CONTEXT_TEAM'
+          and dg.scope_id ~ '^[0-9a-fA-F-]{36}$'
+          and dg.capability in (
+            'entry_team', 'team_manager_assign', 'change_review',
+            'report_view', 'report_analytics_view', 'report_assign',
+            'report_review', 'report_delegate', 'worker_edit_history_view'
+          )
+          and exists (
+            select 1 from public.teams t
+             where t.team_id = dg.scope_id::uuid
+               and t.active = true
+               and t.code <> '__system_vendor__'
+          )
+        )
+        or (
+          dg.scope_kind = 'OWN'
+          and dg.scope_id is null
+          and dg.capability in (
+            'entry_create', 'entry_own', 'submission_create', 'document_upload',
+            'document_view', 'change_request_create', 'employment_status.request'
+          )
+        )
+        or (
+          dg.scope_kind = 'ALL'
+          and dg.scope_id is null
+          and dg.capability in (
+            'recruiter_master_manage', 'team_master_manage', 'audit_view',
+            'catalog_master_manage', 'report_form_manage', 'report_assign',
+            'report_review', 'report_delegate', 'duplicate_cccd_withdraw',
+            'worker_edit_history_view'
+          )
+        )
+      ) as d1_mappable
+    from public.authz_direct_capability_grants dg
+    join public.direct_entry_app_users u on u.app_user_id = dg.app_user_id
+    where dg.ended_at is null
+      and dg.started_at <= pg_catalog.clock_timestamp()
+    order by dg.app_user_id asc, dg.capability asc, dg.scope_kind asc, dg.direct_grant_id asc
+  `);
+
+  const activeDirectGrants = directGrantRows.map((r) => {
+    const classification = r.covered_by_group
+      ? "COVERED_BY_GROUP"
+      : r.covered_by_mappable_role || r.d1_mappable
+        ? "MAPPABLE_TO_GROUP"
+        : "UNMAPPABLE_REQUIRES_T0_DECISION";
+    return {
+      direct_grant_id: r.direct_grant_id.toLowerCase(),
+      app_user_id: r.app_user_id.toLowerCase(),
+      display_name: r.display_name,
+      enabled: Boolean(r.enabled),
+      capability: r.capability,
+      scope_kind: r.scope_kind,
+      scope_id: r.scope_id,
+      classification,
+    };
+  });
+
+  const unmappableDirectGrantCount = activeDirectGrants.filter(
+    (g) => g.classification === "UNMAPPABLE_REQUIRES_T0_DECISION",
+  ).length;
+
+  const { rows: uncutoverRows } = await client.query(`
+    select
+      u.app_user_id,
+      u.display_name,
+      array_agg(distinct cg.capability order by cg.capability) as capabilities
+    from public.direct_entry_app_users u
+    join public.direct_entry_capability_grants cg
+      on cg.app_user_id = u.app_user_id
+     and cg.is_current = true
+    where u.enabled = true
+      and u.authz_managed = false
+    group by u.app_user_id, u.display_name
+    order by u.app_user_id asc
+  `);
+
+  const uncutoverLegacyGrantUsers = uncutoverRows.map((r) => ({
+    app_user_id: r.app_user_id.toLowerCase(),
+    display_name: r.display_name,
+    capabilities: r.capabilities ?? [],
+  }));
+
+  const authorizationCutoverManifest = {
+    active_legacy_global_role_count: legacyRoleCounts[0]?.active_global_roles ?? 0,
+    active_legacy_vfin_global_role_count: legacyRoleCounts[0]?.active_vfin_global_roles ?? 0,
+    active_legacy_leave_module_grant_count: legacyRoleCounts[0]?.active_leave_module_grants ?? 0,
+    active_direct_grant_count: activeDirectGrants.length,
+    unmappable_direct_grant_count: unmappableDirectGrantCount,
+    uncutover_legacy_grant_user_count: uncutoverLegacyGrantUsers.length,
+    active_direct_grants: activeDirectGrants,
+    uncutover_legacy_grant_users: uncutoverLegacyGrantUsers,
+  };
+
   const overallStatus =
     candidates.length === 0 && orphanAuthBindings.length === 0
       ? "NO_CANDIDATES"
@@ -296,7 +477,9 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
   const cleanupMigrationSafe =
     unresolvedLegacyAccountTypeCount === 0 &&
     unresolvedLegacySharedProfileCount === 0 &&
-    orphanAuthBindings.length === 0;
+    orphanAuthBindings.length === 0 &&
+    unmappableDirectGrantCount === 0 &&
+    uncutoverLegacyGrantUsers.length === 0;
 
   const body = {
     schema_state: {
@@ -315,6 +498,7 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
     unresolved_legacy_shared_profile_count: unresolvedLegacySharedProfileCount,
     orphan_auth_bindings: orphanAuthBindings,
     candidates,
+    authorization_cutover_manifest: authorizationCutoverManifest,
   };
 
   const manifest_fingerprint = createHash("sha256").update(stableJson(body), "utf8").digest("hex");

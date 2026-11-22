@@ -2331,24 +2331,34 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           await client.query("rollback");
         }
 
-        const alignStart = wp5b1Migration.indexOf("do $align_wp5b$");
-        const checkEnd = wp5b1Migration.lastIndexOf("$check_wp5b$;");
-        assert.ok(alignStart >= 0 && checkEnd > alignStart, "WP5B-1 migration includes $align_wp5b$ and $check_wp5b$ blocks");
-        const wp5b1VerifyBlocks = wp5b1Migration.slice(alignStart, checkEnd + "$check_wp5b$;".length);
+        // Post-#237: all retired PR28 global-role & module-grant RPCs are dropped, and altering a surviving PR28 group RPC
+        // owner to a non-BYPASSRLS role causes FORCE RLS to fail closed with 42501 under service_role.
+        for (const sig of PR28_CLEANUP_RETIRED_RPC_SIGNATURES) {
+          const retiredCheck = await client.query("select to_regprocedure($1)::text as reg", [sig]);
+          assert.equal(retiredCheck.rows[0].reg, null, `retired RPC must be absent post-#237: ${sig}`);
+        }
+
+        const ownerCheck = await client.query(
+          `select r.rolbypassrls
+             from pg_catalog.pg_proc p
+             join pg_catalog.pg_roles r on r.oid = p.proowner
+            where p.oid = 'public.direct_entry_authz_list_groups_admin(uuid, uuid, uuid, boolean)'::pg_catalog.regprocedure`,
+        );
+        assert.equal(ownerCheck.rows[0]?.rolbypassrls, true, "PR28 group RPC owner must have BYPASSRLS");
 
         await client.query("begin");
         try {
           await client.query("alter role s0_t1c_runner nobypassrls");
           await client.query(
-            "alter function public.direct_entry_authz_list_roles_admin(uuid, uuid) owner to s0_t1c_runner",
+            "alter function public.direct_entry_authz_list_groups_admin(uuid, uuid, uuid, boolean) owner to s0_t1c_runner",
           );
-          await client.query("set local session authorization s0_t1c_runner");
+          await client.query("set local role service_role");
           await assert.rejects(
-            client.query(wp5b1VerifyBlocks),
-            (error) =>
-              error?.code === "55000" &&
-              String(error?.message).includes("WP5B1 RPC security definer owner/RLS/ACL boundary drift"),
-            "WP5B-1 $check_wp5b$ block must fail closed with 55000 if an RPC owner lacks BYPASSRLS",
+            client.query(
+              "select public.direct_entry_authz_list_groups_admin('00000000-0000-4000-8000-000000000001'::uuid, '00000000-0000-4000-8000-000000000002'::uuid, null::uuid, false)",
+            ),
+            (error) => error?.code === "42501",
+            "PR28 group RPC must fail closed under FORCE RLS if owner lacks BYPASSRLS",
           );
         } finally {
           await client.query("rollback");

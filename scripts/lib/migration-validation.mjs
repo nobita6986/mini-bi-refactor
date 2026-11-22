@@ -487,11 +487,21 @@ export const PR28_CLEANUP_MIGRATION_NAME =
 export const PR28_CLEANUP_RETIRED_RPC_SIGNATURES = Object.freeze([
   "public.hrp_sync_catalog(uuid, uuid, uuid)",
   "public.org_department_set_account_type_admin(uuid, uuid, uuid, text, integer, text, uuid, text)",
+  "public.direct_entry_authz_resolve_current_snapshot(timestamp with time zone, uuid)",
   "public.direct_entry_authz_resolve_candidate_access(timestamp with time zone, uuid)",
   "public.direct_entry_authz_compare_shadow_access(timestamp with time zone, uuid)",
+  "public.direct_entry_authz_list_roles_admin(uuid, uuid)",
+  "public.direct_entry_authz_list_accounts_summary_admin(uuid, uuid, text, text, text, integer, integer)",
+  "public.direct_entry_authz_get_account_access_admin(uuid, uuid, uuid)",
+  "public.direct_entry_authz_assign_global_role_admin(uuid, uuid, uuid, text, integer, text, uuid, text)",
+  "public.direct_entry_authz_revoke_global_role_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)",
   "public.direct_entry_list_app_users_filtered_admin(uuid, uuid, text, text, integer, integer, text, text)",
   "public.leave_management_get_admin_overview(uuid, uuid, text, integer, integer)",
+  "public.leave_management_manage_module_grant_admin(uuid, uuid, text, uuid, text, integer, text, text, text)",
   "public.leave_management_upsert_employee_profile_admin(uuid, uuid, uuid, boolean, text, text, date, date, date, integer, integer, text, text, text)",
+  "public.vendor_finance_list_global_roles_admin(uuid, uuid, text, boolean, integer, integer)",
+  "public.vendor_finance_assign_global_role_admin(uuid, uuid, uuid, text, integer, date, text, uuid, text)",
+  "public.vendor_finance_end_global_role_admin(uuid, uuid, uuid, integer, date, text, uuid, text)",
 ]);
 export const PR28_CLEANUP_ADDED_RPC_SIGNATURES = Object.freeze([
   "public.leave_management_upsert_employee_profile_admin(uuid, uuid, uuid, text, text, date, date, date, integer, integer, text, text, text)",

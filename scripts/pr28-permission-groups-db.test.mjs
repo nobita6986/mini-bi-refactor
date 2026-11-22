@@ -300,7 +300,7 @@ test("1. Migration #236 hygiene, atomic rollback, dynamic S0-T1-C allowlist (+6 
     );
     assert.equal(postCheck.details.exposedClientOrPublicCount, 0, "zero client/PUBLIC EXECUTE grants");
 
-    // Seed groups check
+    // Seed groups check (11 exact 1:1 D1/D4 seed groups)
     const { rows: groups } = await db.query(`
       select g.code, g.name, g.is_system_admin, g.team_id, d.system_key as dept_key,
              (select count(*)::int from public.authz_user_group_capabilities c where c.group_id = g.group_id and c.ended_at is null) as cap_count,
@@ -309,6 +309,7 @@ test("1. Migration #236 hygiene, atomic rollback, dynamic S0-T1-C allowlist (+6 
         join public.organization_departments d on d.department_id = g.department_id
        order by g.code
     `);
+    assert.equal(groups.length, 11);
     const byCode = new Map(groups.map((r) => [r.code, r]));
     assert.equal(byCode.get("SYSTEM_ADMIN")?.cap_count, 21);
     assert.equal(byCode.get("SYSTEM_ADMIN")?.name, "BoD/Admin");
@@ -316,7 +317,13 @@ test("1. Migration #236 hygiene, atomic rollback, dynamic S0-T1-C allowlist (+6 
     assert.equal(byCode.get("HR_CATALOG_OPERATOR")?.cap_count, 5);
     assert.equal(byCode.get("RECRUITER_OPERATIONS")?.cap_count, 7);
     assert.equal(byCode.get("ACCOUNTING_OPERATIONS")?.cap_count, 1);
-    assert.equal(byCode.get("LEAVE_HR_OPERATIONS")?.mr_count, 2);
+    assert.equal(byCode.get("LEAVE_HR_OPERATIONS")?.mr_count, 1);
+    assert.equal(byCode.get("LEAVE_REPORT_VIEWER")?.mr_count, 1);
+    assert.equal(byCode.get("LEAVE_BOD_APPROVER")?.mr_count, 1);
+    assert.equal(byCode.get("VFIN_GLOBAL_VIEWER")?.mr_count, 1);
+    assert.equal(byCode.get("VFIN_GLOBAL_RECONCILER")?.mr_count, 1);
+    assert.equal(byCode.get("VFIN_CASH_HOLDER")?.mr_count, 1);
+    assert.equal(byCode.get("VFIN_CASH_HOLDER_RECORD_BEHALF")?.mr_count, 1);
   } finally {
     await db.close();
   }
@@ -872,7 +879,8 @@ test("4. D4 Group-Managed Finance & Leave Module Roles + Idempotency + OCC (Zero
       ])
     ).rows[0].auth;
     assert.equal(lvDuring.is_hr_operator, true);
-    assert.equal(lvDuring.is_hr_report_viewer, true);
+    assert.equal(lvDuring.is_hr_report_viewer, false, "1:1 LEAVE_HR_OPERATIONS holds HR_LEAVE_OPERATOR only");
+    assert.equal(lvDuring.can_view_monthly_report, true);
     assert.equal(lvDuring.can_manage_config, true);
 
     // Update group to drop HR_LEAVE_OPERATOR -> member immediately loses is_hr_operator while keeping HR_REPORT_VIEWER!
