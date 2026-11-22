@@ -1,7 +1,4 @@
 import { createHash } from "node:crypto";
-import { ACCOUNT_TYPES, type AccountType } from "../direct-entry/app-user-access-contract.ts";
-
-export { ACCOUNT_TYPES, type AccountType };
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -98,7 +95,6 @@ export const ORGANIZATION_ERROR_CODES = [
   "RECRUITER_IDENTITY_CONFLICT",
   "RECRUITER_LINK_MISMATCH",
   "RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT",
-  "ACCOUNT_TYPE_LINK_FORBIDDEN",
   "ACCOUNT_OR_PERSON_ALREADY_LINKED",
   "ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS",
   "DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS",
@@ -140,7 +136,6 @@ export const ORGANIZATION_ERROR_HTTP_STATUS: Record<OrganizationErrorCode, numbe
   RECRUITER_IDENTITY_CONFLICT: 409,
   RECRUITER_LINK_MISMATCH: 409,
   RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT: 409,
-  ACCOUNT_TYPE_LINK_FORBIDDEN: 409,
   ACCOUNT_OR_PERSON_ALREADY_LINKED: 409,
   ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS: 409,
   DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS: 409,
@@ -269,16 +264,6 @@ export type TransferPersonDepartmentResponse = {
     version: number;
   };
   active_membership: PersonDepartmentHistoryProjection;
-};
-
-export type SetAccountTypeResponse = {
-  ok: true;
-  replayed: boolean;
-  account: {
-    account_ref: string;
-    account_type: AccountType;
-    version: number;
-  };
 };
 
 export type LinkAccountPersonResponse = {
@@ -921,58 +906,6 @@ export function parseTransferPersonDepartmentBody(
   };
 }
 
-export type SetAccountTypeBody = {
-  account_type: AccountType;
-  expected_account_version: number;
-  reason: string;
-  idempotency_key: string;
-};
-
-export function parseSetAccountTypeBody(
-  body: unknown,
-  idempotencyHeader: string | null,
-): ParseResult<SetAccountTypeBody> {
-  if (!isPlainObject(body)) {
-    return { ok: false, code: "ORG_VALIDATION_ERROR", message: "Payload phải là JSON object." };
-  }
-  const forbidden = checkNoForbiddenClientFields(body);
-  if (!forbidden.ok) return forbidden;
-  const keyCheck = validateAllowedKeys(body, [
-    "account_type",
-    "expected_account_version",
-    "reason",
-    "idempotency_key",
-  ]);
-  if (!keyCheck.ok) return { ok: false, code: "ORG_VALIDATION_ERROR", message: keyCheck.message };
-
-  const idem = parseMatchedIdempotencyKey(idempotencyHeader, body.idempotency_key);
-  if (!idem.ok) return idem;
-  if (
-    typeof body.account_type !== "string" ||
-    !(ACCOUNT_TYPES as readonly string[]).includes(body.account_type)
-  ) {
-    return {
-      ok: false,
-      code: "ORG_VALIDATION_ERROR",
-      message: "account_type phải thuộc NORMAL | SHARED | SERVICE.",
-    };
-  }
-  const ver = parseVersionInt(body.expected_account_version, "expected_account_version");
-  if (!ver.ok) return ver;
-  const reason = parseSafeReason(body.reason);
-  if (!reason.ok) return { ok: false, code: "ORG_VALIDATION_ERROR", message: reason.message };
-
-  return {
-    ok: true,
-    value: {
-      account_type: body.account_type as AccountType,
-      expected_account_version: ver.value,
-      reason: reason.value,
-      idempotency_key: idem.value,
-    },
-  };
-}
-
 export type LinkAccountPersonBody = {
   person_id: string;
   expected_account_version: number;
@@ -1148,22 +1081,6 @@ export function computeTransferPersonDepartmentFingerprint(
   });
 }
 
-export function computeSetAccountTypeFingerprint(
-  actorAppUserId: string,
-  accountRef: string,
-  body: SetAccountTypeBody,
-): string {
-  return sha256Canonical({
-    v: 1,
-    op: "ACCOUNT_TYPE_SET",
-    actor_app_user_id: actorAppUserId.toLowerCase(),
-    account_ref: accountRef.toLowerCase(),
-    account_type: body.account_type,
-    expected_account_version: body.expected_account_version,
-    reason: body.reason,
-  });
-}
-
 export function computeLinkAccountPersonFingerprint(
   actorAppUserId: string,
   accountRef: string,
@@ -1203,7 +1120,6 @@ export type ListPersonsRpcProjection = Omit<ListPersonsResponse, "ok">;
 export type GetPersonRpcProjection = Omit<GetPersonResponse, "ok">;
 export type MutatePersonRpcProjection = Omit<MutatePersonResponse, "ok">;
 export type TransferPersonDepartmentRpcProjection = Omit<TransferPersonDepartmentResponse, "ok">;
-export type SetAccountTypeRpcProjection = Omit<SetAccountTypeResponse, "ok">;
 export type LinkAccountPersonRpcProjection = Omit<LinkAccountPersonResponse, "ok">;
 export type UnlinkAccountPersonRpcProjection = Omit<UnlinkAccountPersonResponse, "ok">;
 
@@ -1673,33 +1589,6 @@ export function projectTransferPersonDepartmentResponse(
       version: value.closed_membership.version,
     },
     active_membership: activeMembership,
-  };
-}
-
-export function projectSetAccountTypeResponse(
-  value: unknown,
-): SetAccountTypeRpcProjection | null {
-  if (!isPlainObject(value) || !hasExactKeys(value, ["replayed", "account"])) {
-    return null;
-  }
-  if (
-    typeof value.replayed !== "boolean" ||
-    !isPlainObject(value.account) ||
-    !hasExactKeys(value.account, ["account_ref", "account_type", "version"]) ||
-    !isValidUuid(value.account.account_ref) ||
-    typeof value.account.account_type !== "string" ||
-    !(ACCOUNT_TYPES as readonly string[]).includes(value.account.account_type) ||
-    !isSafePositiveInt(value.account.version)
-  ) {
-    return null;
-  }
-  return {
-    replayed: value.replayed,
-    account: {
-      account_ref: value.account.account_ref.toLowerCase(),
-      account_type: value.account.account_type as AccountType,
-      version: value.account.version,
-    },
   };
 }
 

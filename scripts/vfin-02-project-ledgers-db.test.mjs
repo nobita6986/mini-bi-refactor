@@ -422,6 +422,22 @@ const VFIN_02_RPC_BINDINGS = {
   ],
 };
 
+async function callVfinRpc(db, fnName, params) {
+  const spec = VFIN_02_RPC_BINDINGS[fnName];
+  assert.ok(spec, `Unbound RPC in PGlite adapter: ${fnName}`);
+  const placeholders = spec.map(([, pgType], idx) => `$${idx + 1}::${pgType}`).join(", ");
+  const values = spec.map(([paramName, pgType]) => {
+    const val = params[paramName];
+    if (val === undefined || val === null) return null;
+    return pgType === "jsonb" ? JSON.stringify(val) : val;
+  });
+  const { rows } = await db.query(
+    `select public.${fnName}(${placeholders}) as data`,
+    values,
+  );
+  return rows[0]?.data ?? null;
+}
+
 function createPgliteVfinRepo(db) {
   return createVendorFinanceRepository(async (fnName, params) => {
     const spec = VFIN_02_RPC_BINDINGS[fnName];
@@ -880,16 +896,16 @@ test("(#2) Full VFIN-02 acceptance: legacy isolation, controlled governance, non
       [BOD_VIEWER, "GLOBAL_VIEWER"],
     ]) {
       const roleReason = `Chỉ định vai trò ${roleCode} cho ${person.name}`;
-      const roleRes = await repo.assignGlobalRoleAdmin({
-        auth_subject: FULL_ADMIN.auth,
-        app_user_id: FULL_ADMIN.app,
-        account_ref: person.app,
-        role_code: roleCode,
-        expected_version: 0,
-        valid_from: "2026-10-01",
-        reason: roleReason,
-        idempotency_key: nextUuid(),
-        request_fingerprint: computeAssignGlobalRoleFingerprint({
+      const roleData = await callVfinRpc(db, "vendor_finance_assign_global_role_admin", {
+        p_auth_subject: FULL_ADMIN.auth,
+        p_app_user_id: FULL_ADMIN.app,
+        p_target_user_id: person.app,
+        p_role_code: roleCode,
+        p_expected_version: 0,
+        p_valid_from: "2026-10-01",
+        p_reason: roleReason,
+        p_idempotency_key: nextUuid(),
+        p_request_fingerprint: computeAssignGlobalRoleFingerprint({
           account_ref: person.app,
           role_code: roleCode,
           valid_from: "2026-10-01",
@@ -897,8 +913,7 @@ test("(#2) Full VFIN-02 acceptance: legacy isolation, controlled governance, non
           reason: roleReason,
         }),
       });
-      assert.equal(roleRes.ok, true, JSON.stringify(roleRes));
-      assert.equal(roleRes.data.role_code, roleCode);
+      assert.equal(roleData.role_code, roleCode);
     }
 
     // Verify Governance Read projections work cleanly
@@ -913,16 +928,15 @@ test("(#2) Full VFIN-02 acceptance: legacy isolation, controlled governance, non
     assert.equal(adminAssignList.ok, true, JSON.stringify(adminAssignList));
     assert.equal(adminAssignList.data.projects.length, 2);
 
-    const adminRolesList = await repo.listGlobalRolesAdmin({
-      auth_subject: FULL_ADMIN.auth,
-      app_user_id: FULL_ADMIN.app,
-      search: null,
-      include_history: true,
-      page: 1,
-      page_size: 25,
+    const adminRolesListData = await callVfinRpc(db, "vendor_finance_list_global_roles_admin", {
+      p_auth_subject: FULL_ADMIN.auth,
+      p_app_user_id: FULL_ADMIN.app,
+      p_search: null,
+      p_include_history: true,
+      p_page: 1,
+      p_page_size: 25,
     });
-    assert.equal(adminRolesList.ok, true, JSON.stringify(adminRolesList));
-    assert.equal(adminRolesList.data.roles.length, 4);
+    assert.equal(adminRolesListData.roles.length, 4);
 
     // -------------------------------------------------------------------------
     // 5. Verify 4-Role Actor Access & Scoped Context Options
@@ -1785,27 +1799,27 @@ test("(#2) Full VFIN-02 acceptance: legacy isolation, controlled governance, non
     }
 
     // End CASH_HOLDER_VIEW global role via Full Admin -> falls back to PROJECT_SCOPED (0 assigned projects)
-    const cashViewRoleRow = adminRolesList.data.roles.find(
+    const cashViewRoleRow = adminRolesListData.roles.find(
       (r) => r.account.account_ref === CASH_HOLDER_VIEW.app && r.state === "ACTIVE",
     );
     assert.ok(cashViewRoleRow, "Expected active CASH_HOLDER role row");
     const endGlobalReason = "Kết thúc phân công cầm tiền tạm thời cho nhân sự đối soát";
-    const endGlobalRes = await repo.endGlobalRoleAdmin({
-      auth_subject: FULL_ADMIN.auth,
-      app_user_id: FULL_ADMIN.app,
-      role_grant_id: cashViewRoleRow.role_grant_id,
-      expected_version: cashViewRoleRow.version,
-      valid_to: adminRolesList.data.authorization_date,
-      reason: endGlobalReason,
-      idempotency_key: nextUuid(),
-      request_fingerprint: computeEndGlobalRoleFingerprint({
+    const endGlobalData = await callVfinRpc(db, "vendor_finance_end_global_role_admin", {
+      p_auth_subject: FULL_ADMIN.auth,
+      p_app_user_id: FULL_ADMIN.app,
+      p_role_grant_id: cashViewRoleRow.role_grant_id,
+      p_expected_version: cashViewRoleRow.version,
+      p_valid_to: adminRolesListData.authorization_date,
+      p_reason: endGlobalReason,
+      p_idempotency_key: nextUuid(),
+      p_request_fingerprint: computeEndGlobalRoleFingerprint({
         role_grant_id: cashViewRoleRow.role_grant_id,
         expected_version: cashViewRoleRow.version,
-        valid_to: adminRolesList.data.authorization_date,
+        valid_to: adminRolesListData.authorization_date,
         reason: endGlobalReason,
       }),
     });
-    assert.equal(endGlobalRes.ok, true, JSON.stringify(endGlobalRes));
+    assert.ok(endGlobalData?.role_grant_id);
     const accessCashViewAfterEnd = await repo.getActorAccess({
       auth_subject: CASH_HOLDER_VIEW.auth,
       app_user_id: CASH_HOLDER_VIEW.app,

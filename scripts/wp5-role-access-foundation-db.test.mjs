@@ -193,7 +193,7 @@ async function seedAccount(
 async function setupDatabase() {
   const db = new PGlite();
   await db.exec(PROLOGUE);
-  const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql") && n < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   assert.ok(names.includes(WP5B1_ROLE_EFFECTIVE_ACCESS_MIGRATION_NAME));
   for (const name of names) {
     await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));

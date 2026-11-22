@@ -1,12 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import { AttendanceExplanationWorkspace } from "@/components/attendance/attendance-explanation-workspace";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { StatusBadge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClasses } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import {
   DATA_TABLE_CLASS,
@@ -27,7 +28,6 @@ import type { LeaveAdminAccountStatusFilter } from "@/lib/leave/leave-contract";
 import {
   LEAVE_DEPARTMENT_APPROVER_UNIT_KINDS,
   LEAVE_EMPLOYMENT_STATUSES,
-  LEAVE_MODULE_GRANT_ROLES,
   LEAVE_REQUEST_STATUS_FILTERS,
   LEAVE_SESSION_CODES,
   LEAVE_TYPES,
@@ -90,7 +90,6 @@ import {
   type LeaveDraftDayRow,
   type LeaveEmploymentStatus,
   type LeaveMeSummaryProjection,
-  type LeaveModuleGrantRole,
   type LeaveMonthlyReportProjection,
   type LeaveOpeningPreviewProjection,
   type LeaveRequestProjection,
@@ -302,16 +301,9 @@ export function LeaveManagementWorkspace({
     useState<DepartmentApproverPendingState | null>(null);
   const deptApproverLocked = deptApproverPendingState !== null;
 
-  // Admin Module Grant Form State
-  const [grantUserId, setGrantUserId] = useState<string>("");
-  const [grantRoleCode, setGrantRoleCode] = useState<LeaveModuleGrantRole>("HR_REPORT_VIEWER");
-  const [grantReason, setGrantReason] = useState<string>("");
-  const [savingGrant, setSavingGrant] = useState<boolean>(false);
-
   // Admin Employee Profile Dialog State
   const [editingEmployee, setEditingEmployee] =
     useState<LeaveAdminEmployeeItemProjection | null>(null);
-  const [profileIsShared, setProfileIsShared] = useState<boolean>(false);
   const [profileStatus, setProfileStatus] = useState<LeaveEmploymentStatus>("OFFICIAL");
   const [profileUnitKind, setProfileUnitKind] = useState<LeaveUnitKind>("RECRUITMENT");
   const [profileWorkStartDate, setProfileWorkStartDate] = useState<string>("");
@@ -632,12 +624,10 @@ export function LeaveManagementWorkspace({
       readonly label: string;
       readonly badgeCount?: number;
     }> = tabs.filter((tab) => tab.id === "personal" || tab.id === "approvals");
-    if (!authority?.is_shared_non_employee) {
-      personalTabs.push({
-        id: "explanations",
-        label: "Giải trình chấm công",
-      });
-    }
+    personalTabs.push({
+      id: "explanations",
+      label: "Giải trình chấm công",
+    });
     return personalTabs;
   }, [authority, inboxStatusFilter, inboxData?.total, viewMode]);
 
@@ -1128,105 +1118,8 @@ export function LeaveManagementWorkspace({
     }
   };
 
-  const handleGrantModuleRole = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (savingGrant) return;
-    if (!grantUserId.trim()) {
-      notify.warning({
-        title: "Thiếu thông tin phân quyền",
-        description: "Vui lòng chọn tài khoản.",
-      });
-      return;
-    }
-
-    setSavingGrant(true);
-    try {
-      const response = await fetch("/api/leave/admin/config", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          operation: "MANAGE_MODULE_GRANT",
-          action: "GRANT",
-          target_app_user_id: grantUserId.trim(),
-          role_code: grantRoleCode,
-          expected_row_version: 0,
-          reason: grantReason.trim() || null,
-          idempotency_key: newClientIdempotencyKey("leave-grant"),
-        }),
-      });
-      const parsed = await parseJsonResponse(response);
-      if (!parsed.ok) {
-        notify.error({
-          title: "Không thể cấp quyền module nghỉ phép",
-          description: leaveErrorMessage(parsed.errorCode),
-        });
-        return;
-      }
-      notify.success({
-        title: "Đã cấp quyền thành công",
-        description: `Đã cấp quyền ${leaveModuleGrantRoleLabel(grantRoleCode)}.`,
-      });
-      setGrantReason("");
-      await loadAdminConfig(adminAppliedSearch, adminPage, adminAccountStatus);
-    } catch {
-      notify.error({
-        title: "Lỗi kết nối",
-        description: "Không thể cấp quyền lúc này.",
-      });
-    } finally {
-      setSavingGrant(false);
-    }
-  };
-
-  const handleRevokeModuleRole = async (
-    targetUserId: string,
-    roleCode: LeaveModuleGrantRole,
-    rowVersion: number,
-  ) => {
-    if (savingGrant) return;
-    setSavingGrant(true);
-    try {
-      const response = await fetch("/api/leave/admin/config", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          operation: "MANAGE_MODULE_GRANT",
-          action: "REVOKE",
-          target_app_user_id: targetUserId,
-          role_code: roleCode,
-          expected_row_version: rowVersion,
-          reason: null,
-          idempotency_key: newClientIdempotencyKey("leave-revoke"),
-        }),
-      });
-      const parsed = await parseJsonResponse(response);
-      if (!parsed.ok) {
-        notify.error({
-          title: "Không thể thu hồi quyền",
-          description: leaveErrorMessage(parsed.errorCode),
-        });
-        return;
-      }
-      notify.success({
-        title: "Đã thu hồi quyền",
-        description: `Đã thu hồi quyền ${leaveModuleGrantRoleLabel(roleCode)}.`,
-      });
-      await loadAdminConfig(adminAppliedSearch, adminPage, adminAccountStatus);
-    } catch {
-      notify.error({
-        title: "Lỗi kết nối",
-        description: "Không thể thu hồi quyền lúc này.",
-      });
-    } finally {
-      setSavingGrant(false);
-    }
-  };
-
   const openEditProfileDialog = (emp: LeaveAdminEmployeeItemProjection) => {
     setEditingEmployee(emp);
-    setProfileIsShared(emp.profile.is_shared_non_employee);
     setProfileStatus(emp.profile.employment_status);
     setProfileUnitKind(emp.profile.unit_kind);
     setProfileWorkStartDate(emp.profile.work_start_date ?? "");
@@ -1262,14 +1155,11 @@ export function LeaveManagementWorkspace({
         body: JSON.stringify({
           operation: "UPSERT_EMPLOYEE_PROFILE",
           target_app_user_id: editingEmployee.account.app_user_id,
-          is_shared_non_employee: profileIsShared,
-          employment_status: profileIsShared ? "UNCONFIGURED" : profileStatus,
-          unit_kind: profileIsShared ? "UNCLASSIFIED" : profileUnitKind,
-          work_start_date: profileIsShared ? null : profileWorkStartDate.trim() || null,
+          employment_status: profileStatus,
+          unit_kind: profileUnitKind,
+          work_start_date: profileWorkStartDate.trim() || null,
           official_effective_date:
-            profileIsShared || profileStatus !== "OFFICIAL"
-              ? null
-              : profileOfficialDate.trim() || null,
+            profileStatus !== "OFFICIAL" ? null : profileOfficialDate.trim() || null,
           next_seniority_effective_date: canEditSeniority
             ? profileSeniorityDate.trim() || null
             : editingEmployee.profile.next_seniority_effective_date,
@@ -1625,22 +1515,6 @@ export function LeaveManagementWorkspace({
           </div>
         }
       />
-
-      {/* Shared Marketing / Non-Employee Account Banner */}
-      {viewMode === "personal" &&
-      (meErrorCode === "LEAVE_SHARED_ACCOUNT_FORBIDDEN" ||
-        summary?.authority.is_shared_non_employee) ? (
-        <StatusBanner
-          tone="warning"
-          title="Tài khoản dùng chung không thuộc đối tượng quản lý nghỉ phép cá nhân"
-          dataTestId="leave-shared-account-banner"
-        >
-          <p>
-            Tài khoản hiện tại được đánh dấu là tài khoản dùng chung (Marketing/hệ thống), không gắn
-            với hồ sơ nhân sự cá nhân nên không phát sinh quỹ phép và không tạo đơn xin nghỉ phép.
-          </p>
-        </StatusBanner>
-      ) : null}
 
       {/* Top-Level Workspace Tabs */}
       <div
@@ -2714,15 +2588,9 @@ export function LeaveManagementWorkspace({
                                 ) : null}
                               </td>
                               <td className={DATA_TABLE_TD_CLASS} data-label="Trạng thái phép">
-                                {emp.profile.is_shared_non_employee ? (
-                                  <StatusBadge tone="neutral">
-                                    Tài khoản dùng chung (Loại trừ)
-                                  </StatusBadge>
-                                ) : (
-                                  <StatusBadge tone={empBadge.tone} dot>
-                                    {empBadge.label}
-                                  </StatusBadge>
-                                )}
+                                <StatusBadge tone={empBadge.tone} dot>
+                                  {empBadge.label}
+                                </StatusBadge>
                               </td>
                               <td className={DATA_TABLE_TD_CLASS} data-label="Bộ phận / Team">
                                 <div>{leaveUnitKindLabel(emp.profile.unit_kind)}</div>
@@ -3047,64 +2915,49 @@ export function LeaveManagementWorkspace({
                     </form>
                   </Card>
 
-                  {/* Card 3: Module Grants */}
-                  <Card className="lg:col-span-12 space-y-4">
-                    <CardHeader
-                      title="Phân quyền nội bộ phân hệ Nghỉ phép (HR & Ban Giám đốc)"
-                      description="Quyền cấp tại đây chỉ có hiệu lực trong phân hệ Quản lý nghỉ phép, giữ nguyên hoàn toàn quyền của các phân hệ khác."
-                    />
+                  {/* Card 3: Read-only group-sourced Leave operators (D4 unified management in /admin/access/groups) */}
+                  <Card className="lg:col-span-12 space-y-4" data-testid="leave-group-managed-roles-card">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <CardHeader
+                        title="Nhân sự có quyền vận hành Nghỉ phép (theo Nhóm quyền)"
+                        description="Các quyền toàn công ty trong phân hệ Nghỉ phép (Vận hành nghỉ phép HR, Xem báo cáo tháng, Ban Giám đốc duyệt phép) được quản lý tập trung tại Nhóm quyền."
+                      />
+                      {authority.is_full_admin ? (
+                        <Link
+                          href="/admin/access/groups"
+                          className={buttonClasses({ variant: "secondary", size: "sm" })}
+                        >
+                          Quản lý tại Nhóm quyền
+                        </Link>
+                      ) : null}
+                    </div>
                     {adminData.module_grants.length > 0 ? (
                       <DataTableContainer>
                         <table className={DATA_TABLE_CLASS}>
                           <thead className={DATA_TABLE_HEAD_CLASS}>
                             <tr>
                               <th className={DATA_TABLE_TH_CLASS}>Nhân sự</th>
-                              <th className={DATA_TABLE_TH_CLASS}>Vai trò trong module</th>
-                              <th className={DATA_TABLE_TH_CLASS}>Lý do cấp</th>
-                              <th className={DATA_TABLE_TH_CLASS}>Thao tác</th>
+                              <th className={DATA_TABLE_TH_CLASS}>Vai trò Nghỉ phép</th>
+                              <th className={DATA_TABLE_TH_CLASS}>Nguồn nhóm quyền</th>
                             </tr>
                           </thead>
                           <tbody>
                             {adminData.module_grants.map((gr) => (
-                              <tr key={gr.grant_id} className={DATA_TABLE_ROW_CLASS}>
+                              <tr key={`${gr.grant_id}-${gr.role_code}`} className={DATA_TABLE_ROW_CLASS}>
                                 <td className={DATA_TABLE_TD_CLASS} data-label="Nhân sự">
                                   {gr.account?.display_name ?? gr.app_user_id}
                                   {gr.account?.login_id ? ` (@${gr.account.login_id})` : ""}
                                 </td>
                                 <td
                                   className={DATA_TABLE_TD_CLASS}
-                                  data-label="Vai trò trong module"
+                                  data-label="Vai trò Nghỉ phép"
                                 >
                                   <StatusBadge tone="primary">
                                     {leaveModuleGrantRoleLabel(gr.role_code)}
                                   </StatusBadge>
                                 </td>
-                                <td className={DATA_TABLE_TD_CLASS} data-label="Lý do cấp">
-                                  {gr.reason ?? "—"}
-                                </td>
-                                <td className={DATA_TABLE_TD_CLASS} data-label="Thao tác">
-                                  <RowActionCluster>
-                                    {authority.is_full_admin && gr.is_current ? (
-                                      <Button
-                                        variant="danger-outline"
-                                        size="sm"
-                                        disabled={savingGrant}
-                                        onClick={() =>
-                                          void handleRevokeModuleRole(
-                                            gr.app_user_id,
-                                            gr.role_code,
-                                            gr.row_version,
-                                          )
-                                        }
-                                      >
-                                        Thu hồi
-                                      </Button>
-                                    ) : (
-                                      <span className="text-xs text-muted">
-                                        {gr.is_current ? "Chỉ Admin" : "Đã thu hồi"}
-                                      </span>
-                                    )}
-                                  </RowActionCluster>
+                                <td className={DATA_TABLE_TD_CLASS} data-label="Nguồn nhóm quyền">
+                                  {gr.reason ?? "Qua nhóm quyền"}
                                 </td>
                               </tr>
                             ))}
@@ -3113,80 +2966,9 @@ export function LeaveManagementWorkspace({
                       </DataTableContainer>
                     ) : (
                       <p className="text-xs text-muted">
-                        Chưa có tài khoản nào được cấp quyền bổ sung trong phân hệ Nghỉ phép.
+                        Chưa có tài khoản nào được gán vào nhóm quyền vận hành Nghỉ phép.
                       </p>
                     )}
-
-                    {authority.is_full_admin ? (
-                      <form
-                        onSubmit={handleGrantModuleRole}
-                        className="grid grid-cols-1 gap-3 border-t border-border pt-3 sm:grid-cols-12 sm:items-end"
-                      >
-                        <div className="sm:col-span-4">
-                          <label className="block text-xs font-medium text-muted mb-1">
-                            Tài khoản nhận quyền
-                          </label>
-                          <select
-                            value={grantUserId}
-                            onChange={(e) => setGrantUserId(e.target.value)}
-                            data-testid="leave-grant-user-select"
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          >
-                            <option value="">-- Chọn tài khoản --</option>
-                            {nonSharedEmployees.map((emp) => (
-                              <option
-                                key={emp.account.app_user_id}
-                                value={emp.account.app_user_id}
-                              >
-                                {formatLeaveAdminAccountOptionLabel(emp.account)}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="sm:col-span-3">
-                          <label className="block text-xs font-medium text-muted mb-1">
-                            Vai trò
-                          </label>
-                          <select
-                            value={grantRoleCode}
-                            onChange={(e) =>
-                              setGrantRoleCode(e.target.value as LeaveModuleGrantRole)
-                            }
-                            data-testid="leave-grant-role-select"
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          >
-                            {LEAVE_MODULE_GRANT_ROLES.map((role) => (
-                              <option key={role} value={role}>
-                                {leaveModuleGrantRoleLabel(role)}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="sm:col-span-3">
-                          <label className="block text-xs font-medium text-muted mb-1">
-                            Lý do cấp quyền (không bắt buộc)
-                          </label>
-                          <input
-                            type="text"
-                            value={grantReason}
-                            onChange={(e) => setGrantReason(e.target.value)}
-                            placeholder="Nhập lý do..."
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          />
-                        </div>
-                        <div className="sm:col-span-2">
-                          <Button
-                            type="submit"
-                            variant="primary"
-                            loading={savingGrant}
-                            disabled={savingGrant}
-                            className="w-full"
-                          >
-                            Cấp quyền
-                          </Button>
-                        </div>
-                      </form>
-                    ) : null}
                   </Card>
                 </div>
               ) : null}
@@ -4119,22 +3901,7 @@ export function LeaveManagementWorkspace({
               </div>
             </div>
 
-            <label className="flex items-center gap-2.5 text-sm font-medium text-foreground">
-              <input
-                type="checkbox"
-                checked={profileIsShared}
-                onChange={(e) => setProfileIsShared(e.target.checked)}
-                data-testid="leave-profile-shared-checkbox"
-                className="h-4 w-4 rounded border-border"
-              />
-              <span>
-                Đánh dấu là tài khoản dùng chung (Marketing/hệ thống — loại khỏi quản lý phép cá nhân)
-              </span>
-            </label>
-
-            {!profileIsShared ? (
-              <>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="block text-xs font-medium text-muted mb-1">
                       Trạng thái làm việc
@@ -4240,8 +4007,6 @@ export function LeaveManagementWorkspace({
                     </div>
                   </div>
                 </div>
-              </>
-            ) : null}
 
             <div>
               <label className="block text-xs font-medium text-muted mb-1">

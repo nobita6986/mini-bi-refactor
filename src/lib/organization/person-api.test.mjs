@@ -8,7 +8,6 @@ import {
   getPersonAdmin,
   linkAccountPersonAdmin,
   listPersonsAdmin,
-  setAccountTypeAdmin,
   transferPersonDepartmentAdmin,
   unlinkAccountPersonAdmin,
   updatePersonAdmin,
@@ -86,7 +85,6 @@ function failIfCalledRepository() {
     createPerson: fail,
     updatePerson: fail,
     transferPersonDepartment: fail,
-    setAccountType: fail,
     linkAccountPerson: fail,
     unlinkAccountPerson: fail,
   };
@@ -200,15 +198,6 @@ function makeSuccessRepository() {
         },
       };
     },
-    async setAccountType() {
-      return {
-        ok: true,
-        data: {
-          replayed: false,
-          account: { account_ref: ACCOUNT_ID, account_type: "SHARED", version: 2 },
-        },
-      };
-    },
     async linkAccountPerson() {
       return {
         ok: true,
@@ -308,8 +297,11 @@ const ROUTE_REGISTRY = Object.freeze({
   "src/app/api/admin/organization/persons/[personId]/transfer-department/route.ts": Object.freeze({
     POST: "transferPersonDepartmentAdmin",
   }),
-  "src/app/api/admin/access/accounts/[accountRef]/classification/route.ts": Object.freeze({
-    POST: "setAccountTypeAdmin",
+  "src/app/api/admin/organization/user-directory/route.ts": Object.freeze({
+    GET: "listUserDirectoryAdmin",
+  }),
+  "src/app/api/admin/organization/user-directory/detail/route.ts": Object.freeze({
+    GET: "getUserDirectoryEntryAdmin",
   }),
   "src/app/api/admin/access/accounts/[accountRef]/person-link/route.ts": Object.freeze({
     POST: "linkAccountPersonAdmin",
@@ -596,31 +588,6 @@ test("organization API handlers return canonical status codes (200/201/replayed 
           }),
         }),
         PERSON_ID,
-        "true",
-        deps,
-      )
-    ).status,
-    200,
-  );
-
-  assert.equal(
-    (
-      await setAccountTypeAdmin(
-        new Request(`${ORIGIN}/api/admin/access/accounts/${ACCOUNT_ID}/classification`, {
-          method: "POST",
-          headers: {
-            ...SAME_ORIGIN_POST_HEADERS,
-            "content-type": "application/json",
-            "idempotency-key": IDEMP_KEY,
-          },
-          body: JSON.stringify({
-            account_type: "SHARED",
-            expected_account_version: 1,
-            reason: "Phân loại tài khoản",
-            idempotency_key: IDEMP_KEY,
-          }),
-        }),
-        ACCOUNT_ID,
         "true",
         deps,
       )

@@ -9,7 +9,7 @@
  *  3. Verified shared code (checkSameOriginRequest in http-guards.mjs, identity-shared.mjs,
  *     analytics/identity/contracts.ts, generic export validators in long-running-feedback.ts)
  *     remains clean, AI-free, and tested.
- *  4. Non-AI modules (BI reporting, Work Reports, Finance, N8N, Attendance, Recruitment)
+ *  4. Non-AI modules (BI reporting, Work Reports, Finance, Attendance, Recruitment)
  *     and CI/Dockerfile/.env.example/README stay coherent.
  */
 import assert from "node:assert/strict";
@@ -151,7 +151,6 @@ test("5. Non-AI core modules and retained shared dependencies remain intact", ()
     "src/lib/reporting/p1-reporting.ts",
     "src/lib/work-reports/submission-api.ts",
     "src/lib/vendor-finance/vendor-finance-contract.ts",
-    "src/lib/integrations/n8n/query-contract.ts",
     "src/lib/attendance/attendance-config.ts",
     "src/lib/analytics/identity/identity-shared.mjs",
     "src/lib/analytics/identity/contracts.ts",

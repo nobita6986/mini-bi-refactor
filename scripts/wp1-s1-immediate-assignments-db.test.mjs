@@ -949,8 +949,11 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       "WP1 migration must produce 0 diff in effective permissions and preserve pre-existing rows untouched",
     );
 
-    // 5b. Apply post-WP1 migrations (WP2A/WP3B/WP5B-1) and verify additive-only context parity
-    for (const name of names.slice(wp1HotfixIdx + 1)) {
+    // 5b. Apply additive post-WP1 migrations (WP2A/WP3B/WP5B-1/.../#236) and verify additive-only context parity
+    // (stop before PR #28 #237 breaking cleanup which retires legacy RPCs & enforces Gate 4 on uncutover pre-WP5 fixtures)
+    for (const name of names
+      .slice(wp1HotfixIdx + 1)
+      .filter((n) => n < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")) {
       await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
     }
     await setBusinessDate(db, TODAY);
@@ -972,10 +975,24 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
         return [actorKey, legacyCtx];
       }),
     );
+    const stripRetiredLeaveSharedFlag = (authorities) =>
+      Object.fromEntries(
+        Object.entries(authorities).map(([actorKey, auth]) => {
+          const { is_shared_non_employee: _legacyShared, ...rest } = auth;
+          return [actorKey, rest];
+        }),
+      );
     assert.deepEqual(
-      { ...postForwardSnapshot, actorContexts: normalizedForwardActorContexts },
-      preWp1Snapshot,
-      "Post-WP1 migrations (including WP5B-1) must preserve pre-existing actor context fields, leave authorities, and raw tables identically",
+      {
+        ...postForwardSnapshot,
+        actorContexts: normalizedForwardActorContexts,
+        leaveAuthorities: stripRetiredLeaveSharedFlag(postForwardSnapshot.leaveAuthorities),
+      },
+      {
+        ...preWp1Snapshot,
+        leaveAuthorities: stripRetiredLeaveSharedFlag(preWp1Snapshot.leaveAuthorities),
+      },
+      "Post-WP1 migrations (including WP5B-1 & PR #28) must preserve pre-existing actor context fields, leave authorities, and raw tables identically",
     );
 
     // 6. Verify RPC Future-Date AND Past-Date Rejection (`ERRCODE = '22023'`) across all WP1 RPCs

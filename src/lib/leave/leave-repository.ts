@@ -20,7 +20,6 @@ export type LeaveActorRef = {
 
 export type LeaveActorAccessProjection = {
   can_access: boolean;
-  is_shared_non_employee: boolean;
   can_submit_request: boolean;
   can_approve_requests: boolean;
   can_manage_config: boolean;
@@ -29,7 +28,6 @@ export type LeaveActorAccessProjection = {
 
 const LEAVE_ACTOR_ACCESS_KEYS = [
   "can_access",
-  "is_shared_non_employee",
   "can_submit_request",
   "can_approve_requests",
   "can_manage_config",
@@ -50,7 +48,6 @@ function projectLeaveActorAccess(raw: unknown): LeaveActorAccessProjection | nul
   }
   return {
     can_access: record.can_access as boolean,
-    is_shared_non_employee: record.is_shared_non_employee as boolean,
     can_submit_request: record.can_submit_request as boolean,
     can_approve_requests: record.can_approve_requests as boolean,
     can_manage_config: record.can_manage_config as boolean,
@@ -349,7 +346,6 @@ export function createLeaveRepository(
             p_actor_auth_subject: input.auth_subject,
             p_actor_app_user_id: input.app_user_id,
             p_target_app_user_id: input.target_app_user_id,
-            p_is_shared_non_employee: input.is_shared_non_employee,
             p_employment_status: input.employment_status,
             p_unit_kind: input.unit_kind,
             p_work_start_date: input.work_start_date,
@@ -368,18 +364,6 @@ export function createLeaveRepository(
             p_unit_kind: input.unit_kind,
             p_approver_app_user_id: input.approver_app_user_id,
             p_valid_from: input.valid_from,
-            p_expected_row_version: input.expected_row_version,
-            p_reason: input.reason,
-            p_idempotency_key: input.idempotency_key,
-            p_request_fingerprint: input.request_fingerprint,
-          });
-        case "MANAGE_MODULE_GRANT":
-          return invoke("leave_management_manage_module_grant_admin", {
-            p_actor_auth_subject: input.auth_subject,
-            p_actor_app_user_id: input.app_user_id,
-            p_action: input.action,
-            p_target_app_user_id: input.target_app_user_id,
-            p_role_code: input.role_code,
             p_expected_row_version: input.expected_row_version,
             p_reason: input.reason,
             p_idempotency_key: input.idempotency_key,

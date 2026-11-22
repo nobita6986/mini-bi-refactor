@@ -52,7 +52,7 @@ describe("R2.2 — 28/28 Table & List Surface Adoption + 4 Owner Screenshot Fixe
       "src/components/admin/vendor-catalog-manager.tsx",
       "src/components/admin/labor-type-catalog-manager.tsx",
       "src/components/admin/project-team-scope-manager.tsx",
-      "src/components/admin/account-manager.tsx",
+      "src/components/admin/person-list-manager.tsx",
     ];
     for (const file of adminFiles) {
       const src = read(file);

@@ -194,7 +194,7 @@ test("WP13 PR-0 Backend real PG18 concurrency, lock-order & dynamic S0-T1-C veri
         + " create schema auth; create table auth.users (id uuid primary key, email text);",
     );
 
-    const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql")).sort();
+    const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
     const wp13Idx = names.indexOf(WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME);
     assert.ok(wp13Idx > 0, "WP13 PR-0 migration is present in migration chain");
     const s0Sql = await readFile(path.join(MIGRATION_DIR, S0_T1_C_MIGRATION_NAME), "utf8");
@@ -208,18 +208,25 @@ test("WP13 PR-0 Backend real PG18 concurrency, lock-order & dynamic S0-T1-C veri
     assert.equal(preCheck.ok, true, `pre-WP13 PG18 S0-T1-C postconditions pass: ${preCheck.reason ?? ""}`);
     assert.equal(preCheck.details.exposedClientOrPublicCount, 0);
 
-    // Apply WP13 PR-0 (and any subsequent migrations if present) and verify dynamic +2 net postconditions
-    for (let i = wp13Idx; i < names.length; i += 1) {
-      await client.query(await readFile(path.join(MIGRATION_DIR, names[i]), "utf8"));
-    }
-    const postApplied = new Set(names);
-    const postCheck = await verifyS0T1CSecurityPostconditions(client, s0Sql, postApplied);
-    assert.equal(postCheck.ok, true, `post-WP13 PG18 S0-T1-C postconditions pass: ${postCheck.reason ?? ""}`);
+    // Apply WP13 PR-0 and verify its exact +2 net service_role RPC delta relative to its applied prefix
+    await client.query(await readFile(path.join(MIGRATION_DIR, names[wp13Idx]), "utf8"));
+    const wp13PostApplied = new Set(names.slice(0, wp13Idx + 1));
+    const wp13PostCheck = await verifyS0T1CSecurityPostconditions(client, s0Sql, wp13PostApplied);
+    assert.equal(wp13PostCheck.ok, true, `post-WP13 PG18 S0-T1-C postconditions pass: ${wp13PostCheck.reason ?? ""}`);
     assert.equal(
-      postCheck.details.actualServiceCount,
+      wp13PostCheck.details.actualServiceCount,
       preCheck.details.actualServiceCount + WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES.length,
       "PG18 WP13 PR-0 adds exact +2 net service_role RPCs relative to applied prefix",
     );
+    assert.equal(wp13PostCheck.details.exposedClientOrPublicCount, 0);
+    assert.equal(wp13PostCheck.details.bootstrapExecutorIntact, true);
+
+    // Apply any subsequent migrations in the chain and verify full-chain S0-T1-C postconditions
+    for (let i = wp13Idx + 1; i < names.length; i += 1) {
+      await client.query(await readFile(path.join(MIGRATION_DIR, names[i]), "utf8"));
+    }
+    const postCheck = await verifyS0T1CSecurityPostconditions(client, s0Sql, new Set(names));
+    assert.equal(postCheck.ok, true, `full-chain PG18 S0-T1-C postconditions pass: ${postCheck.reason ?? ""}`);
     assert.equal(postCheck.details.exposedClientOrPublicCount, 0);
     assert.equal(postCheck.details.bootstrapExecutorIntact, true);
 

@@ -8,6 +8,7 @@ import {
   buildTeamSetActiveRequest,
   buildTeamUpdateRequest,
   classifyTeamMutation,
+  parseActiveTeamCatalogOptions,
   projectTeamListForQuery,
   setTeamConflictLock,
   teamConflictsForDialog,
@@ -136,4 +137,78 @@ test("conflict locks are entity scoped and dialog projection cannot leak another
   const conflicts = new Map([["A", "conflict-A"], ["B", "conflict-B"]]);
   assert.deepEqual(teamConflictsForDialog(conflicts, "B"), ["conflict-B"]);
   assert.deepEqual(teamConflictsForDialog(conflicts, null), []);
+});
+
+test("UX-02: parseActiveTeamCatalogOptions parses canonical display_name contract, excludes inactive and __system_vendor__, and fails closed on fake/malformed shapes", () => {
+  const activeA = {
+    team_id: "11111111-1111-4111-8111-111111111111",
+    code: "north",
+    display_name: "Tổ Bắc",
+    active: true,
+    version: 1,
+    revision_count: 1,
+  };
+  const activeB = {
+    team_id: "22222222-2222-4222-8222-222222222222",
+    code: "south",
+    display_name: "Tổ Nam",
+    active: true,
+    version: 3,
+    revision_count: 2,
+  };
+  const inactiveTeam = {
+    team_id: "33333333-3333-4333-8333-333333333333",
+    code: "legacy_inactive",
+    display_name: "Tổ Ngừng",
+    active: false,
+    version: 2,
+    revision_count: 2,
+  };
+  const systemVendorTeam = {
+    team_id: "44444444-4444-4444-8444-444444444444",
+    code: "__system_vendor__",
+    display_name: "System Vendor",
+    active: true,
+    version: 1,
+    revision_count: 1,
+  };
+
+  const parsed = parseActiveTeamCatalogOptions({
+    ok: true,
+    list: {
+      authorization_date: "2026-11-22",
+      include_inactive: false,
+      search: null,
+      page: 1,
+      page_size: 100,
+      total: 4,
+      teams: [activeA, inactiveTeam, systemVendorTeam, activeB],
+    },
+  });
+  assert.deepEqual(parsed, {
+    ok: true,
+    teams: [
+      { team_id: activeA.team_id, code: "north", display_name: "Tổ Bắc", active: true },
+      { team_id: activeB.team_id, code: "south", display_name: "Tổ Nam", active: true },
+    ],
+  });
+
+  // Fails closed on legacy fake shape (`name`/`team_name` instead of canonical `display_name`) or malformed envelope
+  assert.deepEqual(
+    parseActiveTeamCatalogOptions({
+      ok: true,
+      list: {
+        authorization_date: "2026-11-22",
+        include_inactive: false,
+        search: null,
+        page: 1,
+        page_size: 100,
+        total: 1,
+        teams: [{ team_id: activeA.team_id, code: "north", name: "Fake Name", active: true }],
+      },
+    }),
+    { ok: false },
+  );
+  assert.deepEqual(parseActiveTeamCatalogOptions({ ok: false }), { ok: false });
+  assert.deepEqual(parseActiveTeamCatalogOptions(null), { ok: false });
 });

@@ -110,7 +110,6 @@ export type LeaveAccountProjection = {
 
 export type LeaveAuthorityProjection = {
   app_user_id: string;
-  is_shared_non_employee: boolean;
   is_full_admin: boolean;
   is_bod: boolean;
   is_hr_operator: boolean;
@@ -325,7 +324,6 @@ export type LeaveModuleGrantProjection = {
 
 export type LeaveEmployeeProfileProjection = {
   app_user_id: string;
-  is_shared_non_employee: boolean;
   employment_status: LeaveEmploymentStatus;
   unit_kind: LeaveUnitKind;
   work_start_date: string | null;
@@ -897,7 +895,7 @@ export function leaveErrorMessage(code: string | null | undefined): string {
     case "LEAVE_PROFILE_INVALID":
       return "Thông tin cấu hình hồ sơ nghỉ phép không hợp lệ.";
     case "LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN":
-      return "Phòng ban và trạng thái tài khoản dùng chung của tài khoản này đang do Quản trị Tổ chức / Nhân sự quản lý. Vui lòng cập nhật tại mục Quản trị Tổ chức.";
+      return "Phòng ban của nhân sự này đang do mục Người dùng / Phòng ban quản lý. Vui lòng cập nhật tại quản trị Phòng ban.";
     case "LEAVE_PROFILE_WORK_START_DATE_REQUIRED":
       return "Nhân sự Thử việc hoặc Chính thức bắt buộc phải có Ngày bắt đầu làm việc.";
     case "LEAVE_PROFILE_OFFICIAL_DATE_INVALID":
@@ -950,7 +948,7 @@ export function resolveVisibleLeaveTabs(
   const tabs: LeaveWorkspaceTabDefinition[] = [
     { id: "personal", label: "Cá nhân & Xin nghỉ" },
   ];
-  if (!authority || authority.is_shared_non_employee) {
+  if (!authority) {
     return tabs;
   }
   if (authority.can_approve_requests) {
@@ -1404,9 +1402,6 @@ export function isEligibleLeaveAdminDropdownEmployee(
     return false;
   }
   if (emp.account.account_enabled === false) {
-    return false;
-  }
-  if (emp.profile?.is_shared_non_employee === true) {
     return false;
   }
   return true;

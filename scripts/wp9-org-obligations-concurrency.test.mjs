@@ -520,7 +520,7 @@ test("WP9 Real PostgreSQL 18 Concurrency: Tier 1->2 Person/Account lock serializ
         " create schema auth; create table auth.users (id uuid primary key, email text);",
     );
 
-    const migrationFiles = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const migrationFiles = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
     const wp7bIdx = migrationFiles.indexOf(WP7B_MIGRATION_NAME);
     const wp8dIdx = migrationFiles.indexOf(WP8D_MIGRATION_NAME);
     const wp8d2Idx = migrationFiles.indexOf(WP8D2_MIGRATION_NAME);

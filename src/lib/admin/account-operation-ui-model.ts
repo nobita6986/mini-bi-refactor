@@ -192,14 +192,28 @@ export type AccountOperationUiOutcome =
     };
 
 export function accountOperationStateMessage(state: string): string {
-  if (state === "BLOCKED") return "Auth user tồn tại nhưng không khớp provenance — cần T0/Admin xử lý thủ công.";
-  if (state === "INDETERMINATE") return "Không xác định được kết quả Auth. Không tự thử lại; dùng Đối soát hoặc phát hành thao tác mới.";
-  if (state === "IN_FLIGHT") return "Yêu cầu tạo tài khoản đang được xử lý. Không tự thử lại Auth; dùng Đối soát để kiểm tra kết quả.";
-  if (state === "PENDING") return "Yêu cầu tạo tài khoản đang chờ xử lý. Không tạo yêu cầu mới; dùng Đối soát để kiểm tra kết quả.";
-  if (state === "CONFLICT") return "Trùng mã đăng nhập hoặc xung đột. Hãy kiểm tra lại.";
-  if (state === "FAILED") return "Thao tác Auth đã thất bại.";
-  if (state === "EXPIRED") return "Yêu cầu tạo tài khoản đã hết hạn.";
-  return "Trạng thái: " + state + ".";
+  if (state === "BLOCKED") {
+    return "Tài khoản đăng nhập đã tồn tại nhưng thông tin liên kết chưa trùng khớp — vui lòng liên hệ quản trị hệ thống để kiểm tra trước khi tiếp tục.";
+  }
+  if (state === "INDETERMINATE") {
+    return "Chưa xác định được kết quả mở tài khoản đăng nhập. Không tự tạo lại; hãy bấm \"Kiểm tra lại kết quả mở đăng nhập\" để đối chiếu với máy chủ.";
+  }
+  if (state === "IN_FLIGHT") {
+    return "Yêu cầu mở tài khoản đăng nhập đang được xử lý. Hãy bấm \"Kiểm tra lại kết quả mở đăng nhập\" để cập nhật.";
+  }
+  if (state === "PENDING") {
+    return "Yêu cầu mở tài khoản đăng nhập đang chờ xử lý. Không tạo yêu cầu mới; hãy bấm \"Kiểm tra lại kết quả mở đăng nhập\".";
+  }
+  if (state === "CONFLICT") {
+    return "Tên đăng nhập đã tồn tại hoặc bị trùng lặp. Vui lòng kiểm tra lại.";
+  }
+  if (state === "FAILED") {
+    return "Mở tài khoản đăng nhập chưa thành công. Vui lòng kiểm tra lại thông tin và thử lại.";
+  }
+  if (state === "EXPIRED") {
+    return "Phiên xử lý mở tài khoản đã hết hạn. Vui lòng mở lại biểu mẫu để thực hiện mới.";
+  }
+  return "Trạng thái xử lý chưa hoàn tất. Vui lòng kiểm tra lại kết quả với máy chủ.";
 }
 
 export type AccountOperationResponseContext =
@@ -498,7 +512,7 @@ export function classifyAccountOperationResponse(
       kind: "unavailable",
       preserveIdempotencyKey: false,
       manualCheckRequired: true,
-      message: "Supabase Auth đã xác nhận đổi mật khẩu nhưng ứng dụng chưa ghi nhận kết quả. Không gửi lại yêu cầu này; hãy thử đăng nhập bằng mật khẩu mới trước.",
+      message: "Mật khẩu mới có thể đã được cập nhật nhưng hệ thống chưa ghi nhận hoàn tất. Không gửi lại yêu cầu này; hãy thử đăng nhập bằng mật khẩu mới trước.",
     };
   }
   if (status === 500 && (record?.code === "ACCOUNT_OPERATION_INDETERMINATE" ||
@@ -507,7 +521,7 @@ export function classifyAccountOperationResponse(
       kind: "unavailable",
       preserveIdempotencyKey: false,
       manualCheckRequired: true,
-      message: "Chưa xác định được kết quả đổi mật khẩu. Không gửi lại ngay; Admin cần kiểm tra trạng thái yêu cầu trước khi tạo yêu cầu mới.",
+      message: "Chưa xác định được kết quả đặt lại mật khẩu. Không gửi lại ngay; hãy kiểm tra đăng nhập thực tế của người dùng trước khi tạo yêu cầu mới.",
     };
   }
   return { kind: "unavailable", preserveIdempotencyKey: true, message: "Dịch vụ hiện không khả dụng." };

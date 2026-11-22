@@ -19,7 +19,6 @@ const account = {
   login_id: "vana.td",
   enabled: true,
   version: 3,
-  account_type: "NORMAL",
   active_person_link: null,
 };
 
@@ -43,7 +42,6 @@ test("strict list projection retains only contracted account fields and echoes t
   assert.ok(list);
   assert.deepEqual(Object.keys(list.accounts[0]).sort(), [
     "account_ref",
-    "account_type",
     "active_person_link",
     "display_name",
     "enabled",
@@ -89,7 +87,6 @@ test("list and item projections fail closed on any malformed or widened payload"
   assert.ok(ok);
   assert.deepEqual(Object.keys(ok).sort(), [
     "account_ref",
-    "account_type",
     "active_person_link",
     "display_name",
     "enabled",
@@ -171,40 +168,28 @@ test("each intent gets a fresh UUID idempotency key", () => {
   assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 });
 
-test("WP4 account classification, person link/unlink builders, and recruiter conflict classification", async () => {
+test("WP4 person link/unlink builders and recruiter conflict classification", async () => {
   const model = await import("./account-access-model.ts");
   const PERSON_ID = "70000000-0000-4000-8000-000000000010";
   const LINK_ID = "80000000-0000-4000-8000-000000000011";
   const REC_ID = "90000000-0000-4000-8000-000000000012";
 
+  assert.equal(model.canLinkPersonToAccount({ active_person_link: null }), true);
   assert.equal(
-    model.canLinkPersonToAccount({ account_type: "NORMAL", active_person_link: null }),
-    true,
-  );
-  assert.equal(
-    model.canLinkPersonToAccount({ account_type: "SHARED", active_person_link: null }),
+    model.canLinkPersonToAccount({
+      active_person_link: {
+        link_id: LINK_ID,
+        person_id: PERSON_ID,
+        employee_code: "TD-001",
+        full_name: "Nguyễn Văn A",
+        status: "ACTIVE",
+        person_version: 1,
+        started_at: "2026-11-13T02:00:00.000Z",
+        version: 1,
+      },
+    }),
     false,
   );
-  assert.equal(
-    model.canLinkPersonToAccount({ account_type: "SERVICE", active_person_link: null }),
-    false,
-  );
-
-  const clsReq = model.buildSetAccountClassificationRequest({
-    expectedAccountVersion: 2,
-    accountType: "SHARED",
-    reason: "Tài khoản trực ca dùng chung",
-    idempotencyKey: KEY,
-  });
-  assert.equal(clsReq.ok, true);
-  if (clsReq.ok) {
-    assert.deepEqual(clsReq.body, {
-      account_type: "SHARED",
-      expected_account_version: 2,
-      reason: "Tài khoản trực ca dùng chung",
-      idempotency_key: KEY,
-    });
-  }
 
   const linkReq = model.buildLinkAccountPersonRequest({
     personId: PERSON_ID,
@@ -245,16 +230,8 @@ test("WP4 account classification, person link/unlink builders, and recruiter con
     "hard-conflict",
   );
   assert.equal(
-    model.classifyAccountOrgMutation(
-      409,
-      { ok: false, code: "ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS" },
-      "classification",
-    ).kind,
-    "personal-assignments-block",
-  );
-  assert.equal(
-    model.classifyAccountOrgMutation(422, { ok: false, code: "ACCOUNT_TYPE_LINK_FORBIDDEN" }, "link").kind,
-    "link-forbidden",
+    model.classifyAccountOrgMutation(422, { ok: false, code: "ORG_VALIDATION_ERROR" }, "link").kind,
+    "invalid",
   );
   const uncertain = model.classifyAccountOrgMutation(503, null, "link");
   assert.equal(uncertain.kind, "uncertain");

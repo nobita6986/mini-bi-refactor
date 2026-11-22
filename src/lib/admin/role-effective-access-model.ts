@@ -47,7 +47,6 @@ import {
 } from "../auth/role-access-contract.ts";
 import { newIdempotencyKey } from "../direct-entry/project-operations-model.ts";
 import { isUuid } from "../http/direct-entry-api-guard.ts";
-import { accountTypeBadgeMeta } from "./account-access-model.ts";
 
 export {
   ADMIN_NON_AUTO_GRANT_TOKENS,
@@ -55,7 +54,6 @@ export {
   AUTHZ_CONTEXTUAL_ROLE_CODES,
   AUTHZ_GLOBAL_ROLE_CODES,
   AUTHZ_ROLE_CODES,
-  accountTypeBadgeMeta,
   findForbiddenAuthorityField,
 };
 
@@ -365,7 +363,7 @@ export function describeCannotRevokeReason(reason: CannotRevokeReason | null): s
 }
 
 export function canAssignNewGlobalRoleToAccount(
-  account: Pick<AccountAccessDetail["account"], "enabled" | "account_type">,
+  account: Pick<AccountAccessDetail["account"], "enabled">,
   canManageGlobalRoles: boolean,
   gateBlocked: boolean,
 ): { allowed: boolean; reason: string | null } {
@@ -386,12 +384,6 @@ export function canAssignNewGlobalRoleToAccount(
       allowed: false,
       reason:
         "Tài khoản đang ngừng hoạt động nên không thể cấp vai trò toàn cục mới (các vai trò chưa bảo vệ vẫn có thể thu hồi).",
-    };
-  }
-  if (account.account_type !== "NORMAL") {
-    return {
-      allowed: false,
-      reason: `Tài khoản phân loại ${account.account_type} không được phép gán vai trò cá nhân/toàn cục.`,
     };
   }
   return { allowed: true, reason: null };
@@ -1004,8 +996,6 @@ export function classifyRoleMutationResponse(
       ACCOUNT_DISABLED: "Tài khoản đang bị vô hiệu hóa nên không thể cấp thêm vai trò toàn cục mới.",
       ROLE_ALREADY_ASSIGNED: "Tài khoản đã đang được phân công vai trò toàn cục này.",
       ROLE_ASSIGNMENT_ALREADY_ENDED: "Phân công vai trò này đã được thu hồi trước đó.",
-      ACCOUNT_TYPE_ROLE_FORBIDDEN:
-        "Tài khoản phân loại SHARED hoặc SERVICE không được phép giữ vai trò cá nhân/toàn cục.",
       IDEMPOTENCY_CONFLICT:
         "Khóa chống gửi trùng đã dùng cho một thao tác khác. Vui lòng tải lại dữ liệu và thực hiện lại.",
     };

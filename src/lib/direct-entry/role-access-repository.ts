@@ -106,10 +106,6 @@ const CONFLICT_TOKEN_MESSAGES: ReadonlyArray<
     "ROLE_ASSIGNMENT_ALREADY_ENDED",
     "Phân công vai trò này đã kết thúc trước đó.",
   ],
-  [
-    "ACCOUNT_TYPE_ROLE_FORBIDDEN",
-    "Loại tài khoản này không được phép nhận vai trò được chọn.",
-  ],
 ];
 
 const UNAVAILABLE_ERROR: ClassifiedRoleAccessSqlError = {

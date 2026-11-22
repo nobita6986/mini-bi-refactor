@@ -341,6 +341,7 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
   assert.equal(patchPolicy.ok, true);
   assert.equal(patchPolicy.data.reason, null);
 
+  // PR #28 D4 / T0-R2 / UX-03: MANAGE_MODULE_GRANT is retired; Leave module roles are managed exclusively via Permission Groups.
   const patchGrant = parsePatchAdminConfigBody({
     operation: "MANAGE_MODULE_GRANT",
     action: "GRANT",
@@ -349,8 +350,7 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
     expected_row_version: 0,
     idempotency_key: "idem-grant-1",
   });
-  assert.equal(patchGrant.ok, true);
-  assert.equal(patchGrant.data.reason, null);
+  assert.equal(patchGrant.ok, false);
 
   const applyBatch = parseApplyOpeningBatchBody({
     leave_year: 2026,
@@ -929,19 +929,17 @@ test("Opening balance apply contract preserves expected snapshot metadata, maps 
   assert.equal(staleJson.code, "LEAVE_OPENING_PREVIEW_STALE");
 });
 
-test("WP7B R7: leave repository getActorAccess calls leave_management_get_actor_access and enforces strict 6-key boolean projection", async () => {
+test("WP7B R7 / PR #28: leave repository getActorAccess calls leave_management_get_actor_access and enforces strict 5-key boolean projection", async () => {
   const capturedCalls = [];
   const validEmployeePayload = {
     can_access: true,
-    is_shared_non_employee: false,
     can_submit_request: true,
     can_approve_requests: false,
     can_manage_config: false,
     can_view_monthly_report: false,
   };
-  const sharedAccountPayload = {
+  const restrictedAccountPayload = {
     can_access: false,
-    is_shared_non_employee: true,
     can_submit_request: false,
     can_approve_requests: false,
     can_manage_config: false,
@@ -967,20 +965,21 @@ test("WP7B R7: leave repository getActorAccess calls leave_management_get_actor_
     },
   ]);
 
-  const repoShared = createLeaveRepository(async () => ({
-    data: sharedAccountPayload,
+  const repoRestricted = createLeaveRepository(async () => ({
+    data: restrictedAccountPayload,
     error: null,
   }));
-  const sharedOutcome = await repoShared.getActorAccess({
+  const restrictedOutcome = await repoRestricted.getActorAccess({
     auth_subject: ACTOR_AUTH,
     app_user_id: ACTOR_APP,
   });
-  assert.deepEqual(sharedOutcome, { ok: true, data: sharedAccountPayload });
+  assert.deepEqual(restrictedOutcome, { ok: true, data: restrictedAccountPayload });
 
-  // Strict 6-key boolean projection rejects extra keys, missing keys, non-booleans, arrays, and RPC errors
+  // Strict 5-key boolean projection rejects extra keys, missing keys, non-booleans, arrays, and RPC errors
   for (const malformed of [
     { ...validEmployeePayload, extra_field: true },
-    { can_access: true, is_shared_non_employee: false },
+    { ...validEmployeePayload, is_shared_non_employee: false },
+    { can_access: true },
     { ...validEmployeePayload, can_access: "true" },
     [validEmployeePayload],
     null,

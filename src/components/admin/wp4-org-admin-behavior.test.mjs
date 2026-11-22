@@ -574,7 +574,6 @@ function makeAccount(overrides = {}) {
     login_id: "annv",
     enabled: true,
     version: 2,
-    account_type: "NORMAL",
     active_person_link: null,
     ...overrides,
   };
@@ -609,6 +608,31 @@ function makePersonnelListEnvelope(personnel, search = null) {
   };
 }
 
+function makeUserDirectoryListEnvelope(entries = [], overrides = {}) {
+  return {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    search: null,
+    record_kind: "all",
+    person_status: "all",
+    login_state: "all",
+    department_id: null,
+    page: 1,
+    page_size: 25,
+    total: entries.length,
+    has_more: false,
+    summary: {
+      total_all: entries.length,
+      linked_count: 0,
+      person_only_count: entries.length,
+      unlinked_account_count: 0,
+      conflict_count: 0,
+    },
+    entries,
+    ...overrides,
+  };
+}
 const { PersonListManager } = repoRequire("./src/components/admin/person-list-manager.tsx");
 const { PersonDetailManager } = repoRequire("./src/components/admin/person-detail-manager.tsx");
 const { AccountProvisionAndLinkStepper } = repoRequire(
@@ -633,7 +657,6 @@ const WP4_TEST_ORIGIN = "https://hrp.example.test";
 const { DepartmentDetailManager } = repoRequire(
   "./src/components/admin/department-detail-manager.tsx",
 );
-const { AccountManager } = repoRequire("./src/components/admin/account-manager.tsx");
 const { PersonnelCatalogManager } = repoRequire("./src/components/admin/personnel-catalog-manager.tsx");
 const { DepartmentSelectPicker, PersonSearchPicker, AccountSearchPicker, RecruiterConfirmPicker } =
   repoRequire("./src/components/admin/org-entity-picker.tsx");
@@ -907,114 +930,6 @@ test("Finding 1 [DepartmentDetailManager Header/HEAD/Members]: 409 locks submit 
   );
 });
 
-test("Finding 1 [AccountManager AccountOrgDialogs]: freezes snapshot version, blocks 409 resubmit until authoritative GET succeeds, and preserves RECRUITER_LINK_MISMATCH step 2", async () => {
-  const accV2 = makeAccount({ version: 2, account_type: "NORMAL", active_person_link: null });
-  const am = mount(AccountManager);
-  await am.flush();
-
-  const reclassifyReq = findLastRequest((r) => r.url.endsWith("/reclassify"));
-  const listReq = findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?"));
-  respond(reclassifyReq, 200, { ok: true, reclassified: { reclassified: 0, purged: 0, deleted: 0 } });
-  respond(listReq, 200, makeAccountListEnvelope([accV2]));
-  await am.flush();
-
-  // Open classification dialog
-  findButton(am, "Phân loại").props.onClick();
-  await am.flush();
-  let orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
-  assert.equal(orgDialog.props.operation.kind, "classification");
-
-  findNode(orgDialog, (n) => n.type === "select").props.onChange({
-    target: { value: "SHARED" },
-  });
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Đổi sang SHARED ở v2" },
-  });
-  await orgDialog.flush();
-
-  // Background list refresh updates account version to 3 -> open dialog must STILL use frozen v2!
-  findNode(am, (n) => n.type === "select").props.onChange({ target: { value: "true" } });
-  await am.flush();
-  const bgListGet = findLastRequest((r) => r.method === "GET" && r.url.includes("enabled=true"));
-  respond(bgListGet, 200, makeAccountListEnvelope([makeAccount({ version: 3 })], { enabled: "true" }));
-  await am.flush();
-  orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", orgDialog);
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-
-  const classPost = findLastRequest((r) => r.url.endsWith("/classification"));
-  assert.equal(JSON.parse(classPost.options.body).expected_account_version, 2);
-
-  // Server responds 409 VERSION_CONFLICT -> dialog locks submit
-  respond(classPost, 409, { ok: false, code: "VERSION_CONFLICT" });
-  await orgDialog.flush();
-
-  const beforeConflictResubmit = requests.length;
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  assert.equal(requests.length, beforeConflictResubmit);
-
-  // Failed reload keeps conflictLocked + dialog open
-  findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.onClick();
-  await orgDialog.flush();
-  const failedReloadGet = findLastRequest((r) => r.method === "GET");
-  respond(failedReloadGet, 500, { ok: false });
-  await orgDialog.flush();
-  assert.equal(
-    findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog").props.open,
-    true,
-  );
-  const beforeSecondBlocked = requests.length;
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  assert.equal(requests.length, beforeSecondBlocked);
-
-  // Authoritative reload GET succeeds with v3 -> closes/resets cleanly
-  findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.onClick();
-  await orgDialog.flush();
-  const okReloadGet = findLastRequest((r) => r.method === "GET");
-  respond(okReloadGet, 200, makeAccountListEnvelope([makeAccount({ version: 3 })], { enabled: "true" }));
-  await orgDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOrgDialogs").props.operation, null);
-
-  // Now verify RECRUITER_LINK_MISMATCH still allows step 2 confirmation (not treated as conflictLocked!)
-  findButton(am, "Liên kết người").props.onClick();
-  await am.flush();
-  orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
-  const personPicker = componentNode(orgDialog, "PersonSearchPicker");
-  personPicker.props.onSelect(makePersonSummary({ version: 4 }));
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Liên kết hồ sơ" },
-  });
-  await orgDialog.flush();
-
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  const firstLink = findLastRequest((r) => r.url.endsWith("/person-link"));
-  assert.equal(JSON.parse(firstLink.options.body).confirmed_recruiter_id, null);
-
-  respond(firstLink, 409, { ok: false, code: "RECRUITER_LINK_MISMATCH" });
-  await orgDialog.flush();
-
-  const recruiterPicker = componentNode(orgDialog, "RecruiterConfirmPicker");
-  recruiterPicker.props.onSelect({
-    recruiter_id: RECRUITER_A_ID,
-    display_name: "Nguyễn Văn An",
-    personnel_code: "NS-001",
-    personnel_position: "STAFF",
-    active: true,
-    version: 1,
-    hrp_valid_from: "2026-01-01",
-    revision_count: 1,
-    team_names: [],
-  });
-  await orgDialog.flush();
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  const confirmedLink = findLastRequest((r) => r.url.endsWith("/person-link"));
-  assert.equal(JSON.parse(confirmedLink.options.body).confirmed_recruiter_id, RECRUITER_A_ID);
-});
 
 // ===========================================================================
 // Finding 2 — 401/403 aborts all in-flight workspace requests & blocks delayed 200
@@ -1025,7 +940,7 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   await h.flush();
 
   const deptGet = requests.find((r) => r.url.startsWith("/api/admin/departments"));
-  const personsGet = requests.find((r) => r.url.startsWith("/api/admin/organization/persons"));
+  const personsGet = requests.find((r) => r.url.startsWith("/api/admin/organization/user-directory"));
   assert.ok(deptGet && personsGet);
 
   // Departments returns 403 first -> must abort personsGet and switch to denied immediately
@@ -1036,8 +951,8 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   assert.ok(maybeNode(h, (n) => n.props?.title === "Không có quyền truy cập"));
   assert.equal(maybeNode(h, (n) => n.type?.name === "FilterToolbar"), null);
 
-  // Even if delayed HTTP 200 resolves on personsGet after abort/denial, NO person row is rendered
-  respond(personsGet, 200, makePersonListEnvelope([makePersonSummary({ full_name: "Tên bí mật" })]));
+  // Even if delayed HTTP 200 resolves on personsGet after abort/denial, NO row is rendered
+  respond(personsGet, 200, makeUserDirectoryListEnvelope([]));
   await h.flush();
 
   assert.equal(textOf(h.tree).includes("Tên bí mật"), false);
@@ -1054,10 +969,10 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   const d2 = requests.at(-2);
   const p2 = requests.at(-1);
   respond(d2, 200, makeDeptListEnvelope());
-  respond(p2, 200, makePersonListEnvelope());
+  respond(p2, 200, makeUserDirectoryListEnvelope());
   await h2.flush();
 
-  findButton(h2, "+ Thêm nhân viên").props.onClick();
+  findButton(h2, "+ Thêm người dùng").props.onClick();
   await h2.flush();
   const stepper2 = await syncChildFromTree(h2, AccountProvisionAndLinkStepper, null);
   findNode(stepper2, (n) => n.props?.id === "create-person-employee-code").props.onChange({
@@ -1081,9 +996,13 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   assert.ok(createPost);
 
   // Meanwhile filter change triggers a GET that returns 403
-  findNode(h2, (n) => n.props?.id === "person-status-filter").props.onChange({
-    target: { value: "inactive" },
-  });
+  const statusSelect = collectNodes(h2.tree).find(
+    (n) =>
+      n.type === "select" &&
+      collectNodes(n).some((c) => c.type === "option" && c.props?.value === "inactive"),
+  );
+  assert.ok(statusSelect);
+  statusSelect.props.onChange({ target: { value: "inactive" } });
   await h2.flush();
   const filterGet = findLastRequest((r) => r.method === "GET");
   respond(filterGet, 403, { ok: false, code: "FORBIDDEN" });
@@ -1105,92 +1024,11 @@ test("Finding 2 [PersonListManager]: 403 aborts sibling list GET + blocks delaye
   // Unmount with in-flight request aborts it cleanly
   const h3 = mount(PersonListManager);
   await h3.flush();
-  const p3 = findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons"));
+  const p3 = findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory"));
   h3.unmount();
   assert.equal(p3.signal.aborted, true);
 });
 
-test("Finding 2 [AccountManager]: 401/403 on reclassify or org dialog aborts all in-flight workspace fetches, clears list/dialog, and suppresses delayed 200", async () => {
-  const am = mount(AccountManager);
-  await am.flush();
-
-  const reclassifyReq = findLastRequest((r) => r.url.endsWith("/reclassify"));
-  const listReq = findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?"));
-  assert.ok(reclassifyReq && listReq);
-
-  // Reclassify gets 403 while listReq is still in flight -> listReq must abort & delayed 200 must NOT render rows
-  respond(reclassifyReq, 403, { ok: false, code: "FORBIDDEN" });
-  await am.flush();
-
-  assert.equal(listReq.signal.aborted, true);
-  assert.ok(maybeNode(am, (n) => n.props?.title === "Không có quyền xem danh sách tài khoản"));
-
-  respond(listReq, 200, makeAccountListEnvelope([makeAccount({ display_name: "Tài khoản Bị Thu Hồi" })]));
-  await am.flush();
-
-  assert.equal(textOf(am.tree).includes("Tài khoản Bị Thu Hồi"), false);
-  assert.ok(maybeNode(am, (n) => n.props?.title === "Không có quyền xem danh sách tài khoản"));
-
-  // Fresh AccountManager: start org mutation + trigger session loss from delayed list 401
-  const am2 = mount(AccountManager);
-  await am2.flush();
-  respond(
-    findLastRequest((r) => r.url.endsWith("/reclassify")),
-    200,
-    { ok: true, reclassified: { reclassified: 0, purged: 0, deleted: 0 } },
-  );
-  respond(
-    findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?")),
-    200,
-    makeAccountListEnvelope([makeAccount()]),
-  );
-  await am2.flush();
-
-  findButton(am2, "Phân loại").props.onClick();
-  await am2.flush();
-  const orgDialog = await syncChildFromTree(am2, "AccountOrgDialogs", null);
-  findNode(orgDialog, (n) => n.type === "select").props.onChange({ target: { value: "SHARED" } });
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Đổi loại" },
-  });
-  await orgDialog.flush();
-
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  const classPost = findLastRequest((r) => r.url.endsWith("/classification"));
-  assert.ok(classPost);
-
-  // Trigger another read via search submit that returns 401
-  findNode(am2, (n) => n.type === "input").props.onChange({ target: { value: "find-me" } });
-  await am2.flush();
-  findNode(am2, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await am2.flush();
-  const searchGet = findLastRequest((r) => r.method === "GET" && r.url.includes("search=find-me"));
-  respond(searchGet, 401, { ok: false, code: "UNAUTHENTICATED" });
-  await am2.flush();
-
-  assert.equal(classPost.signal.aborted, true);
-  assert.equal(componentNode(am2, "AccountOrgDialogs").props.operation, null);
-
-  // Delayed 200 on classPost must NOT emit notify.success or reopen rows
-  respond(classPost, 200, {
-    ok: true,
-    replayed: false,
-    account: { account_ref: ACCOUNT_A_REF, account_type: "SHARED", version: 3 },
-  });
-  await am2.flush();
-  await orgDialog.flush();
-
-  assert.equal(notifications.success.length, 0);
-  assert.ok(maybeNode(am2, (n) => n.props?.title === "Không có quyền xem danh sách tài khoản"));
-
-  // Unmount aborts pending GET
-  const am3 = mount(AccountManager);
-  await am3.flush();
-  const pendingListGet = findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?"));
-  am3.unmount();
-  assert.equal(pendingListGet.signal.aborted, true);
-});
 
 test("Finding 2 [PersonDetail & DepartmentDetail]: 403/entity-switch/unmount invalidates in-flight fetches and suppresses stale data & success toasts", async () => {
   // PersonDetail: in-flight mutation aborted + suppressed when entity changes or 403 fires
@@ -1273,10 +1111,10 @@ test("Finding 3 [PersonDetail & PersonList]: uncertain write keeps payload + Ide
   });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl.flush();
 
-  findButton(pl, "+ Thêm nhân viên").props.onClick();
+  findButton(pl, "+ Thêm người dùng").props.onClick();
   await pl.flush();
   const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
   findNode(stepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({
@@ -1306,13 +1144,13 @@ test("Finding 3 [PersonDetail & PersonList]: uncertain write keeps payload + Ide
   const createDialog = () => findNode(stepper, (n) => n.type?.name === "FormDialog");
   assert.equal(createDialog().props.closeDisabled, true);
   createDialog().props.onOpenChange(false);
-  findButton(stepper, "Hủy").props.onClick();
+  findButton(stepper, "Đóng tạm").props.onClick();
   await stepper.flush();
   assert.equal(createDialog().props.open, true);
   assert.ok(
     maybeNode(
       stepper,
-      (n) => n.props?.type === "submit" && textOf(n).trim() === "Thử gửi lại bước 1 (cùng K_person)",
+      (n) => n.props?.type === "submit" && textOf(n).trim() === "Thử đồng bộ lại bước 1",
     ),
   );
 
@@ -1524,55 +1362,6 @@ test("Finding 3 [Department HEAD/Memberships & AccountOrgDialogs]: 409 IDEMPOTEN
   assert.equal(memPost2.options.headers["Idempotency-Key"], memKey);
   assert.equal(memPost2.options.body, memBody);
 
-  // 3e) AccountOrgDialogs -> IDEMPOTENCY_IN_PROGRESS & network failure
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, { ok: true, reclassified: {} });
-  respond(
-    findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?")),
-    200,
-    makeAccountListEnvelope([makeAccount()]),
-  );
-  await am.flush();
-
-  findButton(am, "Phân loại").props.onClick();
-  await am.flush();
-  const orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
-  findNode(orgDialog, (n) => n.type === "select").props.onChange({ target: { value: "SERVICE" } });
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({ target: { value: "Chuyển service" } });
-  await orgDialog.flush();
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-
-  const accPost1 = findLastRequest((r) => r.url.endsWith("/classification"));
-  const accKey = accPost1.options.headers["Idempotency-Key"];
-  const accBody = accPost1.options.body;
-  respond(accPost1, 409, { ok: false, code: "IDEMPOTENCY_IN_PROGRESS" });
-  await orgDialog.flush();
-
-  const accDlg = () => findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog");
-  assert.equal(accDlg().props.closeDisabled, true);
-  accDlg().props.onOpenChange(false);
-  findButton(orgDialog, "Hủy").props.onClick();
-  await orgDialog.flush();
-  assert.equal(accDlg().props.open, true);
-
-  findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.onClick();
-  await orgDialog.flush();
-  rejectNetwork(findLastRequest((r) => r.method === "GET"));
-  await orgDialog.flush();
-  assert.equal(accDlg().props.open, true);
-
-  const accRetryBtn = findNode(
-    orgDialog,
-    (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
-  );
-  assert.equal(Boolean(accRetryBtn.props.disabled), false);
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  const accPost2 = findLastRequest((r) => r.url.endsWith("/classification"));
-  assert.equal(accPost2.options.headers["Idempotency-Key"], accKey);
-  assert.equal(accPost2.options.body, accBody);
 });
 
 // ===========================================================================
@@ -1589,10 +1378,10 @@ test("Finding 4 [Pickers across Person, Department Memberships, Account]: editin
   });
   await pl.flush();
   respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
-  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons")), 200, makePersonListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
   await pl.flush();
 
-  findButton(pl, "+ Thêm nhân viên").props.onClick();
+  findButton(pl, "+ Thêm người dùng").props.onClick();
   await pl.flush();
   const stepper4 = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
   const deptPicker = await syncChildFromTree(stepper4, DepartmentSelectPicker, null);
@@ -1716,617 +1505,8 @@ test("Finding 4 [Pickers across Person, Department Memberships, Account]: editin
     dmBaseline,
   );
 
-  // 4d) AccountManager AccountOrgDialogs (link + mismatch recruiter picker, reason edits -> 0 extra GETs)
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, { ok: true, reclassified: {} });
-  respond(
-    findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?")),
-    200,
-    makeAccountListEnvelope([makeAccount()]),
-  );
-  await am.flush();
-
-  findButton(am, "Liên kết người").props.onClick();
-  await am.flush();
-  const orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
-  const accPersonPicker = await syncChildFromTree(orgDialog, PersonSearchPicker, null);
-  respond(
-    findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons?")),
-    200,
-    makePersonListEnvelope([makePersonSummary()], { link_state: "unlinked", page_size: 10 }),
-  );
-  await accPersonPicker.flush();
-
-  // Trigger RECRUITER_LINK_MISMATCH so RecruiterConfirmPicker mounts too
-  accPersonPicker.props.onSelect(makePersonSummary());
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({ target: { value: "Liên kết" } });
-  await orgDialog.flush();
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/person-link")), 409, {
-    ok: false,
-    code: "RECRUITER_LINK_MISMATCH",
-  });
-  await orgDialog.flush();
-
-  const recPicker = await syncChildFromTree(orgDialog, RecruiterConfirmPicker, null);
-  respond(
-    findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?")),
-    200,
-    makePersonnelListEnvelope([], "Tên cũ A"),
-  );
-  await recPicker.flush();
-
-  const accPickerBefore = requests.filter(
-    (r) =>
-      r.url.startsWith("/api/admin/organization/persons?") ||
-      r.url.startsWith("/api/admin/catalog/personnel?"),
-  ).length;
-
-  for (const r of ["Xác nhận lý do 1", "Xác nhận lý do 12", "Xác nhận lý do 123"]) {
-    findNode(orgDialog, (n) => n.type === "textarea").props.onChange({ target: { value: r } });
-    await orgDialog.flush();
-    await syncChildFromTree(orgDialog, PersonSearchPicker, accPersonPicker);
-    await syncChildFromTree(orgDialog, RecruiterConfirmPicker, recPicker);
-  }
-
-  const accPickerAfter = requests.filter(
-    (r) =>
-      r.url.startsWith("/api/admin/organization/persons?") ||
-      r.url.startsWith("/api/admin/catalog/personnel?"),
-  ).length;
-  assert.equal(accPickerAfter - accPickerBefore, 0);
 });
 
-// ===========================================================================
-// Strict Mode P2 — AccountOrgDialogs setup -> cleanup -> setup retains active
-// mountedRef=true while still suppressing post-unmount state updates
-// ===========================================================================
-
-test("Strict Mode [AccountOrgDialogs]: setup -> cleanup -> setup lowers busy on 409 business error, allows 503 retry, unblocks failed reconcile while keeping uncertain lock, and guards unmount", async () => {
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, { ok: true, reclassified: {} });
-  respond(
-    findLastRequest((r) => r.url.startsWith("/api/admin/access/accounts?")),
-    200,
-    makeAccountListEnvelope([makeAccount({ version: 2 })]),
-  );
-  await am.flush();
-
-  // 1) Business 409 ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS after Strict Mode replay
-  findButton(am, "Phân loại").props.onClick();
-  await am.flush();
-  let orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
-  await orgDialog.replayStrictEffects();
-
-  findNode(orgDialog, (n) => n.type === "select").props.onChange({ target: { value: "SHARED" } });
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Đổi phân loại dùng chung" },
-  });
-  await orgDialog.flush();
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-
-  assert.equal(findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog").props.closeDisabled, true);
-  assert.equal(findNode(orgDialog, (n) => n.type === "textarea").props.disabled, true);
-
-  respond(findLastRequest((r) => r.url.endsWith("/classification")), 409, {
-    ok: false,
-    code: "ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS",
-  });
-  await orgDialog.flush();
-  await am.flush();
-
-  const bizDlg = findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog");
-  assert.equal(bizDlg.props.closeDisabled, false);
-  assert.equal(Boolean(findNode(orgDialog, (n) => n.type === "select").props.disabled), false);
-  assert.equal(Boolean(findNode(orgDialog, (n) => n.type === "textarea").props.disabled), false);
-  assert.equal(Boolean(findButton(orgDialog, "Hủy").props.disabled), false);
-  const bizSubmitBtn = findNode(
-    orgDialog,
-    (n) => n.type?.name === "Button" && textOf(n).trim() === "Lưu phân loại",
-  );
-  assert.equal(Boolean(bizSubmitBtn.props.loading), false);
-  assert.equal(Boolean(bizSubmitBtn.props.disabled), false);
-
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Sửa lại lý do sau 409 nghiệp vụ" },
-  });
-  await orgDialog.flush();
-  assert.equal(
-    findNode(orgDialog, (n) => n.type === "textarea").props.value,
-    "Sửa lại lý do sau 409 nghiệp vụ",
-  );
-
-  findButton(orgDialog, "Hủy").props.onClick();
-  await orgDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOrgDialogs").props.operation, null);
-
-  // 2) 503 uncertain write -> failed reconcile unblocks reconciling while keeping uncertain lock -> retry succeeds
-  findButton(am, "Phân loại").props.onClick();
-  await am.flush();
-  orgDialog = await syncChildFromTree(am, "AccountOrgDialogs", null);
-  await orgDialog.replayStrictEffects();
-
-  findNode(orgDialog, (n) => n.type === "select").props.onChange({ target: { value: "SERVICE" } });
-  findNode(orgDialog, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Đổi sang dịch vụ" },
-  });
-  await orgDialog.flush();
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-
-  const post1 = findLastRequest((r) => r.url.endsWith("/classification"));
-  const key1 = post1.options.headers["Idempotency-Key"];
-  const body1 = post1.options.body;
-  respond(post1, 503, { ok: false, code: "TEMP_UNAVAILABLE" });
-  await orgDialog.flush();
-
-  const dlg503 = () => findNode(orgDialog, (n) => n.props?.dataTestId === "account-org-dialog");
-  assert.equal(dlg503().props.closeDisabled, true);
-  assert.equal(findButton(orgDialog, "Hủy").props.disabled, true);
-  dlg503().props.onOpenChange(false);
-  await orgDialog.flush();
-  assert.equal(dlg503().props.open, true);
-
-  const retryBtn503 = findNode(
-    orgDialog,
-    (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
-  );
-  assert.equal(Boolean(retryBtn503.props.loading), false);
-  assert.equal(Boolean(retryBtn503.props.disabled), false);
-  assert.equal(Boolean(findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.disabled), false);
-
-  // Failed reconcile GET must release reconciling without losing uncertain payload/key
-  findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.onClick();
-  await orgDialog.flush();
-  assert.equal(Boolean(findButton(orgDialog, "Đang tải đối chiếu…").props.disabled), true);
-  assert.equal(
-    Boolean(
-      findNode(
-        orgDialog,
-        (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
-      ).props.disabled,
-    ),
-    true,
-  );
-
-  respond(findLastRequest((r) => r.method === "GET"), 503, { ok: false });
-  await orgDialog.flush();
-
-  assert.equal(Boolean(findButton(orgDialog, "Tải lại dữ liệu mới nhất").props.disabled), false);
-  assert.equal(
-    textOf(orgDialog.tree).includes("Yêu cầu và khóa gửi trùng vẫn được giữ nguyên."),
-    true,
-  );
-  assert.equal(dlg503().props.closeDisabled, true);
-  assert.equal(findButton(orgDialog, "Hủy").props.disabled, true);
-  const retryBtnAfterReconcileFail = findNode(
-    orgDialog,
-    (n) => n.type?.name === "Button" && textOf(n).trim() === "Thử gửi lại cùng yêu cầu",
-  );
-  assert.equal(Boolean(retryBtnAfterReconcileFail.props.disabled), false);
-
-  // Retry sends exact same payload and Idempotency-Key
-  findNode(orgDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await orgDialog.flush();
-  const post2 = findLastRequest((r) => r.url.endsWith("/classification"));
-  assert.notEqual(post2, post1);
-  assert.equal(post2.options.headers["Idempotency-Key"], key1);
-  assert.equal(post2.options.body, body1);
-
-  respond(post2, 200, {
-    ok: true,
-    replayed: true,
-    account: { account_ref: ACCOUNT_A_REF, account_type: "SERVICE", version: 3 },
-  });
-  await orgDialog.flush();
-  await am.flush();
-  respond(
-    findLastRequest((r) => r.method === "GET"),
-    200,
-    makeAccountListEnvelope([makeAccount({ account_type: "SERVICE", version: 3 })]),
-  );
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOrgDialogs").props.operation, null);
-  assert.equal(notifications.success.length, 1);
-
-  // 3) Real unmount still guards async reconcile against post-unmount state updates
-  findButton(am, "Phân loại").props.onClick();
-  await am.flush();
-  const vnode = componentNode(am, "AccountOrgDialogs");
-  let resolveDeferredReload;
-  const deferredReload = new Promise((resolve) => {
-    resolveDeferredReload = resolve;
-  });
-  const unmountDlg = mount(vnode.type, {
-    ...vnode.props,
-    onReloadRequested: () => deferredReload,
-  });
-  await unmountDlg.flush();
-  await unmountDlg.replayStrictEffects();
-
-  findNode(unmountDlg, (n) => n.type === "select").props.onChange({ target: { value: "SHARED" } });
-  findNode(unmountDlg, (n) => n.type === "textarea").props.onChange({
-    target: { value: "Kiểm tra cleanup khi unmount thật" },
-  });
-  await unmountDlg.flush();
-  findNode(unmountDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await unmountDlg.flush();
-
-  respond(findLastRequest((r) => r.url.endsWith("/classification")), 409, {
-    ok: false,
-    code: "VERSION_CONFLICT",
-  });
-  await unmountDlg.flush();
-
-  findButton(unmountDlg, "Tải lại dữ liệu mới nhất").props.onClick();
-  await unmountDlg.flush();
-  assert.equal(unmountDlg.dirty, false);
-
-  unmountDlg.unmount();
-  resolveDeferredReload(false);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(unmountDlg.dirty, false);
-});
-
-test("Hotfix retry [AccountOperationDialogs CREATE]: lost response locks form/passwords/close, keeps key across failed & ok reload, replays cleanly without duplicate or login-search", async () => {
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, {
-    ok: true,
-    reclassified: { reclassified: 0, purged: 0, deleted: 0 },
-  });
-  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount()]));
-  await am.flush();
-
-  findButton(am, "Tạo tài khoản").props.onClick();
-  await am.flush();
-  let opDialog = await syncChildFromTree(am, "AccountOperationDialogs", null);
-  await opDialog.replayStrictEffects();
-
-  const getTextInputs = () => collectNodes(opDialog.tree).filter((n) => n.type === "input");
-  const getPasswordFields = () => collectNodes(opDialog.tree).filter((n) => typeof n.type === "function" && n.type.name === "PasswordField");
-
-  const [loginInput, nameInput] = getTextInputs();
-  const [pwField, pwConfirmField] = getPasswordFields();
-  loginInput.props.onChange({ target: { value: "nv.retry01" } });
-  nameInput.props.onChange({ target: { value: "Nhân viên Retry 01" } });
-  pwField.props.onChange("StrongPass#2026");
-  pwConfirmField.props.onChange("StrongPass#2026");
-  await opDialog.flush();
-
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-
-  const createReq1 = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  const key1 = createReq1.options.headers["Idempotency-Key"];
-  const body1 = createReq1.options.body;
-  assert.equal(JSON.parse(body1).idempotency_key, key1);
-
-  // Server committed but response dropped on network
-  rejectNetwork(createReq1);
-  await opDialog.flush();
-  await am.flush();
-
-  // Inputs + PasswordFields + Esc/Outside/Close/Hủy + background table actions are all locked
-  for (const inp of getTextInputs()) {
-    assert.equal(inp.props.disabled, true);
-  }
-  for (const pf of getPasswordFields()) {
-    assert.equal(pf.props.disabled, true);
-  }
-  const dlgRoot = findNode(opDialog, (n) => n.type?.name === "DialogRoot");
-  const dlgContent = findNode(opDialog, (n) => n.type?.name === "DialogContent");
-  let escPrevented = false;
-  dlgContent.props.onEscapeKeyDown({ preventDefault() { escPrevented = true; } });
-  assert.equal(escPrevented, true);
-  dlgRoot.props.onOpenChange(false);
-  await opDialog.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, "create");
-  assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
-
-  // Attempting to mutate input while uncertain-locked must be ignored
-  getTextInputs()[0].props.onChange({ target: { value: "tampered.login" } });
-  await opDialog.flush();
-  assert.equal(getTextInputs()[0].props.value, "nv.retry01");
-
-  // Failed reconcile reload unblocks reconciling while keeping uncertain lock & key
-  findButton(opDialog, "Tải lại đối chiếu").props.onClick();
-  await opDialog.flush();
-  const reloadFailReq = findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?"));
-  assert.equal(reloadFailReq.url.includes("nv.retry01"), false, "Must never guess account by login search");
-  respond(reloadFailReq, 503, { ok: false });
-  await opDialog.flush();
-  assert.equal(textOf(opDialog.tree).includes("Yêu cầu và khóa idempotency vẫn được giữ nguyên."), true);
-
-  // Even a successful list reload keeps pending key locked until server confirms the operation replay
-  findButton(opDialog, "Tải lại đối chiếu").props.onClick();
-  await opDialog.flush();
-  const reloadOkReq = findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?"));
-  respond(reloadOkReq, 200, makeAccountListEnvelope([makeAccount()]));
-  await opDialog.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, "create");
-  assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
-
-  // Retry sends EXACT same Idempotency-Key & payload; server returns replay APPLIED -> closes & clears password
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const createReq2 = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  assert.notEqual(createReq2, createReq1);
-  assert.equal(createReq2.options.headers["Idempotency-Key"], key1);
-  assert.equal(createReq2.options.body, body1);
-
-  respond(createReq2, 200, {
-    ok: true,
-    account: {
-      app_user_id: ACCOUNT_A_REF,
-      auth_subject: "66666666-6666-4666-8666-666666666666",
-      display_name: "Nhân viên Retry 01",
-      version: 1,
-      revision_id: "77777777-7777-4777-8777-777777777771",
-      intent_id: "88888888-8888-4888-8888-888888888881",
-      intent_state: "APPLIED",
-    },
-  });
-  await opDialog.flush();
-  await am.flush();
-
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-  assert.equal(notifications.success.length, 1);
-  // Password must never leak into notifications
-  const allToasts = JSON.stringify(notifications);
-  assert.equal(allToasts.includes("StrongPass#2026"), false);
-
-  // 2) Create retry returning IN_FLIGHT / INDETERMINATE routes to AccountReconcileSurface (0 repeat Auth calls)
-  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount()]));
-  await am.flush();
-
-  findButton(am, "Tạo tài khoản").props.onClick();
-  await am.flush();
-  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
-  await opDialog.replayStrictEffects();
-
-  collectNodes(opDialog.tree).filter((n) => n.type === "input")[0].props.onChange({ target: { value: "nv.inflight" } });
-  collectNodes(opDialog.tree).filter((n) => n.type === "input")[1].props.onChange({ target: { value: "NV InFlight" } });
-  collectNodes(opDialog.tree).filter((n) => typeof n.type === "function" && n.type.name === "PasswordField")[0].props.onChange("AnotherPass#99");
-  collectNodes(opDialog.tree).filter((n) => typeof n.type === "function" && n.type.name === "PasswordField")[1].props.onChange("AnotherPass#99");
-  await opDialog.flush();
-
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const inFlightReq = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  const intentId = "88888888-8888-4888-8888-888888888882";
-  respond(inFlightReq, 200, {
-    ok: true,
-    intent: { intent_id: intentId, intent_token: "88888888-8888-4888-8888-888888888883", kind: "CREATE_ACCOUNT", state: "IN_FLIGHT" },
-  });
-  await opDialog.flush();
-  await am.flush();
-
-  // Create dialog closed; Reconcile surface active
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-  const recSurface = await syncChildFromTree(am, "AccountReconcileSurface", null);
-  assert.equal(recSurface.props.intent?.intentId, intentId);
-  assert.equal(recSurface.props.intent?.state, "IN_FLIGHT");
-
-  // Reconcile preserves key across 503 and never calls POST /accounts again
-  const createCountBefore = requests.filter((r) => r.method === "POST" && r.url === "/api/admin/access/accounts").length;
-  findButton(recSurface, "Đối soát").props.onClick();
-  await recSurface.flush();
-  const recReq1 = findLastRequest((r) => r.url.includes(`/intents/${intentId}/reconcile`));
-  const recKey1 = recReq1.options.headers["Idempotency-Key"];
-  respond(recReq1, 503, { ok: false });
-  await recSurface.flush();
-  await am.flush();
-
-  findButton(recSurface, "Đối soát").props.onClick();
-  await recSurface.flush();
-  const recReq2 = findLastRequest((r) => r.url.includes(`/intents/${intentId}/reconcile`));
-  assert.notEqual(recReq2, recReq1);
-  assert.equal(recReq2.options.headers["Idempotency-Key"], recKey1);
-  // Reconcile rejects malformed 200 (state outside enum / wrong intent_id / empty account) while keeping key
-  respond(recReq2, 200, {
-    ok: true,
-    intent: { intent_id: intentId, intent_token: "88888888-8888-4888-8888-888888888883", kind: "CREATE_ACCOUNT", state: "BANANA", account_ref: null },
-  });
-  await recSurface.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent?.intentId, intentId);
-  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent?.state, "IN_FLIGHT");
-
-  findButton(recSurface, "Đối soát").props.onClick();
-  await recSurface.flush();
-  const recReq3 = findLastRequest((r) => r.url.includes(`/intents/${intentId}/reconcile`));
-  assert.notEqual(recReq3, recReq2);
-  assert.equal(recReq3.options.headers["Idempotency-Key"], recKey1);
-  // Valid PR #13 fallback account (revision_id: null) completes reconcile cleanly
-  respond(recReq3, 200, {
-    ok: true,
-    replayed: true,
-    account: {
-      app_user_id: ACCOUNT_A_REF,
-      auth_subject: null,
-      display_name: "NV InFlight",
-      version: 2,
-      revision_id: null,
-      intent_id: intentId,
-      intent_state: "APPLIED",
-    },
-    intent: {
-      intent_id: intentId,
-      intent_token: "88888888-8888-4888-8888-888888888883",
-      kind: "CREATE_ACCOUNT",
-      state: "APPLIED",
-      account_ref: ACCOUNT_A_REF,
-    },
-  });
-  await recSurface.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
-  assert.equal(
-    requests.filter((r) => r.method === "POST" && r.url === "/api/admin/access/accounts").length,
-    createCountBefore,
-  );
-});
-
-test("Hotfix retry R1 [AccountOperationDialogs]: malformed 200 on CREATE/EDIT keeps pending key/payload/lock, rejects invalid APPLIED/state, accepts PR #13 fallback & RESET {ok:true}", async () => {
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, {
-    ok: true,
-    reclassified: { reclassified: 0, purged: 0, deleted: 0 },
-  });
-  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount({ version: 2 })]));
-  await am.flush();
-
-  // 1) CREATE_ACCOUNT: malformed 200 envelopes must NEVER report success, clear password/key, or route to reconcile
-  findButton(am, "Tạo tài khoản").props.onClick();
-  await am.flush();
-  let opDialog = await syncChildFromTree(am, "AccountOperationDialogs", null);
-  await opDialog.replayStrictEffects();
-
-  const textInputs = () => collectNodes(opDialog.tree).filter((n) => n.type === "input");
-  const pwFields = () => collectNodes(opDialog.tree).filter((n) => typeof n.type === "function" && n.type.name === "PasswordField");
-  textInputs()[0].props.onChange({ target: { value: "nv.r1check" } });
-  textInputs()[1].props.onChange({ target: { value: "Nhân viên R1" } });
-  pwFields()[0].props.onChange("CheckR1#2026");
-  pwFields()[1].props.onChange("CheckR1#2026");
-  await opDialog.flush();
-
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const cReq1 = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-  const cKey = cReq1.options.headers["Idempotency-Key"];
-  const cBody = cReq1.options.body;
-
-  for (const badPayload of [
-    { ok: true, account: {} },
-    { ok: true, intent: { state: "APPLIED", intent_id: "not-uuid" } },
-    { ok: true, intent: { intent_id: "88888888-8888-4888-8888-888888888891", intent_token: "88888888-8888-4888-8888-888888888892", kind: "RESET_PASSWORD", state: "APPLIED", account_ref: ACCOUNT_A_REF } },
-    { ok: true, intent: { intent_id: "88888888-8888-4888-8888-888888888891", intent_token: "88888888-8888-4888-8888-888888888892", kind: "CREATE_ACCOUNT", state: "BANANA", account_ref: null } },
-  ]) {
-    const req = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-    respond(req, 200, badPayload);
-    await opDialog.flush();
-    await am.flush();
-
-    assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, "create");
-    assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
-    assert.equal(notifications.success.length, 0);
-    assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
-    assert.equal(pwFields()[0].props.disabled, true);
-
-    findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-    await opDialog.flush();
-    const retryReq = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts");
-    assert.notEqual(retryReq, req);
-    assert.equal(retryReq.options.headers["Idempotency-Key"], cKey);
-    assert.equal(retryReq.options.body, cBody);
-  }
-
-  // PR #13 intent-only APPLIED replay with valid intent_id + intent_token + kind + account_ref succeeds cleanly
-  respond(findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts"), 200, {
-    ok: true,
-    replayed: true,
-    intent: {
-      intent_id: "88888888-8888-4888-8888-888888888891",
-      intent_token: "88888888-8888-4888-8888-888888888892",
-      kind: "CREATE_ACCOUNT",
-      state: "APPLIED",
-      account_ref: ACCOUNT_A_REF,
-    },
-  });
-  await opDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-  assert.equal(notifications.success.length, 1);
-
-  // 2) EDIT_DISPLAY_NAME: empty account or wrong account_ref keeps key/lock; exact target EditNameEnvelope succeeds
-  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount({ version: 2 })]));
-  await am.flush();
-  findButton(am, "Sửa tên").props.onClick();
-  await am.flush();
-  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
-  await opDialog.replayStrictEffects();
-
-  findNode(opDialog, (n) => n.type === "input").props.onChange({ target: { value: "Tên R1 Chuẩn" } });
-  await opDialog.flush();
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const eReq1 = findLastRequest((r) => r.url.endsWith("/display-name"));
-  const eKey = eReq1.options.headers["Idempotency-Key"];
-  const eBody = eReq1.options.body;
-
-  for (const badEditPayload of [
-    { ok: true, account: {} },
-    {
-      ok: true,
-      account: {
-        app_user_id: ACCOUNT_B_REF,
-        version: 3,
-        revision_id: "77777777-7777-4777-8777-777777777791",
-        recruiter_id: null,
-        recruiter_version: null,
-        recruiter_revision_id: null,
-      },
-    },
-  ]) {
-    const req = findLastRequest((r) => r.url.endsWith("/display-name"));
-    respond(req, 200, badEditPayload);
-    await opDialog.flush();
-    await am.flush();
-    assert.notEqual(componentNode(am, "AccountOperationDialogs").props.operation, null);
-    assert.equal(notifications.success.length, 1);
-    assert.equal(findNode(opDialog, (n) => n.type === "input").props.disabled, true);
-    assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
-
-    findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-    await opDialog.flush();
-    const retryReq = findLastRequest((r) => r.url.endsWith("/display-name"));
-    assert.notEqual(retryReq, req);
-    assert.equal(retryReq.options.headers["Idempotency-Key"], eKey);
-    assert.equal(retryReq.options.body, eBody);
-  }
-
-  respond(findLastRequest((r) => r.url.endsWith("/display-name")), 200, {
-    ok: true,
-    account: {
-      app_user_id: ACCOUNT_A_REF,
-      version: 3,
-      revision_id: "77777777-7777-4777-8777-777777777792",
-      recruiter_id: null,
-      recruiter_version: null,
-      recruiter_revision_id: null,
-    },
-  });
-  await opDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-  assert.equal(notifications.success.length, 2);
-
-  // 3) RESET_PASSWORD: exact { ok: true } (no account required) succeeds cleanly
-  respond(findLastRequest((r) => r.method === "GET" && r.url.includes("/api/admin/access/accounts?")), 200, makeAccountListEnvelope([makeAccount({ version: 3 })]));
-  await am.flush();
-  findButton(am, "Đặt lại mật khẩu").props.onClick();
-  await am.flush();
-  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
-  await opDialog.replayStrictEffects();
-
-  pwFields()[0].props.onChange("ResetValid#2026");
-  pwFields()[1].props.onChange("ResetValid#2026");
-  await opDialog.flush();
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reset-password")), 200, { ok: true });
-  await opDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-  assert.equal(notifications.success.length, 3);
-});
 
 test("Hotfix retry R1 [PersonnelCatalogManager]: create-from-account rejects malformed 200 with retry intent and succeeds on valid PersonnelFromAccountEnvelope", async () => {
   const pm = mount(PersonnelCatalogManager);
@@ -2427,188 +1607,3 @@ test("Hotfix retry R1 [PersonnelCatalogManager]: create-from-account rejects mal
   assert.equal(notifications.success.length, 1);
 });
 
-test("Hotfix retry [AccountOperationDialogs EDIT]: deterministic 400 rotates key on edit, malformed 200 freezes key, 409 locks until authoritative reload", async () => {
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, {
-    ok: true,
-    reclassified: { reclassified: 0, purged: 0, deleted: 0 },
-  });
-  respond(findLastRequest((r) => r.method === "GET"), 200, makeAccountListEnvelope([makeAccount({ version: 2 })]));
-  await am.flush();
-
-  findButton(am, "Sửa tên").props.onClick();
-  await am.flush();
-  const opDialog = await syncChildFromTree(am, "AccountOperationDialogs", null);
-  await opDialog.replayStrictEffects();
-
-  findNode(opDialog, (n) => n.type === "input").props.onChange({ target: { value: "Tên mới 1" } });
-  await opDialog.flush();
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-
-  const editReq1 = findLastRequest((r) => r.url.endsWith("/display-name"));
-  const key1 = editReq1.options.headers["Idempotency-Key"];
-  // Deterministic 400 unlocks form -> user edits -> next submit uses a NEW key
-  respond(editReq1, 400, { ok: false, code: "ACCOUNT_OPERATION_INVALID" });
-  await opDialog.flush();
-
-  assert.equal(findNode(opDialog, (n) => n.type === "input").props.disabled, false);
-  findNode(opDialog, (n) => n.type === "input").props.onChange({ target: { value: "Tên mới 2" } });
-  await opDialog.flush();
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-
-  const editReq2 = findLastRequest((r) => r.url.endsWith("/display-name"));
-  const key2 = editReq2.options.headers["Idempotency-Key"];
-  const body2 = editReq2.options.body;
-  assert.notEqual(key2, key1, "Deterministic 400 followed by edit must issue a new idempotency key");
-
-  // Malformed 200 ({ ok: false }) locks form & replays exact key2 + body2
-  respond(editReq2, 200, { ok: false });
-  await opDialog.flush();
-  assert.equal(findNode(opDialog, (n) => n.type === "input").props.disabled, true);
-  assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
-
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const editReq3 = findLastRequest((r) => r.url.endsWith("/display-name"));
-  assert.notEqual(editReq3, editReq2);
-  assert.equal(editReq3.options.headers["Idempotency-Key"], key2);
-  assert.equal(editReq3.options.body, body2);
-
-  // 409 conflict clears pending key, locks submit, requires authoritative reload
-  respond(editReq3, 409, { ok: false, code: "ACCOUNT_OPERATION_CONFLICT" });
-  await opDialog.flush();
-  assert.equal(findNode(opDialog, (n) => n.type === "input").props.disabled, true);
-  assert.equal(findNode(opDialog, (n) => n.type === "button" && n.props?.type === "submit").props.disabled, true);
-
-  // Failed reload keeps lock; successful reload closes dialog
-  findButton(opDialog, "Tải lại dữ liệu mới nhất").props.onClick();
-  await opDialog.flush();
-  respond(findLastRequest((r) => r.method === "GET"), 503, { ok: false });
-  await opDialog.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation !== null, true);
-
-  findButton(opDialog, "Tải lại dữ liệu mới nhất").props.onClick();
-  await opDialog.flush();
-  respond(findLastRequest((r) => r.method === "GET"), 200, makeAccountListEnvelope([makeAccount({ version: 3, display_name: "Tên mới khác" })]));
-  await opDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-});
-
-test("Hotfix retry [AccountOperationDialogs RESET_PASSWORD]: preserves key on network drop, locks without Auth retry or CREATE reconcile on AUTH_APPLIED_UNRECORDED/INDETERMINATE, handles 403 & unmount", async () => {
-  const am = mount(AccountManager);
-  await am.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, {
-    ok: true,
-    reclassified: { reclassified: 0, purged: 0, deleted: 0 },
-  });
-  respond(findLastRequest((r) => r.method === "GET"), 200, makeAccountListEnvelope([makeAccount()]));
-  await am.flush();
-
-  findButton(am, "Đặt lại mật khẩu").props.onClick();
-  await am.flush();
-  let opDialog = await syncChildFromTree(am, "AccountOperationDialogs", null);
-  await opDialog.replayStrictEffects();
-
-  const pws = () => collectNodes(opDialog.tree).filter((n) => typeof n.type === "function" && n.type.name === "PasswordField");
-  pws()[0].props.onChange("ResetSecret#2026");
-  pws()[1].props.onChange("ResetSecret#2026");
-  await opDialog.flush();
-
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const resetReq1 = findLastRequest((r) => r.url.endsWith("/reset-password"));
-  const resetKey1 = resetReq1.options.headers["Idempotency-Key"];
-  const resetBody1 = resetReq1.options.body;
-
-  // Network drop keeps same key in memory and disables PasswordFields
-  rejectNetwork(resetReq1);
-  await opDialog.flush();
-  assert.equal(pws()[0].props.disabled, true);
-  assert.equal(pws()[1].props.disabled, true);
-
-  // Retry sends exact same key & payload; server returns 500 ACCOUNT_OPERATION_AUTH_APPLIED_UNRECORDED
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const resetReq2 = findLastRequest((r) => r.url.endsWith("/reset-password"));
-  assert.notEqual(resetReq2, resetReq1);
-  assert.equal(resetReq2.options.headers["Idempotency-Key"], resetKey1);
-  assert.equal(resetReq2.options.body, resetBody1);
-
-  respond(resetReq2, 500, { ok: false, code: "ACCOUNT_OPERATION_AUTH_APPLIED_UNRECORDED" });
-  await opDialog.flush();
-  await am.flush();
-
-  // Must NOT open CREATE_ACCOUNT reconcile surface, must wipe passwords, must disable submit (no Auth retry!)
-  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
-  assert.equal(pws()[0].props.value, "");
-  assert.equal(pws()[1].props.value, "");
-  assert.equal(findNode(opDialog, (n) => n.type === "button" && n.props?.type === "submit").props.disabled, true);
-  assert.equal(textOf(opDialog.tree).includes("Thử gửi lại cùng yêu cầu"), false);
-  assert.equal(JSON.stringify(notifications).includes("ResetSecret#2026"), false);
-
-  // Even if RESET_PASSWORD receives an unexpected intent payload, keep pending/lock & never route into CREATE_ACCOUNT reconcile
-  findButton(opDialog, "Hủy").props.onClick();
-  await opDialog.flush();
-  await am.flush();
-  findButton(am, "Đặt lại mật khẩu").props.onClick();
-  await am.flush();
-  opDialog = await syncChildFromTree(am, "AccountOperationDialogs", opDialog);
-  pws()[0].props.onChange("ThirdSecret#2026");
-  pws()[1].props.onChange("ThirdSecret#2026");
-  await opDialog.flush();
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const unexpectedResetReq = findLastRequest((r) => r.url.endsWith("/reset-password"));
-  const unexpectedResetKey = unexpectedResetReq.options.headers["Idempotency-Key"];
-  respond(unexpectedResetReq, 200, {
-    ok: true,
-    intent: { intent_id: "88888888-8888-4888-8888-888888888889", kind: "RESET_PASSWORD", state: "INDETERMINATE" },
-  });
-  await opDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountReconcileSurface").props.intent, null);
-  assert.equal(pws()[0].props.disabled, true);
-  assert.equal(findButton(opDialog, "Hủy").props.disabled, true);
-  // Retrying after malformed 200 keeps exact key, then 403 session loss clears cleanly
-  findNode(opDialog, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await opDialog.flush();
-  const resetReq3 = findLastRequest((r) => r.url.endsWith("/reset-password"));
-  assert.notEqual(resetReq3, unexpectedResetReq);
-  assert.equal(resetReq3.options.headers["Idempotency-Key"], unexpectedResetKey);
-  respond(resetReq3, 403, { ok: false, code: "ACCOUNT_OPERATION_DENIED" });
-  await opDialog.flush();
-  await am.flush();
-  assert.equal(componentNode(am, "AccountOperationDialogs").props.operation, null);
-  assert.ok(maybeNode(am, (n) => n.props?.title === "Không có quyền xem danh sách tài khoản"));
-
-  // Unmount during pending reload produces zero post-unmount state updates
-  const am2 = mount(AccountManager);
-  await am2.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/reclassify")), 200, { ok: true, reclassified: { reclassified: 0, purged: 0, deleted: 0 } });
-  respond(findLastRequest((r) => r.method === "GET"), 200, makeAccountListEnvelope([makeAccount()]));
-  await am2.flush();
-  findButton(am2, "Sửa tên").props.onClick();
-  await am2.flush();
-  const vnode = componentNode(am2, "AccountOperationDialogs");
-  let resolveDeferred;
-  const deferred = new Promise((r) => { resolveDeferred = r; });
-  const unmountingDlg = mount(vnode.type, { ...vnode.props, onReloadRequested: () => deferred });
-  await unmountingDlg.flush();
-  await unmountingDlg.replayStrictEffects();
-  findNode(unmountingDlg, (n) => n.type === "input").props.onChange({ target: { value: "Tên Unmount" } });
-  await unmountingDlg.flush();
-  findNode(unmountingDlg, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
-  await unmountingDlg.flush();
-  respond(findLastRequest((r) => r.url.endsWith("/display-name")), 503, { ok: false });
-  await unmountingDlg.flush();
-  findButton(unmountingDlg, "Tải lại đối chiếu").props.onClick();
-  await unmountingDlg.flush();
-  unmountingDlg.unmount();
-  resolveDeferred(false);
-  await new Promise((r) => setImmediate(r));
-  assert.equal(unmountingDlg.dirty, false);
-});

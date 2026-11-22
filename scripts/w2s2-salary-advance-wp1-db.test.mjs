@@ -36,7 +36,6 @@ import {
 } from "../src/lib/salary-advance/salary-advance-contract.ts";
 import { createSalaryAdvanceRepository } from "../src/lib/salary-advance/salary-advance-repository.ts";
 import {
-   computeAssignGlobalRoleFingerprint,
   computeAssignProjectAccountantFingerprint,
   computeEndProjectAccountantFingerprint,
 } from "../src/lib/vendor-finance/vendor-finance-contract.ts";
@@ -692,31 +691,21 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
       );
     }
 
-    // Grant VFIN_ONLY_ACTOR (`GLOBAL_RECONCILER`) and VFIN_CASH_HOLDER_ACTOR (`CASH_HOLDER`)
-    for (const [targetActor, roleCode] of [
-      [VFIN_ONLY_ACTOR, "GLOBAL_RECONCILER"],
-      [VFIN_CASH_HOLDER_ACTOR, "CASH_HOLDER"],
+    // Grant VFIN_ONLY_ACTOR (`VFIN_GLOBAL_RECONCILER`) and VFIN_CASH_HOLDER_ACTOR (`VFIN_CASH_HOLDER`) via PR #28 permission groups
+    for (const [targetActor, groupCode] of [
+      [VFIN_ONLY_ACTOR, "VFIN_GLOBAL_RECONCILER"],
+      [VFIN_CASH_HOLDER_ACTOR, "VFIN_CASH_HOLDER"],
     ]) {
-      const reason = `Cấp quyền VFIN ${roleCode}`;
+      const reason = `Cấp quyền VFIN ${groupCode}`;
       await db.query(
-        `select public.vendor_finance_assign_global_role_admin(
-           $1::uuid, $2::uuid, $3::uuid, $4::text, 0, null::date, $5::text, $6::uuid, $7::text
-         )`,
-        [
-          FULL_ADMIN.auth,
-          FULL_ADMIN.app,
-          targetActor.app,
-          roleCode,
-          reason,
-          nextUuid(),
-          computeAssignGlobalRoleFingerprint({
-            account_ref: targetActor.app,
-            role_code: roleCode,
-            valid_from: null,
-            expected_version: 0,
-            reason,
-          }),
-        ],
+        `insert into public.authz_user_group_members (
+           group_id, app_user_id, source_kind, reason, assigned_by_app_user_id
+         )
+         select g.group_id, $1::uuid, 'ADMIN_ASSIGNMENT', $2::text, $3::uuid
+           from public.authz_user_groups g
+          where g.code = $4::text
+            and g.active = true`,
+        [targetActor.app, reason, FULL_ADMIN.app, groupCode],
       );
     }
 

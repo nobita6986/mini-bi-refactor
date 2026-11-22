@@ -483,9 +483,9 @@ export function TeamCatalogManager({
       <div className="space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-foreground">Danh mục nhóm</h1>
+            <h1 className="text-2xl font-semibold text-foreground">Danh mục Tổ đội tuyển dụng</h1>
             <p className="mt-1 max-w-2xl text-sm text-muted">
-              Quản lý tên hiển thị và trạng thái hoạt động của nhóm. Mã nhóm không thay đổi sau khi tạo.
+              Quản lý tên hiển thị và trạng thái hoạt động của tổ đội tuyển dụng. Mã tổ đội không thay đổi sau khi tạo.
             </p>
           </div>
           <Dialog.Trigger asChild>
@@ -511,9 +511,9 @@ export function TeamCatalogManager({
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <Dialog.Title className="text-xl font-semibold text-foreground">
-                    {dialog?.kind === "create" ? "Thêm nhóm" :
-                      dialog?.kind === "edit" ? "Chỉnh sửa nhóm" :
-                        dialog?.active ? "Kích hoạt nhóm" : "Ngừng hoạt động nhóm"}
+                    {dialog?.kind === "create" ? "Thêm tổ đội tuyển dụng" :
+                      dialog?.kind === "edit" ? "Chỉnh sửa tổ đội tuyển dụng" :
+                        dialog?.active ? "Kích hoạt tổ đội tuyển dụng" : "Ngừng hoạt động tổ đội"}
                   </Dialog.Title>
                   <Dialog.Description id="team-dialog-description" className="mt-1 text-sm text-muted">
                     Lý do thao tác không bắt buộc. Dữ liệu được kiểm tra lại trước khi lưu.
@@ -556,7 +556,7 @@ export function TeamCatalogManager({
               {dialog?.kind === "active" ? (
                 <div className="mt-5 space-y-4">
                   <p>
-                    {dialog.active ? "Bạn sắp kích hoạt nhóm" : "Bạn sắp ngừng hoạt động nhóm"}{" "}
+                    {dialog.active ? "Bạn sắp kích hoạt tổ đội" : "Bạn sắp ngừng hoạt động tổ đội"}{" "}
                     <strong>{dialog.team.display_name}</strong> ({dialog.team.code}). Thao tác này
                     không xóa dữ liệu và lịch sử phân công vẫn đọc được.
                   </p>
@@ -714,18 +714,18 @@ export function TeamCatalogManager({
           {list ? (
             list.teams.length === 0 ? (
               <EmptyState
-                title="Không có nhóm phù hợp"
-                description="Thử đổi từ khóa hoặc bật hiển thị nhóm ngừng hoạt động."
+                title="Không có tổ đội phù hợp"
+                description="Thử đổi từ khóa hoặc bật hiển thị tổ đội ngừng hoạt động."
               />
             ) : (
               <>
-                <div role="region" aria-label="Bảng danh sách nhóm" tabIndex={0} className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+                <div role="region" aria-label="Bảng danh sách tổ đội tuyển dụng" tabIndex={0} className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
                   <table className="r22-card-table w-full min-w-[640px] border-collapse text-left text-sm">
-                    <caption className="sr-only">Danh sách nhóm</caption>
+                    <caption className="sr-only">Danh sách tổ đội tuyển dụng</caption>
                     <thead className="border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted">
                       <tr>
-                        <th scope="col" className="px-3.5 py-3 font-semibold">Nhóm</th>
-                        <th scope="col" className="px-3.5 py-3 font-semibold">Mã nhóm</th>
+                        <th scope="col" className="px-3.5 py-3 font-semibold">Tổ đội</th>
+                        <th scope="col" className="px-3.5 py-3 font-semibold">Mã tổ đội</th>
                         <th scope="col" className="px-3.5 py-3 font-semibold">Trạng thái</th>
                         <th scope="col" className="px-3.5 py-3 font-semibold text-right">Thao tác</th>
                       </tr>
@@ -734,7 +734,7 @@ export function TeamCatalogManager({
                       {list.teams.map((team) => (
                         <tr key={team.team_id} className="align-middle transition-colors hover:bg-surface-hover">
                           <td data-card-header="true" className="px-3.5 py-2.5 font-medium">{team.display_name}</td>
-                          <td data-label="Mã nhóm" className="px-3.5 py-2.5 font-mono text-xs">{team.code}</td>
+                          <td data-label="Mã tổ đội" className="px-3.5 py-2.5 font-mono text-xs">{team.code}</td>
                           <td data-label="Trạng thái" className="px-3.5 py-2.5"><ActiveBadge active={team.active} /></td>
                           <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
                             <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">

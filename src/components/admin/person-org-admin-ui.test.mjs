@@ -66,9 +66,9 @@ test("WP4 Nhân sự nội bộ: mã nhân sự do Admin nhập tay, không tự
     /name="(valid_from|valid_to|effective_from|effective_to)"|id="person-(valid|effective)-/,
   );
 
-  // Phân biệt rõ Ngừng hoạt động hồ sơ người với khóa tài khoản đăng nhập
+  // Phân biệt rõ Ngừng làm việc với khóa đăng nhập
   assert.match(detailManager, /không tự khóa tài khoản[\s\S]*đăng nhập liên kết/i);
-  assert.match(listManager, /không tự khóa tài khoản đăng nhập/i);
+  assert.match(listManager, /không tự khóa đăng nhập/i);
 });
 
 test("WP4 dùng PageShell, FormDialog, bảng responsive, AbortController, uncertain retry, 409 reload và xóa dữ liệu khi mất phiên", () => {

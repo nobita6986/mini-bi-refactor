@@ -125,6 +125,13 @@ import {
   WP8D_NAV_READONLY_RPC_SIGNATURES,
   WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_MIGRATION_NAME,
   WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
+  PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME,
+  PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES,
+  PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME,
+  PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
+  PR28_CLEANUP_MIGRATION_NAME,
+  PR28_CLEANUP_RETIRED_RPC_SIGNATURES,
+  PR28_CLEANUP_ADDED_RPC_SIGNATURES,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
@@ -1159,7 +1166,15 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
         ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
         ...WP8D_NAV_READONLY_RPC_SIGNATURES,
-        ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES);
+        ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
+        ...PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES,
+        ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
+        ...PR28_CLEANUP_ADDED_RPC_SIGNATURES);
+      for (let idx = expectedSignatures.length - 1; idx >= 0; idx -= 1) {
+        if (PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx])) {
+          expectedSignatures.splice(idx, 1);
+        }
+      }
       assert.ok(expectedSignatures.length > 0, "the explicit server/invoker allowlist is not empty");
       assert.equal(new Set(expectedSignatures).size, expectedSignatures.length, "the allowlist has no duplicates");
       const { rows: resolvedExpected } = await client.query(
@@ -1226,7 +1241,12 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...WP5B1_ROLE_EFFECTIVE_ACCESS_RPC_SIGNATURES,
           ...WP7B_ATTENDANCE_ORG_SCOPE_RPC_SIGNATURES,
           ...WP8D_NAV_READONLY_RPC_SIGNATURES,
-          ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES].sort(),
+          ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
+          ...PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES,
+          ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
+          ...PR28_CLEANUP_ADDED_RPC_SIGNATURES]
+          .filter((sig) => !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
+          .sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
       const recruitmentLocationCatalogMigration = await readFile(
@@ -1528,6 +1548,82 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ),
           `WP13 PR-0 RPC ${sig} grants EXECUTE only to service_role`,
         );
+      }
+      const pr28DirectoryMigration = await readFile(
+        path.join(MIGRATION_DIR, PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME),
+        "utf8",
+      );
+      const pr28DirectoryNormalized = pr28DirectoryMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES) {
+        assert.ok(
+          pr28DirectoryNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `PR #28 unified user directory RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          pr28DirectoryNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `PR #28 unified user directory RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const pr28GroupsMigration = await readFile(
+        path.join(MIGRATION_DIR, PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME),
+        "utf8",
+      );
+      const pr28GroupsNormalized = pr28GroupsMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES) {
+        assert.ok(
+          pr28GroupsNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `PR #28 permission groups RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          pr28GroupsNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `PR #28 permission groups RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const pr28CleanupMigration = await readFile(
+        path.join(MIGRATION_DIR, PR28_CLEANUP_MIGRATION_NAME),
+        "utf8",
+      );
+      const pr28CleanupNormalized = pr28CleanupMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of PR28_CLEANUP_ADDED_RPC_SIGNATURES) {
+        assert.ok(
+          pr28CleanupNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `PR #28 cleanup RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          pr28CleanupNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `PR #28 cleanup RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      for (const sig of PR28_CLEANUP_RETIRED_RPC_SIGNATURES) {
+        const { rows: dropped } = await client.query(
+          "select pg_catalog.to_regprocedure($1) as reg",
+          [sig],
+        );
+        assert.equal(dropped[0].reg, null, `PR #28 cleanup dropped retired RPC ${sig}`);
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(
         path.join(MIGRATION_DIR, ATTENDANCE_SLOT_POLICY_AND_FOUR_SLOT_MATRIX_MIGRATION_NAME),
@@ -2235,24 +2331,34 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           await client.query("rollback");
         }
 
-        const alignStart = wp5b1Migration.indexOf("do $align_wp5b$");
-        const checkEnd = wp5b1Migration.lastIndexOf("$check_wp5b$;");
-        assert.ok(alignStart >= 0 && checkEnd > alignStart, "WP5B-1 migration includes $align_wp5b$ and $check_wp5b$ blocks");
-        const wp5b1VerifyBlocks = wp5b1Migration.slice(alignStart, checkEnd + "$check_wp5b$;".length);
+        // Post-#237: all retired PR28 global-role & module-grant RPCs are dropped, and altering a surviving PR28 group RPC
+        // owner to a non-BYPASSRLS role causes FORCE RLS to fail closed with 42501 under service_role.
+        for (const sig of PR28_CLEANUP_RETIRED_RPC_SIGNATURES) {
+          const retiredCheck = await client.query("select to_regprocedure($1)::text as reg", [sig]);
+          assert.equal(retiredCheck.rows[0].reg, null, `retired RPC must be absent post-#237: ${sig}`);
+        }
+
+        const ownerCheck = await client.query(
+          `select r.rolbypassrls
+             from pg_catalog.pg_proc p
+             join pg_catalog.pg_roles r on r.oid = p.proowner
+            where p.oid = 'public.direct_entry_authz_list_groups_admin(uuid, uuid, uuid, boolean)'::pg_catalog.regprocedure`,
+        );
+        assert.equal(ownerCheck.rows[0]?.rolbypassrls, true, "PR28 group RPC owner must have BYPASSRLS");
 
         await client.query("begin");
         try {
           await client.query("alter role s0_t1c_runner nobypassrls");
           await client.query(
-            "alter function public.direct_entry_authz_list_roles_admin(uuid, uuid) owner to s0_t1c_runner",
+            "alter function public.direct_entry_authz_list_groups_admin(uuid, uuid, uuid, boolean) owner to s0_t1c_runner",
           );
-          await client.query("set local session authorization s0_t1c_runner");
+          await client.query("set local role service_role");
           await assert.rejects(
-            client.query(wp5b1VerifyBlocks),
-            (error) =>
-              error?.code === "55000" &&
-              String(error?.message).includes("WP5B1 RPC security definer owner/RLS/ACL boundary drift"),
-            "WP5B-1 $check_wp5b$ block must fail closed with 55000 if an RPC owner lacks BYPASSRLS",
+            client.query(
+              "select public.direct_entry_authz_list_groups_admin('00000000-0000-4000-8000-000000000001'::uuid, '00000000-0000-4000-8000-000000000002'::uuid, null::uuid, false)",
+            ),
+            (error) => error?.code === "42501",
+            "PR28 group RPC must fail closed under FORCE RLS if owner lacks BYPASSRLS",
           );
         } finally {
           await client.query("rollback");

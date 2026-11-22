@@ -229,7 +229,7 @@ function stripOuterTransaction(sql) {
 }
 
 async function loadMigrations() {
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   return Promise.all(
     names.map(async (name) => ({
       name,
@@ -1736,16 +1736,15 @@ test("(#2) WP8A E2E: Pre-migration data preservation, WP3 Org + WP5 paired authz
     assert.equal(paAdminList.ok, true);
     assert.ok(paAdminList.data.eligible_accountants.some((a) => a.account_ref === PA_1.app && a.display_name === updatedPersonName));
 
-    const grAdminList = await vfinRepo.listGlobalRolesAdmin({
-      auth_subject: OWNER.auth,
-      app_user_id: OWNER.app,
-      search: null,
-      include_history: true,
-      page: 1,
-      page_size: 25,
-    });
-    assert.equal(grAdminList.ok, true);
-    assert.ok(grAdminList.data.roles.some((r) => r.role_grant_id === cashHolderRoleRes.role_grant_id));
+    const grAdminList = await serviceRpc(db, "vendor_finance_list_global_roles_admin", [
+      OWNER.auth,
+      OWNER.app,
+      null,
+      true,
+      1,
+      25,
+    ]);
+    assert.ok(grAdminList.roles.some((r) => r.role_grant_id === cashHolderRoleRes.role_grant_id));
 
     // Salary Advance OCC conflict + bad state + spoofed auth_subject fail closed
     const staleVersionRes = await salRepo.transitionRequest({

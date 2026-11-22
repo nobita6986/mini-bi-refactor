@@ -210,18 +210,10 @@ test("Owner protection vs member ADMIN uniformity and D10 assignment eligibility
   assert.equal(memberAdmin.assigned_global_roles[0].is_protected, false);
   assert.equal(memberAdmin.assigned_global_roles[0].can_revoke, true);
 
-  // Assign eligibility depends strictly on manager gate, rollout gate, enabled status, and NORMAL type
+  // Assign eligibility depends strictly on manager gate, rollout gate, and enabled status
   assert.equal(canAssignNewGlobalRoleToAccount(owner.account, true, false).allowed, true);
   assert.equal(canAssignNewGlobalRoleToAccount(memberAdmin.account, true, false).allowed, true);
   assert.equal(canAssignNewGlobalRoleToAccount(disabled.account, true, false).allowed, false);
-  assert.equal(
-    canAssignNewGlobalRoleToAccount({ enabled: true, account_type: "SHARED" }, true, false).allowed,
-    false,
-  );
-  assert.equal(
-    canAssignNewGlobalRoleToAccount({ enabled: true, account_type: "SERVICE" }, true, false).allowed,
-    false,
-  );
   assert.equal(canAssignNewGlobalRoleToAccount(memberAdmin.account, false, false).allowed, false);
   assert.equal(canAssignNewGlobalRoleToAccount(memberAdmin.account, true, true).allowed, false);
 });

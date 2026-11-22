@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
+import { relative as pathRelative } from "node:path";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
@@ -324,10 +325,30 @@ test("no test or mock route exists inside the app router", () => {
     }
     return found;
   }
-  const appFiles = walk(fileURLToPath(new URL("../../app", import.meta.url)));
-  const directEntryRoutes = appFiles.filter((file) => file.includes("/api/direct-entry/"));
+  function findSuspiciousRoutes(relativePaths) {
+    return relativePaths.filter((file) => /mock|fixture|synthetic|_test/i.test(file));
+  }
+  // Prove the detector still flags genuine mock/fixture/synthetic/_test paths inside src/app.
+  assert.deepEqual(
+    findSuspiciousRoutes([
+      "api/direct-entry/mock/route.ts",
+      "api/direct-entry/fixture-probe/route.ts",
+      "api/direct-entry/synthetic/route.ts",
+      "api/direct-entry/debug_test/route.ts",
+      "api/direct-entry/drafts/route.ts",
+    ]),
+    [
+      "api/direct-entry/mock/route.ts",
+      "api/direct-entry/fixture-probe/route.ts",
+      "api/direct-entry/synthetic/route.ts",
+      "api/direct-entry/debug_test/route.ts",
+    ],
+  );
+  const appRoot = fileURLToPath(new URL("../../app", import.meta.url));
+  const appRelativeFiles = walk(appRoot).map((file) => pathRelative(appRoot, file).replace(/\\/g, "/"));
+  const directEntryRoutes = appRelativeFiles.filter((file) => file.startsWith("api/direct-entry/"));
   assert.equal(directEntryRoutes.length > 0, true);
-  const suspicious = directEntryRoutes.filter((file) => /mock|fixture|synthetic|_test/i.test(file));
+  const suspicious = findSuspiciousRoutes(directEntryRoutes);
   assert.deepEqual(suspicious, []);
 });
 

@@ -161,7 +161,7 @@ const ACTORS = {
 
 async function loadMigrations() {
   const names = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")
     .sort();
   return Promise.all(
     names.map(async (name) => ({

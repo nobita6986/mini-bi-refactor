@@ -16,7 +16,7 @@ test("Admin subnav renders canonical active state and exactly one current tab fr
   assert.match(component, /bg-primary\/10/);
   assert.match(component, /font-semibold/);
   assert.match(component, /focus-visible:ring-2/);
-  assert.match(component, /flex flex-wrap gap-2/);
+  assert.match(component, /flex flex-nowrap sm:flex-wrap gap-1 sm:gap-2/);
   assert.match(adminLayout, /<AdminSubnav sections=\{visibleAdminSections\(navActor\)\} \/>/);
   assert.match(adminLayout, /mx-auto w-full max-w-7xl px-4 py-6 sm:px-6/);
   assert.doesNotMatch(adminLayout, /max-w-6xl/);

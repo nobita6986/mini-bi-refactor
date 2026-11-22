@@ -67,6 +67,38 @@ export function isReservedVendorTeam(team: { code: string }): boolean {
   return team.code === RESERVED_VENDOR_TEAM_CODE;
 }
 
+export type ActiveTeamSelectOption = {
+  team_id: string;
+  code: string;
+  display_name: string;
+  active: true;
+};
+
+/**
+ * Projects active business teams from `GET /api/admin/catalog/teams` using the
+ * canonical W01C-A contract (`teamCatalogList` / `teamCatalogItem` -> `display_name`).
+ * Rejects malformed envelopes fail-closed (`{ ok: false }`) and excludes inactive
+ * teams and the reserved `__system_vendor__` system team from new selections.
+ */
+export function parseActiveTeamCatalogOptions(
+  payload: unknown,
+): { ok: true; teams: ActiveTeamSelectOption[] } | { ok: false } {
+  if (!isRecord(payload) || payload.ok !== true) return { ok: false };
+  const list = teamCatalogList(payload.list);
+  if (!list) return { ok: false };
+  const teams: ActiveTeamSelectOption[] = [];
+  for (const row of list.teams) {
+    if (!row.active || isReservedVendorTeam(row)) continue;
+    teams.push({
+      team_id: row.team_id,
+      code: row.code,
+      display_name: row.display_name,
+      active: true,
+    });
+  }
+  return { ok: true, teams };
+}
+
 /**
  * Fail-closed list projection. A reserved Vendor row anywhere in the payload is
  * rejected as a whole: the UI never renders it and never silently drops rows.

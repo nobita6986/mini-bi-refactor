@@ -15,7 +15,6 @@ import {
   projectPersonnelListForQuery,
 } from "@/lib/admin/personnel-catalog-model";
 import {
-  accountTypeLabel,
   buildPersonListQuery,
   DEFAULT_ORG_PAGE_SIZE,
   projectPersonListEnvelope,
@@ -602,10 +601,8 @@ export function AccountSearchPicker({
             className="max-h-52 space-y-1.5 overflow-y-auto rounded-lg border border-border bg-surface-muted/20 p-2"
           >
             {state.accounts.map((account) => {
-              const eligible =
-                account.account_type === "NORMAL" && account.active_person_link === null;
+              const eligible = account.active_person_link === null;
               const isSelected = selectedAccountRef === account.account_ref;
-              const typeMeta = accountTypeLabel(account.account_type);
               return (
                 <button
                   key={account.account_ref}
@@ -634,12 +631,9 @@ export function AccountSearchPicker({
                       {account.login_id ? ` · ${account.login_id}` : ""}
                     </span>
                     <span className="block text-xs text-muted">
-                      {typeMeta.shortLabel}
                       {account.active_person_link
-                        ? ` · Đã nối với ${account.active_person_link.full_name} (${account.active_person_link.employee_code})`
-                        : account.account_type === "NORMAL"
-                          ? " · Chưa liên kết hồ sơ người"
-                          : " · Không được liên kết hồ sơ người"}
+                        ? `Đã gắn hồ sơ ${account.active_person_link.full_name} (${account.active_person_link.employee_code})`
+                        : "Chưa gắn hồ sơ nhân viên"}
                     </span>
                   </span>
                   <StatusBadge tone={account.enabled ? "success" : "neutral"}>

@@ -3,15 +3,6 @@ import { projectOptionalActionReason } from "./action-reason.ts";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REASON_MAX = 4000;
 
-export const ACCOUNT_TYPES = ["NORMAL", "SHARED", "SERVICE"] as const;
-export type AccountType = (typeof ACCOUNT_TYPES)[number];
-
-export const ACCOUNT_TYPE_FILTER_VALUES = ["all", "NORMAL", "SHARED", "SERVICE", "SPECIAL"] as const;
-export type AccountTypeFilter = (typeof ACCOUNT_TYPE_FILTER_VALUES)[number];
-
-export const ACCOUNT_LINK_STATE_VALUES = ["all", "linked", "unlinked"] as const;
-export type AccountLinkStateFilter = (typeof ACCOUNT_LINK_STATE_VALUES)[number];
-
 export type ActivePersonLinkSummary = {
   link_id: string;
   person_id: string;
@@ -27,7 +18,6 @@ export type ExistingAccount = {
   login_id: string | null;
   enabled: boolean;
   version: number;
-  account_type: AccountType;
   active_person_link: ActivePersonLinkSummary | null;
 };
 export type ExistingAccountList = {
@@ -44,8 +34,6 @@ export type AccountListQuery = {
   enabled: "all" | "true" | "false";
   page: number;
   page_size: number;
-  account_type: AccountTypeFilter;
-  link_state: AccountLinkStateFilter;
 };
 
 export type AccountAccessParsed<T> =
@@ -86,7 +74,7 @@ export function projectExistingAccount(value: unknown): ExistingAccount | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   if (Object.keys(row).sort().join(",") !==
-      "account_ref,account_type,active_person_link,display_name,enabled,login_id,version") return null;
+      "account_ref,active_person_link,display_name,enabled,login_id,version") return null;
   if (typeof row.account_ref !== "string" || !UUID.test(row.account_ref)) return null;
   if (row.display_name !== null && (typeof row.display_name !== "string" ||
       row.display_name !== row.display_name.trim() || row.display_name === "" ||
@@ -95,8 +83,6 @@ export function projectExistingAccount(value: unknown): ExistingAccount | null {
       !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(row.login_id))) return null;
   if (typeof row.enabled !== "boolean" || typeof row.version !== "number" ||
       !Number.isSafeInteger(row.version) || row.version < 1) return null;
-  if (typeof row.account_type !== "string" ||
-      !(ACCOUNT_TYPES as readonly string[]).includes(row.account_type)) return null;
   const activePersonLink = row.active_person_link === null
     ? null
     : projectActivePersonLink(row.active_person_link);
@@ -107,7 +93,6 @@ export function projectExistingAccount(value: unknown): ExistingAccount | null {
     login_id: row.login_id as string | null,
     enabled: row.enabled,
     version: row.version,
-    account_type: row.account_type as AccountType,
     active_person_link: activePersonLink,
   };
 }
@@ -139,7 +124,7 @@ function integer(value: unknown, min: number): number | null {
 }
 
 export function parseAccountListQuery(url: URL): AccountAccessParsed<AccountListQuery> {
-  const allowed = new Set(["search", "enabled", "page", "page_size", "account_type", "link_state"]);
+  const allowed = new Set(["search", "enabled", "page", "page_size"]);
   for (const key of url.searchParams.keys()) if (!allowed.has(key)) return { ok: false, code: "ACCOUNT_INVALID" };
   for (const key of allowed) if (url.searchParams.getAll(key).length > 1) return { ok: false, code: "ACCOUNT_INVALID" };
   const rawSearch = url.searchParams.get("search");
@@ -147,14 +132,6 @@ export function parseAccountListQuery(url: URL): AccountAccessParsed<AccountList
   const search = rawSearch === null ? null : rawSearch.trim();
   const enabled = url.searchParams.get("enabled") ?? "all";
   if (enabled !== "all" && enabled !== "true" && enabled !== "false") return { ok: false, code: "ACCOUNT_INVALID" };
-  const rawAccountType = url.searchParams.get("account_type") ?? "all";
-  if (!(ACCOUNT_TYPE_FILTER_VALUES as readonly string[]).includes(rawAccountType)) {
-    return { ok: false, code: "ACCOUNT_INVALID" };
-  }
-  const rawLinkState = url.searchParams.get("link_state") ?? "all";
-  if (!(ACCOUNT_LINK_STATE_VALUES as readonly string[]).includes(rawLinkState)) {
-    return { ok: false, code: "ACCOUNT_INVALID" };
-  }
   const rawPage = url.searchParams.get("page") ?? "1";
   const rawPageSize = url.searchParams.get("page_size") ?? "25";
   if (!/^\d{1,6}$/.test(rawPage) || !/^\d{1,6}$/.test(rawPageSize)) return { ok: false, code: "ACCOUNT_INVALID" };
@@ -168,8 +145,6 @@ export function parseAccountListQuery(url: URL): AccountAccessParsed<AccountList
       enabled,
       page,
       page_size,
-      account_type: rawAccountType as AccountTypeFilter,
-      link_state: rawLinkState as AccountLinkStateFilter,
     },
   };
 }

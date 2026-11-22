@@ -173,6 +173,17 @@ export async function readCutoverInventory(queryable) {
   const authDateRes = await queryable.query(
     `select public.direct_entry_authorization_date()::text as authorization_date`,
   );
+  const colCheck = await queryable.query(
+    `select exists (
+       select 1 from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'direct_entry_app_users'
+          and column_name = 'account_type'
+     ) as has_account_type`,
+  );
+  const accountTypeExpr = colCheck.rows[0]?.has_account_type
+    ? "u.account_type"
+    : "'NORMAL'::text";
   const accountsRes = await queryable.query(
     `select
        u.app_user_id::text as app_user_id,
@@ -180,7 +191,7 @@ export async function readCutoverInventory(queryable) {
        au.email as email,
        u.display_name as display_name,
        u.enabled as enabled,
-       u.account_type as account_type,
+       ${accountTypeExpr} as account_type,
        u.authz_managed as authz_managed,
        u.version as version
      from public.direct_entry_app_users u
@@ -556,11 +567,22 @@ export async function verifyPostCutoverInvariants(
     throw new Error("POSTCONDITION_FAILED: protected assignment does not belong to canonical Owner");
   }
 
+  const postColCheck = await queryable.query(
+    `select exists (
+       select 1 from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'direct_entry_app_users'
+          and column_name = 'account_type'
+     ) as has_account_type`,
+  );
+  const postAccountTypeExpr = postColCheck.rows[0]?.has_account_type
+    ? "u.account_type"
+    : "'NORMAL'::text";
   const resolvedRes = await queryable.query(
     `select
        u.app_user_id::text as app_user_id,
        u.enabled as enabled,
-       u.account_type as account_type,
+       ${postAccountTypeExpr} as account_type,
        u.version as version,
        public.direct_entry_authz__internal_resolve_effective_grants(u.app_user_id) as grants
      from public.direct_entry_app_users u

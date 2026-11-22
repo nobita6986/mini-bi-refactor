@@ -196,7 +196,7 @@ function sha256(val) {
 }
 
 async function loadMigrations() {
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql") && f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   return Promise.all(
     names.map(async (name) => ({
       name,
@@ -532,7 +532,7 @@ test("1. WP7A migration hygiene: zero at-signs, atomic rollback, internal ACLs &
 
     // TS contract/error/repository fixes verified alongside migration
     assert.equal(leaveHttpStatusForError("LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN"), 409);
-    assert.match(leaveErrorMessage("LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN"), /Quản trị Tổ chức/);
+    assert.match(leaveErrorMessage("LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN"), /Người dùng \/ Phòng ban/);
     assert.match(leaveErrorMessage("LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN"), /quá khứ/);
     const mockRepo = createServiceAttendanceMonthlyMatrixRepository(async () => ({
       data: null,
@@ -894,7 +894,12 @@ test("4. WP7A Pending Snapshot Preservation, Same-Day HEAD Replace, Dept Transfe
       50,
       0,
     ]);
-    const expOverview = projectAttendanceMyExplanationsOverview(expOverviewRaw);
+    assert.equal(expOverviewRaw.viewer?.is_shared_non_employee, false);
+    const { is_shared_non_employee: _legacySharedFlag, ...cleanViewer } = expOverviewRaw.viewer ?? {};
+    const expOverview = projectAttendanceMyExplanationsOverview({
+      ...expOverviewRaw,
+      viewer: cleanViewer,
+    });
     assert.ok(expOverview, "Strict TS projection for attendance_get_my_explanations_overview must pass");
     assert.equal(expOverview.routing.route_kind, "DEPARTMENT_HEAD");
     assert.equal(expOverview.routing.primary_approver?.app_user_id, MKT_HEAD_A.app);

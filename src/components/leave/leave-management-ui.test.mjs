@@ -71,7 +71,9 @@ test("WP2 Personal Leave surface supports FULL/AM/PM request creation, FIFO lots
   assert.ok(workspaceSource.includes('dataTestId="leave-my-requests-table"'));
   assert.ok(workspaceSource.includes('dataTestId="leave-ledger-table"'));
   assert.ok(workspaceSource.includes('dataTestId="leave-withdraw-dialog"'));
-  assert.ok(workspaceSource.includes('dataTestId="leave-shared-account-banner"'));
+  // PR #28 D5: shared non-employee account banner and checkbox are completely removed from UI
+  assert.equal(workspaceSource.includes('dataTestId="leave-shared-account-banner"'), false);
+  assert.equal(workspaceSource.includes('data-testid="leave-profile-shared-checkbox"'), false);
   assert.ok(workspaceSource.includes("/api/leave/me"));
   assert.ok(workspaceSource.includes("/api/leave/requests"));
   assert.ok(workspaceSource.includes("/withdraw"));
@@ -113,7 +115,10 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
     false,
     "Department approver mutation must not send stale adminData.as_of_date as valid_from",
   );
-  assert.ok(workspaceSource.includes("MANAGE_MODULE_GRANT"));
+  // PR #28 D4 / T0-R2 / UX-03: per-account MANAGE_MODULE_GRANT is retired in favor of Permission Groups (/admin/access/groups)
+  assert.equal(workspaceSource.includes("MANAGE_MODULE_GRANT"), false);
+  assert.ok(workspaceSource.includes('data-testid="leave-group-managed-roles-card"'));
+  assert.ok(workspaceSource.includes('href="/admin/access/groups"'));
   assert.ok(workspaceSource.includes("/api/leave/admin/opening-balances/preview"));
   assert.ok(workspaceSource.includes("/api/leave/admin/opening-balances/apply"));
   assert.ok(workspaceSource.includes('data-testid="leave-opening-preview-btn"'));

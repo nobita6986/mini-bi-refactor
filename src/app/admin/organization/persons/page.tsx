@@ -5,14 +5,19 @@ import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denie
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { computeCheckpointActorScope } from "@/lib/admin/checkpoint-actor-scope";
 import { hasPairedFullAdminAuthority } from "@/lib/admin/effective-access-page-guard";
+import { parseInitialUserDirectoryRecordKind } from "@/lib/admin/user-directory-ui-model";
 import { decideOrganizationPersonsPageAccess } from "@/lib/auth/direct-entry-page-access";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "Nhân sự — Hệ thống báo cáo HRP" };
+export const metadata = { title: "Người dùng — Hệ thống báo cáo HRP" };
 
-export default async function AdminOrganizationPersonsPage() {
+export default async function AdminOrganizationPersonsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const actor = await resolveActorForRequest().catch(() => null);
   switch (decideOrganizationPersonsPageAccess({ actor })) {
     case "NOT_FOUND":
@@ -26,6 +31,8 @@ export default async function AdminOrganizationPersonsPage() {
     case "ACCESS_DENIED":
       return <AccessDenied />;
     case "ALLOW": {
+      const params = searchParams ? await searchParams : {};
+      const initialRecordKind = parseInitialUserDirectoryRecordKind(params?.record_kind);
       const checkpointActorScope =
         actor && actor.ok ? computeCheckpointActorScope(actor.actor.app_user_id) : "";
       const canManageGlobalRoles = actor?.ok
@@ -35,6 +42,7 @@ export default async function AdminOrganizationPersonsPage() {
         <PersonListManager
           checkpointActorScope={checkpointActorScope}
           canManageGlobalRoles={canManageGlobalRoles}
+          initialRecordKind={initialRecordKind}
         />
       );
     }

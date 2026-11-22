@@ -14,31 +14,20 @@
  * applied result never carries optimistic state — the caller must reload the
  * authoritative detail before unlocking.
  */
-import type { BadgeTone } from "../../components/ui/badge.tsx";
 import {
-  ACCOUNT_TYPES,
   parseLinkAccountPersonBody,
   parseSafeReason,
-  parseSetAccountTypeBody,
   parseUnlinkAccountPersonBody,
   projectLinkAccountPersonResponse,
-  projectSetAccountTypeResponse,
   projectUnlinkAccountPersonResponse,
-  type AccountType,
   type LinkAccountPersonBody,
   type LinkAccountPersonRpcProjection,
-  type SetAccountTypeBody,
-  type SetAccountTypeRpcProjection,
   type UnlinkAccountPersonBody,
   type UnlinkAccountPersonRpcProjection,
 } from "../organization/person-contract.ts";
 import {
-  ACCOUNT_LINK_STATE_VALUES,
-  ACCOUNT_TYPE_FILTER_VALUES,
   projectExistingAccount,
   projectExistingAccountList,
-  type AccountLinkStateFilter,
-  type AccountTypeFilter,
   type ExistingAccount,
   type ExistingAccountList,
 } from "../direct-entry/app-user-access-contract.ts";
@@ -55,43 +44,12 @@ export const ACCOUNT_LIST_PAGE_SIZE = 25;
 const SEARCH_MAX = 256;
 
 export type AccountEnabledFilter = "all" | "true" | "false";
-export type AccountManagementView = "all" | "special" | "unlinked";
-export { ACCOUNT_TYPE_FILTER_VALUES, ACCOUNT_LINK_STATE_VALUES };
-export type { AccountTypeFilter, AccountLinkStateFilter };
 
 export type AccountListQuery = {
   search: string;
   enabled: AccountEnabledFilter;
   page: number;
-  accountType?: AccountTypeFilter;
-  linkState?: AccountLinkStateFilter;
 };
-
-export function parseAccountManagementView(
-  raw: string | string[] | null | undefined,
-): AccountManagementView {
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === "special" || value === "unlinked") return value;
-  return "all";
-}
-
-/**
- * Maps UI-only `?view=` query parameter to strict PR-0 API filters.
- * NEVER forwards `view`, `tab`, or `account` to `/api/admin/access/accounts`.
- */
-export function resolveAccountViewFilters(view: AccountManagementView): {
-  accountType: AccountTypeFilter;
-  linkState: AccountLinkStateFilter;
-} {
-  switch (view) {
-    case "special":
-      return { accountType: "SPECIAL", linkState: "all" };
-    case "unlinked":
-      return { accountType: "NORMAL", linkState: "unlinked" };
-    case "all":
-      return { accountType: "all", linkState: "all" };
-  }
-}
 
 export type AccountMutationOutcome =
   | { kind: "applied" }
@@ -144,10 +102,6 @@ export function buildAccountListQuery(input: AccountListQuery): URLSearchParams 
   if (search.length > SEARCH_MAX) return null;
   if (!Number.isSafeInteger(input.page) || input.page < 1 || input.page > 1000) return null;
   if (input.enabled !== "all" && input.enabled !== "true" && input.enabled !== "false") return null;
-  const accountType = input.accountType ?? "all";
-  const linkState = input.linkState ?? "all";
-  if (!ACCOUNT_TYPE_FILTER_VALUES.includes(accountType)) return null;
-  if (!ACCOUNT_LINK_STATE_VALUES.includes(linkState)) return null;
 
   const query = new URLSearchParams({
     enabled: input.enabled,
@@ -155,8 +109,6 @@ export function buildAccountListQuery(input: AccountListQuery): URLSearchParams 
     page_size: String(ACCOUNT_LIST_PAGE_SIZE),
   });
   if (search) query.set("search", search);
-  if (accountType !== "all") query.set("account_type", accountType);
-  if (linkState !== "all") query.set("link_state", linkState);
   return query;
 }
 
@@ -215,67 +167,15 @@ export function newAccountIntentKey(): string {
 }
 
 // ---------------------------------------------------------------------------
-// WP4 Extensions — Account Classification & Person Link / Unlink
+// WP4 Extensions — Person Link / Unlink
 // ---------------------------------------------------------------------------
 
-export { ACCOUNT_TYPES };
 export const ACCOUNT_ORG_MAX_REASON_LENGTH = 500;
 
-export function accountTypeBadgeMeta(accountType: AccountType): {
-  label: string;
-  tone: BadgeTone;
-} {
-  switch (accountType) {
-    case "NORMAL":
-      return { label: "Cá nhân (NORMAL)", tone: "info" };
-    case "SHARED":
-      return { label: "Dùng chung (SHARED)", tone: "warning" };
-    case "SERVICE":
-      return { label: "Dịch vụ (SERVICE)", tone: "neutral" };
-  }
-}
-
 export function canLinkPersonToAccount(
-  account: Pick<ExistingAccount, "account_type" | "active_person_link">,
+  account: Pick<ExistingAccount, "active_person_link">,
 ): boolean {
-  return account.account_type === "NORMAL" && account.active_person_link === null;
-}
-
-export function buildSetAccountClassificationRequest(input: {
-  expectedAccountVersion: number;
-  accountType: AccountType;
-  reason: string;
-  idempotencyKey: string;
-}):
-  | { ok: true; idempotencyKey: string; body: SetAccountTypeBody }
-  | { ok: false; message: string } {
-  const verFailure =
-    validateVersion(input.expectedAccountVersion) ??
-    (input.expectedAccountVersion < 1 ? "Dữ liệu đồng bộ không hợp lệ. Vui lòng tải lại." : null);
-  if (verFailure) return { ok: false, message: verFailure };
-
-  const idemFailure = validateUuid(input.idempotencyKey);
-  if (idemFailure) return { ok: false, message: idemFailure };
-
-  const reasonCheck = parseSafeReason(input.reason);
-  if (!reasonCheck.ok) {
-    return {
-      ok: false,
-      message: "Lý do thao tác là bắt buộc (1–500 ký tự, không chứa ký tự điều khiển).",
-    };
-  }
-
-  const candidate: SetAccountTypeBody = {
-    account_type: input.accountType,
-    expected_account_version: input.expectedAccountVersion,
-    reason: reasonCheck.value,
-    idempotency_key: input.idempotencyKey.toLowerCase(),
-  };
-  const verified = parseSetAccountTypeBody(candidate, candidate.idempotency_key);
-  if (!verified.ok) {
-    return { ok: false, message: verified.message };
-  }
-  return { ok: true, idempotencyKey: verified.value.idempotency_key, body: verified.value };
+  return account.active_person_link === null;
 }
 
 export function buildLinkAccountPersonRequest(input: {
@@ -406,11 +306,6 @@ function unwrapAccountOrgOkData(payload: unknown): Record<string, unknown> | nul
 export function classifyAccountOrgMutation(
   status: number,
   payload: unknown,
-  operation: "classification",
-): AccountOrgMutationOutcome<SetAccountTypeRpcProjection>;
-export function classifyAccountOrgMutation(
-  status: number,
-  payload: unknown,
   operation: "link",
 ): AccountOrgMutationOutcome<LinkAccountPersonRpcProjection>;
 export function classifyAccountOrgMutation(
@@ -421,18 +316,16 @@ export function classifyAccountOrgMutation(
 export function classifyAccountOrgMutation(
   status: number,
   payload: unknown,
-  operation: "classification" | "link" | "unlink",
+  operation: "link" | "unlink",
 ): AccountOrgMutationOutcome<
-  SetAccountTypeRpcProjection | LinkAccountPersonRpcProjection | UnlinkAccountPersonRpcProjection
+  LinkAccountPersonRpcProjection | UnlinkAccountPersonRpcProjection
 > {
   if (status === 200 || (operation === "link" && status === 201)) {
     const data = unwrapAccountOrgOkData(payload);
     const projected = data
-      ? operation === "classification"
-        ? projectSetAccountTypeResponse(data)
-        : operation === "link"
-          ? projectLinkAccountPersonResponse(data)
-          : projectUnlinkAccountPersonResponse(data)
+      ? operation === "link"
+        ? projectLinkAccountPersonResponse(data)
+        : projectUnlinkAccountPersonResponse(data)
       : null;
 
     if (projected) {
@@ -486,24 +379,6 @@ export function classifyAccountOrgMutation(
     };
   }
 
-  if (code === "ACCOUNT_HAS_PERSON_OR_PERSONAL_ASSIGNMENTS") {
-    return {
-      kind: "personal-assignments-block",
-      message:
-        "Tài khoản đang liên kết hồ sơ người hoặc còn phân công cá nhân đang hiệu lực nên không thể đổi sang SHARED/SERVICE. Vui lòng ngắt liên kết và xử lý phân công tại màn hình tương ứng; hệ thống không tự động thu hồi.",
-      preserveIdempotencyKey: false,
-    };
-  }
-
-  if (code === "ACCOUNT_TYPE_LINK_FORBIDDEN") {
-    return {
-      kind: "link-forbidden",
-      message:
-        "Tài khoản phân loại SHARED hoặc SERVICE không được phép liên kết hồ sơ nhân sự nội bộ.",
-      preserveIdempotencyKey: false,
-    };
-  }
-
   if (code === "IDEMPOTENCY_IN_PROGRESS" || status >= 500 || status === 0) {
     return {
       kind: "uncertain",
@@ -532,7 +407,7 @@ export function classifyAccountOrgMutation(
   }
 
   const invalidMessages: Record<string, string> = {
-    PERSON_INACTIVE: "Nhân sự được chọn đã ngừng hoạt động (INACTIVE), không thể liên kết tài khoản.",
+    PERSON_INACTIVE: "Nhân sự được chọn đã ngừng làm việc, không thể liên kết tài khoản.",
     ACCOUNT_NOT_FOUND: "Không tìm thấy tài khoản trên máy chủ.",
     PERSON_NOT_FOUND: "Không tìm thấy hồ sơ nhân sự được chọn.",
     ORG_VALIDATION_ERROR: "Thông tin gửi lên không hợp lệ. Vui lòng kiểm tra lại.",
@@ -547,11 +422,8 @@ export function classifyAccountOrgMutation(
 }
 
 export type {
-  AccountType,
   LinkAccountPersonBody,
   LinkAccountPersonRpcProjection,
-  SetAccountTypeBody,
-  SetAccountTypeRpcProjection,
   UnlinkAccountPersonBody,
   UnlinkAccountPersonRpcProjection,
 };

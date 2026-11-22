@@ -84,7 +84,7 @@ async function bootDb() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   await db.exec("alter table auth.users add column if not exists email text;");
-  const files = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
+  const files = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql") && n < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql").sort();
   for (const f of files) {
     await db.exec(await readFile(path.join(MIGRATION_DIR, f), "utf8"));
   }

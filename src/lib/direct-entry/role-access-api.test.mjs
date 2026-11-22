@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -77,25 +77,21 @@ function makeJsonDelete(urlPath, payload, headers = {}) {
   });
 }
 
-test("Next.js WP5B-1 admin access routes enforce nodejs/force-dynamic and env gates", () => {
-  const routes = [
-    { rel: "../../app/api/admin/access/roles/route.ts", requireMutationsGate: false, fn: "listRoles" },
-    { rel: "../../app/api/admin/access/accounts-summary/route.ts", requireMutationsGate: false, fn: "listAccountsSummary" },
-    { rel: "../../app/api/admin/access/accounts/[accountRef]/access/route.ts", requireMutationsGate: false, fn: "getAccountAccess" },
-    { rel: "../../app/api/admin/access/accounts/[accountRef]/roles/route.ts", requireMutationsGate: true, fn: "assignGlobalRole" },
-    { rel: "../../app/api/admin/access/accounts/[accountRef]/roles/[assignmentId]/route.ts", requireMutationsGate: true, fn: "revokeGlobalRole" },
+test("PR #28 T0-R1/R2: retired WP5B-1 legacy per-account global role routes are deleted (group-only cutover)", () => {
+  const retiredRoutes = [
+    "../../app/api/admin/access/roles/route.ts",
+    "../../app/api/admin/access/accounts-summary/route.ts",
+    "../../app/api/admin/access/accounts/[accountRef]/access/route.ts",
+    "../../app/api/admin/access/accounts/[accountRef]/roles/route.ts",
+    "../../app/api/admin/access/accounts/[accountRef]/roles/[assignmentId]/route.ts",
   ];
 
-  for (const route of routes) {
-    const source = readFileSync(new URL(route.rel, import.meta.url), "utf8");
-    assert.match(source, /import\s+"server-only"/, `${route.rel} requires server-only`);
-    assert.match(source, /export const runtime = "nodejs"/, `${route.rel} requires nodejs runtime`);
-    assert.match(source, /export const dynamic = "force-dynamic"/, `${route.rel} requires force-dynamic`);
-    assert.match(source, /process\.env\.DIRECT_ENTRY_API_ENABLED !== "true"/, `${route.rel} gates DIRECT_ENTRY_API_ENABLED`);
-    assert.ok(source.includes(`handlers.${route.fn}(`), `${route.rel} delegates to handlers.${route.fn}`);
-    if (route.requireMutationsGate) {
-      assert.match(source, /process\.env\.AUTHZ_ROLE_MUTATIONS_ENABLED !== "true"/, `${route.rel} gates AUTHZ_ROLE_MUTATIONS_ENABLED`);
-    }
+  for (const rel of retiredRoutes) {
+    assert.equal(
+      existsSync(new URL(rel, import.meta.url)),
+      false,
+      `Retired legacy role route must stay deleted: ${rel}`,
+    );
   }
 });
 
@@ -121,7 +117,6 @@ test("role-access-repository classifies all SQLSTATE and token errors determinis
     "ACCOUNT_DISABLED",
     "ROLE_ALREADY_ASSIGNED",
     "ROLE_ASSIGNMENT_ALREADY_ENDED",
-    "ACCOUNT_TYPE_ROLE_FORBIDDEN",
   ]) {
     const mapped = classifyRoleAccessSqlError({ code: "PT409", message: token });
     assert.equal(mapped.status, 409, token);

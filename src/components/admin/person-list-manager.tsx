@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import {
   AccountProvisionAndLinkStepper,
@@ -28,16 +28,10 @@ import { OffsetPager } from "@/components/ui/offset-pager";
 import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import { StatusBanner } from "@/components/ui/status-banner";
 import {
-  buildPersonListQuery,
   classifyPersonOrgReadError,
   DEFAULT_ORG_PAGE_SIZE,
   formatOrgDate,
-  personStatusBadge,
-  projectPersonListEnvelope,
   sanitizeOrgSearchInput,
-  type ListPersonsRpcProjection,
-  type PersonFilterStatus,
-  type PersonLinkState,
 } from "@/lib/admin/person-org-ui-model";
 import {
   clearVerifiedCheckpoint,
@@ -48,13 +42,24 @@ import {
   type ProvisionCheckpointV2,
 } from "@/lib/admin/provision-checkpoint-v2";
 import {
+  buildUserDirectoryQuery,
+  projectUserDirectoryListEnvelope,
+  resolveUserDirectoryDetailHref,
+  userDirectoryLoginBadge,
+  userDirectoryWorkStatusBadge,
+  type ListUserDirectoryRpcProjection,
+  type UserDirectoryLoginStateFilter,
+  type UserDirectoryPersonStatusFilter,
+  type UserDirectoryRecordKindFilter,
+} from "@/lib/admin/user-directory-ui-model";
+import {
   projectDepartmentListResponse,
   type DepartmentProjection,
 } from "@/lib/departments/department-contract";
 
-type PersonListLoadState =
+type UserDirectoryLoadState =
   | { kind: "loading" }
-  | { kind: "ready"; list: ListPersonsRpcProjection }
+  | { kind: "ready"; list: ListUserDirectoryRpcProjection }
   | { kind: "denied"; message: string; unauthenticated: boolean }
   | { kind: "error"; message: string; retryable: boolean };
 
@@ -69,45 +74,66 @@ function unwrapDepartmentsOk(payload: unknown): Record<string, unknown> | null {
   return rest;
 }
 
-function summarizeCheckpointStep(cp: ProvisionCheckpointV2): string {
+function summarizePendingStep(cp: ProvisionCheckpointV2): string {
   if (cp.step1_person.status === "UNCERTAIN" || cp.step1_person.status === "IN_FLIGHT") {
-    return "Bước 1 (Tạo hồ sơ nhân viên) chưa nhận xác nhận.";
+    return "Bước tạo hồ sơ nhân viên đang chờ xác nhận từ máy chủ.";
   }
   if (cp.step2_account.status === "NEEDS_RECONCILE") {
-    return "Bước 2 (Mở tài khoản đăng nhập) đang chờ đối chiếu kết quả.";
+    return "Bước mở tài khoản đăng nhập đang chờ kiểm tra lại kết quả.";
   }
   if (cp.step2_account.status === "UNCERTAIN" || cp.step2_account.status === "IN_FLIGHT") {
-    return "Bước 2 (Mở tài khoản đăng nhập) chưa xác nhận; hồ sơ nhân viên đã lưu.";
+    return "Bước mở tài khoản đăng nhập chưa nhận xác nhận; hồ sơ nhân viên đã lưu.";
   }
   if (cp.step3_link.status !== "COMMITTED" && cp.step3_link.status !== "SKIPPED") {
-    return "Bước 3 (Gắn tài khoản vào hồ sơ nhân viên) đang chờ hoàn tất.";
+    return "Bước gắn tài khoản vào hồ sơ nhân viên đang chờ hoàn tất.";
   }
-  if (cp.step4_roles.some((item) => item.status !== "COMMITTED")) {
-    return "Bước 4 (Cấp vai trò khởi tạo) còn vai trò chưa hoàn tất.";
+  if (
+    (cp.step4_groups ?? []).some((item) => item.status !== "COMMITTED") ||
+    cp.step4_roles.some((item) => item.status !== "COMMITTED")
+  ) {
+    return "Bước xếp nhóm quyền khởi tạo còn mục chưa hoàn tất.";
   }
-  return "Đang chờ hoàn tất hoặc đối chiếu với máy chủ.";
+  if (
+    cp.step5_recruiter?.enabled &&
+    cp.step5_recruiter.status !== "COMMITTED" &&
+    cp.step5_recruiter.status !== "SKIPPED"
+  ) {
+    return "Bước kích hoạt tuyển dụng / xếp tổ đội còn đang chờ hoàn tất.";
+  }
+  return "Đang chờ hoàn tất bước cuối cùng với máy chủ.";
 }
 
 export function PersonListManager({
   checkpointActorScope = "",
   canManageGlobalRoles = true,
+  initialRecordKind = "all",
   storage,
   originOverride,
 }: {
   checkpointActorScope?: string;
   canManageGlobalRoles?: boolean;
+  initialRecordKind?: UserDirectoryRecordKindFilter;
   storage?: CheckpointStorageLike | null;
   originOverride?: string;
 } = {}) {
+  const searchInputId = useId();
+  const recordKindId = useId();
+  const personStatusId = useId();
+  const loginStateId = useId();
+  const deptFilterId = useId();
+
   const [searchInput, setSearchInput] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<PersonFilterStatus>("active");
+  const [recordKindFilter, setRecordKindFilter] =
+    useState<UserDirectoryRecordKindFilter>(initialRecordKind);
+  const [personStatusFilter, setPersonStatusFilter] =
+    useState<UserDirectoryPersonStatusFilter>("all");
+  const [loginStateFilter, setLoginStateFilter] = useState<UserDirectoryLoginStateFilter>("all");
   const [departmentFilter, setDepartmentFilter] = useState<string>("all");
-  const [linkStateFilter, setLinkStateFilter] = useState<PersonLinkState>("all");
   const [page, setPage] = useState(1);
   const [reloadToken, setReloadToken] = useState(0);
 
-  const [listState, setListState] = useState<PersonListLoadState>({ kind: "loading" });
+  const [listState, setListState] = useState<UserDirectoryLoadState>({ kind: "loading" });
   const [departments, setDepartments] = useState<readonly DepartmentProjection[]>([]);
   const listReqSeqRef = useRef(0);
   const deptReqSeqRef = useRef(0);
@@ -153,7 +179,6 @@ export function PersonListManager({
       setCorruptCheckpointMessage(result.message);
       return true;
     }
-    // For `foreign_actor_or_origin` or `none`, `readVerifiedCheckpoint` leaves storage untouched.
     setPendingCheckpoint(null);
     setCorruptCheckpointMessage(null);
     return false;
@@ -238,7 +263,7 @@ export function PersonListManager({
           setDepartments(projected.departments);
         }
       } catch {
-        // Ignore dropdown fetch error; primary persons list surfaces full error state.
+        // Optional dropdown degrades cleanly; main user directory surfaces errors.
       } finally {
         tracked.release();
       }
@@ -257,13 +282,14 @@ export function PersonListManager({
     void (async () => {
       const filter = {
         search: appliedSearch,
-        status: statusFilter,
+        recordKind: recordKindFilter,
+        personStatus: personStatusFilter,
+        loginState: loginStateFilter,
         departmentId: departmentFilter === "all" ? null : departmentFilter,
-        linkState: linkStateFilter,
         page,
         pageSize: DEFAULT_ORG_PAGE_SIZE,
       };
-      const query = buildPersonListQuery(filter);
+      const query = buildUserDirectoryQuery(filter);
       if (!query) {
         if (!workspaceGuard.isActive(tracked.epoch, controller) || reqSeq !== listReqSeqRef.current) {
           return;
@@ -283,7 +309,7 @@ export function PersonListManager({
       setListState({ kind: "loading" });
       let response: Response;
       try {
-        response = await fetch(`/api/admin/organization/persons?${query.toString()}`, {
+        response = await fetch(`/api/admin/organization/user-directory?${query.toString()}`, {
           method: "GET",
           cache: "no-store",
           signal: controller.signal,
@@ -297,7 +323,7 @@ export function PersonListManager({
         }
         setListState({
           kind: "error",
-          message: "Không thể kết nối tới máy chủ để tải danh sách Nhân sự.",
+          message: "Không thể kết nối tới máy chủ để tải danh sách Người dùng.",
           retryable: true,
         });
         return;
@@ -328,11 +354,11 @@ export function PersonListManager({
         return;
       }
 
-      const projected = projectPersonListEnvelope(payload, filter);
+      const projected = projectUserDirectoryListEnvelope(payload, filter);
       if (!projected) {
         setListState({
           kind: "error",
-          message: "Phản hồi danh sách Nhân sự không khớp cấu trúc chuẩn.",
+          message: "Phản hồi danh sách Người dùng chưa đầy đủ.",
           retryable: true,
         });
         return;
@@ -350,10 +376,11 @@ export function PersonListManager({
     appliedSearch,
     departmentFilter,
     handleSessionLost,
-    linkStateFilter,
+    loginStateFilter,
     page,
+    personStatusFilter,
+    recordKindFilter,
     reloadToken,
-    statusFilter,
     workspaceGuard,
   ]);
 
@@ -390,9 +417,10 @@ export function PersonListManager({
   const resetFilters = () => {
     setSearchInput("");
     setAppliedSearch("");
-    setStatusFilter("active");
+    setRecordKindFilter("all");
+    setPersonStatusFilter("all");
+    setLoginStateFilter("all");
     setDepartmentFilter("all");
-    setLinkStateFilter("all");
     setPage(1);
   };
 
@@ -407,17 +435,18 @@ export function PersonListManager({
       className="max-w-none px-0 py-0 sm:px-0 sm:py-0 lg:px-0"
     >
       <PageHeader
-        eyebrow="Quản trị hệ thống · Nhân sự"
-        title="Nhân sự"
+        eyebrow="Quản trị hệ thống · Người dùng"
+        title="Người dùng"
         badge={
           readyList ? (
-            <StatusBadge tone="primary">{readyList.total} nhân sự</StatusBadge>
+            <StatusBadge tone="primary">{readyList.total} người dùng</StatusBadge>
           ) : null
         }
-        description="Quản lý hồ sơ nhân viên, tài khoản đăng nhập, vai trò và phân công phòng ban trong một luồng thống nhất."
+        description="Thêm người dùng, xếp phòng ban và nhóm quyền, khóa hoặc mở đăng nhập và đặt lại mật khẩu tại một nơi duy nhất."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button
+              type="button"
               variant="secondary"
               size="md"
               onClick={reloadList}
@@ -426,56 +455,95 @@ export function PersonListManager({
               Làm mới
             </Button>
             <Button
+              type="button"
               variant="primary"
               size="md"
               onClick={openCreateStepper}
               disabled={listState.kind === "denied" || stepperMode !== null || hasBlockingCheckpoint}
             >
-              + Thêm nhân viên
+              + Thêm người dùng
             </Button>
           </div>
         }
       />
 
-      {listState.kind !== "denied" ? (
-        <nav
-          aria-label="Công cụ quản trị phụ"
-          data-testid="persons-utility-bar"
-          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-muted/35 px-3.5 py-2.5 text-xs"
+      {readyList && listState.kind !== "denied" ? (
+        <div
+          className="flex flex-wrap items-center gap-2 text-xs"
+          data-testid="user-directory-summary-strip"
         >
-          <span className="font-medium text-muted">Công cụ quản trị nâng cao:</span>
-          <div className="flex flex-wrap items-center gap-2">
-            <Link
-              href="/admin/access/accounts?view=special"
-              className={buttonClasses({ variant: "secondary", size: "sm" })}
+          <button
+            type="button"
+            onClick={() => {
+              setRecordKindFilter("all");
+              setPage(1);
+            }}
+            className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+              recordKindFilter === "all"
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border bg-surface text-muted hover:text-foreground"
+            }`}
+          >
+            Tất cả ({readyList.summary.total_all})
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRecordKindFilter("person");
+              setPage(1);
+            }}
+            className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+              recordKindFilter === "person"
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border bg-surface text-muted hover:text-foreground"
+            }`}
+          >
+            Hồ sơ nhân viên ({readyList.summary.linked_count + readyList.summary.person_only_count})
+          </button>
+          {readyList.summary.unlinked_account_count > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setRecordKindFilter("unlinked_account");
+                setPage(1);
+              }}
+              className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+                recordKindFilter === "unlinked_account"
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-surface text-muted hover:text-foreground"
+              }`}
             >
-              Tài khoản đặc biệt
-            </Link>
-            <Link
-              href="/admin/access/accounts?view=unlinked"
-              className={buttonClasses({ variant: "secondary", size: "sm" })}
+              Tài khoản chưa gắn hồ sơ ({readyList.summary.unlinked_account_count})
+            </button>
+          ) : null}
+          {readyList.summary.conflict_count > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setRecordKindFilter("conflict");
+                setPage(1);
+              }}
+              className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+                recordKindFilter === "conflict"
+                  ? "border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                  : "border-amber-400/60 bg-amber-500/5 text-amber-700 dark:text-amber-300"
+              }`}
             >
-              Đối chiếu dữ liệu cũ
-            </Link>
-            <Link
-              href="/admin/access/effective"
-              className={buttonClasses({ variant: "secondary", size: "sm" })}
-            >
-              Quyền hiệu lực
-            </Link>
-          </div>
-        </nav>
+              Cần kiểm tra xung đột ({readyList.summary.conflict_count})
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {pendingCheckpoint && listState.kind !== "denied" ? (
         <Alert
           tone="warning"
           role="status"
-          title="Có tiến trình thêm nhân viên / mở đăng nhập đang dang dở"
+          title="Có tiến trình thêm người dùng / mở đăng nhập đang dang dở"
         >
           <div className="space-y-2">
             <p>
-              Nhân viên{" "}
+              Người dùng{" "}
               <strong>
                 {pendingCheckpoint.step1_person.existing_full_name ??
                   pendingCheckpoint.step1_person.payload_snapshot?.full_name ??
@@ -487,16 +555,16 @@ export function PersonListManager({
                   pendingCheckpoint.step1_person.payload_snapshot?.employee_code ??
                   "—"}
               </span>
-              ) —{" "}
-              {summarizeCheckpointStep(pendingCheckpoint)}
+              ) — {summarizePendingStep(pendingCheckpoint)}
             </p>
             <p className="text-xs">
-              Nút <strong>+ Thêm nhân viên</strong> và <strong>Mở đăng nhập</strong> tạm khóa để
-              bảo toàn dữ liệu đối chiếu. Hãy bấm <strong>Tiếp tục / Đối chiếu</strong> để hoàn tất
-              hoặc xác nhận hủy bản nháp cũ trước khi mở luồng mới.
+              Nút <strong>+ Thêm người dùng</strong> và <strong>Mở đăng nhập</strong> tạm khóa để
+              tránh tạo trùng dữ liệu. Bấm <strong>Tiếp tục hoàn tất</strong> để đồng bộ lại với
+              máy chủ.
             </p>
             <div>
               <Button
+                type="button"
                 variant="primary"
                 size="sm"
                 disabled={stepperMode !== null}
@@ -504,7 +572,7 @@ export function PersonListManager({
                   setStepperMode({ kind: "resume-checkpoint", checkpoint: pendingCheckpoint })
                 }
               >
-                Tiếp tục / Đối chiếu
+                Tiếp tục hoàn tất
               </Button>
             </div>
           </div>
@@ -515,31 +583,32 @@ export function PersonListManager({
         <Alert
           tone="warning"
           role="alert"
-          title="Bản nháp phục hồi trong bộ nhớ phiên không hợp lệ"
+          title="Tiến trình lưu tạm trong trình duyệt không thể đọc được"
         >
           <div className="space-y-2">
             <p>{corruptCheckpointMessage}</p>
             <p className="text-xs">
-              Hệ thống không tự ghi đè bản nháp lỗi. Sau khi đối chiếu thủ công, hãy bấm nút bên
-              dưới để xóa bản nháp lỗi và mở lại thao tác tạo mới.
+              Hệ thống không tự ghi đè dữ liệu lưu tạm lỗi. Hãy kiểm tra lại danh sách bên dưới rồi
+              bấm xóa bản lưu tạm lỗi để mở lại thao tác thêm mới.
             </p>
             <div>
               <Button
+                type="button"
                 variant="danger-outline"
                 size="sm"
                 onClick={handleClearCorruptCheckpoint}
               >
-                Đã đối chiếu thủ công · Xóa bản nháp lỗi
+                Đã kiểm tra · Xóa bản lưu tạm lỗi
               </Button>
             </div>
           </div>
         </Alert>
       ) : null}
 
-      <StatusBanner tone="info" title="Tách biệt hồ sơ nhân viên và tài khoản đăng nhập">
-        Ngừng hoạt động hồ sơ nhân viên <strong>không tự khóa tài khoản đăng nhập</strong>, và khóa
-        đăng nhập không làm thay đổi trạng thái làm việc. Quản lý mật khẩu, khóa/mở đăng nhập và
-        vai trò ngay trong hồ sơ chi tiết của từng nhân viên.
+      <StatusBanner tone="info" title="Quản lý tập trung trạng thái làm việc và đăng nhập">
+        Ngừng làm việc <strong>không tự khóa đăng nhập</strong>, và khóa đăng nhập không làm mất
+        lịch sử làm việc, chấm công hay báo cáo. Mọi tài khoản cá nhân đang có đều hiển thị và quản
+        lý trực tiếp trong danh sách này.
       </StatusBanner>
 
       {listState.kind !== "denied" ? (
@@ -548,15 +617,15 @@ export function PersonListManager({
           summary={
             readyList ? (
               <span>
-                Hiển thị {readyList.persons.length} / {readyList.total} nhân sự (ngày hiệu lực tổ
-                chức: {formatOrgDate(readyList.authorization_date)})
+                Hiển thị {readyList.entries.length} / {readyList.total} người dùng (ngày hiệu lực:{" "}
+                {formatOrgDate(readyList.authorization_date)})
               </span>
             ) : (
-              <span>Bộ lọc máy chủ áp dụng trực tiếp trên toàn bộ danh sách Nhân sự</span>
+              <span>Bộ lọc máy chủ áp dụng trên toàn bộ danh sách Người dùng</span>
             )
           }
           actions={
-            <Button variant="ghost" size="sm" onClick={resetFilters}>
+            <Button type="button" variant="ghost" size="sm" onClick={resetFilters}>
               Đặt lại bộ lọc
             </Button>
           }
@@ -564,18 +633,18 @@ export function PersonListManager({
           <search>
             <form
               onSubmit={applySearch}
-              className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5"
+              className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6"
             >
               <div className="sm:col-span-2 xl:col-span-2">
                 <label
-                  htmlFor="person-search-input"
+                  htmlFor={searchInputId}
                   className="mb-1 block text-xs font-medium text-muted"
                 >
                   Tìm kiếm
                 </label>
                 <div className="flex gap-2">
                   <input
-                    id="person-search-input"
+                    id={searchInputId}
                     type="search"
                     value={searchInput}
                     onChange={(event) =>
@@ -591,36 +660,74 @@ export function PersonListManager({
               </div>
 
               <div>
-                <label
-                  htmlFor="person-status-filter"
-                  className="mb-1 block text-xs font-medium text-muted"
-                >
-                  Trạng thái hồ sơ
+                <label htmlFor={recordKindId} className="mb-1 block text-xs font-medium text-muted">
+                  Nhóm hồ sơ
                 </label>
                 <select
-                  id="person-status-filter"
-                  value={statusFilter}
+                  id={recordKindId}
+                  value={recordKindFilter}
                   onChange={(event) => {
-                    setStatusFilter(event.target.value as PersonFilterStatus);
+                    setRecordKindFilter(event.target.value as UserDirectoryRecordKindFilter);
                     setPage(1);
                   }}
                   className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
                 >
-                  <option value="active">Đang hoạt động</option>
-                  <option value="inactive">Ngừng hoạt động</option>
-                  <option value="all">Tất cả trạng thái</option>
+                  <option value="all">Tất cả người dùng</option>
+                  <option value="person">Hồ sơ nhân viên</option>
+                  <option value="unlinked_account">Tài khoản chưa gắn hồ sơ</option>
+                  <option value="conflict">Cần kiểm tra xung đột</option>
                 </select>
               </div>
 
               <div>
                 <label
-                  htmlFor="person-department-filter"
+                  htmlFor={personStatusId}
                   className="mb-1 block text-xs font-medium text-muted"
                 >
-                  Phòng ban hiện hành
+                  Trạng thái làm việc
                 </label>
                 <select
-                  id="person-department-filter"
+                  id={personStatusId}
+                  value={personStatusFilter}
+                  onChange={(event) => {
+                    setPersonStatusFilter(event.target.value as UserDirectoryPersonStatusFilter);
+                    setPage(1);
+                  }}
+                  className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
+                >
+                  <option value="all">Tất cả</option>
+                  <option value="active">Đang làm việc</option>
+                  <option value="inactive">Ngừng làm việc</option>
+                  <option value="none">Chưa gắn hồ sơ</option>
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor={loginStateId} className="mb-1 block text-xs font-medium text-muted">
+                  Đăng nhập
+                </label>
+                <select
+                  id={loginStateId}
+                  value={loginStateFilter}
+                  onChange={(event) => {
+                    setLoginStateFilter(event.target.value as UserDirectoryLoginStateFilter);
+                    setPage(1);
+                  }}
+                  className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
+                >
+                  <option value="all">Tất cả</option>
+                  <option value="enabled">Đang mở đăng nhập</option>
+                  <option value="disabled">Đã khóa đăng nhập</option>
+                  <option value="no_account">Chưa mở đăng nhập</option>
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor={deptFilterId} className="mb-1 block text-xs font-medium text-muted">
+                  Phòng ban
+                </label>
+                <select
+                  id={deptFilterId}
                   value={departmentFilter}
                   onChange={(event) => {
                     setDepartmentFilter(event.target.value);
@@ -636,28 +743,6 @@ export function PersonListManager({
                   ))}
                 </select>
               </div>
-
-              <div>
-                <label
-                  htmlFor="person-link-filter"
-                  className="mb-1 block text-xs font-medium text-muted"
-                >
-                  Tài khoản đăng nhập
-                </label>
-                <select
-                  id="person-link-filter"
-                  value={linkStateFilter}
-                  onChange={(event) => {
-                    setLinkStateFilter(event.target.value as PersonLinkState);
-                    setPage(1);
-                  }}
-                  className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
-                >
-                  <option value="all">Tất cả</option>
-                  <option value="linked">Đã có tài khoản (mở &amp; khóa)</option>
-                  <option value="unlinked">Chưa có tài khoản</option>
-                </select>
-              </div>
             </form>
           </search>
         </FilterToolbar>
@@ -666,7 +751,7 @@ export function PersonListManager({
       {listState.kind === "loading" ? (
         <Card>
           <p role="status" className="py-10 text-center text-sm text-muted">
-            Đang tải danh sách Nhân sự…
+            Đang tải danh sách Người dùng…
           </p>
         </Card>
       ) : null}
@@ -696,10 +781,10 @@ export function PersonListManager({
       {listState.kind === "error" ? (
         <Card>
           <div className="space-y-3">
-            <ErrorState title="Không tải được danh sách Nhân sự" detail={listState.message} />
+            <ErrorState title="Không tải được danh sách Người dùng" detail={listState.message} />
             {listState.retryable ? (
               <div>
-                <Button variant="secondary" onClick={reloadList}>
+                <Button type="button" variant="secondary" onClick={reloadList}>
                   Thử tải lại
                 </Button>
               </div>
@@ -708,28 +793,29 @@ export function PersonListManager({
         </Card>
       ) : null}
 
-      {readyList && readyList.persons.length === 0 ? (
+      {readyList && readyList.entries.length === 0 ? (
         <Card>
           <div className="space-y-4">
             <EmptyState
-              title="Chưa có hồ sơ nhân sự phù hợp"
-              description="Thử thay đổi bộ lọc tìm kiếm hoặc thêm nhân viên mới."
+              title="Chưa có người dùng phù hợp"
+              description="Thử thay đổi bộ lọc tìm kiếm hoặc thêm người dùng mới."
             />
             <div className="flex justify-center">
               <Button
+                type="button"
                 variant="primary"
                 size="md"
                 onClick={openCreateStepper}
                 disabled={listState.kind === "denied" || stepperMode !== null || hasBlockingCheckpoint}
               >
-                + Thêm nhân viên
+                + Thêm người dùng
               </Button>
             </div>
           </div>
         </Card>
       ) : null}
 
-      {readyList && readyList.persons.length > 0 ? (
+      {readyList && readyList.entries.length > 0 ? (
         <DataTableContainer
           dataTestId="persons-table-container"
           footer={
@@ -744,23 +830,20 @@ export function PersonListManager({
             />
           }
         >
-          <table className={DATA_TABLE_CLASS}>
+          <table className={`r22-card-table ${DATA_TABLE_CLASS}`}>
             <thead className={DATA_TABLE_HEAD_CLASS}>
               <tr>
                 <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                  Nhân viên
+                  Người dùng
                 </th>
                 <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                  Trạng thái
+                  Trạng thái làm việc
                 </th>
                 <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                  Phòng ban hiện hành
+                  Phòng ban
                 </th>
                 <th scope="col" className={DATA_TABLE_TH_CLASS}>
                   Đăng nhập
-                </th>
-                <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                  Ngày gia nhập
                 </th>
                 <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
                   Thao tác
@@ -768,48 +851,56 @@ export function PersonListManager({
               </tr>
             </thead>
             <tbody>
-              {readyList.persons.map((person) => {
-                const statusMeta = personStatusBadge(person.status);
+              {readyList.entries.map((entry) => {
+                const detailHref = resolveUserDirectoryDetailHref(entry);
+                const workBadge = userDirectoryWorkStatusBadge(entry);
+                const loginBadge = userDirectoryLoginBadge(entry.login_state);
                 const canQuickOpenLogin =
-                  person.status === "ACTIVE" && person.active_account_link === null;
+                  entry.record_kind === "PERSON_ONLY" &&
+                  entry.person !== null &&
+                  entry.person.status === "ACTIVE" &&
+                  !entry.identity_mutation_blocked;
+
                 return (
-                  <tr key={person.person_id} className={DATA_TABLE_ROW_CLASS}>
-                    <td data-label="Nhân viên" className={DATA_TABLE_TD_CLASS}>
+                  <tr key={entry.directory_entry_key} className={DATA_TABLE_ROW_CLASS}>
+                    <td data-label="Người dùng" className={DATA_TABLE_TD_CLASS}>
                       <div className="space-y-0.5">
                         <Link
-                          href={`/admin/organization/persons/${encodeURIComponent(person.person_id)}`}
+                          href={detailHref}
                           className="font-semibold text-foreground hover:text-primary hover:underline"
                         >
-                          {person.full_name}
+                          {entry.display_name}
                         </Link>
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="font-mono text-xs text-muted">
-                            {person.employee_code}
-                          </span>
-                          {person.recruiter_id ? (
-                            <StatusBadge tone="info">Hồ sơ tính công TD</StatusBadge>
+                          {entry.person ? (
+                            <span className="font-mono text-xs text-muted">
+                              {entry.person.employee_code}
+                            </span>
+                          ) : null}
+                          {entry.person?.recruiter_id ? (
+                            <StatusBadge tone="info">Tuyển dụng</StatusBadge>
                           ) : null}
                         </div>
                       </div>
                     </td>
 
-                    <td data-label="Trạng thái" className={DATA_TABLE_TD_CLASS}>
-                      <StatusBadge tone={statusMeta.tone} dot>
-                        {statusMeta.label}
+                    <td data-label="Trạng thái làm việc" className={DATA_TABLE_TD_CLASS}>
+                      <StatusBadge tone={workBadge.tone} dot>
+                        {workBadge.label}
                       </StatusBadge>
                     </td>
 
-                    <td data-label="Phòng ban hiện hành" className={DATA_TABLE_TD_CLASS}>
-                      {person.active_department ? (
+                    <td data-label="Phòng ban" className={DATA_TABLE_TD_CLASS}>
+                      {entry.person?.active_department ? (
                         <Link
-                          href={`/admin/departments/${encodeURIComponent(person.active_department.department_id)}`}
+                          href={`/admin/departments/${encodeURIComponent(entry.person.active_department.department_id)}`}
                           className="inline-flex flex-col hover:underline"
                         >
                           <span className="font-medium text-foreground">
-                            {person.active_department.name}
+                            {entry.person.active_department.name}
                           </span>
                           <span className="font-mono text-xs text-muted">
-                            {person.active_department.code}
+                            {entry.person.active_department.code}
                           </span>
                         </Link>
                       ) : (
@@ -818,54 +909,39 @@ export function PersonListManager({
                     </td>
 
                     <td data-label="Đăng nhập" className={DATA_TABLE_TD_CLASS}>
-                      {person.active_account_link ? (
-                        <div className="space-y-1">
-                          {person.active_account_link.login_id ? (
-                            <p className="font-mono text-xs font-medium text-foreground">
-                              {person.active_account_link.login_id}
-                            </p>
-                          ) : null}
-                          <StatusBadge
-                            tone={person.active_account_link.enabled ? "success" : "warning"}
-                            dot
-                          >
-                            {person.active_account_link.enabled
-                              ? "Đang mở đăng nhập"
-                              : "Đang khóa đăng nhập"}
-                          </StatusBadge>
-                        </div>
-                      ) : (
-                        <StatusBadge tone="neutral">Chưa có tài khoản</StatusBadge>
-                      )}
-                    </td>
-
-                    <td
-                      data-label="Ngày gia nhập"
-                      className={`${DATA_TABLE_TD_CLASS} font-mono text-xs`}
-                    >
-                      {formatOrgDate(person.joined_on)}
+                      <div className="space-y-1">
+                        {entry.account?.login_id ? (
+                          <p className="font-mono text-xs font-medium text-foreground">
+                            {entry.account.login_id}
+                          </p>
+                        ) : null}
+                        <StatusBadge tone={loginBadge.tone} dot>
+                          {loginBadge.label}
+                        </StatusBadge>
+                      </div>
                     </td>
 
                     <td data-label="Thao tác" className={`${DATA_TABLE_TD_CLASS} text-right`}>
                       <RowActionCluster>
                         <Link
-                          href={`/admin/organization/persons/${encodeURIComponent(person.person_id)}`}
+                          href={detailHref}
                           className={buttonClasses({ variant: "secondary", size: "sm" })}
                         >
-                          Xem hồ sơ
+                          Xem chi tiết
                         </Link>
-                        {canQuickOpenLogin ? (
+                        {canQuickOpenLogin && entry.person ? (
                           <Button
+                            type="button"
                             variant="soft"
                             size="sm"
                             disabled={stepperMode !== null || hasBlockingCheckpoint}
                             onClick={() =>
                               openLoginForExistingPerson({
-                                person_id: person.person_id,
-                                employee_code: person.employee_code,
-                                full_name: person.full_name,
-                                version: person.version,
-                                recruiter_id: person.recruiter_id,
+                                person_id: entry.person!.person_id,
+                                employee_code: entry.person!.employee_code,
+                                full_name: entry.person!.full_name,
+                                version: entry.person!.version,
+                                recruiter_id: entry.person!.recruiter_id,
                               })
                             }
                           >

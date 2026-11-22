@@ -145,15 +145,16 @@ test("VFIN-02: Monthly project debt report & Full Admin governance views enforce
   assert.match(monthlyReportView, /CursorLoadMore/);
   assert.doesNotMatch(monthlyReportView, /method:\s*"(POST|PUT|PATCH|DELETE)"/);
 
-  assert.match(governanceView, /role="tablist"/);
   assert.match(governanceView, /vfin-governance-panel-assignments/);
-  assert.match(governanceView, /vfin-governance-panel-global-roles/);
   assert.match(governanceView, /Vendor đã phát sinh giao dịch/);
   assert.match(governanceView, /transacted_vendor_count/);
   assert.match(governanceView, /buildAssignProjectAccountantRequest\(/);
   assert.match(governanceView, /buildEndProjectAccountantRequest\(/);
-  assert.match(governanceView, /buildAssignGlobalRoleRequest\(/);
-  assert.match(governanceView, /buildEndGlobalRoleRequest\(/);
+  assert.match(governanceView, /href="\/admin\/access\/groups"/);
+  assert.doesNotMatch(
+    governanceView,
+    /vfin-governance-panel-global-roles|buildAssignGlobalRoleRequest\(|buildEndGlobalRoleRequest\(/,
+  );
   assert.doesNotMatch(governanceView, /vfin-governance-panel-vendors|buildSetProjectVendorLinkRequest|Liên kết Dự án – Vendor/);
   assert.doesNotMatch(governanceView, /type="checkbox"/);
 });

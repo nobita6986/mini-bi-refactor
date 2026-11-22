@@ -312,6 +312,7 @@ test(
       assert.ok(names.includes(WP8A_MIGRATION_NAME), `${WP8A_MIGRATION_NAME} must exist`);
       for (const name of names) {
         await setup.query(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+        if (name === WP8A_MIGRATION_NAME) break;
       }
 
       // Seed accounts & WP5 cutover

@@ -7,7 +7,7 @@ import {
   AccountProvisionAndLinkStepper,
   type ProvisionStepperMode,
 } from "@/components/admin/account-provision-and-link-stepper";
-import { AccountRolesEmbeddedSection } from "@/components/admin/account-roles-embedded-section";
+import { AccountGroupsSection } from "@/components/admin/account-groups-section";
 import {
   DepartmentSelectPicker,
   type SelectedDepartmentOption,
@@ -32,9 +32,7 @@ import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import { StatusBanner } from "@/components/ui/status-banner";
 import {
   buildAccountStateRequest,
-  buildUnlinkAccountPersonRequest,
   classifyAccountMutation,
-  classifyAccountOrgMutation,
   newAccountIntentKey,
 } from "@/lib/admin/account-access-model";
 import {
@@ -72,7 +70,6 @@ import {
   type CheckpointStorageLike,
   type ProvisionCheckpointV2,
 } from "@/lib/admin/provision-checkpoint-v2";
-import type { AccountAccessDetail } from "@/lib/auth/role-access-contract";
 import type { AdminPersonnel, PersonnelPosition } from "@/lib/direct-entry/personnel-catalog-contract";
 
 type PersonDetailLoadState =
@@ -125,15 +122,6 @@ type PersonDialogState =
       manualCheckLocked: boolean;
     }
   | {
-      kind: "unlink-account";
-      accountRef: string;
-      loginId: string | null;
-      expectedAccountVersion: number;
-      expectedPersonVersion: number;
-      expectedLinkId: string;
-      conflictLocked: boolean;
-    }
-  | {
       kind: "activate-recruiter";
       accountRef: string;
       loginId: string;
@@ -155,13 +143,6 @@ type PendingDetailIntent =
       family: "toggle-login";
       url: string;
       nextEnabled: boolean;
-      body: Record<string, unknown>;
-      idempotencyKey: string;
-      message: string;
-    }
-  | {
-      family: "unlink-account";
-      url: string;
       body: Record<string, unknown>;
       idempotencyKey: string;
       message: string;
@@ -356,8 +337,8 @@ export function PersonDetailManager({
     setRecruiterReloadToken((v) => v + 1);
   }, [refreshCheckpointBanner]);
 
-  const handleAccessDetailLoaded = useCallback((detail: AccountAccessDetail) => {
-    setLatestAccountVersion(detail.account.version);
+  const handleAccountVersionChanged = useCallback((version: number) => {
+    setLatestAccountVersion(version);
   }, []);
 
   const closeDialog = useCallback(() => {
@@ -673,26 +654,6 @@ export function PersonDetailManager({
     });
   };
 
-  const openUnlinkDialog = () => {
-    if (!person?.active_account_link || authoritativeAccountVersion === null || busy || pendingIntent !== null) {
-      return;
-    }
-    setReason("");
-    setFormError(null);
-    setConflictMsg(null);
-    setActiveHeadBlockMsg(null);
-    setPendingIntent(null);
-    setDialog({
-      kind: "unlink-account",
-      accountRef: person.active_account_link.account_ref,
-      loginId: person.active_account_link.login_id,
-      expectedAccountVersion: authoritativeAccountVersion,
-      expectedPersonVersion: person.version,
-      expectedLinkId: person.active_account_link.link_id,
-      conflictLocked: false,
-    });
-  };
-
   const openActivateRecruiterDialog = () => {
     if (
       !person ||
@@ -817,37 +778,6 @@ export function PersonDetailManager({
         return;
       }
 
-      if (intent.family === "unlink-account") {
-        const outcome = classifyAccountOrgMutation(response.status, payload, "unlink");
-        if (outcome.kind === "applied") {
-          notify.success({
-            title: "Đã gỡ liên kết tài khoản đăng nhập khỏi hồ sơ nhân viên.",
-            dedupeKey: `wp13-person-unlink:${personId}`,
-          });
-          setLatestAccountVersion(null);
-          closeDialog();
-          setReloadToken((v) => v + 1);
-          setAccountAccessReloadToken((v) => v + 1);
-          return;
-        }
-        if (outcome.kind === "session-lost") {
-          handleSessionLost(outcome.message, response.status === 401);
-          return;
-        }
-        if (outcome.kind === "uncertain") {
-          setPendingIntent({ ...intent, message: outcome.message });
-          return;
-        }
-        setPendingIntent(null);
-        if (outcome.kind === "conflict") {
-          setConflictMsg(outcome.message);
-          setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
-          return;
-        }
-        setFormError(outcome.message);
-        return;
-      }
-
       // intent.family === "activate-recruiter"
       const outcome = classifyAccountOperationResponse(response.status, payload, {
         operation: "personnel_from_account",
@@ -886,7 +816,7 @@ export function PersonDetailManager({
       setPendingIntent({
         ...intent,
         message:
-          "Mất kết nối trong lúc lưu thay đổi. Đã giữ nguyên dữ liệu và khóa idempotency; bạn có thể thử lại đúng yêu cầu hoặc tải lại để đối chiếu.",
+          "Mất kết nối trong lúc lưu thay đổi. Hệ thống đã giữ nguyên yêu cầu vừa gửi; bạn có thể thử lại đúng yêu cầu hoặc tải lại để đối chiếu.",
       });
     } finally {
       inFlightRef.current = false;
@@ -979,7 +909,7 @@ export function PersonDetailManager({
       if (outcome.kind === "unavailable") {
         clearRamResetPasswords();
         setFormError(
-          "Không nhận được xác nhận từ máy chủ khi đặt lại mật khẩu. Không tự gửi lại Auth lần hai; hãy kiểm tra thủ công hoặc mở thao tác mới sau khi xác minh.",
+          "Không nhận được xác nhận từ máy chủ khi đặt lại mật khẩu. Hệ thống không tự gửi lại để tránh ghi đè; hãy kiểm tra đăng nhập thực tế hoặc mở thao tác mới sau khi xác minh.",
         );
         setDialog((prev) =>
           prev?.kind === "reset-password" ? { ...prev, manualCheckLocked: true } : prev,
@@ -991,7 +921,7 @@ export function PersonDetailManager({
       if (!workspaceGuard.isActive(tracked.epoch, controller)) return;
       clearRamResetPasswords();
       setFormError(
-        "Mất kết nối trong lúc đặt lại mật khẩu. Đã xóa mật khẩu khỏi bộ nhớ và không tự gửi lại Auth; hãy kiểm tra đăng nhập thực tế trước khi thực hiện thao tác mới.",
+        "Mất kết nối trong lúc đặt lại mật khẩu. Hệ thống đã xóa mật khẩu vừa nhập và không tự gửi lại; hãy kiểm tra đăng nhập thực tế trước khi thực hiện thao tác mới.",
       );
       setDialog((prev) =>
         prev?.kind === "reset-password" ? { ...prev, manualCheckLocked: true } : prev,
@@ -1067,7 +997,8 @@ export function PersonDetailManager({
           prev
             ? {
                 ...prev,
-                message: `Đã tải trạng thái hiện tại từ máy chủ (hồ sơ v${projected.person.version}). Khóa idempotency và phiên bản gốc vẫn được giữ nguyên — hãy bấm "Thử lại đúng yêu cầu" để xác nhận an toàn hoặc đóng nếu bạn đã xác minh thay đổi đã được áp dụng.`,
+                message:
+                  "Đã tải trạng thái hiện tại từ máy chủ. Yêu cầu đang chờ vẫn được giữ nguyên — hãy bấm \"Thử lại đúng yêu cầu\" để xác nhận an toàn hoặc đóng nếu bạn đã xác minh thay đổi đã được áp dụng.",
               }
             : null,
         );
@@ -1239,29 +1170,6 @@ export function PersonDetailManager({
       return;
     }
 
-    if (dialog.kind === "unlink-account") {
-      const idempotencyKey = newAccountIntentKey();
-      const req = buildUnlinkAccountPersonRequest({
-        expectedAccountVersion: dialog.expectedAccountVersion,
-        expectedPersonVersion: dialog.expectedPersonVersion,
-        expectedLinkId: dialog.expectedLinkId,
-        reason,
-        idempotencyKey,
-      });
-      if (!req.ok) {
-        setFormError(req.message);
-        return;
-      }
-      void dispatchIntent({
-        family: "unlink-account",
-        url: `/api/admin/access/accounts/${encodeURIComponent(dialog.accountRef)}/person-link/end`,
-        body: req.body,
-        idempotencyKey: req.idempotencyKey,
-        message: "",
-      });
-      return;
-    }
-
     if (dialog.kind === "activate-recruiter") {
       const idempotencyKey = newAccountOperationKey();
       const req = buildPersonnelFromAccountRequest({
@@ -1297,8 +1205,7 @@ export function PersonDetailManager({
     dialog?.kind === "edit" ||
     dialog?.kind === "assign-dept" ||
     dialog?.kind === "transfer-dept" ||
-    dialog?.kind === "end-dept" ||
-    dialog?.kind === "unlink-account";
+    dialog?.kind === "end-dept";
 
   const dialogTitle = (() => {
     switch (dialog?.kind) {
@@ -1314,8 +1221,6 @@ export function PersonDetailManager({
         return dialog.nextEnabled ? "Mở lại đăng nhập tài khoản" : "Khóa đăng nhập tài khoản";
       case "reset-password":
         return "Đặt lại mật khẩu đăng nhập";
-      case "unlink-account":
-        return "Gỡ liên kết tài khoản đăng nhập";
       case "activate-recruiter":
         return "Kích hoạt nghiệp vụ tuyển dụng";
       default:
@@ -1326,11 +1231,9 @@ export function PersonDetailManager({
   const dialogDescription = (() => {
     switch (dialog?.kind) {
       case "reset-password":
-        return "Mật khẩu mới chỉ lưu tạm trong RAM khi gửi và sẽ bị xóa ngay sau phản hồi.";
+        return "Mật khẩu mới chỉ được dùng để gửi lên máy chủ và sẽ bị xóa khỏi màn hình ngay sau khi hoàn tất.";
       case "toggle-login":
-        return "Khóa/mở đăng nhập chỉ ảnh hưởng quyền truy cập hệ thống, tách biệt với trạng thái hồ sơ nhân sự (D10).";
-      case "unlink-account":
-        return "Tác vụ danh tính nâng cao: tách tài khoản đăng nhập khỏi hồ sơ nhân sự và ghi nhận nhật ký kiểm toán.";
+        return "Khóa/mở đăng nhập chỉ ảnh hưởng quyền truy cập hệ thống, tách biệt với trạng thái hồ sơ nhân sự.";
       case "activate-recruiter":
         return "Tạo hồ sơ tính công tuyển dụng từ tài khoản đăng nhập đang hoạt động.";
       default:
@@ -1348,18 +1251,11 @@ export function PersonDetailManager({
           href="/admin/organization/persons"
           className="inline-flex min-h-10 items-center text-sm font-medium text-primary hover:underline"
         >
-          ← Quay lại Nhân sự
+          ← Quay lại danh sách Người dùng
         </Link>
         <div className="flex flex-wrap items-center gap-2">
-          {person?.active_account_link ? (
-            <Link
-              href={`/admin/access/effective?account=${encodeURIComponent(person.active_account_link.account_ref)}`}
-              className={buttonClasses({ variant: "secondary", size: "sm" })}
-            >
-              Tra cứu quyền hiệu lực
-            </Link>
-          ) : null}
           <Button
+            type="button"
             variant="secondary"
             size="sm"
             onClick={reloadDetail}
@@ -1380,7 +1276,7 @@ export function PersonDetailManager({
         <Alert
           tone="warning"
           role="status"
-          title="Có tiến trình mở tài khoản / tạo nhân viên đang dang dở"
+          title="Có tiến trình thêm người dùng / mở đăng nhập đang dang dở"
         >
           <div className="space-y-2">
             <p>
@@ -1396,11 +1292,12 @@ export function PersonDetailManager({
                   pendingCheckpoint.step1_person.payload_snapshot?.employee_code ??
                   "—"}
               </span>
-              ) đang có tiến trình chưa hoàn tất. Hãy hoàn tất hoặc xác nhận hủy bản nháp cũ trước
-              khi mở luồng tài khoản mới.
+              ) đang có tiến trình chưa hoàn tất. Hãy bấm tiếp tục để đồng bộ với máy chủ trước khi
+              mở thao tác mới.
             </p>
             <div>
               <Button
+                type="button"
                 variant="primary"
                 size="sm"
                 disabled={stepperMode !== null}
@@ -1408,7 +1305,7 @@ export function PersonDetailManager({
                   setStepperMode({ kind: "resume-checkpoint", checkpoint: pendingCheckpoint })
                 }
               >
-                Tiếp tục / Đối chiếu
+                Tiếp tục hoàn tất
               </Button>
             </div>
           </div>
@@ -1419,17 +1316,18 @@ export function PersonDetailManager({
         <Alert
           tone="warning"
           role="alert"
-          title="Bản nháp phục hồi trong bộ nhớ phiên không hợp lệ"
+          title="Tiến trình lưu tạm trong trình duyệt không thể đọc được"
         >
           <div className="space-y-2">
             <p>{corruptCheckpointMessage}</p>
             <div>
               <Button
+                type="button"
                 variant="danger-outline"
                 size="sm"
                 onClick={handleClearCorruptCheckpoint}
               >
-                Đã đối chiếu thủ công · Xóa bản nháp lỗi
+                Đã kiểm tra · Xóa bản lưu tạm lỗi
               </Button>
             </div>
           </div>
@@ -1502,10 +1400,10 @@ export function PersonDetailManager({
                   >
                     {person.active_account_link.enabled
                       ? "Đang mở đăng nhập"
-                      : "Đang khóa đăng nhập"}
+                      : "Đã khóa đăng nhập"}
                   </StatusBadge>
                 ) : (
-                  <StatusBadge tone="neutral">Chưa có tài khoản</StatusBadge>
+                  <StatusBadge tone="neutral">Chưa mở đăng nhập</StatusBadge>
                 )}
               </div>
             }
@@ -1517,8 +1415,8 @@ export function PersonDetailManager({
             }
           />
 
-          <StatusBanner tone="info" title="Trạng thái hồ sơ người độc lập với khóa tài khoản (D10)">
-            Chuyển trạng thái hồ sơ sang <strong>Ngừng hoạt động</strong> không tự khóa tài khoản
+          <StatusBanner tone="info" title="Trạng thái làm việc độc lập với khóa tài khoản">
+            Chuyển trạng thái hồ sơ sang <strong>Ngừng làm việc</strong> không tự khóa tài khoản
             đăng nhập liên kết. Nếu nhân sự nghỉ việc cần chặn đăng nhập hệ thống, hãy dùng nút{" "}
             <strong>Khóa đăng nhập</strong> ngay tại khối <strong>Tài khoản đăng nhập</strong> bên
             dưới.
@@ -1781,7 +1679,7 @@ export function PersonDetailManager({
             <Card>
               <CardHeader
                 title="2. Tài khoản đăng nhập"
-                description="Quản lý đăng nhập của riêng nhân viên này. Tách biệt với trạng thái làm việc (D10)."
+                description="Quản lý đăng nhập của riêng nhân viên này. Tách biệt với trạng thái làm việc."
               />
               {person.active_account_link ? (
                 <div className="space-y-4">
@@ -1796,7 +1694,7 @@ export function PersonDetailManager({
                       >
                         {person.active_account_link.enabled
                           ? "Đang mở đăng nhập"
-                          : "Đang khóa đăng nhập"}
+                          : "Đã khóa đăng nhập"}
                       </StatusBadge>
                     </div>
                     <p className="text-xs text-muted">
@@ -1816,7 +1714,7 @@ export function PersonDetailManager({
 
                   <p className="text-xs text-muted">
                     Khóa đăng nhập chỉ chặn phiên đăng nhập hệ thống, không tắt nghĩa vụ chấm công /
-                    báo cáo và không đổi trạng thái nhân sự (D10).
+                    báo cáo và không đổi trạng thái nhân sự.
                   </p>
 
                   <div className="flex flex-wrap gap-2">
@@ -1839,27 +1737,6 @@ export function PersonDetailManager({
                         : "Mở lại đăng nhập"}
                     </Button>
                   </div>
-
-                  <details className="rounded-lg border border-border/80 bg-surface p-3">
-                    <summary className="cursor-pointer select-none text-xs font-medium text-muted hover:text-foreground">
-                      Tác vụ danh tính nâng cao (Quản trị)
-                    </summary>
-                    <div className="mt-3 space-y-2.5 text-xs text-muted">
-                      <p>
-                        Chỉ dùng khi cần tách tài khoản đăng nhập khỏi hồ sơ nhân viên do ghép nhầm
-                        hoặc xử lý dữ liệu lịch sử. Thao tác bắt buộc ghi lý do kiểm toán và không
-                        tự xóa tài khoản đăng nhập.
-                      </p>
-                      <Button
-                        variant="danger-outline"
-                        size="sm"
-                        disabled={isDialogLocked}
-                        onClick={openUnlinkDialog}
-                      >
-                        Gỡ liên kết tài khoản
-                      </Button>
-                    </div>
-                  </details>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -1904,23 +1781,14 @@ export function PersonDetailManager({
                       {pendingCheckpoint !== null || corruptCheckpointMessage !== null ? (
                         <p className="text-xs text-amber-700 dark:text-amber-300">
                           Đang có tiến trình chưa hoàn tất ở đầu trang. Hãy bấm{" "}
-                          <strong>Tiếp tục / Đối chiếu</strong> trước khi mở tài khoản mới.
+                          <strong>Tiếp tục hoàn tất</strong> trước khi mở tài khoản mới.
                         </p>
                       ) : null}
-                      <p className="text-xs text-muted">
-                        Cần đối chiếu ghép với một tài khoản cũ chưa liên kết?{" "}
-                        <Link
-                          href="/admin/access/accounts?view=unlinked"
-                          className="font-medium text-primary underline"
-                        >
-                          Mở Đối chiếu dữ liệu cũ
-                        </Link>
-                      </p>
                     </div>
                   ) : (
                     <p className="text-xs text-muted">
-                      Hồ sơ đang Ngừng hoạt động. Cần kích hoạt lại hồ sơ nhân viên trước khi mở tài
-                      khoản đăng nhập mới.
+                      Hồ sơ đang Ngừng làm việc. Cần chuyển trạng thái sang Đang làm việc trước khi
+                      mở tài khoản đăng nhập mới.
                     </p>
                   )}
                 </div>
@@ -1929,40 +1797,26 @@ export function PersonDetailManager({
             </div>
           </div>
 
-          {/* BLOCK 3: Vai trò & Phân công truy cập */}
+          {/* BLOCK 3: Nhóm quyền & Phân công */}
           <section data-testid="person-block-3-roles" className="space-y-2">
             {person.active_account_link ? (
-              canManageGlobalRoles ? (
-                <AccountRolesEmbeddedSection
-                  accountRef={person.active_account_link.account_ref}
-                  canManageGlobalRoles={canManageGlobalRoles}
-                  workspaceGuard={workspaceGuard}
-                  onSessionLost={handleSessionLost}
-                  embeddedInPerson
-                  reloadToken={accountAccessReloadToken}
-                  onDetailLoaded={handleAccessDetailLoaded}
-                />
-              ) : (
-                <Card>
-                  <CardHeader
-                    title="3. Vai trò & Phân công truy cập"
-                    description="Vai trò toàn cục, phân công ngữ cảnh và quyền theo phân hệ của nhân viên."
-                  />
-                  <p className="text-sm text-muted">
-                    Tài khoản hiện tại không có thẩm quyền Quản trị phân quyền đầy đủ (paired Full
-                    Admin) để truy vấn hoặc gán vai trò toàn cục tại khối này.
-                  </p>
-                </Card>
-              )
+              <AccountGroupsSection
+                accountRef={person.active_account_link.account_ref}
+                canManageGroups={canManageGlobalRoles}
+                workspaceGuard={workspaceGuard}
+                reloadToken={accountAccessReloadToken}
+                onSessionLost={handleSessionLost}
+                onAccountVersionChanged={handleAccountVersionChanged}
+              />
             ) : (
               <Card>
                 <CardHeader
-                  title="3. Vai trò & Phân công truy cập"
-                  description="Vai trò toàn cục, phân công ngữ cảnh và quyền theo phân hệ của nhân viên."
+                  title="3. Nhóm quyền & Phân công"
+                  description="Quyền thao tác được quản lý theo nhóm gắn với phòng ban."
                 />
                 <p className="text-sm text-muted">
-                  Chưa có tài khoản đăng nhập. Hãy mở tài khoản đăng nhập ở Khối 2 để cấp vai trò
-                  và theo dõi quyền hiệu lực.
+                  Chưa có tài khoản đăng nhập. Hãy mở tài khoản đăng nhập ở mục phía trên để xếp vào
+                  nhóm quyền phù hợp.
                 </p>
               </Card>
             )}
@@ -1973,7 +1827,7 @@ export function PersonDetailManager({
           <Card>
             <CardHeader
               title="4. Nghiệp vụ Tuyển dụng"
-              description="Hồ sơ tính công tuyển dụng, phân Nhóm và phân công Dự án của nhân sự (nếu có)."
+              description="Hồ sơ tính công tuyển dụng, phân Tổ đội tuyển dụng và phân công Dự án của nhân sự (nếu có)."
             />
             {person.recruiter_id ? (
               <div className="space-y-4">
@@ -2019,7 +1873,7 @@ export function PersonDetailManager({
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-xs text-muted">Nhóm hiện tại</dt>
+                      <dt className="text-xs text-muted">Tổ đội tuyển dụng hiện tại</dt>
                       <dd className="mt-0.5 flex flex-wrap gap-1">
                         {recruiterState.personnel.team_names.length > 0 ? (
                           recruiterState.personnel.team_names.map((teamName) => (
@@ -2028,7 +1882,7 @@ export function PersonDetailManager({
                             </StatusBadge>
                           ))
                         ) : (
-                          <span className="text-xs text-muted">Chưa vào nhóm</span>
+                          <span className="text-xs text-muted">Chưa vào tổ đội</span>
                         )}
                       </dd>
                     </div>
@@ -2040,13 +1894,13 @@ export function PersonDetailManager({
                     href={`/admin/catalog/personnel?recruiter=${encodeURIComponent(person.recruiter_id)}`}
                     className={buttonClasses({ variant: "primary", size: "sm" })}
                   >
-                    Mở hồ sơ tính công &amp; phân Nhóm
+                    Mở hồ sơ tính công &amp; phân Tổ đội
                   </Link>
                   <Link
                     href="/admin/catalog/teams"
                     className={buttonClasses({ variant: "secondary", size: "sm" })}
                   >
-                    Mở quản lý Nhóm &amp; Trưởng nhóm
+                    Mở quản lý Tổ đội tuyển dụng &amp; Trưởng nhóm
                   </Link>
                   <Link
                     href="/direct-entry/projects"
@@ -2171,20 +2025,12 @@ export function PersonDetailManager({
                 Tải bản mới nhất
               </Button>
               {dialog?.kind === "activate-recruiter" ? (
-                <>
-                  <Link
-                    href="/admin/catalog/personnel"
-                    className={buttonClasses({ variant: "secondary", size: "sm" })}
-                  >
-                    Mở Danh mục hồ sơ tính công
-                  </Link>
-                  <Link
-                    href="/admin/access/accounts?view=unlinked"
-                    className={buttonClasses({ variant: "secondary", size: "sm" })}
-                  >
-                    Mở Đối chiếu dữ liệu cũ
-                  </Link>
-                </>
+                <Link
+                  href="/admin/catalog/personnel"
+                  className={buttonClasses({ variant: "secondary", size: "sm" })}
+                >
+                  Mở Danh mục hồ sơ tính công
+                </Link>
               ) : null}
             </div>
           </Alert>
@@ -2283,8 +2129,8 @@ export function PersonDetailManager({
                     onChange={(event) => setPersonStatus(event.target.value as PersonStatus)}
                     className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30 disabled:opacity-60"
                   >
-                    <option value="ACTIVE">Đang hoạt động (ACTIVE)</option>
-                    <option value="INACTIVE">Ngừng hoạt động (INACTIVE)</option>
+                    <option value="ACTIVE">Đang làm việc</option>
+                    <option value="INACTIVE">Ngừng làm việc</option>
                   </select>
                 </div>
               </div>
@@ -2338,9 +2184,9 @@ export function PersonDetailManager({
                 </p>
               ) : (
                 <p>
-                  Tài khoản của <strong>{person.full_name}</strong> sẽ bị chặn đăng nhập ngay. Lưu
-                  ý (D10): khóa đăng nhập không đổi trạng thái làm việc và không tắt nghĩa vụ chấm
-                  công / báo cáo.
+                  Tài khoản của <strong>{person.full_name}</strong> sẽ bị chặn đăng nhập ngay. Khóa
+                  đăng nhập không thay đổi trạng thái làm việc và không xóa lịch sử chấm công hoặc
+                  báo cáo đã có.
                 </p>
               )}
             </Alert>
@@ -2396,23 +2242,12 @@ export function PersonDetailManager({
             </>
           ) : null}
 
-          {dialog?.kind === "unlink-account" && person ? (
-            <Alert tone="warning" title="Cảnh báo tác vụ danh tính nâng cao">
-              Tài khoản{" "}
-              <strong className="font-mono">{dialog.loginId ?? dialog.accountRef}</strong> sẽ bị gỡ
-              liên kết khỏi hồ sơ <strong>{person.full_name}</strong>. Tài khoản sau khi gỡ sẽ xuất
-              hiện tại <strong>Đối chiếu dữ liệu cũ</strong> và giữ nguyên trạng thái khóa/mở hiện
-              tại.
-            </Alert>
-          ) : null}
-
           {dialog?.kind === "activate-recruiter" ? (
             <>
               <StatusBanner tone="info" title="Lưu ý trước khi kích hoạt nghiệp vụ tuyển dụng">
                 Thao tác tạo <strong>Hồ sơ tính công tuyển dụng</strong> với mã{" "}
-                <strong className="font-mono">{dialog.loginId}</strong> và có thể tự cấp vai trò{" "}
-                <strong>Tuyển dụng (RECRUITER)</strong> cho tài khoản. Nếu tài khoản từng có hồ sơ
-                tính công cũ, không tạo mới mà đối chiếu tại{" "}
+                <strong className="font-mono">{dialog.loginId}</strong> cho người dùng này. Nếu
+                người dùng từng có hồ sơ tính công trước đây, vui lòng kiểm tra tại{" "}
                 <Link href="/admin/catalog/personnel" className="font-medium underline">
                   Danh mục hồ sơ tính công
                 </Link>

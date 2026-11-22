@@ -170,7 +170,8 @@ test("D3-B UI: response classifier surfaces needs-reconcile states without passw
   );
   assert.equal(blocked.kind, "needs-reconcile");
   assert.equal(blocked.state, "BLOCKED");
-  assert.match(blocked.message, /provenance/i);
+  assert.match(blocked.message, /liên kết chưa trùng khớp/i);
+  assert.doesNotMatch(blocked.message, /provenance|Auth|T0\/Admin/i);
   const indeterminate = classifyAccountOperationResponse(
     200,
     {
@@ -180,7 +181,8 @@ test("D3-B UI: response classifier surfaces needs-reconcile states without passw
     { operation: "create_account" },
   );
   assert.equal(indeterminate.kind, "needs-reconcile");
-  assert.match(indeterminate.message, /Không tự thử lại/);
+  assert.match(indeterminate.message, /Kiểm tra lại kết quả mở đăng nhập/);
+  assert.doesNotMatch(indeterminate.message, /Auth/i);
 });
 
 test("reset errors distinguish confirmed Auth success from unknown outcome without exposing raw codes", () => {
@@ -188,9 +190,9 @@ test("reset errors distinguish confirmed Auth success from unknown outcome witho
     ok: false, code: "ACCOUNT_OPERATION_AUTH_APPLIED_UNRECORDED",
   });
   assert.equal(appliedUnrecorded.kind, "unavailable");
-  assert.match(appliedUnrecorded.message, /Auth đã xác nhận đổi mật khẩu/);
+  assert.match(appliedUnrecorded.message, /Mật khẩu mới có thể đã được cập nhật/);
   assert.match(appliedUnrecorded.message, /Không gửi lại/);
-  assert.doesNotMatch(appliedUnrecorded.message, /ACCOUNT_OPERATION_/);
+  assert.doesNotMatch(appliedUnrecorded.message, /ACCOUNT_OPERATION_|Supabase Auth/);
 
   for (const code of ["ACCOUNT_OPERATION_INDETERMINATE", "ACCOUNT_OPERATION_RESULT_UNRECORDED"]) {
     const unknown = classifyAccountOperationResponse(500, { ok: false, code });
@@ -199,7 +201,7 @@ test("reset errors distinguish confirmed Auth success from unknown outcome witho
     assert.equal(unknown.manualCheckRequired, true);
     assert.match(unknown.message, /Chưa xác định được kết quả/);
     assert.match(unknown.message, /Không gửi lại ngay/);
-    assert.match(unknown.message, /Admin cần kiểm tra/);
+    assert.match(unknown.message, /kiểm tra đăng nhập thực tế/);
     assert.doesNotMatch(unknown.message, /ACCOUNT_OPERATION_/);
   }
 });

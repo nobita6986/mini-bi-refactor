@@ -276,11 +276,11 @@ test("W06D: mobile contract uses bounded inner table overflow, not body-level ov
 
 test("W06D: approved Admin navigation labels are exact and routes remain unchanged", () => {
   assert.match(nav, /id: "personnel", label: "Hồ sơ tính công tuyển dụng", href: "\/admin\/catalog\/personnel"/);
-  assert.match(nav, /id: "organization-persons", label: "Nhân sự", href: "\/admin\/organization\/persons"/);
+  assert.match(nav, /id: "organization-persons", label: "Người dùng", href: "\/admin\/organization\/persons"/);
   assert.doesNotMatch(nav, /id: "accounts"/);
   assert.match(navTest, /Hồ sơ tính công tuyển dụng/);
-  assert.match(navTest, /label: "Nhân sự"/);
-  assert.match(accountTest, /id: "organization-persons", label: "Nhân sự"/);
+  assert.match(navTest, /label: "Người dùng"/);
+  assert.match(accountTest, /id: "organization-persons", label: "Người dùng"/);
 });
 
 test("W06D: focused lane is registered once and canonical test invokes it once", () => {
