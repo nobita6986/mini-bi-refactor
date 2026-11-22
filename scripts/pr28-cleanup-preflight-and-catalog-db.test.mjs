@@ -1279,3 +1279,252 @@ test("6. PR28 Gate 3 & Gate 4 Fail-Closed Preflight: unmappable direct grants & 
     await db.close();
   }
 });
+
+test("7. PR28 Ponytail P1-1/P1-2/P2-4: Gate 4 suspended grants, recruiter link cutover on cutover_ready=false, leave overview enabled filter & two-phase direct-grant provenance", async () => {
+  const migrations = await loadMigrations();
+  const grpIdx = migrations.findIndex((m) => m.name === PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
+  const cleanupIdx = migrations.findIndex((m) => m.name === PR28_CLEANUP_MIGRATION_NAME);
+  const db = new PGlite();
+  try {
+    await db.exec(ROLE_PREAMBLE);
+    for (let i = 0; i <= grpIdx; i += 1) {
+      await db.exec(migrations[i].sql);
+    }
+
+    await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [OWNER.auth, OWNER.email]);
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, true, $3, 'NORMAL', true)",
+      [OWNER.app, OWNER.auth, OWNER.name],
+    );
+    const adminGrpId = (
+      await db.query("select group_id from public.authz_user_groups where code = 'SYSTEM_ADMIN'")
+    ).rows[0].group_id;
+    await db.query(
+      `insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason)
+       values ($1::uuid, $2::uuid, 'ADMIN_ASSIGNMENT', 'Seed test admin')`,
+      [adminGrpId, OWNER.app],
+    );
+    await db.query("select public.direct_entry_authz__internal_sync_legacy_grants($1::uuid)", [OWNER.app]);
+    const disabledSusp = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "disabled.susp@hrpartner.vn",
+      name: "Disabled Suspended Legacy",
+    };
+    const disabledClean = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "disabled.clean@hrpartner.vn",
+      name: "Disabled Historical Clean",
+    };
+    const twoPhaseUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "twophase.hr@hrpartner.vn",
+      name: "Two Phase HR Operator",
+    };
+    const recCreateUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "reccreate01@hrpartner.vn",
+      name: "Recruiter Create Unmanaged",
+    };
+    const recLinkUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "reclink02@hrpartner.vn",
+      name: "Recruiter Link Unmanaged",
+    };
+    const disabledLeaveUser = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "disabled.leave@hrpartner.vn",
+      name: "Disabled Leave Operator",
+    };
+
+    for (const u of [disabledSusp, disabledClean, twoPhaseUser, recCreateUser, recLinkUser, disabledLeaveUser]) {
+      await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [u.auth, u.email]);
+    }
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, false, $3, 'NORMAL', false)",
+      [disabledSusp.app, disabledSusp.auth, disabledSusp.name],
+    );
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, false, $3, 'NORMAL', false)",
+      [disabledClean.app, disabledClean.auth, disabledClean.name],
+    );
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, true, $3, 'NORMAL', true)",
+      [twoPhaseUser.app, twoPhaseUser.auth, twoPhaseUser.name],
+    );
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, true, $3, 'NORMAL', false)",
+      [recCreateUser.app, recCreateUser.auth, recCreateUser.name],
+    );
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, true, $3, 'NORMAL', false)",
+      [recLinkUser.app, recLinkUser.auth, recLinkUser.name],
+    );
+    await db.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name, account_type, authz_managed) values ($1::uuid, $2::uuid, false, $3, 'NORMAL', true)",
+      [disabledLeaveUser.app, disabledLeaveUser.auth, disabledLeaveUser.name],
+    );
+
+    // P1-2: disabledClean has historical non-suspended grant -> allowed; disabledSusp has suspended_by_account_disable=true -> BLOCKED!
+    await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable) values ($1::uuid, 'entry_create', '2024-01-01', '2024-06-01', false, false)",
+      [disabledClean.app],
+    );
+    await db.query(
+      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current, suspended_by_account_disable) values ($1::uuid, 'entry_create', '2025-01-01', false, true)",
+      [disabledSusp.app],
+    );
+
+    // P2-4 two-phase: twoPhaseUser has HR_OPERATOR + redundant direct grant catalog_master_manage @ ALL before #236 backfill
+    await db.query(
+      "insert into public.authz_account_role_assignments (app_user_id, role_code, scope_kind, source_kind, reason, assigned_by_app_user_id) values ($1::uuid, 'HR_OPERATOR', 'GLOBAL', 'ADMIN_ASSIGNMENT', 'Pre-236 HR', $2::uuid)",
+      [twoPhaseUser.app, OWNER.app],
+    );
+    await db.query(
+      "insert into public.authz_direct_capability_grants (app_user_id, capability, scope_kind, scope_id, source_kind, reason, granted_by_app_user_id) values ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', 'Redundant direct grant', $2::uuid)",
+      [twoPhaseUser.app, OWNER.app],
+    );
+
+    // Run #236 backfill (phase 1)
+    await db.query("select public.direct_entry_authz__internal_backfill_legacy_to_groups()");
+    const coveredLedger = (
+      await db.query(
+        "select resolution_kind from public.authz_legacy_direct_grant_migrations dm join public.authz_direct_capability_grants dg on dg.direct_grant_id = dm.direct_grant_id where dg.app_user_id = $1::uuid",
+        [twoPhaseUser.app],
+      )
+    ).rows;
+    assert.equal(coveredLedger.length, 1);
+    assert.equal(coveredLedger[0].resolution_kind, "COVERED_BY_GROUP");
+
+    // Admin edits HR_CATALOG_OPERATOR between #236 and #237 to remove catalog_master_manage
+    const hrGroup = (
+      await db.query("select group_id, department_id, name, description, version from public.authz_user_groups where code = 'HR_CATALOG_OPERATOR'")
+    ).rows[0];
+    const kEditHr = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_update_group_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::text, $6::text, $7::uuid, null::uuid, true,
+         array['recruiter_master_manage', 'team_master_manage', 'audit_view', 'document_view']::text[],
+         '[]'::jsonb, 'Two-phase edit before #237', $8::uuid, $9::text
+       )`,
+      [OWNER.auth, OWNER.app, hrGroup.group_id, hrGroup.version, hrGroup.name, hrGroup.description, hrGroup.department_id, kEditHr, sha256(kEditHr)],
+    );
+
+    // P1-2 check: manifest & Gate 4 MUST block disabledSusp (suspended_by_account_disable=true)
+    const mSusp = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mSusp.cleanup_migration_safe, false);
+    assert.equal(mSusp.authorization_cutover_manifest.uncutover_legacy_grant_user_count, 1);
+    assert.equal(mSusp.authorization_cutover_manifest.uncutover_legacy_grant_users[0].app_user_id, disabledSusp.app);
+    assert.equal(mSusp.authorization_cutover_manifest.uncutover_legacy_grant_users[0].has_suspended_grants, true);
+
+    await assert.rejects(
+      () => db.exec(migrations[cleanupIdx].sql),
+      (err) => String(err?.message ?? "").includes("PR28_CLEANUP_BLOCKED_UNCUTOVER_LEGACY_GRANTS"),
+    );
+    await db.exec("rollback;");
+
+    // Clear disabledSusp suspended flag (leaving disabledClean untouched!) and keep cutover_ready = false to test P1-1!
+    await db.query(
+      "update public.direct_entry_capability_grants set suspended_by_account_disable = false where app_user_id = $1::uuid",
+      [disabledSusp.app],
+    );
+    await db.query("update public.authz_system_state set cutover_ready = false where singleton_id = true");
+
+    const mReady = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mReady.cleanup_migration_safe, true, "disabledClean (historical non-suspended) passes Gate 4");
+
+    // Apply #237 (phase 2)
+    await db.exec(migrations[cleanupIdx].sql);
+
+    // P2-4 check: twoPhaseUser did NOT receive a phantom MIGRATED_DEPT_CATALOG_MASTER_MANAGE group!
+    const twoPhaseCtx = (
+      await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [twoPhaseUser.auth])
+    ).rows[0].ctx;
+    assert.equal(
+      twoPhaseCtx.capabilities.includes("catalog_master_manage"),
+      false,
+      "two-phase #236->edit->#237 must NOT resurrect direct grant covered by edited group",
+    );
+
+    // P2-4 check: leave_management_get_admin_overview excludes disabled Leave-group member
+    const leaveHrGroupId = (await db.query("select group_id from public.authz_user_groups where code = 'LEAVE_HR_OPERATIONS'")).rows[0].group_id;
+    await db.query(
+      "insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason, assigned_by_app_user_id) values ($1::uuid, $2::uuid, 'ADMIN_ASSIGNMENT', 'Test disabled member', $3::uuid)",
+      [leaveHrGroupId, disabledLeaveUser.app, OWNER.app],
+    );
+    const leaveOverview = (
+      await serviceQuery(db, "select public.leave_management_get_admin_overview($1::uuid, $2::uuid, null::text, 25, 0, 'ALL') as payload", [OWNER.auth, OWNER.app])
+    ).rows[0].payload;
+    assert.equal(
+      leaveOverview.module_grants.some((g) => g.app_user_id === disabledLeaveUser.app),
+      false,
+      "leave_management_get_admin_overview must exclude disabled app_users",
+    );
+
+    // P1-1 check: on cutover_ready = false, edit RECRUITER_OPERATIONS to drop document_upload,
+    // then run BOTH create_personnel AND link_recruiter on authz_managed = false accounts!
+    const recGroup = (
+      await db.query("select group_id, department_id, name, description, version from public.authz_user_groups where code = 'RECRUITER_OPERATIONS'")
+    ).rows[0];
+    const kEditRec = nextUuid();
+    await serviceQuery(
+      db,
+      `select public.direct_entry_authz_update_group_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::text, $6::text, $7::uuid, null::uuid, true,
+         array['entry_create', 'entry_own', 'submission_create', 'change_request_create', 'employment_status.request', 'document_view']::text[],
+         '[]'::jsonb, 'Drop document_upload from RECRUITER_OPERATIONS', $8::uuid, $9::text
+       )`,
+      [OWNER.auth, OWNER.app, recGroup.group_id, recGroup.version, recGroup.name, recGroup.description, recGroup.department_id, kEditRec, sha256(kEditRec)],
+    );
+
+    // 1) direct_entry_account_operation_create_personnel
+    await serviceQuery(
+      db,
+      "select public.direct_entry_account_operation_create_personnel($1::uuid, $2::uuid, $3::uuid, 1, 'reccreate01', 'STAFF', null, 'Create personnel test', $4::text)",
+      [OWNER.auth, OWNER.app, recCreateUser.app, nextUuid()],
+    );
+    const recCreateRow = (
+      await db.query("select authz_managed from public.direct_entry_app_users where app_user_id = $1::uuid", [recCreateUser.app])
+    ).rows[0];
+    assert.equal(recCreateRow.authz_managed, true, "create_personnel must unconditionally set authz_managed=true");
+    const recCreateCtx = (
+      await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [recCreateUser.auth])
+    ).rows[0].ctx;
+    assert.equal(recCreateCtx.capabilities.includes("entry_create"), true);
+    assert.equal(recCreateCtx.capabilities.includes("document_upload"), false, "create_personnel must NOT leak dropped capability from RECRUITER_OPERATIONS");
+
+    // 2) direct_entry_account_operation_link_recruiter
+    const preRecId = nextUuid();
+    const today = (await db.query("select public.direct_entry_authorization_date()::text as today")).rows[0].today;
+    await db.query(
+      "insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active, version) values ($1::uuid, 'Recruiter Link Target', 'reclink02', 'STAFF', true, 1)",
+      [preRecId],
+    );
+    await db.query(
+      "insert into public.recruiter_provider_memberships (recruiter_id, provider_type, valid_from, vendor_id, is_current) values ($1::uuid, 'hrp', $2::date, null, true)",
+      [preRecId, today],
+    );
+    await serviceQuery(
+      db,
+      "select public.direct_entry_account_operation_link_recruiter($1::uuid, $2::uuid, $3::uuid, 1, $4::uuid, 1, 'Link recruiter test', $5::text)",
+      [OWNER.auth, OWNER.app, preRecId, recLinkUser.app, nextUuid()],
+    );
+    const recLinkRow = (
+      await db.query("select authz_managed from public.direct_entry_app_users where app_user_id = $1::uuid", [recLinkUser.app])
+    ).rows[0];
+    assert.equal(recLinkRow.authz_managed, true, "link_recruiter must unconditionally set authz_managed=true");
+    const recLinkCtx = (
+      await serviceQuery(db, "select public.direct_entry_resolve_actor_context($1::uuid) as ctx", [recLinkUser.auth])
+    ).rows[0].ctx;
+    assert.equal(recLinkCtx.capabilities.includes("entry_create"), true);
+    assert.equal(recLinkCtx.capabilities.includes("document_upload"), false, "link_recruiter must NOT leak dropped capability from RECRUITER_OPERATIONS");
+  } finally {
+    await db.close();
+  }
+});

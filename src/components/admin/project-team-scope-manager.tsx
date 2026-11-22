@@ -271,11 +271,11 @@ export function ProjectTeamScopeManager() {
       </header>
 
       <Card>
-        <CardHeader title="Danh sách mapping" description={list ? `${list.total} mapping` : "Tìm theo mã hoặc tên dự án / nhóm, hoặc xem lịch sử."} />
+        <CardHeader title="Danh sách phân công" description={list ? `${list.total} phân công` : "Tìm theo mã hoặc tên dự án / tổ đội, hoặc xem lịch sử."} />
         <form className="mb-4 flex flex-wrap gap-3 items-end" onSubmit={(e) => { e.preventDefault(); setSearchFilter(searchInput); setPage(1); reloadList(); }}>
-          <label className="flex flex-col gap-1 text-sm font-medium flex-1">Tìm dự án hoặc nhóm
+          <label className="flex flex-col gap-1 text-sm font-medium flex-1">Tìm dự án hoặc tổ đội
             <input type="search" value={searchInput} maxLength={256}
-              placeholder="Nhập một phần mã hoặc tên dự án / nhóm"
+              placeholder="Nhập một phần mã hoặc tên dự án / tổ đội"
               onChange={(e) => setSearchInput(e.target.value)} className={input} />
           </label>
           <label className="flex items-center gap-2 text-sm">
@@ -294,41 +294,41 @@ export function ProjectTeamScopeManager() {
             pendingIntent.current = null;
             setFormError(null);
             setDialog({ kind: "grant" });
-          }}>Cấp mapping</button>
+          }}>Cấp phân công</button>
         </form>
 
         {state === "loading" ? <p role="status" className="py-8 text-center text-sm text-muted">Đang tải…</p> : null}
-        {state === "denied" ? <Alert tone="error" title="Không có quyền">Chỉ Full Admin được xem mapping.</Alert> : null}
+        {state === "denied" ? <Alert tone="error" title="Không có quyền">Chỉ Quản trị viên mới được xem danh sách phân công.</Alert> : null}
         {state === "error" ? (
           <div className="space-y-2">
-            <ErrorState title="Không tải được danh sách mapping" />
+            <ErrorState title="Không tải được danh sách phân công" />
             <button type="button" className={button} onClick={reloadList}>Thử tải lại</button>
           </div>
         ) : null}
-        {state === "ready" && mappings.length === 0 ? <EmptyState title="Chưa có mapping nào" /> : null}
+        {state === "ready" && mappings.length === 0 ? <EmptyState title="Chưa có phân công nào" /> : null}
         {state === "ready" && mappings.length > 0 ? (
           <div className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs">
             <table className="r22-card-table w-full min-w-[720px] border-collapse text-left text-sm">
               <thead className="border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted"><tr>
                 <th scope="col" className="px-3.5 py-3 font-semibold">Dự án</th>
-                <th scope="col" className="px-3.5 py-3 font-semibold">Nhóm</th>
+                <th scope="col" className="px-3.5 py-3 font-semibold">Tổ đội</th>
                 <th scope="col" className="px-3.5 py-3 font-semibold">Hiệu lực</th>
                 <th scope="col" className="px-3.5 py-3 font-semibold">Trạng thái</th>
-                <th scope="col" className="px-3.5 py-3 font-semibold">Phiên bản cặp</th>
+                <th scope="col" className="px-3.5 py-3 font-semibold">Phiên bản</th>
                 <th scope="col" className="px-3.5 py-3 text-right">Thao tác</th>
               </tr></thead>
               <tbody className="divide-y divide-border">
                 {mappings.map((m) => (
                   <tr key={m.mapping_id} className="border-b border-border/80 last:border-0 transition-colors hover:bg-surface-hover">
                     <td data-card-header="true" className="px-3.5 py-2.5 font-medium">{m.project_display_name}</td>
-                    <td data-label="Nhóm" className="px-3.5 py-2.5">{m.team_display_name} ({m.team_code})</td>
+                    <td data-label="Tổ đội" className="px-3.5 py-2.5">{m.team_display_name} ({m.team_code})</td>
                     <td data-label="Hiệu lực" className="px-3.5 py-2.5 font-mono tabular-nums whitespace-nowrap">{m.valid_from} → {m.valid_to ?? "∞"}</td>
                     <td data-label="Trạng thái" className="px-3.5 py-2.5">
                       <StatusBadge tone={scopeMappingStateBadgeProps(m.state).tone} dot>
                         {scopeMappingStateBadgeProps(m.state).label}
                       </StatusBadge>
                     </td>
-                    <td data-label="Phiên bản cặp" className="px-3.5 py-2.5 font-mono tabular-nums">{m.version}</td>
+                    <td data-label="Phiên bản" className="px-3.5 py-2.5 font-mono tabular-nums">{m.version}</td>
                     <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
                       <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
                         {m.valid_to === null ? (
@@ -350,7 +350,7 @@ export function ProjectTeamScopeManager() {
             page={page}
             pageCount={pageCount}
             total={list.total}
-            ariaLabel="Phân trang danh sách mapping"
+            ariaLabel="Phân trang danh sách phân công"
             nextDisabled={!list.has_more}
             onPageChange={(nextPage) => {
               setPage(Math.min(1000, nextPage));
@@ -368,8 +368,8 @@ export function ProjectTeamScopeManager() {
             setDialog(null);
           }
         }}
-        title={dialog?.kind === "grant" ? "Cấp mapping Dự án ↔ Nhóm" : "Thu hồi mapping Dự án ↔ Nhóm"}
-        description="Lý do thao tác không bắt buộc; mọi thay đổi đều có audit."
+        title={dialog?.kind === "grant" ? "Cấp phân công Dự án ↔ Tổ đội" : "Thu hồi phân công Dự án ↔ Tổ đội"}
+        description="Lý do thao tác không bắt buộc; mọi thay đổi đều được ghi nhật ký."
         descriptionId="mapping-dialog-desc"
         closeDisabled={busy}
         closeAriaLabel="Đóng"
@@ -438,25 +438,25 @@ export function ProjectTeamScopeManager() {
                     ) : null}
                   </section>
                   <section className="space-y-3" aria-labelledby="team-picker-title">
-                    <h3 id="team-picker-title" className="text-sm font-semibold">Chọn một nhóm</h3>
-                    <label className="flex flex-col gap-1 text-sm font-medium">Tìm nhóm
+                    <h3 id="team-picker-title" className="text-sm font-semibold">Chọn một tổ đội</h3>
+                    <label className="flex flex-col gap-1 text-sm font-medium">Tìm tổ đội
                       <input type="search" value={teamSearch} disabled={busy}
                         maxLength={256}
                         onChange={(e) => { setTeamSearch(e.target.value); setTeamPage(1); }}
                         className={input} />
                     </label>
-                    {teamPicker.kind === "loading" ? <p role="status" className="text-sm text-muted">Đang tải nhóm…</p> : null}
-                    {teamPicker.kind === "denied" ? <Alert tone="error" title="Không có quyền">Không thể tải danh sách nhóm.</Alert> : null}
+                    {teamPicker.kind === "loading" ? <p role="status" className="text-sm text-muted">Đang tải tổ đội…</p> : null}
+                    {teamPicker.kind === "denied" ? <Alert tone="error" title="Không có quyền">Không thể tải danh sách tổ đội.</Alert> : null}
                     {teamPicker.kind === "error" ? (
                       <div className="space-y-2">
-                        <ErrorState title="Không tải được danh sách nhóm" />
+                        <ErrorState title="Không tải được danh sách tổ đội" />
                         <button type="button" className={button} disabled={busy}
                           onClick={() => setTeamReloadToken((value) => value + 1)}>Thử tải lại</button>
                       </div>
                     ) : null}
                     {teamPicker.kind === "ready" ? (
                       <>
-                        <label className="flex flex-col gap-1 text-sm font-medium">Nhóm
+                        <label className="flex flex-col gap-1 text-sm font-medium">Tổ đội
                           <select required value={selectedTeam?.team_id ?? ""} disabled={busy} className={input}
                             onChange={(event) => {
                               setFormError(null);
@@ -464,7 +464,7 @@ export function ProjectTeamScopeManager() {
                                 teamList?.teams.find((team) => team.team_id === event.target.value) ?? null,
                               );
                             }}>
-                            <option value="">Chọn nhóm</option>
+                            <option value="">Chọn tổ đội</option>
                             {selectedTeam && !teamList?.teams.some((team) => team.team_id === selectedTeam.team_id)
                               ? <option value={selectedTeam.team_id}>{selectedTeam.display_name}</option>
                               : null}
@@ -473,7 +473,7 @@ export function ProjectTeamScopeManager() {
                             ))}
                           </select>
                         </label>
-                        {teamList?.teams.length === 0 ? <p className="text-sm text-muted">Không có nhóm đang hoạt động phù hợp.</p> : null}
+                        {teamList?.teams.length === 0 ? <p className="text-sm text-muted">Không có tổ đội đang hoạt động phù hợp.</p> : null}
                         <div className="flex items-center gap-2 text-sm text-muted">
                           <button type="button" className={button} disabled={busy || teamPage <= 1}
                             onClick={() => setTeamPage((value) => Math.max(1, value - 1))}>Trang trước</button>
@@ -487,7 +487,7 @@ export function ProjectTeamScopeManager() {
                 </>
               ) : dialog ? (
                 <>
-                  <p>Bạn sắp thu hồi mapping <strong>{dialog.mapping.project_display_name}</strong> ↔ <strong>{dialog.mapping.team_display_name}</strong> (version {dialog.mapping.version}).</p>
+                  <p>Bạn sắp thu hồi phân công <strong>{dialog.mapping.project_display_name}</strong> ↔ <strong>{dialog.mapping.team_display_name}</strong> (phiên bản {dialog.mapping.version}).</p>
                   <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
                     Hiệu lực thu hồi được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
                   </div>
@@ -502,7 +502,7 @@ export function ProjectTeamScopeManager() {
                 <button type="submit" disabled={busy || (dialog?.kind === "grant" && (
                   projectPicker.kind !== "ready" || teamPicker.kind !== "ready" ||
                   selectedProjectIds.length < 1 || selectedProjectIds.length > MAX_BATCH_PROJECTS || !selectedTeam
-                ))} className={primary}>{busy ? "Đang lưu…" : dialog?.kind === "grant" ? "Cấp mapping" : "Xác nhận thu hồi"}</button>
+                ))} className={primary}>{busy ? "Đang lưu…" : dialog?.kind === "grant" ? "Cấp phân công" : "Xác nhận thu hồi"}</button>
               </div>
             </form>
       </FormDialog>

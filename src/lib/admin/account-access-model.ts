@@ -407,7 +407,7 @@ export function classifyAccountOrgMutation(
   }
 
   const invalidMessages: Record<string, string> = {
-    PERSON_INACTIVE: "Nhân sự được chọn đã ngừng hoạt động (INACTIVE), không thể liên kết tài khoản.",
+    PERSON_INACTIVE: "Nhân sự được chọn đã ngừng làm việc, không thể liên kết tài khoản.",
     ACCOUNT_NOT_FOUND: "Không tìm thấy tài khoản trên máy chủ.",
     PERSON_NOT_FOUND: "Không tìm thấy hồ sơ nhân sự được chọn.",
     ORG_VALIDATION_ERROR: "Thông tin gửi lên không hợp lệ. Vui lòng kiểm tra lại.",

@@ -293,7 +293,18 @@ create table if not exists public.authz_group_idempotency (
   unique (actor_app_user_id, operation_name, target_key, idempotency_key)
 );
 
--- FORCE RLS + zero table grants on all 6 new tables
+create table if not exists public.authz_legacy_direct_grant_migrations (
+  direct_grant_id uuid primary key
+    references public.authz_direct_capability_grants(direct_grant_id) on delete restrict,
+  resolution_kind text not null
+    constraint authz_legacy_direct_grant_migrations_kind_chk
+    check (resolution_kind in ('COVERED_BY_GROUP', 'MIGRATED_TO_GROUP')),
+  group_id uuid
+    references public.authz_user_groups(group_id) on delete restrict,
+  recorded_at timestamptz not null default pg_catalog.clock_timestamp()
+);
+
+-- FORCE RLS + zero table grants on all 7 new tables
 alter table public.authz_user_groups enable row level security;
 alter table public.authz_user_groups force row level security;
 revoke all on table public.authz_user_groups from public, anon, authenticated, service_role;
@@ -317,6 +328,10 @@ revoke all on table public.authz_group_audit_events from public, anon, authentic
 alter table public.authz_group_idempotency enable row level security;
 alter table public.authz_group_idempotency force row level security;
 revoke all on table public.authz_group_idempotency from public, anon, authenticated, service_role;
+
+alter table public.authz_legacy_direct_grant_migrations enable row level security;
+alter table public.authz_legacy_direct_grant_migrations force row level security;
+revoke all on table public.authz_legacy_direct_grant_migrations from public, anon, authenticated, service_role;
 
 -- -----------------------------------------------------------------------------
 -- 2. Table Guard Triggers (4 guard triggers + 2 immutable audit/idempotency)
@@ -654,7 +669,7 @@ declare
   v_code text;
   v_name text;
   v_cap_sanitized text;
-  v_already_covered boolean;
+  v_covering_group_id uuid;
 begin
   select department_id into v_dept_bod
     from public.organization_departments
@@ -817,64 +832,77 @@ begin
        and dg.started_at <= v_now
        and not exists (
          select 1
+           from public.authz_legacy_direct_grant_migrations dm
+          where dm.direct_grant_id = dg.direct_grant_id
+       )
+       and not exists (
+         select 1
            from public.authz_user_group_members m_prev
           where m_prev.migrated_from_source = 'authz_direct_capability_grants'
             and m_prev.migrated_from_id = dg.direct_grant_id
        )
      order by dg.created_at asc, dg.direct_grant_id asc
   loop
-    -- Skip if already satisfied by an active group membership of this user
-    select exists (
-      select 1
-        from public.authz_user_group_members m
-        join public.authz_user_groups g
-          on g.group_id = m.group_id
-         and g.active = true
-        join public.organization_departments d
-          on d.department_id = g.department_id
-         and d.is_active = true
-        left join public.teams t
-          on t.team_id = g.team_id
-         and t.active = true
-         and t.code <> '__system_vendor__'
-        join public.authz_user_group_capabilities gc
-          on gc.group_id = g.group_id
-         and gc.ended_at is null
-         and gc.started_at <= v_now
-         and gc.capability = v_dg.capability
-       where m.app_user_id = v_dg.app_user_id
-         and m.ended_at is null
-         and m.started_at <= v_now
-         and (g.team_id is null or t.team_id is not null)
-         and (
-           (v_dg.scope_kind = 'ALL' and v_dg.scope_id is null and g.team_id is null and (
-             g.is_system_admin
-             or (
-               gc.capability not in (
-                 'entry_create', 'entry_own', 'submission_create', 'document_upload',
-                 'document_view', 'change_request_create', 'employment_status.request'
-               )
+    -- Skip if already satisfied by an active group membership of this user, recording permanent provenance
+    v_covering_group_id := null;
+    select g.group_id
+      into v_covering_group_id
+      from public.authz_user_group_members m
+      join public.authz_user_groups g
+        on g.group_id = m.group_id
+       and g.active = true
+      join public.organization_departments d
+        on d.department_id = g.department_id
+       and d.is_active = true
+      left join public.teams t
+        on t.team_id = g.team_id
+       and t.active = true
+       and t.code <> '__system_vendor__'
+      join public.authz_user_group_capabilities gc
+        on gc.group_id = g.group_id
+       and gc.ended_at is null
+       and gc.started_at <= v_now
+       and gc.capability = v_dg.capability
+     where m.app_user_id = v_dg.app_user_id
+       and m.ended_at is null
+       and m.started_at <= v_now
+       and (g.team_id is null or t.team_id is not null)
+       and (
+         (v_dg.scope_kind = 'ALL' and v_dg.scope_id is null and g.team_id is null and (
+           g.is_system_admin
+           or (
+             gc.capability not in (
+               'entry_create', 'entry_own', 'submission_create', 'document_upload',
+               'document_view', 'change_request_create', 'employment_status.request'
              )
-             or (
-               gc.capability = 'document_view'
-               and exists (
-                 select 1
-                   from public.authz_user_group_capabilities gc2
-                  where gc2.group_id = g.group_id
-                    and gc2.ended_at is null
-                    and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
-               )
+           )
+           or (
+             gc.capability = 'document_view'
+             and exists (
+               select 1
+                 from public.authz_user_group_capabilities gc2
+                where gc2.group_id = g.group_id
+                  and gc2.ended_at is null
+                  and gc2.capability in ('recruiter_master_manage', 'team_master_manage', 'catalog_master_manage', 'audit_view')
              )
-           ))
-           or (v_dg.scope_kind = 'OWN' and v_dg.scope_id is null and gc.capability in (
-             'entry_create', 'entry_own', 'submission_create', 'document_upload',
-             'document_view', 'change_request_create', 'employment_status.request'
-           ))
-           or (v_dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = v_dg.scope_id)
-         )
-    ) into v_already_covered;
+           )
+         ))
+         or (v_dg.scope_kind = 'OWN' and v_dg.scope_id is null and gc.capability in (
+           'entry_create', 'entry_own', 'submission_create', 'document_upload',
+           'document_view', 'change_request_create', 'employment_status.request'
+         ))
+         or (v_dg.scope_kind = 'CONTEXT_TEAM' and g.team_id is not null and g.team_id::text = v_dg.scope_id)
+       )
+     order by g.is_system_admin desc, g.group_id asc
+     limit 1;
 
-    if v_already_covered then
+    if v_covering_group_id is not null then
+      insert into public.authz_legacy_direct_grant_migrations (
+        direct_grant_id, resolution_kind, group_id, recorded_at
+      ) values (
+        v_dg.direct_grant_id, 'COVERED_BY_GROUP', v_covering_group_id, v_now
+      )
+      on conflict (direct_grant_id) do nothing;
       continue;
     end if;
 
@@ -977,6 +1005,13 @@ begin
         null
       )
       on conflict (group_id, app_user_id) where ended_at is null do nothing;
+
+      insert into public.authz_legacy_direct_grant_migrations (
+        direct_grant_id, resolution_kind, group_id, recorded_at
+      ) values (
+        v_dg.direct_grant_id, 'MIGRATED_TO_GROUP', v_target_group_id, v_now
+      )
+      on conflict (direct_grant_id) do nothing;
     end if;
   end loop;
 end;

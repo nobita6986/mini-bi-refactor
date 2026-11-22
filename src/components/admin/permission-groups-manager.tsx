@@ -948,9 +948,12 @@ export function PermissionGroupsManager() {
                   className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
                 >
                   <option value="">Chọn phòng ban…</option>
-                  {departments.map((dept) => (
+                  {(editor.kind === "create"
+                    ? departments.filter((dept) => dept.is_active)
+                    : departments
+                  ).map((dept) => (
                     <option key={dept.department_id} value={dept.department_id}>
-                      {dept.name} ({dept.code})
+                      {dept.name} ({dept.code}){!dept.is_active ? " (Ngừng hoạt động)" : ""}
                     </option>
                   ))}
                 </select>
@@ -981,7 +984,8 @@ export function PermissionGroupsManager() {
                     editor.group.team_id &&
                     !teams.some((t) => t.team_id === editor.group.team_id) ? (
                       <option value={editor.group.team_id}>
-                        {editor.group.team_name ?? editor.group.team_id} (Đã ngừng hoạt động)
+                        {editor.group.team_name ?? editor.group.team_id}{" "}
+                        {teamsLoadError ? "(Tổ đội hiện tại)" : "(Đã ngừng hoạt động)"}
                       </option>
                     ) : null}
                     {teams.map((team) => (

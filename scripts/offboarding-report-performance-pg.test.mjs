@@ -503,8 +503,10 @@ test(
         )
       ).rows[0].data;
 
-      // 4. Apply the performance hotfix migration (and remaining migrations if any)
-      for (const name of names.slice(perfIdx)) {
+      // 4. Apply the performance hotfix migration (and remaining pre-#237 migrations; perf fixture uses legacy authz_managed=false seed users)
+      for (const name of names
+        .slice(perfIdx)
+        .filter((f) => f < "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql")) {
         await client.query(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
       }
       await client.query("analyze;");

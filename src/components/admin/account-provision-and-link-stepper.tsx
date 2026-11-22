@@ -750,12 +750,19 @@ export function AccountProvisionAndLinkStepper({
                 ? String((rawJson as Record<string, unknown>).message)
                 : "Chưa kích hoạt được hồ sơ tuyển dụng lúc này.";
             const isUncertain5a = response.status >= 500;
+            const isVersionConflict5a = response.status === 409;
             persistCpOrReport({
               ...currentCp,
               updated_at: nowIso(),
               step5_recruiter: {
                 ...currentCp.step5_recruiter!,
                 status: isUncertain5a ? "UNCERTAIN" : "IDLE",
+                ...(isUncertain5a
+                  ? {}
+                  : {
+                      idempotency_key: null,
+                      expected_account_version: null,
+                    }),
               },
             });
             if (isUncertain5a) {
@@ -767,11 +774,18 @@ export function AccountProvisionAndLinkStepper({
                   "Hồ sơ, tài khoản và nhóm quyền đã được lưu. Hệ thống giữ nguyên yêu cầu đang chờ để bạn bấm \"Tiếp tục thiết lập tuyển dụng\" mà không tạo trùng.",
               });
             } else {
+              if (isVersionConflict5a) {
+                setStep4VersionConflict(true);
+              }
               setStep5PartialFailure(msg);
               setFeedback({
                 tone: "warning",
-                title: "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
-                message: `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
+                title: isVersionConflict5a
+                  ? "Dữ liệu tài khoản vừa thay đổi trước khi kích hoạt tuyển dụng"
+                  : "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
+                message: isVersionConflict5a
+                  ? "Hãy bấm \"Tải lại dữ liệu tài khoản\" rồi thử lại, hoặc bấm \"Đóng & Mở hồ sơ\" để thiết lập tuyển dụng sau."
+                  : `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
               });
             }
             return;
@@ -1996,9 +2010,18 @@ export function AccountProvisionAndLinkStepper({
             },
           });
           setStep2AllowNewLoginEdit(isTerminalFail);
+          const stateTitleMap: Record<string, string> = {
+            FAILED: "Mở tài khoản không thành công",
+            EXPIRED: "Yêu cầu mở tài khoản đã hết hạn",
+            CONFLICT: "Tên đăng nhập đã được sử dụng",
+            BLOCKED: "Yêu cầu mở tài khoản cần kiểm tra lại",
+            INDETERMINATE: "Chưa xác định được kết quả mở tài khoản",
+            IN_FLIGHT: "Yêu cầu mở tài khoản đang được xử lý",
+            PENDING: "Yêu cầu mở tài khoản đang chờ xử lý",
+          };
           setFeedback({
             tone: isTerminalFail ? "error" : "warning",
-            title: `Kết quả đối chiếu: ${outcome.state}`,
+            title: stateTitleMap[outcome.state] ?? "Chưa hoàn tất kiểm tra kết quả mở đăng nhập",
             message: outcome.message,
           });
           return;
@@ -2006,7 +2029,7 @@ export function AccountProvisionAndLinkStepper({
 
         setFeedback({
           tone: outcome.kind === "conflict" ? "warning" : "error",
-          title: "Chưa hoàn tất đối chiếu yêu cầu tạo tài khoản",
+          title: "Chưa hoàn tất kiểm tra yêu cầu mở tài khoản",
           message: outcome.message,
         });
       } catch (error) {
@@ -2014,9 +2037,9 @@ export function AccountProvisionAndLinkStepper({
         if (!mountedRef.current || !workspaceGuard.isActive(callerEpoch)) return;
         setFeedback({
           tone: "warning",
-          title: "Mất kết nối khi đối chiếu yêu cầu tạo tài khoản",
+          title: "Mất kết nối khi kiểm tra yêu cầu mở tài khoản",
           message:
-            "Khóa đối chiếu được giữ nguyên. Bạn có thể bấm \"Đối chiếu kết quả tạo tài khoản\" lại an toàn.",
+            "Yêu cầu đang chờ được giữ nguyên. Bạn có thể bấm \"Kiểm tra lại kết quả mở đăng nhập\" an toàn mà không tạo trùng.",
         });
       } finally {
         tracked.release();
@@ -2170,7 +2193,7 @@ export function AccountProvisionAndLinkStepper({
             tone: "info",
             title: "Bước 1 đã hoàn tất — nhập mật khẩu tạm để tiếp tục Bước 2",
             message:
-              "Hồ sơ nhân viên đã được xác nhận trên máy chủ. Mật khẩu không được lưu qua lần tải lại trang; hãy nhập mật khẩu tạm để chạy Bước 2 mở tài khoản bằng đúng khóa K_account đã chuẩn bị.",
+              "Hồ sơ nhân viên đã được lưu. Vì lý do bảo mật, mật khẩu tạm không tự lưu khi tải lại trang; hãy nhập mật khẩu tạm để tiếp tục mở đăng nhập (không tạo trùng).",
           });
           return;
         }
@@ -2840,20 +2863,35 @@ export function AccountProvisionAndLinkStepper({
           ? { ...g, idempotency_key: newGroupMutationIdempotencyKey() }
           : g,
       );
+      const refreshedStep5 =
+        checkpoint.step5_recruiter && checkpoint.step5_recruiter.status === "IDLE"
+          ? {
+              ...checkpoint.step5_recruiter,
+              idempotency_key: null,
+              expected_account_version: null,
+            }
+          : checkpoint.step5_recruiter;
       const refreshedCp = persistCpOrReport({
         ...checkpoint,
         updated_at: nowIso(),
         step4_roles: refreshedRoles,
         ...(refreshedGroups !== undefined ? { step4_groups: refreshedGroups } : {}),
+        ...(refreshedStep5 !== undefined ? { step5_recruiter: refreshedStep5 } : {}),
       });
       if (refreshedCp) {
         setVerifiedStep4AccountVersion(projectedA.version);
         setStep4VersionConflict(false);
         setStep4PartialFailure(null);
+        setStep5PartialFailure(null);
+        const hasPendingStep4 =
+          refreshedRoles.some((r) => r.status !== "COMMITTED") ||
+          (refreshedGroups ?? []).some((g) => g.status !== "COMMITTED");
         setFeedback({
           tone: "info",
           title: "Đã cập nhật dữ liệu tài khoản mới nhất",
-          message: "Hãy bấm \"Tiếp tục xếp nhóm quyền còn lại\" để hoàn tất.",
+          message: hasPendingStep4
+            ? "Hãy bấm \"Tiếp tục xếp nhóm quyền còn lại\" để hoàn tất."
+            : "Hãy bấm \"Tiếp tục thiết lập tuyển dụng\" để hoàn tất.",
         });
       }
     } catch (error) {
@@ -2941,7 +2979,7 @@ export function AccountProvisionAndLinkStepper({
     step2NeedsPasswordReentry && step2PreIntentUncertain;
 
   // Core steps (1-3) keep PR27-R1/R2 close lock during unresolved UNCERTAIN/IN_FLIGHT;
-  // Step 4/5 UNCERTAIN allows temporary close WITHOUT wiping sessionStorage checkpoint (UX-04).
+  // Step 4/5 UNCERTAIN allows temporary close WITHOUT wiping the browser checkpoint (UX-04).
   const isCloseDisabled =
     busy ||
     verifyingResume ||
@@ -3594,7 +3632,7 @@ export function AccountProvisionAndLinkStepper({
                 onClick={() => {
                   if (isCloseDisabled) return;
                   clearRamPasswords();
-                  // Temporary close: NEVER wipe sessionStorage recovery checkpoint when steps remain UNCERTAIN/pending!
+                  // Temporary close: NEVER wipe browser recovery checkpoint when steps remain UNCERTAIN/pending!
                   onCheckpointChangedRef.current?.();
                   onClose();
                 }}

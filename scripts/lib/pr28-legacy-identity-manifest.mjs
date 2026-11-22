@@ -437,20 +437,26 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
     select
       u.app_user_id,
       u.display_name,
+      u.enabled,
+      bool_or(cg.suspended_by_account_disable) as has_suspended_grants,
       array_agg(distinct cg.capability order by cg.capability) as capabilities
     from public.direct_entry_app_users u
     join public.direct_entry_capability_grants cg
       on cg.app_user_id = u.app_user_id
-     and cg.is_current = true
-    where u.enabled = true
-      and u.authz_managed = false
-    group by u.app_user_id, u.display_name
+     and (
+       (u.enabled = true and cg.is_current = true)
+       or cg.suspended_by_account_disable = true
+     )
+    where not coalesce(u.authz_managed, false)
+    group by u.app_user_id, u.display_name, u.enabled
     order by u.app_user_id asc
   `);
 
   const uncutoverLegacyGrantUsers = uncutoverRows.map((r) => ({
     app_user_id: r.app_user_id.toLowerCase(),
     display_name: r.display_name,
+    enabled: Boolean(r.enabled),
+    has_suspended_grants: Boolean(r.has_suspended_grants),
     capabilities: r.capabilities ?? [],
   }));
 

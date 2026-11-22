@@ -160,18 +160,22 @@ begin
       using errcode = 'P0001';
   end if;
 
-  -- Gate 4: Enabled uncutover legacy users still relying on pre-WP5 direct_entry_capability_grants
+  -- Gate 4: Uncutover legacy users still relying on pre-WP5 direct_entry_capability_grants
+  -- (enabled with is_current = true, OR disabled with suspended_by_account_disable = true
+  --  which would resurrect pre-WP5 legacy grants upon re-enable)
   select count(distinct u.app_user_id)::integer
     into v_uncutover_legacy_count
     from public.direct_entry_app_users u
     join public.direct_entry_capability_grants cg
       on cg.app_user_id = u.app_user_id
-     and cg.is_current = true
-   where u.enabled = true
-     and not coalesce(u.authz_managed, false);
+     and (
+       (u.enabled = true and cg.is_current = true)
+       or cg.suspended_by_account_disable = true
+     )
+   where not coalesce(u.authz_managed, false);
 
   if v_uncutover_legacy_count > 0 then
-    raise exception 'PR28_CLEANUP_BLOCKED_UNCUTOVER_LEGACY_GRANTS: % enabled user(s) still have authz_managed = false with active direct_entry_capability_grants', v_uncutover_legacy_count
+    raise exception 'PR28_CLEANUP_BLOCKED_UNCUTOVER_LEGACY_GRANTS: % user(s) still have authz_managed = false with active or suspended direct_entry_capability_grants', v_uncutover_legacy_count
       using errcode = 'P0001';
   end if;
 end;
@@ -649,8 +653,8 @@ declare
   v_today date := public.direct_entry_authorization_date();
   v_valid_from date;
   v_now timestamptz;
-  v_next_capability_start date;
-  v_next_scope_start date;
+  v_prev_caps text[];
+  v_had_own_scope boolean;
   v_auto_reason text;
 begin
   if p_reason is not null and length(p_reason) > 4000 then
@@ -748,50 +752,17 @@ begin
   values (p_account_ref, v_recruiter.recruiter_id, true, v_valid_from, true)
   returning link_id into v_link_id;
 
-  foreach v_capability in array array[
-    'entry_create', 'entry_own', 'submission_create', 'change_request_create',
-    'employment_status.request', 'document_upload', 'document_view'
-  ]::text[]
-  loop
-    if not exists (
-      select 1 from public.direct_entry_capability_grants g
-       where g.app_user_id = p_account_ref and g.capability = v_capability
-         and g.is_current
-    ) then
-      select min(g.valid_from) into v_next_capability_start
-        from public.direct_entry_capability_grants g
-       where g.app_user_id = p_account_ref and g.capability = v_capability
-         and g.valid_from > v_today;
-      insert into public.direct_entry_capability_grants
-        (app_user_id, capability, valid_from, valid_to, is_current)
-      values (p_account_ref, v_capability, v_today, v_next_capability_start, true);
-      insert into public.direct_entry_audit_events (
-        auth_subject, app_user_id, action, capability, resource_ref, outcome, reason_id, changed_fields
-      ) values (
-        p_auth_subject, p_actor_app_user_id, 'capability_default_grant', v_capability,
-        p_account_ref::text, 'APPLIED', v_reason_id, array['valid_from', 'valid_to']
-      );
-    end if;
-  end loop;
+  select coalesce(array_agg(distinct g.capability), array[]::text[])
+    into v_prev_caps
+    from public.direct_entry_capability_grants g
+   where g.app_user_id = p_account_ref
+     and g.is_current;
 
-  if not exists (
+  select exists (
     select 1 from public.direct_entry_scope_grants g
      where g.app_user_id = p_account_ref and g.scope_kind = 'own'
        and g.is_current
-  ) then
-    select min(g.valid_from) into v_next_scope_start
-      from public.direct_entry_scope_grants g
-     where g.app_user_id = p_account_ref and g.scope_kind = 'own'
-       and g.valid_from > v_today;
-    insert into public.direct_entry_scope_grants (app_user_id, scope_kind, valid_from, valid_to, is_current)
-    values (p_account_ref, 'own', v_today, v_next_scope_start, true);
-    insert into public.direct_entry_audit_events (
-      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
-    ) values (
-      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
-      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
-    );
-  end if;
+  ) into v_had_own_scope;
 
   v_auto_reason := left(coalesce(p_reason, 'Auto-granted upon personnel creation'), 500);
   if pg_catalog.length(pg_catalog.btrim(v_auto_reason)) < 3 then
@@ -811,18 +782,47 @@ begin
   update public.direct_entry_app_users
      set version = version + 1,
          updated_at = v_now,
-         authz_managed = (
-           authz_managed
-           or coalesce(
-             (select s.cutover_ready from public.authz_system_state s where s.singleton_id = true),
-             false
-           )
-         )
+         authz_managed = true
    where app_user_id = p_account_ref
   returning version, authz_managed into v_account.version, v_account.authz_managed;
 
-  if v_account.authz_managed then
-    perform public.direct_entry_authz__internal_sync_legacy_grants(p_account_ref);
+  -- Legacy mirrors are strictly derived from active permission groups (zero direct writes outside group sync)
+  perform public.direct_entry_authz__internal_sync_legacy_grants(p_account_ref);
+
+  foreach v_capability in array array[
+    'entry_create', 'entry_own', 'submission_create', 'change_request_create',
+    'employment_status.request', 'document_upload', 'document_view'
+  ]::text[]
+  loop
+    if not (v_capability = any(v_prev_caps))
+       and exists (
+         select 1 from public.direct_entry_capability_grants g
+          where g.app_user_id = p_account_ref
+            and g.capability = v_capability
+            and g.is_current
+       ) then
+      insert into public.direct_entry_audit_events (
+        auth_subject, app_user_id, action, capability, resource_ref, outcome, reason_id, changed_fields
+      ) values (
+        p_auth_subject, p_actor_app_user_id, 'capability_default_grant', v_capability,
+        p_account_ref::text, 'APPLIED', v_reason_id, array['valid_from', 'valid_to']
+      );
+    end if;
+  end loop;
+
+  if not v_had_own_scope
+     and exists (
+       select 1 from public.direct_entry_scope_grants g
+        where g.app_user_id = p_account_ref
+          and g.scope_kind = 'own'
+          and g.is_current
+     ) then
+    insert into public.direct_entry_audit_events (
+      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
+    ) values (
+      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
+      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
+    );
   end if;
 
   if v_person.person_id is not null and v_person.recruiter_id is null then
@@ -903,8 +903,8 @@ declare
   v_reason_id uuid;
   v_link_id uuid;
   v_capability text;
-  v_next_capability_start date;
-  v_next_scope_start date;
+  v_prev_caps text[];
+  v_had_own_scope boolean;
   v_app_user_revision_id uuid;
   v_now timestamptz;
   v_result jsonb;
@@ -1186,95 +1186,19 @@ begin
     p_account_ref, p_recruiter_id, true, v_today, true
   ) returning link_id into v_link_id;
 
-  if not exists (
+  select coalesce(array_agg(distinct g.capability), array[]::text[])
+    into v_prev_caps
+    from public.direct_entry_capability_grants g
+   where g.app_user_id = p_account_ref
+     and g.is_current;
+
+  select exists (
     select 1
       from public.direct_entry_scope_grants g
      where g.app_user_id = p_account_ref
        and g.scope_kind = 'own'
        and g.is_current
-  ) then
-    if exists (
-      select 1
-        from public.direct_entry_scope_grants g
-       where g.app_user_id = p_account_ref
-         and g.scope_kind = 'own'
-         and g.valid_from <= v_today
-         and (g.valid_to is null or v_today < g.valid_to)
-    ) then
-      update public.direct_entry_scope_grants g
-         set is_current = true
-       where g.app_user_id = p_account_ref
-         and g.scope_kind = 'own'
-         and g.valid_from <= v_today
-         and (g.valid_to is null or v_today < g.valid_to);
-    else
-      select min(g.valid_from)
-        into v_next_scope_start
-        from public.direct_entry_scope_grants g
-       where g.app_user_id = p_account_ref
-         and g.scope_kind = 'own'
-         and g.valid_from > v_today;
-      insert into public.direct_entry_scope_grants (
-        app_user_id, scope_kind, valid_from, valid_to, is_current
-      ) values (
-        p_account_ref, 'own', v_today, v_next_scope_start, true
-      );
-    end if;
-    insert into public.direct_entry_audit_events (
-      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
-    ) values (
-      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
-      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
-    );
-  end if;
-
-  foreach v_capability in array array[
-    'entry_create', 'entry_own', 'submission_create', 'change_request_create',
-    'employment_status.request', 'document_upload', 'document_view'
-  ]::text[]
-  loop
-    if not exists (
-      select 1
-        from public.direct_entry_capability_grants g
-       where g.app_user_id = p_account_ref
-         and g.capability = v_capability
-         and g.is_current
-    ) then
-      if exists (
-        select 1
-          from public.direct_entry_capability_grants g
-         where g.app_user_id = p_account_ref
-           and g.capability = v_capability
-           and g.valid_from <= v_today
-           and (g.valid_to is null or v_today < g.valid_to)
-      ) then
-        update public.direct_entry_capability_grants g
-           set is_current = true
-         where g.app_user_id = p_account_ref
-           and g.capability = v_capability
-           and g.valid_from <= v_today
-           and (g.valid_to is null or v_today < g.valid_to);
-      else
-        select min(g.valid_from)
-          into v_next_capability_start
-          from public.direct_entry_capability_grants g
-         where g.app_user_id = p_account_ref
-           and g.capability = v_capability
-           and g.valid_from > v_today;
-        insert into public.direct_entry_capability_grants (
-          app_user_id, capability, valid_from, valid_to, is_current
-        ) values (
-          p_account_ref, v_capability, v_today, v_next_capability_start, true
-        );
-      end if;
-      insert into public.direct_entry_audit_events (
-        auth_subject, app_user_id, action, capability, resource_ref, outcome, reason_id, changed_fields
-      ) values (
-        p_auth_subject, p_actor_app_user_id, 'capability_default_grant', v_capability,
-        p_account_ref::text, 'APPLIED', v_reason_id, array['valid_from', 'valid_to']
-      );
-    end if;
-  end loop;
+  ) into v_had_own_scope;
 
   v_auto_reason := left(coalesce(p_reason, 'Auto-granted upon recruiter account link'), 500);
   if pg_catalog.length(pg_catalog.btrim(v_auto_reason)) < 3 then
@@ -1294,19 +1218,50 @@ begin
   update public.direct_entry_app_users
      set version = version + 1,
          updated_at = v_now,
-         authz_managed = (
-           authz_managed
-           or coalesce(
-             (select s.cutover_ready from public.authz_system_state s where s.singleton_id = true),
-             false
-           )
-         )
+         authz_managed = true
    where app_user_id = p_account_ref
   returning version, authz_managed into v_account.version, v_account.authz_managed;
 
-  if v_account.authz_managed then
-    perform public.direct_entry_authz__internal_sync_legacy_grants(p_account_ref);
+  -- Legacy mirrors are strictly derived from active permission groups (zero direct writes outside group sync)
+  perform public.direct_entry_authz__internal_sync_legacy_grants(p_account_ref);
+
+  if not v_had_own_scope
+     and exists (
+       select 1
+         from public.direct_entry_scope_grants g
+        where g.app_user_id = p_account_ref
+          and g.scope_kind = 'own'
+          and g.is_current
+     ) then
+    insert into public.direct_entry_audit_events (
+      auth_subject, app_user_id, action, capability, resource_ref, scope_kind, outcome, reason_id, changed_fields
+    ) values (
+      p_auth_subject, p_actor_app_user_id, 'scope_default_grant', 'entry_own',
+      p_account_ref::text, 'own', 'APPLIED', v_reason_id, array['scope_kind', 'valid_from', 'valid_to']
+    );
   end if;
+
+  foreach v_capability in array array[
+    'entry_create', 'entry_own', 'submission_create', 'change_request_create',
+    'employment_status.request', 'document_upload', 'document_view'
+  ]::text[]
+  loop
+    if not (v_capability = any(v_prev_caps))
+       and exists (
+         select 1
+           from public.direct_entry_capability_grants g
+          where g.app_user_id = p_account_ref
+            and g.capability = v_capability
+            and g.is_current
+       ) then
+      insert into public.direct_entry_audit_events (
+        auth_subject, app_user_id, action, capability, resource_ref, outcome, reason_id, changed_fields
+      ) values (
+        p_auth_subject, p_actor_app_user_id, 'capability_default_grant', v_capability,
+        p_account_ref::text, 'APPLIED', v_reason_id, array['valid_from', 'valid_to']
+      );
+    end if;
+  end loop;
 
   if v_acct_person.person_id is not null and v_acct_person.recruiter_id is null then
     update public.organization_persons
@@ -2823,9 +2778,11 @@ begin
              from public.authz_user_group_members m
              join public.authz_user_groups grp on grp.group_id = m.group_id and grp.active = true
              join public.organization_departments dept on dept.department_id = grp.department_id and dept.is_active = true
+             left join public.teams t on t.team_id = grp.team_id and t.active = true and t.code <> '__system_vendor__'
              join public.authz_user_group_capabilities gc on gc.group_id = grp.group_id and gc.ended_at is null
             where m.app_user_id = p_target_app_user_id
               and m.ended_at is null
+              and (grp.team_id is null or t.team_id is not null)
               and gc.capability = g.capability
          )
        );
@@ -3345,9 +3302,14 @@ begin
         join public.organization_departments d
           on d.department_id = g.department_id
          and d.is_active = true
+        left join public.teams t
+          on t.team_id = g.team_id
+         and t.active = true
+         and t.code <> '__system_vendor__'
         where m.app_user_id = v_app_user_id
           and m.ended_at is null
           and m.started_at <= v_now
+          and (g.team_id is null or t.team_id is not null)
         union all
         select
           5 as sort_order,
@@ -6578,6 +6540,9 @@ begin
          )
     into v_module_grants
     from public.authz_user_group_members m
+    join public.direct_entry_app_users u
+      on u.app_user_id = m.app_user_id
+     and u.enabled = true
     join public.authz_user_groups grp
       on grp.group_id = m.group_id
      and grp.active = true
@@ -12165,7 +12130,6 @@ declare
   v_reason_id uuid;
   v_app_user public.direct_entry_app_users;
   v_revision_id uuid;
-  v_cutover_ready boolean := false;
 begin
   if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 128 then
     raise exception 'idempotency key required' using errcode = '22023';
@@ -12173,13 +12137,6 @@ begin
   if p_created_auth_subject is null or p_intent_id is null or p_intent_token is null then
     raise exception 'intent, token and auth subject required' using errcode = '22023';
   end if;
-
-  select coalesce(s.cutover_ready, false)
-    into v_cutover_ready
-    from public.authz_system_state s
-   where s.singleton_id = true
-   for share;
-  v_cutover_ready := coalesce(v_cutover_ready, false);
 
   perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_actor_app_user_id);
 
@@ -12349,10 +12306,12 @@ begin
              from public.authz_user_group_members m
              join public.authz_user_groups grp on grp.group_id = m.group_id and grp.active = true
              join public.organization_departments dept on dept.department_id = grp.department_id and dept.is_active = true
+             left join public.teams t on t.team_id = grp.team_id and t.active = true and t.code <> '__system_vendor__'
              join public.authz_user_group_capabilities gc on gc.group_id = grp.group_id and gc.ended_at is null and gc.started_at <= v_now
             where m.app_user_id = g.app_user_id
               and m.ended_at is null
               and m.started_at <= v_now
+              and (grp.team_id is null or t.team_id is not null)
               and gc.capability = g.capability
          );
     elsif tg_op = 'UPDATE'
@@ -12476,10 +12435,12 @@ begin
            from public.authz_user_group_members m
            join public.authz_user_groups grp on grp.group_id = m.group_id and grp.active = true
            join public.organization_departments dept on dept.department_id = grp.department_id and dept.is_active = true
+           left join public.teams t on t.team_id = grp.team_id and t.active = true and t.code <> '__system_vendor__'
            join public.authz_user_group_capabilities gc on gc.group_id = grp.group_id and gc.ended_at is null and gc.started_at <= v_now
           where m.app_user_id = g.app_user_id
             and m.ended_at is null
             and m.started_at <= v_now
+            and (grp.team_id is null or t.team_id is not null)
             and gc.capability = g.capability
        );
   end if;
