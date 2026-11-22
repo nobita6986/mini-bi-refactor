@@ -180,3 +180,87 @@ test("3. Read-only Legacy Technical Identity Manifest accurately classifies all 
     await db.close();
   }
 });
+
+test("4. Authorization Cutover Manifest gates #237 preflight on unmappable direct grants & uncutover legacy grants", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      create role anon;
+      create role authenticated;
+      create role service_role;
+      create schema auth;
+      create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);
+    `);
+
+    const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const grpIdx = names.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
+    assert.ok(grpIdx >= 0);
+    for (const name of names.slice(0, grpIdx + 1)) {
+      await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+    }
+
+    const uAuth = "67000000-0000-4000-8000-000000000001";
+    const uApp = "67000000-0000-4000-8000-000000000011";
+    const teamId = "67000000-0000-4000-8000-000000000099";
+    await db.query(`insert into auth.users (id, email) values ($1::uuid, 'gate.manifest@hrpartner.vn')`, [uAuth]);
+    await db.query(
+      `insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled, account_type, authz_managed)
+       values ($1::uuid, $2::uuid, 'Gate Manifest User', true, 'NORMAL', false)`,
+      [uApp, uAuth],
+    );
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active)
+       values ($1::uuid, 'gate-team', 'Gate Team', true)`,
+      [teamId],
+    );
+
+    // 1) Active legacy direct_entry_capability_grants on enabled authz_managed=false -> Gate 4 blocks cleanup_migration_safe
+    await db.query(
+      `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
+       values ($1::uuid, 'entry_own', '2026-01-01', true)`,
+      [uApp],
+    );
+    const mGate4 = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mGate4.cleanup_migration_safe, false);
+    assert.equal(mGate4.authorization_cutover_manifest.uncutover_legacy_grant_user_count, 1);
+    assert.equal(mGate4.authorization_cutover_manifest.unmappable_direct_grant_count, 0);
+
+    // Mark account cutover (authz_managed=true) -> Gate 4 clears
+    await db.query(`update public.direct_entry_app_users set authz_managed = true where app_user_id = $1::uuid`, [uApp]);
+    const mAfterCutover = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mAfterCutover.cleanup_migration_safe, true);
+    assert.equal(mAfterCutover.authorization_cutover_manifest.uncutover_legacy_grant_user_count, 0);
+
+    // 2) Add mappable direct grant (catalog_master_manage @ ALL -> HR_CATALOG_OPERATOR) -> still cleanup_migration_safe = true!
+    await db.query(
+      `insert into public.authz_direct_capability_grants
+         (app_user_id, capability, scope_kind, scope_id, source_kind, started_at, reason)
+       values ($1::uuid, 'catalog_master_manage', 'ALL', null, 'EXCEPTION_GRANT', now(), 'Mappable direct grant')`,
+      [uApp],
+    );
+    const mMappable = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mMappable.cleanup_migration_safe, true);
+    assert.equal(mMappable.authorization_cutover_manifest.active_direct_grant_count, 1);
+    assert.equal(mMappable.authorization_cutover_manifest.unmappable_direct_grant_count, 0);
+    assert.equal(mMappable.authorization_cutover_manifest.active_direct_grants[0].classification, "MAPPABLE_TO_GROUP");
+
+    // 3) Add unmappable direct grant (report_view @ ALL -> must NOT auto-upgrade to Admin) -> Gate 3 blocks cleanup_migration_safe!
+    await db.query(
+      `insert into public.authz_direct_capability_grants
+         (app_user_id, capability, scope_kind, scope_id, source_kind, started_at, reason)
+       values ($1::uuid, 'report_view', 'ALL', null, 'EXCEPTION_GRANT', now(), 'Unmappable direct grant')`,
+      [uApp],
+    );
+    const mGate3 = await buildLegacyTechnicalIdentityManifest(db, {});
+    assert.equal(mGate3.cleanup_migration_safe, false);
+    assert.equal(mGate3.authorization_cutover_manifest.unmappable_direct_grant_count, 1);
+    const unmappable = mGate3.authorization_cutover_manifest.active_direct_grants.find(
+      (g) => g.classification === "UNMAPPABLE_REQUIRES_T0_DECISION",
+    );
+    assert.ok(unmappable);
+    assert.equal(unmappable.capability, "report_view");
+    assert.equal(unmappable.scope_kind, "ALL");
+  } finally {
+    await db.close();
+  }
+});

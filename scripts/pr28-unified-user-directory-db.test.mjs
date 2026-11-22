@@ -264,9 +264,15 @@ async function seedPersonDirect(
 
 async function createBootstrappedDb() {
   const migrations = await loadMigrations();
+  const pr28ReaderIdx = migrations.findIndex(
+    (m) => m.name === PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME,
+  );
+  assert.ok(pr28ReaderIdx >= 0, "PR #28 unified user directory migration must exist");
+
   const db = new PGlite();
   await db.exec(ROLE_PREAMBLE);
-  await applyPrefix(db, migrations, migrations.length);
+  // Real production rollout order: #001..#235 -> WP5 cutover -> pre-cutover roles -> #236 (groups) -> #237 (cleanup).
+  await applyPrefix(db, migrations, pr28ReaderIdx + 1);
 
   for (const u of [OWNER, LUANPT, LIENVU, NGATTT, HR_OP, REC_ACTOR]) {
     await seedBaseUser(db, u);
@@ -304,6 +310,11 @@ async function createBootstrappedDb() {
      )`,
     [OWNER.auth, OWNER.app, REC_ACTOR.app, nextUuid(), sha256("pr28-seed-rec")],
   );
+
+  // Apply #236 (permission groups foundation & backfill) and #237 (group-only cutover & legacy cleanup).
+  for (const m of migrations.slice(pr28ReaderIdx + 1)) {
+    await db.exec(m.sql);
+  }
 
   return db;
 }
@@ -1422,6 +1433,148 @@ test("4. Rev 2 Case 7c (Recruiter-vs-Person Contradiction in Normal Schema) & >2
     assert.equal(spaceDetailRes.status, 200);
     const spaceDetail = await spaceDetailRes.json();
     assert.equal(spaceDetail.entry.account.login_id, null);
+  } finally {
+    await db.close();
+  }
+});
+
+test("5. UX-01 DB E2E: Completing legacy account-only entry (create-new-person+dept OR link-existing-person) collapses into 1 linked user directory row without creating new auth account", async () => {
+  const db = await createBootstrappedDb();
+  try {
+    const repo = createServiceUserDirectoryRepository(createPgliteNamedRpc(db));
+    const deps = { resolveSession: makeFullAdminSession(OWNER), repository: repo };
+    const deptRow = (
+      await db.query(
+        `select department_id, name from public.organization_departments where is_active = true order by code limit 1`,
+      )
+    ).rows[0];
+    assert.ok(deptRow?.department_id, "Active department must exist");
+
+    // Path A: Legacy personal account without Person -> create Person + Department + Link atomically via org_department_create_person_admin
+    const uLegacyCreate = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "legacy.ux01.create@hrpartner.vn",
+      name: "Nhân Viên Cũ Tạo Hồ Sơ",
+    };
+    await seedBaseUser(db, uLegacyCreate, { enabled: true });
+
+    const beforeCreate = await (
+      await listUserDirectoryAdmin(
+        new Request("https://bi.local/api/admin/organization/user-directory?search=legacy.ux01.create"),
+        "true",
+        deps,
+      )
+    ).json();
+    assert.equal(beforeCreate.total, 1);
+    assert.equal(beforeCreate.entries[0].record_kind, "UNLINKED_ACCOUNT");
+    assert.equal(beforeCreate.entries[0].person_id, null);
+    assert.equal(beforeCreate.entries[0].account.version, 1);
+
+    const authCountBefore = Number((await db.query(`select count(*) as c from auth.users`)).rows[0].c);
+    const createRes = (
+      await serviceQuery(
+        db,
+        `select public.org_department_create_person_admin(
+           $1::uuid, $2::uuid, $3::text, $4::text, $5::date, $6::uuid, $7::uuid, $8::integer, null::uuid, $9::text, $10::uuid, $11::text
+         ) as payload`,
+        [
+          OWNER.auth,
+          OWNER.app,
+          "NV-UX01-A",
+          "Nhân Viên Cũ Tạo Hồ Sơ",
+          "2026-02-01",
+          deptRow.department_id,
+          uLegacyCreate.app,
+          1,
+          "Hoàn thiện hồ sơ nhân viên và phòng ban cho tài khoản hiện hữu",
+          nextUuid(),
+          sha256("ux01-create-and-link"),
+        ],
+      )
+    ).rows[0].payload;
+    const createdPersonId = createRes.person.person_id;
+    assert.ok(createdPersonId);
+
+    // Zero new Auth accounts created!
+    const authCountAfter = Number((await db.query(`select count(*) as c from auth.users`)).rows[0].c);
+    assert.equal(authCountAfter, authCountBefore, "UX-01 completion must NEVER create a second Auth account");
+
+    const afterCreate = await (
+      await listUserDirectoryAdmin(
+        new Request("https://bi.local/api/admin/organization/user-directory?search=legacy.ux01.create"),
+        "true",
+        deps,
+      )
+    ).json();
+    assert.equal(afterCreate.total, 1, "Account-only entry must collapse cleanly into 1 linked row");
+    assert.equal(afterCreate.entries[0].record_kind, "LINKED_PERSON_ACCOUNT");
+    assert.equal(afterCreate.entries[0].person_id, createdPersonId);
+    assert.equal(afterCreate.entries[0].person.employee_code, "NV-UX01-A");
+    assert.equal(afterCreate.entries[0].person.active_department.department_id, deptRow.department_id);
+
+    const detailAfterCreate = await (
+      await getUserDirectoryEntryAdmin(
+        new Request(`https://bi.local/api/admin/organization/user-directory/detail?account_ref=${uLegacyCreate.app}`),
+        "true",
+        deps,
+      )
+    ).json();
+    assert.equal(detailAfterCreate.entry.record_kind, "LINKED_PERSON_ACCOUNT");
+    assert.equal(detailAfterCreate.entry.person_id, createdPersonId);
+
+    // Path B: Legacy personal account + existing unlinked Person -> explicit manual link via org_department_link_account_person_admin
+    const uLegacyLink = {
+      auth: nextUuid(),
+      app: nextUuid(),
+      email: "legacy.ux01.link@hrpartner.vn",
+      name: "Nhân Viên Cũ Gắn Sẵn",
+    };
+    await seedBaseUser(db, uLegacyLink, { enabled: true });
+    const existingPersonId = nextUuid();
+    await seedPersonDirect(db, {
+      personId: existingPersonId,
+      employeeCode: "NV-UX01-B",
+      fullName: "Nhân Viên Cũ Gắn Sẵn",
+      status: "ACTIVE",
+    });
+
+    const beforeLink = await (
+      await listUserDirectoryAdmin(
+        new Request("https://bi.local/api/admin/organization/user-directory?search=G%E1%BA%AFn%20S%E1%BA%B5n"),
+        "true",
+        deps,
+      )
+    ).json();
+    assert.equal(beforeLink.total, 2, "Before explicit link, unlinked account and unlinked person remain 2 separate rows (zero auto-merge)");
+
+    await serviceQuery(
+      db,
+      `select public.org_department_link_account_person_admin(
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 1, null::uuid, $5::text, $6::uuid, $7::text
+       )`,
+      [
+        OWNER.auth,
+        OWNER.app,
+        uLegacyLink.app,
+        existingPersonId,
+        "Liên kết tài khoản đăng nhập hiện hữu với hồ sơ nhân viên",
+        nextUuid(),
+        sha256("ux01-link-existing"),
+      ],
+    );
+
+    const afterLink = await (
+      await listUserDirectoryAdmin(
+        new Request("https://bi.local/api/admin/organization/user-directory?search=G%E1%BA%AFn%20S%E1%BA%B5n"),
+        "true",
+        deps,
+      )
+    ).json();
+    assert.equal(afterLink.total, 1, "Explicit manual link collapses the 2 entries into 1 linked row");
+    assert.equal(afterLink.entries[0].record_kind, "LINKED_PERSON_ACCOUNT");
+    assert.equal(afterLink.entries[0].person_id, existingPersonId);
+    assert.equal(afterLink.entries[0].account_ref, uLegacyLink.app);
   } finally {
     await db.close();
   }
