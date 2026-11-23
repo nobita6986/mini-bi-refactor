@@ -216,6 +216,10 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
   const allSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
   const workerEditHistorySection = allSections.filter(({ id }) => id === "worker-edit-history");
   const allSectionsWithoutWorkerHistory = allSections.filter(({ id }) => id !== "worker-edit-history");
+  const fullAdminSections = allSections.filter(({ id }) => id !== "teams");
+  const fullAdminSectionsWithoutWorkerHistory = fullAdminSections.filter(
+    ({ id }) => id !== "worker-edit-history",
+  );
   const catalogSections = allSectionsWithoutWorkerHistory.filter(
     ({ id }) =>
       ![
@@ -243,7 +247,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
       adminShellAllowed: true,
       personnelAllowed: true,
       accountsAllowed: true,
-      expectedSections: allSectionsWithoutWorkerHistory,
+      expectedSections: fullAdminSectionsWithoutWorkerHistory,
     },
     {
       name: "Allowlisted Full Admin with worker_edit_history_view (@ all)",
@@ -253,7 +257,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
       adminShellAllowed: true,
       personnelAllowed: true,
       accountsAllowed: true,
-      expectedSections: allSections,
+      expectedSections: fullAdminSections,
     },
     {
       name: "BoD via entry_privileged_edit (@ all)",
