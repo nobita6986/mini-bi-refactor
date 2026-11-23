@@ -114,7 +114,7 @@ export function TeamLeaderManager({
   onTeamUnavailable,
   onLockChange,
 }: {
-  team: AdminTeam | null;
+  team: Pick<AdminTeam, "team_id" | "display_name" | "active" | "version"> | null;
   canManageLeaders?: boolean;
   teamOperationLocked: boolean;
   onClose(): void;

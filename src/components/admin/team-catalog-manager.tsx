@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 import * as Dialog from "radix-ui/dialog";
 
 import { Alert } from "@/components/ui/alert";
@@ -24,6 +25,8 @@ import {
   teamConflictsForDialog,
   type TeamMutationOutcome,
 } from "@/lib/admin/team-catalog-model";
+import { buildRecruitmentTeamsQuery, DEPARTMENT_UI_MAX_SEARCH_LENGTH, projectRecruitmentTeamsEnvelope } from "@/lib/admin/department-ui-model";
+import type { RecruitmentTeamProjection } from "@/lib/departments/department-contract";
 import type {
   AdminTeam,
   AdminTeamList,
@@ -31,15 +34,15 @@ import type {
 
 type ListState =
   | { kind: "loading" }
-  | { kind: "loaded"; list: AdminTeamList }
+  | { kind: "loaded"; list: Pick<AdminTeamList, "total" | "page_size"> & { teams: readonly RecruitmentTeamProjection[] } }
   | { kind: "denied" }
   | { kind: "unavailable" }
   | { kind: "error" };
 
 type DialogState =
   | { kind: "create" }
-  | { kind: "edit"; team: AdminTeam }
-  | { kind: "active"; team: AdminTeam; active: boolean };
+  | { kind: "edit"; team: RecruitmentTeamProjection }
+  | { kind: "active"; team: RecruitmentTeamProjection; active: boolean };
 
 type TeamForm = {
   code: string;
@@ -74,14 +77,20 @@ function ActiveBadge({ active }: { active: boolean }) {
 }
 
 export function TeamCatalogManager({
-  canManageTeamLeaders = true,
+  departmentId,
+  canManageCatalog = true,
+  canManageTeamLeaders = false,
+  onTeamMutated,
 }: {
+  departmentId?: string;
+  canManageCatalog?: boolean;
+  onTeamMutated?: () => Promise<boolean>;
   canManageTeamLeaders?: boolean;
 } = {}) {
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [includeInactive, setIncludeInactive] = useState(false);
+  const [includeInactive, setIncludeInactive] = useState(Boolean(departmentId));
   const [page, setPage] = useState(1);
   const [reloadToken, setReloadToken] = useState(0);
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -92,27 +101,31 @@ export function TeamCatalogManager({
   const [busy, setBusy] = useState(false);
   const [conflictLocks, setConflictLocks] = useState<ReadonlySet<string>>(new Set());
   const [leaderLocks, setLeaderLocks] = useState<ReadonlySet<string>>(new Set());
-  const [leaderTeam, setLeaderTeam] = useState<AdminTeam | null>(null);
+  const [leaderTeam, setLeaderTeam] = useState<RecruitmentTeamProjection | null>(null);
   const notify = useNotify();
 
+  const buildListQuery = departmentId ? buildRecruitmentTeamsQuery : buildTeamListQuery;
   useEffect(() => {
-    const listQuery = buildTeamListQuery({ search, includeInactive, page });
+    const query = { search, includeInactive, page };
+    const listQuery = buildListQuery(query);
+    const endpoint = departmentId ? "/api/admin/departments/recruitment/teams" : "/api/admin/catalog/teams";
     if (!listQuery) return;
     const controller = new AbortController();
     void (async () => {
       let response: Response;
       try {
-        response = await fetch(`/api/admin/catalog/teams?${listQuery.toString()}`, {
+        response = await fetch(`${endpoint}?${listQuery.toString()}`, {
           method: "GET",
           cache: "no-store",
           signal: controller.signal,
           headers: { Accept: "application/json" },
         });
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
         setListState({ kind: "unavailable" });
         return;
       }
+      if (controller.signal.aborted) return;
       if (response.status === 401 || response.status === 403) {
         setListState({ kind: "denied" });
         return;
@@ -124,11 +137,11 @@ export function TeamCatalogManager({
         return;
       }
       try {
-        const list = projectTeamListForQuery(await response.json(), {
-          search,
-          includeInactive,
-          page,
-        });
+        const payload = await response.json();
+        if (controller.signal.aborted) return;
+        const list = departmentId
+          ? projectRecruitmentTeamsEnvelope(payload, query, departmentId)
+          : projectTeamListForQuery(payload, query);
         if (!list) {
           setListState({ kind: "error" });
           return;
@@ -140,11 +153,12 @@ export function TeamCatalogManager({
         }
         setListState({ kind: "loaded", list });
       } catch {
+        if (controller.signal.aborted) return;
         setListState({ kind: "error" });
       }
     })();
     return () => controller.abort();
-  }, [includeInactive, page, reloadToken, search]);
+  }, [buildListQuery, departmentId, includeInactive, page, reloadToken, search]);
 
   const reloadList = () => {
     setListState({ kind: "loading" });
@@ -179,13 +193,13 @@ export function TeamCatalogManager({
     setDialog({ kind: "create" });
   };
 
-  const startEdit = (team: AdminTeam) => {
+  const startEdit = (team: RecruitmentTeamProjection) => {
     setForm({ code: team.code, displayName: team.display_name, reason: "" });
     setFormError(null);
     setDialog({ kind: "edit", team });
   };
 
-  const startActiveChange = (team: AdminTeam, active: boolean) => {
+  const startActiveChange = (team: RecruitmentTeamProjection, active: boolean) => {
     setForm({ ...EMPTY_FORM, reason: "" });
     setFormError(null);
     setDialog({ kind: "active", team, active });
@@ -216,6 +230,7 @@ export function TeamCatalogManager({
         );
         if (response.status === 404) {
           clearConflict(intent.lockId);
+          if (onTeamMutated) void onTeamMutated();
           notify.warning({ title: "Nhóm không còn tồn tại hoặc không còn khả dụng. Danh sách đang được cập nhật." });
           setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
           setDialog((current) => current && (
@@ -262,6 +277,7 @@ export function TeamCatalogManager({
           throw new Error("reload");
         }
       }
+      if (onTeamMutated) void onTeamMutated();
       clearConflict(intent.lockId);
       notify.info({ title: "Đã tải dữ liệu mới nhất. Bạn có thể bắt đầu thao tác mới." });
       setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
@@ -287,7 +303,7 @@ export function TeamCatalogManager({
     } finally {
       setBusy(false);
     }
-  }, [clearConflict, notify]);
+  }, [clearConflict, notify, onTeamMutated]);
 
   const sendIntent = useCallback(async (intent: MutationIntent) => {
     setBusy(true);
@@ -334,6 +350,7 @@ export function TeamCatalogManager({
       }
       if (outcome.kind === "not-found" && intent.teamId !== null) {
         clearConflict(intent.lockId);
+        if (onTeamMutated) void onTeamMutated();
         setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
         setDialog((current) => current && (
           current.kind === "create" ? "create" : current.team.team_id
@@ -354,7 +371,7 @@ export function TeamCatalogManager({
     } finally {
       setBusy(false);
     }
-  }, [clearConflict, notify, reloadConflictedTeam]);
+  }, [clearConflict, notify, onTeamMutated, reloadConflictedTeam]);
 
   const submitMutation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -483,12 +500,15 @@ export function TeamCatalogManager({
       <div className="space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-foreground">Danh mục Tổ đội tuyển dụng</h1>
+            {departmentId ? <h2 className="text-2xl font-semibold text-foreground">Tổ đội tuyển dụng</h2>
+              : <h1 className="text-2xl font-semibold text-foreground">Danh mục Tổ đội tuyển dụng</h1>}
             <p className="mt-1 max-w-2xl text-sm text-muted">
-              Quản lý tên hiển thị và trạng thái hoạt động của tổ đội tuyển dụng. Mã tổ đội không thay đổi sau khi tạo.
+              {canManageCatalog
+                ? "Quản lý tổ đội, trưởng nhóm và phân công thành viên."
+                : "Danh sách tổ đội trực thuộc Phòng Tuyển dụng."}
             </p>
           </div>
-          <Dialog.Trigger asChild>
+          {canManageCatalog && <Dialog.Trigger asChild>
             <button
               type="button"
               onClick={startCreate}
@@ -498,7 +518,7 @@ export function TeamCatalogManager({
             >
               Thêm nhóm
             </button>
-          </Dialog.Trigger>
+          </Dialog.Trigger>}
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
             <Dialog.Content
@@ -645,7 +665,7 @@ export function TeamCatalogManager({
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              const query = buildTeamListQuery({ search: searchInput, includeInactive, page: 1 });
+              const query = buildListQuery({ search: searchInput, includeInactive, page: 1 });
               if (!query) {
                 setListState({ kind: "error" });
                 return;
@@ -662,7 +682,7 @@ export function TeamCatalogManager({
               <input
                 id="team-search"
                 value={searchInput}
-                maxLength={256}
+                maxLength={departmentId ? DEPARTMENT_UI_MAX_SEARCH_LENGTH : 256}
                 onChange={(event) => setSearchInput(event.currentTarget.value)}
                 className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-md border border-border bg-background px-3 text-base sm:text-sm"
               />
@@ -727,7 +747,7 @@ export function TeamCatalogManager({
                         <th scope="col" className="px-3.5 py-3 font-semibold">Tổ đội</th>
                         <th scope="col" className="px-3.5 py-3 font-semibold">Mã tổ đội</th>
                         <th scope="col" className="px-3.5 py-3 font-semibold">Trạng thái</th>
-                        <th scope="col" className="px-3.5 py-3 font-semibold text-right">Thao tác</th>
+                        {canManageCatalog && <th scope="col" className="px-3.5 py-3 font-semibold text-right">Thao tác</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
@@ -736,8 +756,14 @@ export function TeamCatalogManager({
                           <td data-card-header="true" className="px-3.5 py-2.5 font-medium">{team.display_name}</td>
                           <td data-label="Mã tổ đội" className="px-3.5 py-2.5 font-mono text-xs">{team.code}</td>
                           <td data-label="Trạng thái" className="px-3.5 py-2.5"><ActiveBadge active={team.active} /></td>
-                          <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
-                            <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
+                          {canManageCatalog && <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
+                            <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                              <Link
+                                href={`/admin/catalog/personnel?team_id=${encodeURIComponent(team.team_id)}`}
+                                className="inline-flex min-h-11 items-center rounded-md border border-border px-3 text-xs font-medium md:min-h-8"
+                              >
+                                Thành viên
+                              </Link>
                               <Dialog.Trigger asChild>
                                 <button
                                   type="button"
@@ -770,7 +796,7 @@ export function TeamCatalogManager({
                                 Trưởng nhóm
                               </button>
                             </div>
-                          </td>
+                          </td>}
                         </tr>
                       ))}
                     </tbody>

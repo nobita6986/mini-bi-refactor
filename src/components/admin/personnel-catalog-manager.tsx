@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
+import type { AdminTeam } from "@/lib/direct-entry/team-catalog-contract";
 import * as Dialog from "radix-ui/dialog";
 
 import { Alert } from "@/components/ui/alert";
@@ -145,7 +147,11 @@ function ActiveBadge({ active }: { active: boolean }) {
 export function PersonnelCatalogManager({
   canManageAccountLinks = true,
   initialRecruiterId = null,
+  team = null,
+  teamReturnHref = "/admin/catalog/teams",
 }: {
+  team?: AdminTeam | null;
+  teamReturnHref?: string;
   canManageAccountLinks?: boolean;
   initialRecruiterId?: string | null;
 } = {}) {
@@ -158,6 +164,8 @@ export function PersonnelCatalogManager({
     | { kind: "not-found" }
     | { kind: "error" }
   >({ kind: initialRecruiterId ? "loading" : "idle" });
+  const [membersOnly, setMembersOnly] = useState(true);
+  const teamId = membersOnly ? team?.team_id : null;
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
@@ -290,7 +298,7 @@ export function PersonnelCatalogManager({
   }, [loadEligibleAccounts]);
 
   useEffect(() => {
-    const listQuery = buildPersonnelListQuery({ search, includeInactive, page });
+    const listQuery = buildPersonnelListQuery({ search, includeInactive, page, teamId });
     if (!listQuery) {
       return;
     }
@@ -305,10 +313,12 @@ export function PersonnelCatalogManager({
           headers: { Accept: "application/json" },
         });
       } catch (error) {
+        if (controller.signal.aborted) return;
         if (error instanceof DOMException && error.name === "AbortError") return;
         setListState({ kind: "unavailable" });
         return;
       }
+      if (controller.signal.aborted) return;
       if (response.status === 401 || response.status === 403) {
         setListState({ kind: "denied" });
         return;
@@ -325,6 +335,7 @@ export function PersonnelCatalogManager({
           includeInactive,
           page,
         });
+        if (controller.signal.aborted) return;
         if (!list) {
           setListState({ kind: "error" });
           return;
@@ -336,11 +347,12 @@ export function PersonnelCatalogManager({
         }
         setListState({ kind: "loaded", list });
       } catch {
+        if (controller.signal.aborted) return;
         setListState({ kind: "error" });
       }
     })();
     return () => controller.abort();
-  }, [includeInactive, page, reloadToken, search]);
+  }, [includeInactive, page, reloadToken, search, teamId]);
 
   useEffect(() => {
     if (!focusedRecruiterId) {
@@ -426,6 +438,14 @@ export function PersonnelCatalogManager({
   const reloadList = () => {
     setListState({ kind: "loading" });
     setReloadToken((value) => value + 1);
+  };
+
+  const toggleMembersOnly = () => {
+    setListState({ kind: "loading" });
+    setPage(1);
+    setSearch("");
+    setSearchInput("");
+    setMembersOnly((value) => !value);
   };
 
   const changeForm = useCallback(<K extends keyof PersonnelForm>(field: K, value: PersonnelForm[K]) => {
@@ -766,6 +786,7 @@ export function PersonnelCatalogManager({
     setConflictLocks((current) => setPersonnelConflictLock(current, recruiterId, locked));
   }, []);
   const updateReloadedPersonnel = useCallback((personnel: AdminPersonnel) => {
+    if (teamId) setReloadToken((value) => value + 1);
     setListState((current) => current.kind === "loaded"
       ? {
           ...current,
@@ -784,7 +805,7 @@ export function PersonnelCatalogManager({
     setMembershipPersonnel((current) => current?.recruiter_id === personnel.recruiter_id
       ? personnel
       : current);
-  }, []);
+  }, [teamId]);
 
   return (
     <Dialog.Root
@@ -794,15 +815,28 @@ export function PersonnelCatalogManager({
       }}
     >
     <div className="space-y-6">
+      {team && <Link href={teamReturnHref} className="inline-flex min-h-11 items-center text-sm font-medium text-primary">
+        ← Quay lại danh sách tổ đội
+      </Link>}
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-foreground">Hồ sơ tính công tuyển dụng</h1>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-2xl font-semibold text-foreground">
+              {team ? `Thành viên · ${team.display_name}` : "Hồ sơ tính công tuyển dụng"}
+            </h1>
+            {team && !team.active ? <ActiveBadge active={false} /> : null}
+          </div>
           <p className="mt-1 max-w-2xl text-sm text-muted">
-            Quản lý hồ sơ tính công tuyển dụng và dữ liệu HRP (phân biệt với hồ sơ Nhân sự nội bộ
-            trong cơ cấu tổ chức). Vị trí trong hồ sơ chỉ là thuộc tính nghiệp vụ, không cấp quyền truy cập.
+            {team
+              ? (membersOnly ? "Danh sách hồ sơ đang được phân vào tổ đội này." : "Chọn hồ sơ để phân công hoặc chuyển tổ đội.")
+              : "Quản lý hồ sơ tính công tuyển dụng và dữ liệu HRP (phân biệt với hồ sơ Nhân sự nội bộ trong cơ cấu tổ chức). Vị trí trong hồ sơ chỉ là thuộc tính nghiệp vụ, không cấp quyền truy cập."}
           </p>
         </div>
-        {canManageAccountLinks ? (
+        {team && <button type="button" className="min-h-11 rounded-md border border-border px-4 text-sm font-medium"
+          onClick={toggleMembersOnly}>
+          {membersOnly ? "Tìm người để phân vào tổ" : "Xem thành viên của tổ"}
+        </button>}
+        {canManageAccountLinks && !team ? (
           <Dialog.Trigger asChild>
             <button
               type="button"
@@ -1256,7 +1290,7 @@ export function PersonnelCatalogManager({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            const query = buildPersonnelListQuery({ search: searchInput, includeInactive, page: 1 });
+            const query = buildPersonnelListQuery({ search: searchInput, includeInactive, page: 1, teamId });
             if (!query) {
               setListState({ kind: "error" });
               return;
@@ -1324,10 +1358,28 @@ export function PersonnelCatalogManager({
         ) : null}
         {list ? (
           list.personnel.length === 0 ? (
-            <EmptyState
-              title="Không có hồ sơ phù hợp"
-              description="Thử đổi từ khóa hoặc bật hiển thị hồ sơ ngừng hoạt động."
-            />
+            team && membersOnly && !search ? (
+              <div className="space-y-4">
+                <EmptyState
+                  title="Tổ đội chưa có thành viên"
+                  description="Chưa có hồ sơ tuyển dụng nào đang hiệu lực trong tổ đội này. Chọn Tìm người để phân vào tổ để phân công thành viên."
+                />
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={toggleMembersOnly}
+                    className="min-h-11 rounded-md bg-primary px-4 text-sm font-medium text-on-primary"
+                  >
+                    Tìm người để phân vào tổ
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <EmptyState
+                title="Không có hồ sơ phù hợp"
+                description="Thử đổi từ khóa hoặc bật hiển thị hồ sơ ngừng hoạt động."
+              />
+            )
           ) : (
             <>
               <div role="region" aria-label="Bảng danh sách nhân sự" tabIndex={0} className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
@@ -1450,6 +1502,7 @@ export function PersonnelCatalogManager({
       </Card>
       <PersonnelTeamMembershipManager
         personnel={membershipPersonnel}
+        preferredTeam={team}
         onClose={() => {
           setMembershipPersonnel(null);
           window.requestAnimationFrame(() => membershipTrigger.current?.focus());

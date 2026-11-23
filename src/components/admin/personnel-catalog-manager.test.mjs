@@ -48,7 +48,7 @@ test("strict response projection, page size and retry reuse are wired in the com
   assert.match(source, /setPendingIntent\(\{\s*\.\.\.intent,\s*retryState:\s*"retry"\s*\}\)/);
   assert.match(source, /sendIntent\(pendingIntent\)/);
   assert.match(source, /newPersonnelIntentKey\(\)/);
-  assert.match(source, /buildPersonnelListQuery\(\{ search, includeInactive, page \}\)/);
+  assert.match(source, /buildPersonnelListQuery\(\{ search, includeInactive, page, teamId \}\)/);
 });
 
 test("loading, denied, unavailable, empty, error and conflict are separate accessible states", () => {

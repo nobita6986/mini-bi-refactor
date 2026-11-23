@@ -33,7 +33,7 @@ export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
   { id: "permission-groups", label: "Nhóm quyền", href: "/admin/access/groups", visible: effectiveAccessAdminNavPredicate },
   { id: "departments", label: "Phòng ban", href: "/admin/departments", visible: adminSecurityNavPredicate },
   { id: "personnel", label: "Hồ sơ tính công tuyển dụng", href: "/admin/catalog/personnel", visible: adminAreaNavPredicate },
-  { id: "teams", label: "Tổ đội tuyển dụng", href: "/admin/catalog/teams", visible: adminAreaNavPredicate },
+  { id: "teams", label: "Tổ đội tuyển dụng", href: "/admin/catalog/teams", visible: (actor) => adminAreaNavPredicate(actor) && !adminSecurityNavPredicate(actor) },
   { id: "labor-types", label: "Loại hình lao động", href: "/admin/catalog/labor-types", visible: adminAreaNavPredicate },
   { id: "provinces", label: "Tỉnh/Thành", href: "/admin/catalog/provinces", visible: recruitmentLocationCatalogNavPredicate },
   { id: "industrial-parks", label: "Khu công nghiệp", href: "/admin/catalog/industrial-parks", visible: recruitmentLocationCatalogNavPredicate },

@@ -861,6 +861,9 @@ const { AccountGroupsSection } = repoRequire(
 const { PersonnelCatalogManager } = repoRequire(
   "./src/components/admin/personnel-catalog-manager.tsx",
 );
+const { PersonnelTeamMembershipManager } = repoRequire(
+  "./src/components/admin/personnel-team-membership-manager.tsx",
+);
 
 const ACTOR_A_SCOPE = computeCheckpointActorScope(ADMIN_A_ID);
 const ACTOR_B_SCOPE = computeCheckpointActorScope(ADMIN_B_ID);
@@ -1656,6 +1659,270 @@ test("PersonDetailManager renders 4 blocks on 1 page, hides NORMAL/SHARED/SERVIC
 // 5. Personnel Catalog UX Gate (HR_OPERATOR / Catalog-only) & ?recruiter=<uuid>
 // ============================================================================
 
+test("Team roster keeps the return link and restores the server team filter after searching other personnel", async () => {
+  const team = { team_id: GROUP_RECRUIT_ID, display_name: "Tổ Bắc", code: "BAC", active: true, version: 2, revision_count: 1 };
+  const teamReturnHref = `/admin/departments/${DEPT_ID}?view=teams`;
+  const roster = mount(PersonnelCatalogManager, { team, teamReturnHref, canManageAccountLinks: false });
+  await roster.flush();
+  const readList = () => new URL(findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?")).url, "https://test.local");
+  assert.equal(readList().searchParams.get("team_id"), team.team_id);
+  findNode(roster, (n) => n.props?.href === teamReturnHref);
+  findButton(roster, "Tìm người để phân vào tổ").props.onClick();
+  await roster.flush();
+  assert.equal(readList().searchParams.has("team_id"), false);
+  findButton(roster, "Xem thành viên của tổ").props.onClick();
+  await roster.flush();
+  assert.equal(readList().searchParams.get("team_id"), team.team_id);
+  assert.equal(maybeButton(roster, "Tạo nhân sự từ tài khoản"), null);
+  roster.unmount();
+
+  // Remounting under a different team/recruiter context resets internal filter and search state (simulating server key={team:recruiter})
+  const teamB = { team_id: GROUP_ADMIN_ID, display_name: "Tổ Nam", code: "NAM", active: false, version: 4, revision_count: 1 };
+  const rosterB = mount(PersonnelCatalogManager, { team: teamB, teamReturnHref, canManageAccountLinks: false });
+  await rosterB.flush();
+  assert.equal(readList().searchParams.get("team_id"), teamB.team_id);
+  assert.equal(textOf(rosterB.tree).includes("Ngừng hoạt động"), true);
+  rosterB.unmount();
+
+  const directR2 = mount(PersonnelCatalogManager, { canManageAccountLinks: false, initialRecruiterId: RECRUITER_PAGE2_ID });
+  await directR2.flush();
+  assert.ok(findLastRequest((r) => r.url === `/api/admin/catalog/personnel/${RECRUITER_PAGE2_ID}`));
+  assert.equal(readList().searchParams.has("team_id"), false);
+});
+
+test("Empty team finds candidate, assigns via PersonnelTeamMembershipManager, and refreshes effective team roster after save/unassign", async () => {
+  const team = { team_id: GROUP_RECRUIT_ID, display_name: "Tổ Bắc", code: "BAC", active: true, version: 2, revision_count: 1 };
+  const teamB = { team_id: GROUP_ADMIN_ID, display_name: "Tổ Nam", code: "NAM", active: true, version: 3, revision_count: 1 };
+  const member = makePersonnel({ recruiter_id: RECRUITER_ID, display_name: "Ứng Viên Tổ", version: 2, team_names: [] });
+  const membershipId = "86000000-0000-4000-8000-000000000001";
+  const roster = mount(PersonnelCatalogManager, {
+    team,
+    teamReturnHref: `/admin/departments/${DEPT_ID}?view=teams`,
+    canManageAccountLinks: false,
+  });
+  await roster.flush();
+
+  // 1) Empty team state -> click CTA "Tìm người để phân vào tổ" inside empty state
+  const initialReq = findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?"));
+  assert.equal(new URL(initialReq.url, "https://test.local").searchParams.get("team_id"), team.team_id);
+  respond(initialReq, 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, include_inactive: false, search: null, page: 1, page_size: 25, total: 0, personnel: [] },
+  });
+  await roster.flush();
+  const findCandidateButtons = collectNodes(roster.tree).filter(
+    (n) => typeof n.props?.onClick === "function" && textOf(n).trim() === "Tìm người để phân vào tổ",
+  );
+  assert.equal(findCandidateButtons.length, 2, "Expected header and empty-team CTAs to find personnel");
+  findCandidateButtons[1].props.onClick();
+  await roster.flush();
+
+  // 2) Load all personnel -> open "Quản lý nhóm" -> assign to Tổ Bắc with preferredTeam pre-selected
+  const allReq = findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?"));
+  assert.equal(new URL(allReq.url, "https://test.local").searchParams.has("team_id"), false);
+  respond(allReq, 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, include_inactive: false, search: null, page: 1, page_size: 25, total: 1, personnel: [member] },
+  });
+  await roster.flush();
+
+  findButton(roster, "Quản lý nhóm").props.onClick({ currentTarget: {} });
+  await roster.flush();
+  const membershipNode = findNode(
+    roster,
+    (n) => typeof n.type === "function" && n.type.name === "PersonnelTeamMembershipManager",
+  );
+  assert.equal(membershipNode.props.preferredTeam?.team_id, team.team_id);
+  const membershipModal = await syncChildFromTree(roster, PersonnelTeamMembershipManager);
+
+  // Respond to CURRENT/SCHEDULED/HISTORY reads for member
+  for (const state of ["current", "scheduled", "history"]) {
+    const req = findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes(`state=${state}`));
+    respond(req, 200, { ok: true, list: { authorization_date: AUTH_DATE, page: 1, page_size: 25, total: 0, memberships: [] } });
+  }
+  await membershipModal.flush();
+
+  findButton(membershipModal, "Gán nhóm").props.onClick();
+  await membershipModal.flush();
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/catalog/teams?")), 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, include_inactive: false, search: null, page: 1, page_size: 100, total: 2, teams: [team, teamB] },
+  });
+  await membershipModal.flush();
+  assert.equal(findNode(membershipModal, (n) => n.props?.id === "membership-team").props.value, team.team_id);
+
+  findNode(membershipModal, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await membershipModal.flush();
+  const assignReq = findLastRequest((r) => r.method === "POST" && r.url.endsWith(`/team-memberships/${team.team_id}`));
+  assert.ok(assignReq);
+  respond(assignReq, 200, {
+    ok: true,
+    membership: {
+      membership_id: membershipId,
+      recruiter_id: member.recruiter_id,
+      team_id: team.team_id,
+      valid_from: AUTH_DATE,
+      valid_to: null,
+      recruiter_version: 3,
+      revision_id: "87000000-0000-4000-8000-000000000001",
+      change: "ASSIGN",
+    },
+  });
+  await membershipModal.flush();
+
+  // Authoritative reload after assign -> toggle back to team roster -> assigned member appears
+  const assignedMember = { ...member, version: 3, team_names: [team.display_name] };
+  respond(findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/catalog/personnel/${member.recruiter_id}`), 200, {
+    ok: true,
+    personnel: assignedMember,
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes("state=current")), 200, {
+    ok: true,
+    list: {
+      authorization_date: AUTH_DATE,
+      page: 1,
+      page_size: 25,
+      total: 1,
+      memberships: [{
+        membership_id: membershipId,
+        recruiter_id: member.recruiter_id,
+        team_id: team.team_id,
+        team_display_name: team.display_name,
+        valid_from: AUTH_DATE,
+        valid_to: null,
+        recruiter_version: 3,
+        state: "CURRENT",
+      }],
+    },
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes("state=scheduled")), 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, page: 1, page_size: 25, total: 0, memberships: [] },
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes("state=history")), 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, page: 1, page_size: 25, total: 0, memberships: [] },
+  });
+  await membershipModal.flush();
+
+  findButton(roster, "Xem thành viên của tổ").props.onClick();
+  await roster.flush();
+  const teamListReq1 = findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?"));
+  assert.equal(new URL(teamListReq1.url, "https://test.local").searchParams.get("team_id"), team.team_id);
+  respond(teamListReq1, 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, include_inactive: false, search: null, page: 1, page_size: 25, total: 1, personnel: [assignedMember] },
+  });
+  await roster.flush();
+  assert.equal(textOf(roster.tree).includes("Ứng Viên Tổ"), true);
+
+  // 3) Unassign right from team roster -> post-save effective refetch updates team roster immediately
+  await syncChildFromTree(roster, PersonnelTeamMembershipManager, membershipModal);
+  const currentSectionNode = findNode(
+    membershipModal,
+    (n) => typeof n.type === "function" && n.type.name === "MembershipSection" && n.props?.state === "CURRENT",
+  );
+  const currentSection = mount(currentSectionNode.type, currentSectionNode.props);
+  assert.ok(maybeButton(currentSection, "Chuyển nhóm"));
+  findButton(currentSection, "Bỏ gán").props.onClick();
+  currentSection.unmount();
+  await membershipModal.flush();
+  findNode(membershipModal, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await membershipModal.flush();
+  const unassignReq = findLastRequest((r) => r.method === "POST" && r.url.endsWith("/team-memberships/unassign"));
+  assert.ok(unassignReq);
+  respond(unassignReq, 200, {
+    ok: true,
+    membership: {
+      membership_id: membershipId,
+      recruiter_id: member.recruiter_id,
+      team_id: team.team_id,
+      valid_from: AUTH_DATE,
+      valid_to: AUTH_DATE,
+      recruiter_version: 4,
+      revision_id: "87000000-0000-4000-8000-000000000002",
+      change: "UNASSIGN",
+    },
+  });
+  await membershipModal.flush();
+
+  const requestsBeforeReload = requests.length;
+  respond(findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/catalog/personnel/${member.recruiter_id}`), 200, {
+    ok: true,
+    personnel: { ...member, version: 4, team_names: [] },
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes("state=current")), 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, page: 1, page_size: 25, total: 0, memberships: [] },
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes("state=scheduled")), 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, page: 1, page_size: 25, total: 0, memberships: [] },
+  });
+  respond(findLastRequest((r) => r.url.includes("/api/admin/catalog/team-memberships?") && r.url.includes("state=history")), 200, {
+    ok: true,
+    list: {
+      authorization_date: AUTH_DATE,
+      page: 1,
+      page_size: 25,
+      total: 1,
+      memberships: [{
+        membership_id: membershipId,
+        recruiter_id: member.recruiter_id,
+        team_id: team.team_id,
+        team_display_name: team.display_name,
+        valid_from: AUTH_DATE,
+        valid_to: AUTH_DATE,
+        recruiter_version: 4,
+        state: "HISTORY",
+      }],
+    },
+  });
+  await membershipModal.flush();
+  await roster.flush();
+
+  const refreshedTeamReq = requests.slice(requestsBeforeReload).find(
+    (r) => r.method === "GET" && r.url.startsWith("/api/admin/catalog/personnel?") && r.url.includes(`team_id=${team.team_id}`),
+  );
+  assert.ok(refreshedTeamReq, "Saving membership from team roster must refetch server team_id roster");
+  respond(refreshedTeamReq, 200, {
+    ok: true,
+    list: { authorization_date: AUTH_DATE, include_inactive: false, search: null, page: 1, page_size: 25, total: 0, personnel: [] },
+  });
+  await roster.flush();
+  assert.equal(textOf(roster.tree).includes("Tổ đội chưa có thành viên"), true);
+});
+
+test("Department teams validate the department envelope and expose only permitted operations", async () => {
+  const { TeamCatalogManager } = repoRequire("./src/components/admin/team-catalog-manager.tsx");
+  const row = { team_id: GROUP_RECRUIT_ID, code: "BAC", display_name: "Tổ Bắc", active: true, version: 2 };
+  const payload = { ok: true, authorization_date: AUTH_DATE, department_id: DEPT_ID, system_key: "RECRUITMENT",
+    include_inactive: true, page: 1, page_size: 25, search: null, total: 1, has_more: false, teams: [row] };
+  const cases = [
+    { canManageCatalog: true, response: payload, visible: true },
+    { canManageCatalog: false, response: payload, visible: true },
+    { canManageCatalog: true, response: { ...payload, department_id: ADMIN_A_ID }, visible: false },
+    { canManageCatalog: true, response: { ...payload, teams: [{ ...row, code: "__system_vendor__" }] }, visible: false },
+  ];
+  for (const { canManageCatalog, response, visible } of cases) {
+    const page = mount(TeamCatalogManager, { departmentId: DEPT_ID, canManageCatalog, canManageTeamLeaders: false });
+    await page.flush();
+    respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments/recruitment/teams?")), 200, response);
+    await page.flush();
+    assert.equal(Boolean(maybeNode(page, (n) => n.type === "td" && textOf(n) === row.display_name)), visible);
+    assert.equal(Boolean(maybeButton(page, "Chỉnh sửa")), canManageCatalog && visible);
+    assert.equal(Boolean(maybeButton(page, "Trưởng nhóm")), canManageCatalog && visible);
+    assert.equal(Boolean(maybeNode(page, (n) => n.props?.href?.includes("team_id="))), canManageCatalog && visible);
+    assert.equal(Boolean(maybeButton(page, "Thêm nhóm")), canManageCatalog);
+    if (canManageCatalog && visible) {
+      findButton(page, "Trưởng nhóm").props.onClick();
+      await page.flush();
+      findNode(page, (n) => n.props?.team?.team_id === row.team_id && n.props.canManageLeaders === false);
+    }
+    page.unmount();
+  }
+});
+
 test("PersonnelCatalogManager hides create-from-account & link buttons with 0 link-status calls for HR_OPERATOR/Catalog-only, and loads ?recruiter=<uuid> directly outside page 1", async () => {
   // 5a) HR_OPERATOR / Catalog-only (canManageAccountLinks = false)
   const pcmHr = mount(PersonnelCatalogManager, {
@@ -2097,10 +2364,14 @@ test("Ponytail regressions (P1 #7, #8 & P2 #11): uncertain reload preserves pend
   const personDetailPage = readFileSync(path.join(repoRoot, "src/app/admin/organization/persons/[personId]/page.tsx"), "utf8");
   const accountsPage = readFileSync(path.join(repoRoot, "src/app/admin/access/accounts/page.tsx"), "utf8");
   const personnelPage = readFileSync(path.join(repoRoot, "src/app/admin/catalog/personnel/page.tsx"), "utf8");
+  const teamsPage = readFileSync(path.join(repoRoot, "src/app/admin/catalog/teams/page.tsx"), "utf8");
   assert.match(personsPage, /hasPairedFullAdminAuthority/);
   assert.match(personDetailPage, /hasPairedFullAdminAuthority/);
   assert.match(accountsPage, /resolveLegacyAccountsRedirectTarget/);
-  assert.match(personnelPage, /key=\{initialRecruiterId \?\? "all"\}/);
+  assert.match(personnelPage, /key=\{`\$\{team\?\.team_id \?\? "all"\}:\$\{effectiveRecruiterId \?\? "all"\}`\}/);
+  assert.match(personnelPage, /resolveTeamReturnHref\(/);
+  assert.doesNotMatch(personnelPage, /params\.department_id/);
+  assert.match(teamsPage, /resolveRecruitmentTeamsRedirectHref\(/);
 });
 
 test("PR27-R1/P1 regression: unresolved checkpoint of Admin A is NEVER overwritten or cleared by fresh flow from Admin A (List/Detail/Stepper) OR Admin B (scoped & legacy keys), and A still resumes exact K_person/snapshot", async () => {

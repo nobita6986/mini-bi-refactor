@@ -73,6 +73,10 @@ test("list query always bounds page size and preserves search, inactive and page
   assert.equal(query.get("include_inactive"), "true");
   assert.equal(query.get("page"), "2");
   assert.equal(query.get("page_size"), "25");
+  assert.equal(query.has("team_id"), false);
+  const filters = { search: "Thu", includeInactive: false, page: 2 };
+  assert.equal(buildPersonnelListQuery({ ...filters, teamId: KEY })?.get("team_id"), KEY);
+  assert.equal(buildPersonnelListQuery({ ...filters, teamId: "invalid" }), null);
   assert.equal(buildPersonnelListQuery({ search: "x".repeat(257), includeInactive: false, page: 1 }), null);
   assert.equal(buildPersonnelListQuery({ search: "", includeInactive: false, page: 1001 }), null);
 });
