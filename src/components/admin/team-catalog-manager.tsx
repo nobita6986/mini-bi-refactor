@@ -564,7 +564,7 @@ export function TeamCatalogManager({
                     type="button"
                     aria-label="Đóng hộp thoại"
                     disabled={dismissLocked}
-                    className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                    className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 sm:size-10"
                   >
                     <span aria-hidden="true">×</span>
                   </button>

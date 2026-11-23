@@ -1968,6 +1968,13 @@ test("Department create rechecks the department list if it changes while the dia
   assert.equal(requests.some(r => r.method === "POST"), false);
 });
 
+test("Team dialog close button has a 44px mobile touch target and keeps its compact desktop size", async () => {
+  const page = await openTeamDialog("Thêm nhóm", []);
+  const close = findNode(page, n => n.type === "button" && n.props["aria-label"] === "Đóng hộp thoại");
+  assert.match(close.props.className, /(?:^|\s)size-11(?:\s|$)/);
+  assert.match(close.props.className, /(?:^|\s)sm:size-10(?:\s|$)/);
+});
+
 test("An unresolved create can leave the dialog on permission loss and only replay once permission returns", async () => {
   const page = await openTeamDialog("Thêm nhóm", []);
   submitTeamDialog(page);
