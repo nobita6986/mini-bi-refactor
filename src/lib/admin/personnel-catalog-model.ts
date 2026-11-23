@@ -24,6 +24,7 @@ const PERSONNEL_CODE_PATTERN = /^[^\s\u0000-\u001f\u007f]{1,64}$/;
 
 export type PersonnelListQuery = {
   search: string;
+  teamId?: string | null;
   includeInactive: boolean;
   page: number;
 };
@@ -52,6 +53,10 @@ export function buildPersonnelListQuery(input: PersonnelListQuery): URLSearchPar
     page: String(input.page),
     page_size: String(PERSONNEL_PAGE_SIZE),
   });
+  if (input.teamId != null) {
+    if (validateUuid(input.teamId)) return null;
+    query.set("team_id", input.teamId.trim());
+  }
   if (search) query.set("search", search);
   return query;
 }

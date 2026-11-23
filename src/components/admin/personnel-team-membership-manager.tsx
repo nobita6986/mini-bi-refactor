@@ -124,6 +124,7 @@ function statusDescription(kind: Exclude<ReadState<unknown>, { kind: "loaded" | 
 
 export function PersonnelTeamMembershipManager({
   personnel,
+  preferredTeam,
   onClose,
   onOpen,
   onConflictLock,
@@ -131,6 +132,7 @@ export function PersonnelTeamMembershipManager({
   onPersonnelUnavailable,
 }: {
   personnel: AdminPersonnel | null;
+  preferredTeam?: Pick<AdminTeam, "team_id" | "code" | "display_name" | "active"> | null;
   onClose(): void;
   onOpen(personnel: AdminPersonnel, trigger: HTMLButtonElement): void;
   onConflictLock(recruiterId: string, locked: boolean): void;
@@ -420,7 +422,7 @@ export function PersonnelTeamMembershipManager({
   const startAssign = () => {
     if (!personnel || !canAssignMembership(visibleLists.CURRENT, visibleLists.SCHEDULED) || locked) return;
     setActiveOperation({ kind: "assign" });
-    setActiveForm(() => EMPTY_FORM);
+    setActiveForm(() => ({ ...EMPTY_FORM, teamId: preferredTeam?.active ? preferredTeam.team_id : "" }));
     setActiveWorkflow({ formError: null, message: null });
     ensureTeams();
   };
@@ -432,7 +434,8 @@ export function PersonnelTeamMembershipManager({
       expectedVersion: membership.recruiter_version,
       validTo: membership.valid_to,
     });
-    setActiveForm(() => EMPTY_FORM);
+    setActiveForm(() => ({ ...EMPTY_FORM, teamId: preferredTeam?.active && preferredTeam.team_id !== membership.team_id
+      ? preferredTeam.team_id : "" }));
     setActiveWorkflow({ formError: null, message: null });
     ensureTeams();
   };
@@ -683,6 +686,11 @@ export function PersonnelTeamMembershipManager({
                           disabled={teamState.kind !== "loaded" || activeListLock}
                           className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3">
                           <option value="">Chọn nhóm</option>
+                          {teamState.kind === "loaded" && preferredTeam?.active &&
+                            (operation.kind !== "move" || operation.currentTeamId !== preferredTeam.team_id) &&
+                            !teamState.teams.some((team) => team.team_id === preferredTeam.team_id) && (
+                              <option value={preferredTeam.team_id}>{preferredTeam.display_name} ({preferredTeam.code})</option>
+                            )}
                           {teamState.kind === "loaded" ? teamState.teams
                             .filter((team) => operation.kind !== "move" || team.team_id !== operation.currentTeamId)
                             .map((team) => <option key={team.team_id} value={team.team_id}>{team.display_name} ({team.code})</option>)

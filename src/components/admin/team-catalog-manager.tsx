@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
 import * as Dialog from "radix-ui/dialog";
 
 import { Alert } from "@/components/ui/alert";
@@ -10,6 +11,7 @@ import { useNotify } from "@/components/ui/notify-provider";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { TeamLeaderManager } from "@/components/admin/team-leader-manager";
+import { useWp4WorkspaceGuard } from "@/components/admin/wp4-workspace-guard";
 import {
   buildTeamCreateRequest,
   buildTeamListQuery,
@@ -24,6 +26,8 @@ import {
   teamConflictsForDialog,
   type TeamMutationOutcome,
 } from "@/lib/admin/team-catalog-model";
+import { buildRecruitmentTeamsQuery, DEPARTMENT_UI_MAX_SEARCH_LENGTH, projectRecruitmentTeamsEnvelope } from "@/lib/admin/department-ui-model";
+import type { RecruitmentTeamProjection } from "@/lib/departments/department-contract";
 import type {
   AdminTeam,
   AdminTeamList,
@@ -31,15 +35,15 @@ import type {
 
 type ListState =
   | { kind: "loading" }
-  | { kind: "loaded"; list: AdminTeamList }
+  | { kind: "loaded"; departmentId?: string; list: Pick<AdminTeamList, "total" | "page_size"> & { teams: readonly RecruitmentTeamProjection[] } }
   | { kind: "denied" }
   | { kind: "unavailable" }
   | { kind: "error" };
 
 type DialogState =
   | { kind: "create" }
-  | { kind: "edit"; team: AdminTeam }
-  | { kind: "active"; team: AdminTeam; active: boolean };
+  | { kind: "edit"; team: RecruitmentTeamProjection }
+  | { kind: "active"; team: RecruitmentTeamProjection; active: boolean };
 
 type TeamForm = {
   code: string;
@@ -74,14 +78,20 @@ function ActiveBadge({ active }: { active: boolean }) {
 }
 
 export function TeamCatalogManager({
-  canManageTeamLeaders = true,
+  departmentId,
+  canManageCatalog = true,
+  canManageTeamLeaders = false,
+  onTeamMutated,
 }: {
+  departmentId?: string;
+  canManageCatalog?: boolean;
+  onTeamMutated?: () => Promise<boolean>;
   canManageTeamLeaders?: boolean;
 } = {}) {
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [includeInactive, setIncludeInactive] = useState(false);
+  const [includeInactive, setIncludeInactive] = useState(Boolean(departmentId));
   const [page, setPage] = useState(1);
   const [reloadToken, setReloadToken] = useState(0);
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -92,27 +102,37 @@ export function TeamCatalogManager({
   const [busy, setBusy] = useState(false);
   const [conflictLocks, setConflictLocks] = useState<ReadonlySet<string>>(new Set());
   const [leaderLocks, setLeaderLocks] = useState<ReadonlySet<string>>(new Set());
-  const [leaderTeam, setLeaderTeam] = useState<AdminTeam | null>(null);
+  const [leaderTeam, setLeaderTeam] = useState<RecruitmentTeamProjection | null>(null);
   const notify = useNotify();
+  const workspace = useWp4WorkspaceGuard();
+  const sending = useRef(false);
+  const list = listState.kind === "loaded" && listState.departmentId === departmentId ? listState.list : null;
+  const canWrite = canManageCatalog && (!departmentId || list !== null);
+  const formFrozen = busy || pendingIntent !== null;
+  const dismissLocked = busy || (pendingIntent !== null && canWrite);
 
+  const buildListQuery = departmentId ? buildRecruitmentTeamsQuery : buildTeamListQuery;
   useEffect(() => {
-    const listQuery = buildTeamListQuery({ search, includeInactive, page });
+    const query = { search, includeInactive, page };
+    const listQuery = buildListQuery(query);
+    const endpoint = departmentId ? "/api/admin/departments/recruitment/teams" : "/api/admin/catalog/teams";
     if (!listQuery) return;
     const controller = new AbortController();
     void (async () => {
       let response: Response;
       try {
-        response = await fetch(`/api/admin/catalog/teams?${listQuery.toString()}`, {
+        response = await fetch(`${endpoint}?${listQuery.toString()}`, {
           method: "GET",
           cache: "no-store",
           signal: controller.signal,
           headers: { Accept: "application/json" },
         });
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
         setListState({ kind: "unavailable" });
         return;
       }
+      if (controller.signal.aborted) return;
       if (response.status === 401 || response.status === 403) {
         setListState({ kind: "denied" });
         return;
@@ -124,11 +144,11 @@ export function TeamCatalogManager({
         return;
       }
       try {
-        const list = projectTeamListForQuery(await response.json(), {
-          search,
-          includeInactive,
-          page,
-        });
+        const payload = await response.json();
+        if (controller.signal.aborted) return;
+        const list = departmentId
+          ? projectRecruitmentTeamsEnvelope(payload, query, departmentId)
+          : projectTeamListForQuery(payload, query);
         if (!list) {
           setListState({ kind: "error" });
           return;
@@ -138,13 +158,14 @@ export function TeamCatalogManager({
           setPage(Math.min(1000, pages));
           return;
         }
-        setListState({ kind: "loaded", list });
+        setListState({ kind: "loaded", departmentId, list });
       } catch {
+        if (controller.signal.aborted) return;
         setListState({ kind: "error" });
       }
     })();
     return () => controller.abort();
-  }, [includeInactive, page, reloadToken, search]);
+  }, [buildListQuery, departmentId, includeInactive, page, reloadToken, search]);
 
   const reloadList = () => {
     setListState({ kind: "loading" });
@@ -169,23 +190,27 @@ export function TeamCatalogManager({
   }, []);
 
   const changeForm = useCallback(<K extends keyof TeamForm>(field: K, value: TeamForm[K]) => {
+    if (formFrozen || sending.current) return;
     setForm((current) => ({ ...current, [field]: value }));
     setFormError(null);
-  }, []);
+  }, [formFrozen]);
 
   const startCreate = () => {
+    if (!canWrite || formFrozen) return;
     setForm(EMPTY_FORM);
     setFormError(null);
     setDialog({ kind: "create" });
   };
 
-  const startEdit = (team: AdminTeam) => {
+  const startEdit = (team: RecruitmentTeamProjection) => {
+    if (!canWrite || formFrozen) return;
     setForm({ code: team.code, displayName: team.display_name, reason: "" });
     setFormError(null);
     setDialog({ kind: "edit", team });
   };
 
-  const startActiveChange = (team: AdminTeam, active: boolean) => {
+  const startActiveChange = (team: RecruitmentTeamProjection, active: boolean) => {
+    if (!canWrite || formFrozen) return;
     setForm({ ...EMPTY_FORM, reason: "" });
     setFormError(null);
     setDialog({ kind: "active", team, active });
@@ -201,6 +226,7 @@ export function TeamCatalogManager({
   }, []);
 
   const reloadConflictedTeam = useCallback(async (intent: MutationIntent) => {
+    const epoch = workspace.getEpoch();
     setConflictIntents((current) => {
       const next = new Map(current);
       const entry = next.get(intent.lockId);
@@ -214,8 +240,10 @@ export function TeamCatalogManager({
           `/api/admin/catalog/teams/${encodeURIComponent(intent.teamId)}`,
           { method: "GET", cache: "no-store", headers: { Accept: "application/json" } },
         );
+        if (!workspace.isActive(epoch)) return;
         if (response.status === 404) {
           clearConflict(intent.lockId);
+          if (onTeamMutated) void onTeamMutated();
           notify.warning({ title: "Nhóm không còn tồn tại hoặc không còn khả dụng. Danh sách đang được cập nhật." });
           setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
           setDialog((current) => current && (
@@ -227,6 +255,7 @@ export function TeamCatalogManager({
         }
         if (response.status !== 200) throw new Error("reload");
         const team = projectTeamItem(await response.json());
+        if (!workspace.isActive(epoch)) return;
         if (!team || team.team_id !== intent.teamId) throw new Error("reload");
         setListState((current) => current.kind === "loaded"
           ? {
@@ -258,10 +287,12 @@ export function TeamCatalogManager({
               page: 1,
             })
           : null;
+        if (!workspace.isActive(epoch)) return;
         if (!list || !teamListConfirmsCode(list, code)) {
           throw new Error("reload");
         }
       }
+      if (onTeamMutated) void onTeamMutated();
       clearConflict(intent.lockId);
       notify.info({ title: "Đã tải dữ liệu mới nhất. Bạn có thể bắt đầu thao tác mới." });
       setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
@@ -271,6 +302,7 @@ export function TeamCatalogManager({
       setListState({ kind: "loading" });
       setReloadToken((value) => value + 1);
     } catch {
+      if (!workspace.isActive(epoch)) return;
       const reloadError = "Không tải được dữ liệu có thẩm quyền. Thao tác vẫn đang bị khóa; hãy thử tải lại.";
       setConflictIntents((current) => {
         const next = new Map(current);
@@ -285,11 +317,15 @@ export function TeamCatalogManager({
       });
       notify.error({ title: reloadError });
     } finally {
-      setBusy(false);
+      if (workspace.isActive(epoch)) setBusy(false);
     }
-  }, [clearConflict, notify]);
+  }, [clearConflict, notify, onTeamMutated, workspace]);
 
   const sendIntent = useCallback(async (intent: MutationIntent) => {
+    if (!canWrite || sending.current) return;
+    sending.current = true;
+    const epoch = workspace.getEpoch();
+    setPendingIntent(intent);
     setBusy(true);
     try {
       let response: Response;
@@ -305,6 +341,7 @@ export function TeamCatalogManager({
           body: JSON.stringify(intent.body),
         });
       } catch {
+        if (!workspace.isActive(epoch)) return;
         setPendingIntent({ ...intent, retryState: "retry" });
         notify.warning({ title: "Không nhận được phản hồi. Có thể thử lại đúng thao tác này." });
         return;
@@ -315,6 +352,7 @@ export function TeamCatalogManager({
       } catch {
         payload = null;
       }
+      if (!workspace.isActive(epoch)) return;
       const outcome = classifyTeamMutation(response.status, payload, intent.operation);
       if (outcome.kind === "applied") {
         setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
@@ -334,6 +372,7 @@ export function TeamCatalogManager({
       }
       if (outcome.kind === "not-found" && intent.teamId !== null) {
         clearConflict(intent.lockId);
+        if (onTeamMutated) void onTeamMutated();
         setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
         setDialog((current) => current && (
           current.kind === "create" ? "create" : current.team.team_id
@@ -352,14 +391,15 @@ export function TeamCatalogManager({
         notify.error({ title: messageForOutcome(outcome) });
       }
     } finally {
-      setBusy(false);
+      sending.current = false;
+      if (workspace.isActive(epoch)) setBusy(false);
     }
-  }, [clearConflict, notify, reloadConflictedTeam]);
+  }, [canWrite, clearConflict, notify, onTeamMutated, reloadConflictedTeam, workspace]);
 
   const submitMutation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
-    if (!dialog) return;
+    if (!dialog || !canWrite || sending.current) return;
     if (isConflictLocked) {
       setFormError("Nhóm đang bị khóa cho đến khi tải lại dữ liệu có thẩm quyền.");
       return;
@@ -441,11 +481,9 @@ export function TeamCatalogManager({
         retryState: "ready",
       };
     }
-    setPendingIntent(intent);
     void sendIntent(intent);
   };
 
-  const list = listState.kind === "loaded" ? listState.list : null;
   const pageCount = list
     ? Math.min(1000, Math.max(1, Math.ceil(list.total / Math.max(1, list.page_size))))
     : 1;
@@ -477,28 +515,30 @@ export function TeamCatalogManager({
     <Dialog.Root
       open={dialog !== null}
       onOpenChange={(open) => {
-        if (!open && !busy) setDialog(null);
+        if (!open && !dismissLocked && !sending.current) setDialog(null);
       }}
     >
       <div className="space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-foreground">Danh mục Tổ đội tuyển dụng</h1>
+            {departmentId ? <h2 className="text-2xl font-semibold text-foreground">Tổ đội tuyển dụng</h2>
+              : <h1 className="text-2xl font-semibold text-foreground">Danh mục Tổ đội tuyển dụng</h1>}
             <p className="mt-1 max-w-2xl text-sm text-muted">
-              Quản lý tên hiển thị và trạng thái hoạt động của tổ đội tuyển dụng. Mã tổ đội không thay đổi sau khi tạo.
+              {canManageCatalog
+                ? "Quản lý tổ đội, trưởng nhóm và phân công thành viên."
+                : "Danh sách tổ đội trực thuộc Phòng Tuyển dụng."}
             </p>
           </div>
-          <Dialog.Trigger asChild>
+          {canWrite && <Dialog.Trigger asChild>
             <button
               type="button"
               onClick={startCreate}
-              disabled={busy || conflictLocks.has("create") ||
-                (pendingIntent !== null && pendingIntent.lockId !== "create")}
+              disabled={formFrozen || conflictLocks.has("create")}
               className="inline-flex min-h-11 whitespace-nowrap shrink-0 items-center rounded-md bg-primary px-4 text-sm font-medium text-on-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               Thêm nhóm
             </button>
-          </Dialog.Trigger>
+          </Dialog.Trigger>}
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
             <Dialog.Content
@@ -523,8 +563,8 @@ export function TeamCatalogManager({
                   <button
                     type="button"
                     aria-label="Đóng hộp thoại"
-                    disabled={busy}
-                    className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                    disabled={dismissLocked}
+                    className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 sm:size-10"
                   >
                     <span aria-hidden="true">×</span>
                   </button>
@@ -536,7 +576,7 @@ export function TeamCatalogManager({
                   <p>Thử lại đúng thao tác này bằng cùng một khóa để tránh thay đổi trùng lặp.</p>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !canWrite}
                     onClick={() => void sendIntent(pendingIntent)}
                     className="mt-2 min-h-10 rounded-md border border-current px-3 font-medium disabled:opacity-50"
                   >
@@ -561,9 +601,9 @@ export function TeamCatalogManager({
                     không xóa dữ liệu và lịch sử phân công vẫn đọc được.
                   </p>
                   <form onSubmit={submitMutation} className="space-y-4">
-                    <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
+                    <ReasonField value={form.reason} readOnly={formFrozen} onChange={(value) => changeForm("reason", value)} />
                     {formError ? <p role="alert" className="text-sm text-red-700 dark:text-red-300">{formError}</p> : null}
-                    <DialogActions busy={busy} disabled={isConflictLocked || pendingIntent !== null}>
+                    <DialogActions dismissLocked={dismissLocked} disabled={!canWrite || formFrozen || isConflictLocked}>
                       {busy ? "Đang lưu…" : dialog.active ? "Xác nhận kích hoạt" : "Xác nhận ngừng"}
                     </DialogActions>
                   </form>
@@ -576,6 +616,7 @@ export function TeamCatalogManager({
                         id="team-code"
                         label="Mã nhóm"
                         value={form.code}
+                        readOnly={formFrozen}
                         maxLength={128}
                         required
                         onChange={(value) => changeForm("code", value)}
@@ -595,14 +636,15 @@ export function TeamCatalogManager({
                       id="team-name"
                       label="Tên hiển thị"
                       value={form.displayName}
+                      readOnly={formFrozen}
                       maxLength={256}
                       required
                       onChange={(value) => changeForm("displayName", value)}
                     />
                   </div>
-                  <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
+                  <ReasonField value={form.reason} readOnly={formFrozen} onChange={(value) => changeForm("reason", value)} />
                   {formError ? <p role="alert" className="text-sm text-red-700 dark:text-red-300">{formError}</p> : null}
-                  <DialogActions busy={busy} disabled={isConflictLocked || pendingIntent !== null}>
+                  <DialogActions dismissLocked={dismissLocked} disabled={!canWrite || formFrozen || isConflictLocked}>
                     {busy ? "Đang lưu…" : dialog?.kind === "create" ? "Tạo nhóm" : "Lưu thay đổi"}
                   </DialogActions>
                 </form>
@@ -617,7 +659,7 @@ export function TeamCatalogManager({
             <p>Thử lại cùng khóa thao tác để tránh tạo thay đổi trùng lặp.</p>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !canWrite}
               onClick={() => void sendIntent(pendingIntent)}
               className="mt-2 min-h-10 rounded-md border border-current px-3 font-medium disabled:opacity-50"
             >
@@ -645,7 +687,7 @@ export function TeamCatalogManager({
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              const query = buildTeamListQuery({ search: searchInput, includeInactive, page: 1 });
+              const query = buildListQuery({ search: searchInput, includeInactive, page: 1 });
               if (!query) {
                 setListState({ kind: "error" });
                 return;
@@ -662,7 +704,7 @@ export function TeamCatalogManager({
               <input
                 id="team-search"
                 value={searchInput}
-                maxLength={256}
+                maxLength={departmentId ? DEPARTMENT_UI_MAX_SEARCH_LENGTH : 256}
                 onChange={(event) => setSearchInput(event.currentTarget.value)}
                 className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-md border border-border bg-background px-3 text-base sm:text-sm"
               />
@@ -727,7 +769,7 @@ export function TeamCatalogManager({
                         <th scope="col" className="px-3.5 py-3 font-semibold">Tổ đội</th>
                         <th scope="col" className="px-3.5 py-3 font-semibold">Mã tổ đội</th>
                         <th scope="col" className="px-3.5 py-3 font-semibold">Trạng thái</th>
-                        <th scope="col" className="px-3.5 py-3 font-semibold text-right">Thao tác</th>
+                        {canManageCatalog && <th scope="col" className="px-3.5 py-3 font-semibold text-right">Thao tác</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
@@ -736,14 +778,19 @@ export function TeamCatalogManager({
                           <td data-card-header="true" className="px-3.5 py-2.5 font-medium">{team.display_name}</td>
                           <td data-label="Mã tổ đội" className="px-3.5 py-2.5 font-mono text-xs">{team.code}</td>
                           <td data-label="Trạng thái" className="px-3.5 py-2.5"><ActiveBadge active={team.active} /></td>
-                          <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
-                            <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
+                          {canManageCatalog && <td data-card-actions="true" className="px-3.5 py-2.5 text-right">
+                            <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                              <Link
+                                href={`/admin/catalog/personnel?team_id=${encodeURIComponent(team.team_id)}`}
+                                className="inline-flex min-h-11 items-center rounded-md border border-border px-3 text-xs font-medium md:min-h-8"
+                              >
+                                Thành viên
+                              </Link>
                               <Dialog.Trigger asChild>
                                 <button
                                   type="button"
                                   onClick={() => startEdit(team)}
-                                  disabled={busy || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id) ||
-                                    (pendingIntent !== null && pendingIntent.lockId !== team.team_id)}
+                                  disabled={formFrozen || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id)}
                                   className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50"
                                 >
                                   Chỉnh sửa
@@ -753,8 +800,7 @@ export function TeamCatalogManager({
                                 <button
                                   type="button"
                                   onClick={() => startActiveChange(team, !team.active)}
-                                  disabled={busy || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id) ||
-                                    (pendingIntent !== null && pendingIntent.lockId !== team.team_id)}
+                                  disabled={formFrozen || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id)}
                                   className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50"
                                 >
                                   {team.active ? "Ngừng hoạt động" : "Kích hoạt"}
@@ -770,7 +816,7 @@ export function TeamCatalogManager({
                                 Trưởng nhóm
                               </button>
                             </div>
-                          </td>
+                          </td>}
                         </tr>
                       ))}
                     </tbody>
@@ -819,6 +865,7 @@ function Field({
   value,
   maxLength,
   required = false,
+  readOnly,
   onChange,
 }: {
   id: string;
@@ -826,6 +873,7 @@ function Field({
   value: string;
   maxLength?: number;
   required?: boolean;
+  readOnly: boolean;
   onChange(value: string): void;
 }) {
   return (
@@ -837,6 +885,7 @@ function Field({
         value={value}
         maxLength={maxLength}
         required={required}
+        readOnly={readOnly}
         onChange={(event) => onChange(event.currentTarget.value)}
         className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3 text-sm"
       />
@@ -844,13 +893,14 @@ function Field({
   );
 }
 
-function ReasonField({ value, onChange }: { value: string; onChange(value: string): void }) {
+function ReasonField({ value, readOnly, onChange }: { value: string; readOnly: boolean; onChange(value: string): void }) {
   return (
     <label htmlFor="team-reason" className="block text-sm font-medium text-foreground">
       Lý do thay đổi (không bắt buộc)
       <textarea
         id="team-reason"
         value={value}
+        readOnly={readOnly}
         onChange={(event) => onChange(event.currentTarget.value)}
         maxLength={4000}
         rows={3}
@@ -861,24 +911,24 @@ function ReasonField({ value, onChange }: { value: string; onChange(value: strin
 }
 
 function DialogActions({
-  busy,
+  dismissLocked,
   disabled,
   children,
 }: {
-  busy: boolean;
+  dismissLocked: boolean;
   disabled: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div className="flex flex-wrap justify-end gap-2">
       <Dialog.Close asChild>
-        <button type="button" disabled={busy} className="min-h-11 rounded-md border border-border px-4 text-sm">
+        <button type="button" disabled={dismissLocked} className="min-h-11 rounded-md border border-border px-4 text-sm">
           Hủy
         </button>
       </Dialog.Close>
       <button
         type="submit"
-        disabled={busy || disabled}
+        disabled={disabled}
         className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50"
       >
         {children}

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { TeamCatalogManager } from "@/components/admin/team-catalog-manager";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
@@ -38,7 +39,6 @@ import {
   DEPARTMENT_UI_MAX_REASON_LENGTH,
   DEPARTMENT_UI_MAX_SEARCH_LENGTH,
   DEPARTMENT_WP3_MAX_REASON_LENGTH,
-  RECRUITMENT_DEFAULT_POLICY_DESCRIPTION,
   buildAccountingCandidatesQuery,
   buildAccountingMembershipsQuery,
   buildAssignAccountingMemberRequest,
@@ -49,7 +49,6 @@ import {
   buildEndAccountingMemberRequest,
   buildEndDepartmentHeadRequest,
   buildEndDepartmentPersonMemberRequest,
-  buildRecruitmentTeamsQuery,
   buildUpdateDepartmentRequest,
   canManageDepartmentMemberships,
   canToggleDepartmentActive,
@@ -72,10 +71,8 @@ import {
   projectDepartmentPersonMembershipsListEnvelope,
   projectDesignateDepartmentHeadEnvelope,
   projectEndDepartmentHeadEnvelope,
-  projectRecruitmentTeamsEnvelope,
   resolveWp3DepartmentMutationResult,
   sanitizeDepartmentSearchInput,
-  visibleRecruitmentTeams,
   type DepartmentWp3MutationResult,
 } from "@/lib/admin/department-ui-model";
 import {
@@ -93,7 +90,6 @@ import type {
   DepartmentPersonMembershipStatusFilter,
   DepartmentPersonMembershipsListProjection,
   PersonDeptMembershipProjection,
-  RecruitmentTeamListProjection,
 } from "@/lib/departments/department-contract";
 
 const INPUT_CLASS =
@@ -140,8 +136,14 @@ function useLatestSessionLostHandler(onSessionLost: (message: string) => void) {
 
 export function DepartmentDetailManager({
   departmentId,
+  teamsView = false,
+  canManageCatalog = false,
+  canManageTeamLeaders = false,
 }: {
   departmentId: string;
+  teamsView?: boolean;
+  canManageCatalog?: boolean;
+  canManageTeamLeaders?: boolean;
 }) {
   const normalizedDepartmentId = normalizeDepartmentUuid(departmentId);
   const [detailState, setDetailState] = useState<DepartmentDetailLoadState>({
@@ -381,37 +383,50 @@ export function DepartmentDetailManager({
 
       {effectiveState.kind === "ready" ? (
         <div className="space-y-6">
-          <DepartmentGovernanceHeaderCard
-            detail={effectiveState.detail}
-            workspaceGuard={workspaceGuard}
-            onReloadDetail={reloadDetail}
-            onReconcileDetail={reconcileDepartmentDetail}
-            onSessionLost={handleSessionLost}
-          />
+          {effectiveState.detail.department.system_key === "RECRUITMENT" && (
+            <Link
+              href={`/admin/departments/${normalizedDepartmentId}${teamsView ? "" : "?view=teams"}`}
+              className={buttonClasses({ variant: "secondary", size: "md" })}
+            >
+              {teamsView ? "Chi tiết phòng ban" : "Quản lý tổ đội tuyển dụng"}
+            </Link>
+          )}
+          {(!teamsView || effectiveState.detail.department.system_key !== "RECRUITMENT") && (
+            <>
+              <DepartmentGovernanceHeaderCard
+                detail={effectiveState.detail}
+                workspaceGuard={workspaceGuard}
+                onReloadDetail={reloadDetail}
+                onReconcileDetail={reconcileDepartmentDetail}
+                onSessionLost={handleSessionLost}
+              />
 
-          <DepartmentHeadManagementSection
-            detail={effectiveState.detail}
-            parentReloadToken={detailReloadToken}
-            workspaceGuard={workspaceGuard}
-            onReconcileDetail={reconcileDepartmentDetail}
-            onMutated={handleChildMutated}
-            onSessionLost={handleSessionLost}
-          />
+              <DepartmentHeadManagementSection
+                detail={effectiveState.detail}
+                parentReloadToken={detailReloadToken}
+                workspaceGuard={workspaceGuard}
+                onReconcileDetail={reconcileDepartmentDetail}
+                onMutated={handleChildMutated}
+                onSessionLost={handleSessionLost}
+              />
 
-          <DepartmentPersonMembershipsSection
-            detail={effectiveState.detail}
-            parentReloadToken={detailReloadToken}
-            workspaceGuard={workspaceGuard}
-            onReconcileDetail={reconcileDepartmentDetail}
-            onMutated={handleChildMutated}
-            onSessionLost={handleSessionLost}
-          />
+              <DepartmentPersonMembershipsSection
+                detail={effectiveState.detail}
+                parentReloadToken={detailReloadToken}
+                workspaceGuard={workspaceGuard}
+                onReconcileDetail={reconcileDepartmentDetail}
+                onMutated={handleChildMutated}
+                onSessionLost={handleSessionLost}
+              />
+            </>
+          )}
 
           {effectiveState.detail.department.system_key === "RECRUITMENT" ? (
-            <RecruitmentDepartmentReadOnlySection
-              detail={effectiveState.detail}
-              parentReloadToken={detailReloadToken}
-              onReloadDetail={reloadDetail}
+            <TeamCatalogManager
+              departmentId={effectiveState.detail.department.department_id}
+              canManageCatalog={canManageCatalog}
+              canManageTeamLeaders={canManageTeamLeaders}
+              onTeamMutated={reconcileDepartmentDetail}
             />
           ) : effectiveState.detail.department.system_key === "ACCOUNTING" ? (
             <AccountingDepartmentMembershipsSection
@@ -2570,310 +2585,6 @@ function DepartmentPersonMembershipsSection({
         ) : null}
       </FormDialog>
     </Card>
-  );
-}
-
-function RecruitmentDepartmentReadOnlySection({
-  detail,
-  parentReloadToken,
-  onReloadDetail,
-}: {
-  detail: DepartmentDetailProjection;
-  parentReloadToken: number;
-  onReloadDetail: () => void;
-}) {
-  const department = detail.department;
-  const [searchInput, setSearchInput] = useState("");
-  const [searchFilter, setSearchFilter] = useState("");
-  const [includeInactive, setIncludeInactive] = useState(true);
-  const [page, setPage] = useState(1);
-  const [reloadToken, setReloadToken] = useState(0);
-  const [teamsState, setTeamsState] = useState<SubListLoadState<RecruitmentTeamListProjection>>({
-    kind: "loading",
-  });
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setSearchFilter(searchInput);
-      setPage(1);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchInput]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      const query = buildRecruitmentTeamsQuery({
-        search: searchFilter,
-        includeInactive,
-        page,
-      });
-      if (!query) {
-        setTeamsState({
-          kind: "error",
-          message: "Bộ lọc tìm kiếm nhóm không hợp lệ.",
-          retryable: true,
-        });
-        return;
-      }
-
-      setTeamsState({ kind: "loading" });
-      let response: Response;
-      try {
-        response = await fetch(
-          `/api/admin/departments/recruitment/teams?${query.toString()}`,
-          {
-            method: "GET",
-            cache: "no-store",
-            signal: controller.signal,
-            headers: { Accept: "application/json" },
-          },
-        );
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        setTeamsState({
-          kind: "error",
-          message: "Không thể kết nối tới máy chủ để tải danh sách Nhóm.",
-          retryable: true,
-        });
-        return;
-      }
-
-      const payload: unknown = await response.json().catch(() => null);
-      if (controller.signal.aborted) return;
-
-      if (response.status !== 200) {
-        const failure = classifyDepartmentReadError(response.status, payload);
-        if (failure.kind === "unauthenticated" || failure.kind === "denied") {
-          setTeamsState({ kind: "denied", message: failure.message });
-          return;
-        }
-        setTeamsState({
-          kind: "error",
-          message: failure.message,
-          retryable: failure.retryable,
-        });
-        return;
-      }
-
-      const projected = projectRecruitmentTeamsEnvelope(
-        payload,
-        { search: searchFilter, includeInactive, page },
-        department.department_id,
-      );
-      if (!projected) {
-        setTeamsState({
-          kind: "error",
-          message: "Phản hồi danh sách Nhóm không đúng định dạng chuẩn.",
-          retryable: true,
-        });
-        return;
-      }
-
-      setTeamsState({ kind: "ready", data: projected });
-    })();
-
-    return () => controller.abort();
-  }, [
-    department.department_id,
-    includeInactive,
-    page,
-    parentReloadToken,
-    reloadToken,
-    searchFilter,
-  ]);
-
-  const reloadTeams = () => {
-    setTeamsState({ kind: "loading" });
-    setReloadToken((value) => value + 1);
-  };
-
-  const teams =
-    teamsState.kind === "ready" ? visibleRecruitmentTeams(teamsState.data.teams) : [];
-  const pageCount =
-    teamsState.kind === "ready"
-      ? Math.max(1, Math.ceil(teamsState.data.total / Math.max(1, teamsState.data.page_size)))
-      : 1;
-
-  return (
-    <div className="space-y-4" data-testid="recruitment-department-readonly-panel">
-      <PageHeader
-        eyebrow="Chi tiết Phòng ban"
-        title={department.name}
-        badge={
-          <StatusBadge tone={department.is_active ? "success" : "neutral"} dot>
-            {department.is_active ? "Đang hoạt động" : "Ngừng hoạt động"}
-          </StatusBadge>
-        }
-        description={`Mã hệ thống: ${department.code} · Ngày hiệu lực: ${detail.authorization_date} · ${departmentScaleSummary(department)}`}
-        actions={
-          <Button variant="secondary" size="md" onClick={onReloadDetail}>
-            Làm mới
-          </Button>
-        }
-      />
-
-      <Alert tone="info" role="status" title="Chế độ chỉ đọc — Vỏ Phòng Tuyển dụng">
-        <p>{RECRUITMENT_DEFAULT_POLICY_DESCRIPTION}</p>
-        <p>
-          Phòng Tuyển dụng không hỗ trợ gán thành viên trực tiếp và không cho phép chỉnh sửa
-          Nhóm, Team Leader, thành viên tuyển dụng hoặc phạm vi Dự án ↔ Nhóm tại đây.
-        </p>
-      </Alert>
-
-      <Card>
-        <CardHeader
-          title="Danh sách Nhóm trực thuộc (chỉ đọc)"
-          description={
-            teamsState.kind === "ready"
-              ? `${teamsState.data.total} nhóm kinh doanh được chiếu từ danh mục hiện hành`
-              : "Tra cứu danh sách Nhóm hiện hữu thuộc nghiệp vụ tuyển dụng."
-          }
-        />
-
-        <FilterToolbar
-          className="mb-4"
-          actions={
-            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Bộ lọc trạng thái nhóm">
-              <Button
-                variant={includeInactive ? "soft" : "secondary"}
-                size="md"
-                aria-pressed={includeInactive}
-                onClick={() => {
-                  setIncludeInactive(true);
-                  setPage(1);
-                }}
-              >
-                Tất cả nhóm
-              </Button>
-              <Button
-                variant={!includeInactive ? "soft" : "secondary"}
-                size="md"
-                aria-pressed={!includeInactive}
-                onClick={() => {
-                  setIncludeInactive(false);
-                  setPage(1);
-                }}
-              >
-                Chỉ nhóm đang hoạt động
-              </Button>
-            </div>
-          }
-        >
-          <form
-            className="flex flex-col gap-2 sm:flex-row sm:items-end"
-            onSubmit={(event) => {
-              event.preventDefault();
-              setSearchFilter(searchInput);
-              setPage(1);
-              reloadTeams();
-            }}
-          >
-            <label className="flex flex-1 flex-col gap-1 text-sm font-medium text-foreground">
-              Tìm theo mã hoặc tên nhóm
-              <input
-                type="search"
-                value={searchInput}
-                maxLength={DEPARTMENT_UI_MAX_SEARCH_LENGTH}
-                placeholder="Nhập mã hoặc tên nhóm…"
-                onChange={(event) =>
-                  setSearchInput(sanitizeDepartmentSearchInput(event.target.value))
-                }
-                className={INPUT_CLASS}
-              />
-            </label>
-            <Button type="submit" variant="secondary" size="md">
-              Lọc
-            </Button>
-          </form>
-        </FilterToolbar>
-
-        {teamsState.kind === "loading" ? (
-          <p role="status" className="py-8 text-center text-sm text-muted">
-            Đang tải danh sách Nhóm…
-          </p>
-        ) : null}
-
-        {teamsState.kind === "denied" ? (
-          <Alert tone="error" role="alert" title="Không có quyền truy cập">
-            {teamsState.message}
-          </Alert>
-        ) : null}
-
-        {teamsState.kind === "error" ? (
-          <div className="space-y-3">
-            <ErrorState
-              title="Không tải được danh sách Nhóm"
-              detail={teamsState.message}
-            />
-            {teamsState.retryable ? (
-              <Button variant="secondary" onClick={reloadTeams}>
-                Thử tải lại
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-
-        {teamsState.kind === "ready" && teams.length === 0 ? (
-          <EmptyState
-            title="Không có nhóm phù hợp"
-            description={
-              searchFilter.trim()
-                ? "Không tìm thấy nhóm nào khớp với từ khóa hiện tại."
-                : "Hiện chưa có nhóm nào để hiển thị."
-            }
-          />
-        ) : null}
-
-        {teamsState.kind === "ready" && teams.length > 0 ? (
-          <>
-            <DataTableContainer dataTestId="recruitment-teams-readonly-table">
-              <table className={DATA_TABLE_CLASS}>
-                <thead className={DATA_TABLE_HEAD_CLASS}>
-                  <tr>
-                    <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                      Tên nhóm
-                    </th>
-                    <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                      Mã nhóm
-                    </th>
-                    <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                      Trạng thái
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {teams.map((team) => (
-                    <tr key={team.team_id} className={DATA_TABLE_ROW_CLASS}>
-                      <td data-card-header="true" className={`${DATA_TABLE_TD_CLASS} font-medium`}>
-                        {team.display_name}
-                      </td>
-                      <td data-label="Mã nhóm" className={`${DATA_TABLE_TD_CLASS} font-mono text-xs sm:text-sm`}>
-                        {team.code}
-                      </td>
-                      <td data-label="Trạng thái" className={DATA_TABLE_TD_CLASS}>
-                        <StatusBadge tone={team.active ? "success" : "neutral"} dot>
-                          {team.active ? "Đang hoạt động" : "Ngừng hoạt động"}
-                        </StatusBadge>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </DataTableContainer>
-
-            <OffsetPager
-              page={page}
-              pageCount={pageCount}
-              total={teamsState.data.total}
-              ariaLabel="Phân trang danh sách nhóm thuộc Phòng Tuyển dụng"
-              nextDisabled={!teamsState.data.has_more}
-              onPageChange={(nextPage) => setPage(nextPage)}
-            />
-          </>
-        ) : null}
-      </Card>
-    </div>
   );
 }
 

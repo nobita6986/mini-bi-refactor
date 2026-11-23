@@ -73,36 +73,12 @@ test("/admin/departments list view uses shared house primitives and handles load
   assert.match(listManager, /"Idempotency-Key":\s*intent\.idempotencyKey/);
 });
 
-test("Recruitment department detail is strictly read-only, hides __system_vendor__, and exposes zero Team/Leader/Scope write controls", () => {
-  const recruitmentStart = detailManager.indexOf(
-    "function RecruitmentDepartmentReadOnlySection",
-  );
-  const accountingStart = detailManager.indexOf(
-    "function AccountingDepartmentMembershipsSection",
-  );
-  assert.ok(recruitmentStart > 0 && accountingStart > recruitmentStart);
-  const recruitmentSection = detailManager.slice(recruitmentStart, accountingStart);
-
-  assert.match(
-    recruitmentSection,
-    /\/api\/admin\/departments\/recruitment\/teams\?\$\{query\.toString\(\)\}/,
-  );
-  assert.match(recruitmentSection, /projectRecruitmentTeamsEnvelope\(/);
-  assert.match(recruitmentSection, /visibleRecruitmentTeams\(/);
-  assert.match(recruitmentSection, /Chế độ chỉ đọc — Vỏ Phòng Tuyển dụng/);
-  assert.match(
-    recruitmentSection,
-    /Phòng Tuyển dụng không hỗ trợ gán thành viên trực tiếp/,
-  );
-
-  // Recruitment section must have zero mutation calls, dialogs, or links/writes to Team/Leader/Scope APIs
-  assert.doesNotMatch(recruitmentSection, /method:\s*"(POST|PUT|PATCH|DELETE)"/);
-  assert.doesNotMatch(recruitmentSection, /FormDialog/);
-  assert.doesNotMatch(recruitmentSection, /Gán thành viên|Kết thúc/);
-  assert.doesNotMatch(
-    detailManager,
-    /\/api\/admin\/catalog\/(teams|team-leaders|project-team-scopes|personnel)/,
-  );
+test("Recruitment department embeds the shared team workspace and preserves separate catalog and leader permissions", () => {
+  assert.match(detailManager, /system_key === "RECRUITMENT" \? \(\s*<TeamCatalogManager/);
+  assert.match(detailManager, /departmentId=\{effectiveState\.detail\.department\.department_id\}/);
+  assert.match(detailPage, /canManageCatalog=\{decideTeamCatalogPageAccess\(\{ actor \}\) === "ALLOW"\}/);
+  assert.match(detailPage, /canManageTeamLeaders=\{canManageTeamLeadersFromActor\(actor\)\}/);
+  assert.doesNotMatch(detailManager, /\/api\/admin\/catalog\/(teams|team-leaders|project-team-scopes|personnel)/);
 });
 
 test("Accounting department detail displays read-only Vendor Finance policy and wires canonical candidate search, OCC, reason, and idempotency", () => {
@@ -193,7 +169,7 @@ test("Department UI modules contain no capability editor/checkboxes, no browser 
 });
 
 test("WP4 Department Head and Person membership panels wire OCC, immediate effective mutations, active-head blocks, and zero scheduling fields", () => {
-  const wp4Sections = detailManager.slice(0, detailManager.indexOf("function RecruitmentDepartmentReadOnlySection"));
+  const wp4Sections = detailManager.slice(0, detailManager.indexOf("function AccountingDepartmentMembershipsSection"));
   assert.match(wp4Sections, /DepartmentGovernanceHeaderCard/);
   assert.match(wp4Sections, /DepartmentHeadManagementSection/);
   assert.match(wp4Sections, /DepartmentPersonMembershipsSection/);

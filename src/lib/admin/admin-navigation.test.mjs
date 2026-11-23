@@ -120,7 +120,8 @@ test("Admin internal navigation exposes mapping, departments, organization perso
   const serializableSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
   const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "permission-groups", "provinces", "industrial-parks", "departments", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
-  const fullAdminWithoutHistory = serializableSections.filter(({ id }) => id !== "worker-edit-history");
+  const departmentAdmin = serializableSections.filter(({ id }) => id !== "teams");
+  const fullAdminWithoutHistory = departmentAdmin.filter(({ id }) => id !== "worker-edit-history");
   const allowlistedAdmin = makeNavActor(
     [...fullAdmin.capabilities, "worker_edit_history_view"],
     [{ kind: "all" }],
@@ -170,9 +171,9 @@ test("Admin internal navigation exposes mapping, departments, organization perso
   // Aggregate-only or submission-only report viewers do not receive Attendance Report access.
   assert.deepEqual(visibleAdminSections({ capabilities: ["report_analytics_view"], scopes: [{ kind: "all" }] }), []);
   assert.deepEqual(visibleAdminSections({ capabilities: ["report_view"], scopes: [{ kind: "all" }] }), []);
-  // Canonical Full Admin without worker_edit_history_view sees every section except worker-edit-history; allowlisted Admin sees all.
+  // Department admins manage teams inside the recruitment department.
   assert.deepEqual(visibleAdminSections(fullAdmin), fullAdminWithoutHistory);
-  assert.deepEqual(visibleAdminSections(allowlistedAdmin), serializableSections);
+  assert.deepEqual(visibleAdminSections(allowlistedAdmin), departmentAdmin);
   assert.equal(visibleAdminSections(allowlistedAdmin).some((section) => Object.values(section).some((value) => typeof value === "function")), false);
   // Project Admin (entry_admin@all without the triple) and unresolved actors see nothing.
   assert.deepEqual(visibleAdminSections({ capabilities: ["entry_admin"], scopes: [{ kind: "all" }] }), []);

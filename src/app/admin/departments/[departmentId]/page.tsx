@@ -4,7 +4,7 @@ import { DepartmentDetailManager } from "@/components/admin/department-detail-ma
 import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { normalizeDepartmentUuid } from "@/lib/admin/department-ui-model";
-import { decideAccountAccessPageAccess } from "@/lib/auth/direct-entry-page-access";
+import { canManageTeamLeadersFromActor, decideAccountAccessPageAccess, decideTeamCatalogPageAccess } from "@/lib/auth/direct-entry-page-access";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
@@ -13,10 +13,13 @@ export const metadata = { title: "Chi tiết Phòng ban — Hệ thống báo c�
 
 export default async function AdminDepartmentDetailPage({
   params,
+  searchParams,
 }: {
+  searchParams: Promise<{ view?: string | string[] }>;
   params: Promise<{ departmentId: string }>;
 }) {
   const actor = await resolveActorForRequest().catch(() => null);
+  const teamsView = (await searchParams)?.view === "teams";
   switch (decideAccountAccessPageAccess({ actor })) {
     case "NOT_FOUND":
       notFound();
@@ -24,7 +27,7 @@ export default async function AdminDepartmentDetailPage({
       const { departmentId } = await params;
       const safeId = normalizeDepartmentUuid(departmentId);
       const nextPath = safeId
-        ? `/admin/departments/${encodeURIComponent(safeId)}`
+        ? `/admin/departments/${encodeURIComponent(safeId)}${teamsView ? "?view=teams" : ""}`
         : "/admin/departments";
       redirect(`/login?next=${encodeURIComponent(nextPath)}`);
     }
@@ -36,7 +39,15 @@ export default async function AdminDepartmentDetailPage({
       return <AccessDenied />;
     case "ALLOW": {
       const { departmentId } = await params;
-      return <DepartmentDetailManager key={departmentId} departmentId={departmentId} />;
+      return (
+        <DepartmentDetailManager
+          key={departmentId}
+          departmentId={departmentId}
+          teamsView={teamsView}
+          canManageCatalog={decideTeamCatalogPageAccess({ actor }) === "ALLOW"}
+          canManageTeamLeaders={canManageTeamLeadersFromActor(actor)}
+        />
+      );
     }
   }
 }

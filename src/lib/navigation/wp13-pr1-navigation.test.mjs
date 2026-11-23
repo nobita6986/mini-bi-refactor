@@ -1018,7 +1018,7 @@ test("AdminSubnav dropdown renamed to 'Danh mục tuyển dụng' while preservi
   assert.equal(sections.some((s) => s.id === "permission-groups" && s.label === "Nhóm quyền"), true);
   assert.equal(sections.some((s) => s.id === "effective-access"), false);
   assert.equal(sections.some((s) => s.id === "accounts"), false);
-  assert.equal(sections.some((s) => s.id === "teams"), true);
+  assert.equal(sections.some((s) => s.id === "teams"), false);
   assert.equal(ADMIN_SECTIONS.some((s) => s.href.includes("/ai")), false);
 
   // No AI or Change Requests restored in CURRENT_NAV_ENTRIES
