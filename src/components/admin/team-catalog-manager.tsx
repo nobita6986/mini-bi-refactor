@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import * as Dialog from "radix-ui/dialog";
 
@@ -11,6 +11,7 @@ import { useNotify } from "@/components/ui/notify-provider";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { TeamLeaderManager } from "@/components/admin/team-leader-manager";
+import { useWp4WorkspaceGuard } from "@/components/admin/wp4-workspace-guard";
 import {
   buildTeamCreateRequest,
   buildTeamListQuery,
@@ -34,7 +35,7 @@ import type {
 
 type ListState =
   | { kind: "loading" }
-  | { kind: "loaded"; list: Pick<AdminTeamList, "total" | "page_size"> & { teams: readonly RecruitmentTeamProjection[] } }
+  | { kind: "loaded"; departmentId?: string; list: Pick<AdminTeamList, "total" | "page_size"> & { teams: readonly RecruitmentTeamProjection[] } }
   | { kind: "denied" }
   | { kind: "unavailable" }
   | { kind: "error" };
@@ -103,6 +104,12 @@ export function TeamCatalogManager({
   const [leaderLocks, setLeaderLocks] = useState<ReadonlySet<string>>(new Set());
   const [leaderTeam, setLeaderTeam] = useState<RecruitmentTeamProjection | null>(null);
   const notify = useNotify();
+  const workspace = useWp4WorkspaceGuard();
+  const sending = useRef(false);
+  const list = listState.kind === "loaded" && listState.departmentId === departmentId ? listState.list : null;
+  const canWrite = canManageCatalog && (!departmentId || list !== null);
+  const formFrozen = busy || pendingIntent !== null;
+  const dismissLocked = busy || (pendingIntent !== null && canWrite);
 
   const buildListQuery = departmentId ? buildRecruitmentTeamsQuery : buildTeamListQuery;
   useEffect(() => {
@@ -151,7 +158,7 @@ export function TeamCatalogManager({
           setPage(Math.min(1000, pages));
           return;
         }
-        setListState({ kind: "loaded", list });
+        setListState({ kind: "loaded", departmentId, list });
       } catch {
         if (controller.signal.aborted) return;
         setListState({ kind: "error" });
@@ -183,23 +190,27 @@ export function TeamCatalogManager({
   }, []);
 
   const changeForm = useCallback(<K extends keyof TeamForm>(field: K, value: TeamForm[K]) => {
+    if (formFrozen || sending.current) return;
     setForm((current) => ({ ...current, [field]: value }));
     setFormError(null);
-  }, []);
+  }, [formFrozen]);
 
   const startCreate = () => {
+    if (!canWrite || formFrozen) return;
     setForm(EMPTY_FORM);
     setFormError(null);
     setDialog({ kind: "create" });
   };
 
   const startEdit = (team: RecruitmentTeamProjection) => {
+    if (!canWrite || formFrozen) return;
     setForm({ code: team.code, displayName: team.display_name, reason: "" });
     setFormError(null);
     setDialog({ kind: "edit", team });
   };
 
   const startActiveChange = (team: RecruitmentTeamProjection, active: boolean) => {
+    if (!canWrite || formFrozen) return;
     setForm({ ...EMPTY_FORM, reason: "" });
     setFormError(null);
     setDialog({ kind: "active", team, active });
@@ -215,6 +226,7 @@ export function TeamCatalogManager({
   }, []);
 
   const reloadConflictedTeam = useCallback(async (intent: MutationIntent) => {
+    const epoch = workspace.getEpoch();
     setConflictIntents((current) => {
       const next = new Map(current);
       const entry = next.get(intent.lockId);
@@ -228,6 +240,7 @@ export function TeamCatalogManager({
           `/api/admin/catalog/teams/${encodeURIComponent(intent.teamId)}`,
           { method: "GET", cache: "no-store", headers: { Accept: "application/json" } },
         );
+        if (!workspace.isActive(epoch)) return;
         if (response.status === 404) {
           clearConflict(intent.lockId);
           if (onTeamMutated) void onTeamMutated();
@@ -242,6 +255,7 @@ export function TeamCatalogManager({
         }
         if (response.status !== 200) throw new Error("reload");
         const team = projectTeamItem(await response.json());
+        if (!workspace.isActive(epoch)) return;
         if (!team || team.team_id !== intent.teamId) throw new Error("reload");
         setListState((current) => current.kind === "loaded"
           ? {
@@ -273,6 +287,7 @@ export function TeamCatalogManager({
               page: 1,
             })
           : null;
+        if (!workspace.isActive(epoch)) return;
         if (!list || !teamListConfirmsCode(list, code)) {
           throw new Error("reload");
         }
@@ -287,6 +302,7 @@ export function TeamCatalogManager({
       setListState({ kind: "loading" });
       setReloadToken((value) => value + 1);
     } catch {
+      if (!workspace.isActive(epoch)) return;
       const reloadError = "Không tải được dữ liệu có thẩm quyền. Thao tác vẫn đang bị khóa; hãy thử tải lại.";
       setConflictIntents((current) => {
         const next = new Map(current);
@@ -301,11 +317,15 @@ export function TeamCatalogManager({
       });
       notify.error({ title: reloadError });
     } finally {
-      setBusy(false);
+      if (workspace.isActive(epoch)) setBusy(false);
     }
-  }, [clearConflict, notify, onTeamMutated]);
+  }, [clearConflict, notify, onTeamMutated, workspace]);
 
   const sendIntent = useCallback(async (intent: MutationIntent) => {
+    if (!canWrite || sending.current) return;
+    sending.current = true;
+    const epoch = workspace.getEpoch();
+    setPendingIntent(intent);
     setBusy(true);
     try {
       let response: Response;
@@ -321,6 +341,7 @@ export function TeamCatalogManager({
           body: JSON.stringify(intent.body),
         });
       } catch {
+        if (!workspace.isActive(epoch)) return;
         setPendingIntent({ ...intent, retryState: "retry" });
         notify.warning({ title: "Không nhận được phản hồi. Có thể thử lại đúng thao tác này." });
         return;
@@ -331,6 +352,7 @@ export function TeamCatalogManager({
       } catch {
         payload = null;
       }
+      if (!workspace.isActive(epoch)) return;
       const outcome = classifyTeamMutation(response.status, payload, intent.operation);
       if (outcome.kind === "applied") {
         setPendingIntent((current) => current?.lockId === intent.lockId ? null : current);
@@ -369,14 +391,15 @@ export function TeamCatalogManager({
         notify.error({ title: messageForOutcome(outcome) });
       }
     } finally {
-      setBusy(false);
+      sending.current = false;
+      if (workspace.isActive(epoch)) setBusy(false);
     }
-  }, [clearConflict, notify, onTeamMutated, reloadConflictedTeam]);
+  }, [canWrite, clearConflict, notify, onTeamMutated, reloadConflictedTeam, workspace]);
 
   const submitMutation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
-    if (!dialog) return;
+    if (!dialog || !canWrite || sending.current) return;
     if (isConflictLocked) {
       setFormError("Nhóm đang bị khóa cho đến khi tải lại dữ liệu có thẩm quyền.");
       return;
@@ -458,11 +481,9 @@ export function TeamCatalogManager({
         retryState: "ready",
       };
     }
-    setPendingIntent(intent);
     void sendIntent(intent);
   };
 
-  const list = listState.kind === "loaded" ? listState.list : null;
   const pageCount = list
     ? Math.min(1000, Math.max(1, Math.ceil(list.total / Math.max(1, list.page_size))))
     : 1;
@@ -494,7 +515,7 @@ export function TeamCatalogManager({
     <Dialog.Root
       open={dialog !== null}
       onOpenChange={(open) => {
-        if (!open && !busy) setDialog(null);
+        if (!open && !dismissLocked && !sending.current) setDialog(null);
       }}
     >
       <div className="space-y-6">
@@ -508,12 +529,11 @@ export function TeamCatalogManager({
                 : "Danh sách tổ đội trực thuộc Phòng Tuyển dụng."}
             </p>
           </div>
-          {canManageCatalog && <Dialog.Trigger asChild>
+          {canWrite && <Dialog.Trigger asChild>
             <button
               type="button"
               onClick={startCreate}
-              disabled={busy || conflictLocks.has("create") ||
-                (pendingIntent !== null && pendingIntent.lockId !== "create")}
+              disabled={formFrozen || conflictLocks.has("create")}
               className="inline-flex min-h-11 whitespace-nowrap shrink-0 items-center rounded-md bg-primary px-4 text-sm font-medium text-on-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               Thêm nhóm
@@ -543,7 +563,7 @@ export function TeamCatalogManager({
                   <button
                     type="button"
                     aria-label="Đóng hộp thoại"
-                    disabled={busy}
+                    disabled={dismissLocked}
                     className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                   >
                     <span aria-hidden="true">×</span>
@@ -556,7 +576,7 @@ export function TeamCatalogManager({
                   <p>Thử lại đúng thao tác này bằng cùng một khóa để tránh thay đổi trùng lặp.</p>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !canWrite}
                     onClick={() => void sendIntent(pendingIntent)}
                     className="mt-2 min-h-10 rounded-md border border-current px-3 font-medium disabled:opacity-50"
                   >
@@ -581,9 +601,9 @@ export function TeamCatalogManager({
                     không xóa dữ liệu và lịch sử phân công vẫn đọc được.
                   </p>
                   <form onSubmit={submitMutation} className="space-y-4">
-                    <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
+                    <ReasonField value={form.reason} readOnly={formFrozen} onChange={(value) => changeForm("reason", value)} />
                     {formError ? <p role="alert" className="text-sm text-red-700 dark:text-red-300">{formError}</p> : null}
-                    <DialogActions busy={busy} disabled={isConflictLocked || pendingIntent !== null}>
+                    <DialogActions dismissLocked={dismissLocked} disabled={!canWrite || formFrozen || isConflictLocked}>
                       {busy ? "Đang lưu…" : dialog.active ? "Xác nhận kích hoạt" : "Xác nhận ngừng"}
                     </DialogActions>
                   </form>
@@ -596,6 +616,7 @@ export function TeamCatalogManager({
                         id="team-code"
                         label="Mã nhóm"
                         value={form.code}
+                        readOnly={formFrozen}
                         maxLength={128}
                         required
                         onChange={(value) => changeForm("code", value)}
@@ -615,14 +636,15 @@ export function TeamCatalogManager({
                       id="team-name"
                       label="Tên hiển thị"
                       value={form.displayName}
+                      readOnly={formFrozen}
                       maxLength={256}
                       required
                       onChange={(value) => changeForm("displayName", value)}
                     />
                   </div>
-                  <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
+                  <ReasonField value={form.reason} readOnly={formFrozen} onChange={(value) => changeForm("reason", value)} />
                   {formError ? <p role="alert" className="text-sm text-red-700 dark:text-red-300">{formError}</p> : null}
-                  <DialogActions busy={busy} disabled={isConflictLocked || pendingIntent !== null}>
+                  <DialogActions dismissLocked={dismissLocked} disabled={!canWrite || formFrozen || isConflictLocked}>
                     {busy ? "Đang lưu…" : dialog?.kind === "create" ? "Tạo nhóm" : "Lưu thay đổi"}
                   </DialogActions>
                 </form>
@@ -637,7 +659,7 @@ export function TeamCatalogManager({
             <p>Thử lại cùng khóa thao tác để tránh tạo thay đổi trùng lặp.</p>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !canWrite}
               onClick={() => void sendIntent(pendingIntent)}
               className="mt-2 min-h-10 rounded-md border border-current px-3 font-medium disabled:opacity-50"
             >
@@ -768,8 +790,7 @@ export function TeamCatalogManager({
                                 <button
                                   type="button"
                                   onClick={() => startEdit(team)}
-                                  disabled={busy || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id) ||
-                                    (pendingIntent !== null && pendingIntent.lockId !== team.team_id)}
+                                  disabled={formFrozen || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id)}
                                   className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50"
                                 >
                                   Chỉnh sửa
@@ -779,8 +800,7 @@ export function TeamCatalogManager({
                                 <button
                                   type="button"
                                   onClick={() => startActiveChange(team, !team.active)}
-                                  disabled={busy || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id) ||
-                                    (pendingIntent !== null && pendingIntent.lockId !== team.team_id)}
+                                  disabled={formFrozen || conflictLocks.has(team.team_id) || leaderLocks.has(team.team_id)}
                                   className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border px-3 text-xs font-medium disabled:opacity-50"
                                 >
                                   {team.active ? "Ngừng hoạt động" : "Kích hoạt"}
@@ -845,6 +865,7 @@ function Field({
   value,
   maxLength,
   required = false,
+  readOnly,
   onChange,
 }: {
   id: string;
@@ -852,6 +873,7 @@ function Field({
   value: string;
   maxLength?: number;
   required?: boolean;
+  readOnly: boolean;
   onChange(value: string): void;
 }) {
   return (
@@ -863,6 +885,7 @@ function Field({
         value={value}
         maxLength={maxLength}
         required={required}
+        readOnly={readOnly}
         onChange={(event) => onChange(event.currentTarget.value)}
         className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3 text-sm"
       />
@@ -870,13 +893,14 @@ function Field({
   );
 }
 
-function ReasonField({ value, onChange }: { value: string; onChange(value: string): void }) {
+function ReasonField({ value, readOnly, onChange }: { value: string; readOnly: boolean; onChange(value: string): void }) {
   return (
     <label htmlFor="team-reason" className="block text-sm font-medium text-foreground">
       Lý do thay đổi (không bắt buộc)
       <textarea
         id="team-reason"
         value={value}
+        readOnly={readOnly}
         onChange={(event) => onChange(event.currentTarget.value)}
         maxLength={4000}
         rows={3}
@@ -887,24 +911,24 @@ function ReasonField({ value, onChange }: { value: string; onChange(value: strin
 }
 
 function DialogActions({
-  busy,
+  dismissLocked,
   disabled,
   children,
 }: {
-  busy: boolean;
+  dismissLocked: boolean;
   disabled: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div className="flex flex-wrap justify-end gap-2">
       <Dialog.Close asChild>
-        <button type="button" disabled={busy} className="min-h-11 rounded-md border border-border px-4 text-sm">
+        <button type="button" disabled={dismissLocked} className="min-h-11 rounded-md border border-border px-4 text-sm">
           Hủy
         </button>
       </Dialog.Close>
       <button
         type="submit"
-        disabled={busy || disabled}
+        disabled={disabled}
         className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50"
       >
         {children}

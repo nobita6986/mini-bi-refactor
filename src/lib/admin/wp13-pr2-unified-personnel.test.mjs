@@ -1913,7 +1913,7 @@ test("Department teams validate the department envelope and expose only permitte
     assert.equal(Boolean(maybeButton(page, "Chỉnh sửa")), canManageCatalog && visible);
     assert.equal(Boolean(maybeButton(page, "Trưởng nhóm")), canManageCatalog && visible);
     assert.equal(Boolean(maybeNode(page, (n) => n.props?.href?.includes("team_id="))), canManageCatalog && visible);
-    assert.equal(Boolean(maybeButton(page, "Thêm nhóm")), canManageCatalog);
+    assert.equal(Boolean(maybeButton(page, "Thêm nhóm")), canManageCatalog && visible);
     if (canManageCatalog && visible) {
       findButton(page, "Trưởng nhóm").props.onClick();
       await page.flush();
@@ -1922,6 +1922,143 @@ test("Department teams validate the department envelope and expose only permitte
     page.unmount();
   }
 });
+
+const catalogTeam = { team_id: GROUP_RECRUIT_ID, code: "BAC", display_name: "Tổ Bắc", active: true, version: 2 };
+
+function departmentTeamsPage(teams, overrides = {}) {
+  return { ok: true, authorization_date: AUTH_DATE, department_id: DEPT_ID, system_key: "RECRUITMENT",
+    include_inactive: true, page: 1, page_size: 25, search: null, total: teams.length, has_more: false, teams, ...overrides };
+}
+
+async function openTeamDialog(action, teams, onTeamMutated) {
+  const { TeamCatalogManager } = repoRequire("./src/components/admin/team-catalog-manager.tsx");
+  const page = mount(TeamCatalogManager, { departmentId: DEPT_ID, canManageCatalog: true, onTeamMutated });
+  assert.equal(maybeButton(page, "Thêm nhóm"), null);
+  respond(findLastRequest(r => r.url.startsWith("/api/admin/departments/recruitment/teams?")), 200, departmentTeamsPage(teams));
+  await page.flush();
+  findButton(page, action).props.onClick();
+  await page.flush();
+  if (action === "Thêm nhóm") {
+    findNode(page, n => n.props.id === "team-code").props.onChange("BAC");
+  }
+  if (action !== "Ngừng hoạt động") {
+    findNode(page, n => n.props.id === "team-name").props.onChange("Tổ Bắc");
+  }
+  findNode(page, n => n.type?.name === "ReasonField").props.onChange("Xác nhận");
+  await page.flush();
+  return page;
+}
+
+function submitTeamDialog(page) {
+  const modal = findNode(page, n => n.type === dialogStub.Content);
+  const form = findNode({ tree: modal }, n => n.type === "form");
+  form.props.onSubmit({ preventDefault() {} });
+}
+
+test("Department create rechecks the department list if it changes while the dialog is open", async () => {
+  const page = await openTeamDialog("Thêm nhóm", []);
+  const search = findNode(page, n => n.type === "form" && n.props.className.includes("sm:flex-row"));
+  search.props.onSubmit({ preventDefault() {} });
+  await page.flush();
+  respond(findLastRequest(r => r.url.startsWith("/api/admin/departments/recruitment/teams?")), 200,
+    departmentTeamsPage([], { department_id: ADMIN_A_ID }));
+  await page.flush();
+  assert.equal(maybeButton(page, "Thêm nhóm"), null);
+  submitTeamDialog(page);
+  assert.equal(requests.some(r => r.method === "POST"), false);
+});
+
+test("An unresolved create can leave the dialog on permission loss and only replay once permission returns", async () => {
+  const page = await openTeamDialog("Thêm nhóm", []);
+  submitTeamDialog(page);
+  const original = findLastRequest(r => r.method === "POST");
+  rejectNetwork(original);
+  await page.flush();
+  page.setProps({ departmentId: DEPT_ID, canManageCatalog: false });
+  findNode(page, n => n.type === dialogStub.Root).props.onOpenChange(false);
+  await page.flush();
+  assert.equal(findNode(page, n => n.type === dialogStub.Root).props.open, false);
+  const retry = () => findButton(page, "Thử lại thao tác");
+  assert.equal(retry().props.disabled, true);
+  retry().props.onClick();
+  assert.equal(requests.filter(r => r.method === "POST").length, 1);
+  page.setProps({ departmentId: DEPT_ID, canManageCatalog: true });
+  retry().props.onClick();
+  const replay = findLastRequest(r => r.method === "POST");
+  assert.notEqual(replay, original);
+  assert.equal(replay.options.body, original.options.body);
+  assert.equal(replay.options.headers["Idempotency-Key"], original.options.headers["Idempotency-Key"]);
+});
+
+for (const [action, failure] of [["Thêm nhóm", "network"], ["Chỉnh sửa", "503"], ["Ngừng hoạt động", "malformed"]]) {
+  test(`Team dialog ${action} freezes its submitted fields and retries exactly once after ${failure}`, async () => {
+    const page = await openTeamDialog(action, action === "Thêm nhóm" ? [] : [catalogTeam]);
+    // Two submissions in the same event turn, before React can disable the button.
+    submitTeamDialog(page);
+    submitTeamDialog(page);
+    const writes = () => requests.filter(r => r.method === "POST" || r.method === "PATCH");
+    assert.equal(writes().length, 1);
+    const original = writes()[0];
+    if (failure === "network") rejectNetwork(original);
+    else respond(original, failure === "503" ? 503 : 200, {});
+    await page.flush();
+
+    for (const field of collectNodes(page.tree).filter(n => ["Field", "ReasonField"].includes(n.type?.name))) {
+      const input = collectNodes(field.type(field.props)).find(n => n.type === "input" || n.type === "textarea");
+      assert.equal(input.props.readOnly, true);
+      field.props.onChange("Giá trị khác");
+      await page.flush();
+      const current = findNode(page, n => n.type === field.type && n.props.id === field.props.id);
+      assert.equal(current.props.value, field.props.value);
+    }
+    assert.equal(findNode(page, n => n.props["aria-label"] === "Đóng hộp thoại").props.disabled, true);
+    const actions = findNode(page, n => n.type?.name === "DialogActions");
+    const cancel = findNode({ tree: actions.type(actions.props) }, n => n.type === "button" && textOf(n) === "Hủy");
+    assert.equal(cancel.props.disabled, true);
+    // Both Escape and outside click request closure through the controlled Radix Root.
+    findNode(page, n => n.type === dialogStub.Root).props.onOpenChange(false);
+    await page.flush();
+    assert.equal(findNode(page, n => n.type === dialogStub.Root).props.open, true);
+    const retry = findButton(page, "Thử lại thao tác");
+    retry.props.onClick(); retry.props.onClick();
+    assert.equal(writes().length, 2);
+    assert.equal(writes()[1].options.body, original.options.body);
+    assert.equal(writes()[1].options.headers["Idempotency-Key"], original.options.headers["Idempotency-Key"]);
+    assert.equal(writes()[1].method, original.method);
+    assert.equal(writes()[1].url, original.url);
+    respond(writes()[1], 400, {});
+    await page.flush();
+    assert.equal(findNode(page, n => n.props["aria-label"] === "Đóng hộp thoại").props.disabled, false);
+  });
+}
+
+for (const complete of ["success", "network failure", "reconciliation"]) {
+  test(`Team workspace ignores late ${complete} when its user navigates away`, async () => {
+    let callbacks = 0;
+    const page = await openTeamDialog("Thêm nhóm", [], async () => { callbacks++; return true; });
+    submitTeamDialog(page);
+    const write = findLastRequest(r => r.method === "POST");
+    const applied = { ok: true, team: { ...catalogTeam, revision_id: GROUP_RECRUIT_ID, created: true } };
+    if (complete === "reconciliation") {
+      respond(write, 200, applied);
+      await page.flush();
+      assert.equal(notifications.success.length, 1);
+    }
+    const started = requests.length;
+    const beforeLeave = JSON.stringify(notifications);
+    page.unmount();
+    if (complete === "reconciliation") {
+      const reload = findLastRequest(r => r.url.startsWith("/api/admin/catalog/teams?"));
+      respond(reload, 200, {ok:true, list:{authorization_date:AUTH_DATE, include_inactive:true, search:"BAC",
+        page:1, page_size:25, total:1, teams:[{...catalogTeam, revision_count:1}]}});
+    } else if (complete === "success") respond(write, 200, applied);
+    else rejectNetwork(write);
+    await page.flush();
+    assert.equal(JSON.stringify(notifications), beforeLeave);
+    assert.equal(requests.length, started);
+    assert.equal(callbacks, 0);
+  });
+}
 
 test("PersonnelCatalogManager hides create-from-account & link buttons with 0 link-status calls for HR_OPERATOR/Catalog-only, and loads ?recruiter=<uuid> directly outside page 1", async () => {
   // 5a) HR_OPERATOR / Catalog-only (canManageAccountLinks = false)

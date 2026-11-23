@@ -34,7 +34,6 @@ test("conflict alerts are scoped to the open team and remain available after clo
   assert.match(manager, /teamConflictsForDialog\(conflictIntents, dialogLockId\)/);
   assert.match(manager, /dialog === null \?\s*\(\s*Array\.from\(conflictIntents\.values\(\)/);
   assert.match(manager, /disabled=\{busy \|\| conflictLocks\.has\(team\.team_id\)/);
-  assert.match(manager, /!open && !busy/);
 });
 
 test("dialogs expose accessible, sanitized errors and do not access Supabase directly", () => {
