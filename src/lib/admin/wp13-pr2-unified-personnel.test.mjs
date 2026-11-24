@@ -3768,6 +3768,151 @@ test("UX-04/P1 regression: Step 5 UNCERTAIN preserves sessionStorage checkpoint 
   assert.equal(completedStep3.length, 0, "Step 3 reload must NOT finish early while step4_groups or step5_recruiter are pending");
   assert.equal(step3PendingStorage.store.has(ACTOR_A_STORAGE_KEY), true, "Checkpoint must remain intact for pending Step 4/5");
   run4.unmount();
+
+  // (e) WP10-2: Step 5a returns 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT -> keeps saved Steps 1..4 COMMITTED intact,
+  //     resets only step5_recruiter to IDLE, renders dedicated Tổ đội/Trưởng nhóm guidance + reload button,
+  //     and after account version reload retries ONLY Step 5 (never re-posting Steps 1..4)!
+  const teamBlockStorage = makeMemoryStorage();
+  const teamBlockCp = makeStep5Checkpoint();
+  assert.equal(persistAndVerifyCheckpoint(teamBlockCp, teamBlockStorage).ok, true);
+  const completedAfterTeamResolve = [];
+  const run5 = mount(AccountProvisionAndLinkStepper, {
+    open: true,
+    mode: { kind: "resume-checkpoint", checkpoint: teamBlockCp },
+    checkpointActorScope: ACTOR_A_SCOPE,
+    workspaceGuard: {
+      epoch: 1,
+      getEpoch() { return 1; },
+      trackController() {
+        const controller = new AbortController();
+        return { epoch: 1, controller, release() {} };
+      },
+      isActive() { return true; },
+      invalidateSession() {},
+    },
+    canManageGlobalRoles: true,
+    storage: teamBlockStorage,
+    originOverride: ORIGIN,
+    onClose() {},
+    onCompleted: (res) => completedAfterTeamResolve.push(res),
+    onSessionLost() {},
+  });
+  await run5.flush();
+  respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100"), 200, makeTeamCatalogListEnvelope());
+  respond(findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`), 200, {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    person: makePersonDetail({
+      version: 2,
+      active_account_link: {
+        link_id: LINK_ID,
+        account_ref: ACCOUNT_ID,
+        login_id: "nam.tb",
+        display_name: "Trần Bước Năm",
+        enabled: true,
+        account_version: 3,
+        started_at: AS_OF,
+        source_kind: "ADMIN_MUTATION",
+        evidence_date: null,
+        version: 1,
+      },
+    }),
+  });
+  await run5.flush();
+
+  const countBeforeStep5 = requests.length;
+  findNode(run5, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run5.flush();
+  const req5aTeamBlock = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/catalog/personnel/from-account");
+  assert.ok(req5aTeamBlock);
+  respond(req5aTeamBlock, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await run5.flush();
+
+  const storedTeamBlock = readVerifiedCheckpoint({
+    expectedOrigin: ORIGIN,
+    expectedActorScope: ACTOR_A_SCOPE,
+    storage: teamBlockStorage,
+  });
+  assert.equal(storedTeamBlock.kind, "valid");
+  assert.equal(storedTeamBlock.checkpoint.step1_person.status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step2_account.status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step3_link.status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step4_groups[0].status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step5_recruiter.status, "IDLE");
+  assert.equal(storedTeamBlock.checkpoint.step5_recruiter.idempotency_key, null);
+  assert.match(textOf(run5.tree), /Tổ đội|Trưởng nhóm/);
+
+  findButton(run5, "Tải lại dữ liệu tài khoản mới nhất").props.onClick();
+  await run5.flush();
+  const reloadAcc5 = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}`);
+  assert.ok(reloadAcc5);
+  respond(reloadAcc5, 200, { ok: true, account: makeAccount({ version: 4 }) });
+  await run5.flush();
+
+  findNode(run5, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run5.flush();
+  const reqsDuringRetry = requests.slice(countBeforeStep5);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url === "/api/admin/organization/persons"), false);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url === "/api/admin/access/accounts"), false);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url.endsWith("/person-link")), false);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url.endsWith("/groups")), false);
+
+  const req5aRetry = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/catalog/personnel/from-account");
+  assert.equal(JSON.parse(req5aRetry.options.body).expected_account_version, 4);
+  respond(req5aRetry, 201, { ok: true, personnel: { recruiter_id: RECRUITER_ID, personnel_code: "nam.tb", version: 1 } });
+  await run5.flush();
+  const req5bAfterRetry = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/catalog/personnel/${RECRUITER_ID}/team-memberships/${TEAM_ACTIVE_A}`);
+  assert.ok(req5bAfterRetry);
+  respond(req5bAfterRetry, 200, { ok: true, membership: { recruiter_id: RECRUITER_ID, team_id: TEAM_ACTIVE_A } });
+  await run5.flush();
+  assert.equal(completedAfterTeamResolve.length, 1);
+  run5.unmount();
+
+  // (f) WP10-2: PersonDetailManager activate-recruiter 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT shows dedicated guidance & lock
+  const pdBlockedStorage = makeMemoryStorage();
+  const pdBlocked = mount(PersonDetailManager, {
+    personId: PERSON_ID,
+    checkpointActorScope: ACTOR_A_SCOPE,
+    canManageGlobalRoles: true,
+    storage: pdBlockedStorage,
+    originOverride: ORIGIN,
+  });
+  await pdBlocked.flush();
+  respond(findLastRequest((r) => r.url === `/api/admin/organization/persons/${PERSON_ID}`), 200, {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    person: makePersonDetail({
+      recruiter_id: null,
+      version: 2,
+      active_account_link: {
+        link_id: LINK_ID,
+        account_ref: ACCOUNT_ID,
+        login_id: "an.nv",
+        display_name: "Nguyễn Văn An",
+        enabled: true,
+        account_version: 2,
+        started_at: AS_OF,
+        source_kind: "ADMIN_MUTATION",
+        evidence_date: null,
+        version: 1,
+      },
+    }),
+  });
+  await pdBlocked.flush();
+  findButton(pdBlocked, "Kích hoạt nghiệp vụ tuyển dụng").props.onClick();
+  await pdBlocked.flush();
+  findNode(pdBlocked, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await pdBlocked.flush();
+  const activateReq = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/catalog/personnel/from-account");
+  assert.ok(activateReq);
+  respond(activateReq, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await pdBlocked.flush();
+  assert.match(textOf(pdBlocked.tree), /Tổ đội|Trưởng nhóm/);
+  assert.ok(maybeButton(pdBlocked, "Tải bản mới nhất"));
+  pdBlocked.unmount();
 });
 
 test("UX-03/05/06/07 regressions: AccountGroupsSection empty-state honors resource_assignments, AdminSubnav uses single-row mobile scroll & disambiguated Tổ đội labels, and customer copy leaks zero internal jargon", async () => {

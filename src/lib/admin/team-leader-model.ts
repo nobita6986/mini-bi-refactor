@@ -7,7 +7,6 @@ import {
   type TeamLeaderState,
   type TeamLeaderMutation,
 } from "../direct-entry/team-leader-contract.ts";
-import { parseIsoDate } from "../direct-entry/direct-entry-date-format.ts";
 import { projectTeamItem } from "./team-catalog-model.ts";
 import type { AdminTeam } from "../direct-entry/team-catalog-contract.ts";
 import {
@@ -111,47 +110,23 @@ type MutationInput = {
   idempotencyKey: string;
 };
 
-const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Asia/Ho_Chi_Minh",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function resolveBusinessTodayVn(todayVn?: string): string {
-  return todayVn && parseIsoDate(todayVn) !== null
-    ? todayVn
-    : VIETNAM_DATE_FORMATTER.format(new Date());
-}
-
 function validateImmediateEffectiveDate(
   rawDate: string | null | undefined,
-  todayVn?: string,
-): { ok: true; value: string | null } | { ok: false; message: string } {
-  const businessToday = resolveBusinessTodayVn(todayVn);
-  const normalized = typeof rawDate === "string" && rawDate.trim() !== ""
-    ? rawDate.trim()
-    : null;
-  if (normalized === null) {
-    return { ok: true, value: null };
+): { ok: true; value: null } | { ok: false; message: string } {
+  if (rawDate !== undefined && rawDate !== null && rawDate !== "") {
+    return {
+      ok: false,
+      message: "Ngày hiệu lực do máy chủ quyết định khi lưu; không gửi ngày hiệu lực từ trình duyệt.",
+    };
   }
-  if (!parseIsoDate(normalized)) {
-    return { ok: false, message: "Ngày hiệu lực không hợp lệ." };
-  }
-  if (normalized > businessToday) {
-    return { ok: false, message: "Ngày hiệu lực không được ở tương lai." };
-  }
-  if (normalized < businessToday) {
-    return { ok: false, message: "Ngày hiệu lực không được ở quá khứ." };
-  }
-  return { ok: true, value: normalized };
+  return { ok: true, value: null };
 }
 
 export function buildTeamLeaderDesignation(input: MutationInput & {
   leaderAppUserId: string;
   change: "designate" | "replace";
 }): { ok: true; intent: TeamLeaderIntent } | { ok: false; message: string } {
-  const effectiveDate = validateImmediateEffectiveDate(input.effectiveDate, input.todayVn);
+  const effectiveDate = validateImmediateEffectiveDate(input.effectiveDate);
   const failure = validateUuid(input.teamId) ?? validateUuid(input.leaderAppUserId) ??
     (effectiveDate.ok ? null : effectiveDate.message) ??
     validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
@@ -166,7 +141,7 @@ export function buildTeamLeaderDesignation(input: MutationInput & {
       url: `/api/admin/catalog/teams/${encodeURIComponent(input.teamId)}/leaders`,
       body: {
         leader_app_user_id: input.leaderAppUserId,
-        effective_date: effectiveDate.value,
+        effective_date: null,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,
@@ -178,7 +153,7 @@ export function buildTeamLeaderDesignation(input: MutationInput & {
 export function buildTeamLeaderRevocation(input: MutationInput): {
   ok: true; intent: TeamLeaderIntent;
 } | { ok: false; message: string } {
-  const effectiveDate = validateImmediateEffectiveDate(input.effectiveDate, input.todayVn);
+  const effectiveDate = validateImmediateEffectiveDate(input.effectiveDate);
   const failure = validateUuid(input.teamId) ??
     (effectiveDate.ok ? null : effectiveDate.message) ??
     validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1

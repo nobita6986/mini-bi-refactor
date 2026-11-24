@@ -96,6 +96,9 @@ test("membership form captures DOM values before the queued React state updater 
   );
   assert.match(component, /const teamId = event\.currentTarget\.value;[\s\S]*teamId \}\)\);/);
   assert.doesNotMatch(component, /id="membership-effective-date"\s+type="date"/);
+  assert.doesNotMatch(component, /EMPTY_FORM\s*=\s*\{[^}]*\bdate:/);
+  assert.match(component, /validTo:\s*null/);
+  assert.match(component, /validFrom:\s*null/);
   assert.match(component, /const reason = event\.currentTarget\.value;[\s\S]*reason \}\)\);/);
 });
 

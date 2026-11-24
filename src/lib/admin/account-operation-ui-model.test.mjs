@@ -362,6 +362,19 @@ test("response classifier strictly validates PR #13 CREATE/reconcile/EDIT/RESET/
     { operation: "link_recruiter_account", expectedRecruiterId: RECRUITER, expectedAccountRef: ACCOUNT },
   );
 
+  // 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT surfaces dedicated blocking conflict ahead of generic 409
+  const teamBlocked = classifyAccountOperationResponse(
+    409,
+    { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" },
+    { operation: "link_recruiter_account", expectedRecruiterId: RECRUITER, expectedAccountRef: ACCOUNT },
+  );
+  assert.equal(teamBlocked.kind, "active-team-assignment");
+  if (teamBlocked.kind === "active-team-assignment") {
+    assert.equal(teamBlocked.code, "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT");
+    assert.match(teamBlocked.message, /Tổ đội|Trưởng nhóm/);
+    assert.match(teamBlocked.message, /tải lại dữ liệu/i);
+  }
+
   // Generic 503 preserves idempotency key; 400/404 are deterministic invalid
   const s503 = classifyAccountOperationResponse(503, { ok: false, code: "ACCOUNT_OPERATION_UNAVAILABLE" });
   assert.equal(s503.kind, "unavailable");

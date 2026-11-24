@@ -33,7 +33,8 @@ test("designation, replacement and revoke preserve canonical team path, effectiv
   assert.match(component, /buildTeamLeaderDesignation/);
   assert.match(component, /buildTeamLeaderRevocation/);
   assert.match(component, /expectedVersion: team\.version/);
-  assert.match(component, /effectiveDate: form\.effectiveDate/);
+  assert.match(component, /effectiveDate:\s*null/);
+  assert.doesNotMatch(component, /form\.effectiveDate/);
   assert.match(component, /reason: form\.reason/);
   assert.match(component, /const idempotencyKey = newTeamLeaderIntentKey\(\)/);
   assert.match(component, /"Idempotency-Key": String\(intent\.body\.idempotency_key\)/);

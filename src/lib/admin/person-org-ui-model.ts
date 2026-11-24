@@ -588,6 +588,8 @@ export function messageForOrgErrorCode(code: string | null, status: number): str
       return "Hồ sơ hoặc phòng ban vừa được cập nhật bởi thao tác khác. Vui lòng tải bản mới từ máy chủ trước khi sửa lại.";
     case "PERSON_IS_ACTIVE_DEPARTMENT_HEAD":
       return "Nhân sự này đang giữ chức danh Trưởng phòng. Hãy kết thúc hoặc thay chức danh Trưởng phòng trước khi chuyển phòng, kết thúc thành viên hoặc ngừng hoạt động hồ sơ người.";
+    case "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT":
+      return "Nhân sự đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục). Vui lòng thu hồi hoặc đóng phân công Tổ/Trưởng nhóm trước, rồi tải lại dữ liệu mới nhất.";
     case "DUPLICATE_CODE":
       return "Mã nhân sự nội bộ này đã tồn tại trên hệ thống. Vui lòng kiểm tra lại.";
     case "PERSON_INACTIVE":

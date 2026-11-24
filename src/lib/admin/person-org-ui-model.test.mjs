@@ -463,6 +463,17 @@ test("classifyPersonOrgReadError & classifyPersonOrgMutationResponse xử lý đ
   assert.match(headBlock.message, /Trưởng phòng/);
   assert.match(headBlock.message, /kết thúc hoặc thay chức danh/i);
 
+  // 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT giải thích rõ phải thu hồi/đóng phân công Tổ đội/Trưởng nhóm
+  const teamBlock = classifyPersonOrgMutationResponse(
+    409,
+    { code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" },
+    "transfer-department",
+  );
+  assert.equal(teamBlock.kind, "business-error");
+  assert.equal(teamBlock.code, "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT");
+  assert.match(teamBlock.message, /Tổ đội|Trưởng nhóm/);
+  assert.equal(teamBlock.preserveIdempotencyKey, false);
+
   // Lỗi nghiệp vụ khác
   for (const code of [
     "DUPLICATE_CODE",

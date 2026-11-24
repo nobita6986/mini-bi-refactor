@@ -37,8 +37,8 @@ type CandidateState =
   | { kind: ReadErrorKind };
 type ReadErrorKind = "unauthenticated" | "denied" | "not-found" | "unavailable" | "error";
 type LeaderForm =
-  | { kind: "designate" | "replace"; appUserId: string; effectiveDate: string; reason: string }
-  | { kind: "revoke"; effectiveDate: string; reason: string };
+  | { kind: "designate" | "replace"; appUserId: string; reason: string }
+  | { kind: "revoke"; reason: string };
 type Workflow = {
   phase: "idle" | "sending" | "retry" | "reload" | "reload-error";
   intent: TeamLeaderIntent | null;
@@ -353,7 +353,6 @@ export function TeamLeaderManager({
     setForm({
       kind: currentLeaders.length ? "replace" : "designate",
       appUserId: "",
-      effectiveDate: "",
       reason: "",
     });
     setFormError(null);
@@ -365,7 +364,7 @@ export function TeamLeaderManager({
 
   const startRevocation = () => {
     if (!canManageLeaders || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
-    setForm({ kind: "revoke", effectiveDate: "", reason: "" });
+    setForm({ kind: "revoke", reason: "" });
     setFormError(null);
   };
 
@@ -377,7 +376,7 @@ export function TeamLeaderManager({
     const request = form.kind === "revoke"
       ? buildTeamLeaderRevocation({
           teamId: team.team_id,
-          effectiveDate: form.effectiveDate,
+          effectiveDate: null,
           expectedVersion: team.version,
           reason: form.reason,
           idempotencyKey,
@@ -385,7 +384,7 @@ export function TeamLeaderManager({
       : buildTeamLeaderDesignation({
           teamId: team.team_id,
           leaderAppUserId: form.appUserId,
-          effectiveDate: form.effectiveDate,
+          effectiveDate: null,
           expectedVersion: team.version,
           reason: form.reason,
           idempotencyKey,
@@ -628,7 +627,7 @@ export function TeamLeaderManager({
                       </>
                     ) : null}
                     <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted">
-                      Ngày hiệu lực hệ thống: <span className="font-mono font-semibold text-foreground">{form.effectiveDate || currentList?.authorization_date || "Hôm nay (giờ Việt Nam)"}</span> (áp dụng ngay khi lưu).
+                      Ngày hiệu lực hệ thống: <span className="font-mono font-semibold text-foreground">{currentList?.authorization_date || "Hôm nay (giờ Việt Nam)"}</span> (áp dụng ngay khi lưu).
                     </div>
                     <label htmlFor="team-leader-reason" className="block text-sm font-medium">
                       Lý do thay đổi (không bắt buộc)

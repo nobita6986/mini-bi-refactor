@@ -87,7 +87,11 @@ const EMPTY_FORM: PersonnelForm = {
   reason: "",
 };
 
-function responseOutcome(status: number, payload: unknown, intent: MutationIntent): PersonnelMutationOutcome {
+type CatalogResponseOutcome =
+  | PersonnelMutationOutcome
+  | { kind: "active-team-assignment"; message: string };
+
+function responseOutcome(status: number, payload: unknown, intent: MutationIntent): CatalogResponseOutcome {
   if (intent.operation === "create" || intent.operation === "link") {
     const outcome = classifyAccountOperationResponse(
       status,
@@ -105,22 +109,28 @@ function responseOutcome(status: number, payload: unknown, intent: MutationInten
               typeof intent.body.account_ref === "string" ? intent.body.account_ref : "",
           },
     );
-    if (outcome.kind === "applied") return { kind: "applied" } as unknown as PersonnelMutationOutcome;
+    if (outcome.kind === "applied") return { kind: "applied" } as unknown as CatalogResponseOutcome;
+    if (outcome.kind === "active-team-assignment") {
+      return {
+        kind: "active-team-assignment",
+        message: outcome.message,
+      };
+    }
     if (intent.operation === "link" && outcome.kind === "conflict") {
       return {
         kind: "conflict",
         message: "Hồ sơ nhân sự hoặc tài khoản đã có liên kết hiệu lực hoặc dữ liệu đã thay đổi. Vui lòng tải lại.",
-      } as unknown as PersonnelMutationOutcome;
+      } as unknown as CatalogResponseOutcome;
     }
     return {
       kind: outcome.kind === "needs-reconcile" ? "unavailable" : outcome.kind,
       message: outcome.message,
-    } as unknown as PersonnelMutationOutcome;
+    } as unknown as CatalogResponseOutcome;
   }
   return classifyPersonnelMutation(status, payload, intent.operation);
 }
 
-function messageForOutcome(outcome: Exclude<PersonnelMutationOutcome, { kind: "applied" }>): string {
+function messageForOutcome(outcome: Exclude<CatalogResponseOutcome, { kind: "applied" }>): string {
   return outcome.message;
 }
 
@@ -618,6 +628,13 @@ export function PersonnelCatalogManager({
         notify.success({ title: "Đã lưu thay đổi. Danh sách đang được cập nhật." });
         setListState({ kind: "loading" });
         setReloadToken((value) => value + 1);
+        return;
+      }
+      if (outcome.kind === "active-team-assignment") {
+        setPendingIntent(null);
+        setConflictIntents((current) => new Map(current).set(intent.lockId, { intent, error: outcome.message }));
+        setConflictLocks((current) => setPersonnelConflictLock(current, intent.lockId, true));
+        notify.warning({ title: outcome.message });
         return;
       }
       if (outcome.kind === "conflict") {

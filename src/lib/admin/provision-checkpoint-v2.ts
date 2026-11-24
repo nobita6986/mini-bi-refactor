@@ -1321,6 +1321,7 @@ export function classifyProvisionStep2Response(
   );
 
   if (base.kind === "denied") return base;
+  if (base.kind === "active-team-assignment") return { kind: "conflict", message: base.message };
   if (base.kind === "conflict") return base;
   if (base.kind === "invalid") return base;
   if (base.kind === "unavailable") return base;

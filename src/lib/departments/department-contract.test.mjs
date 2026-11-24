@@ -689,4 +689,5 @@ test("WP3 department, person-membership, and HEAD parsers distinguish IDEMPOTENC
   });
   const uniqueFps = new Set([fp1, fp2, fp3, fp4, fp5, fp6]);
   assert.equal(uniqueFps.size, 6);
+  assert.equal(departmentHttpStatusForError("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"), 409);
 });

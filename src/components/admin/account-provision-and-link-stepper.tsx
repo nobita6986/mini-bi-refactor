@@ -24,6 +24,7 @@ import {
   buildCreateAccountRequest,
   buildPersonnelFromAccountRequest,
   buildReconcileRequest,
+  classifyAccountOperationResponse,
   newAccountOperationKey,
 } from "@/lib/admin/account-operation-ui-model";
 import {
@@ -743,10 +744,15 @@ export function AccountProvisionAndLinkStepper({
             if (!updated) return;
             currentCp = updated;
           } else {
-            const msg =
-              typeof rawJson === "object" &&
-              rawJson !== null &&
-              typeof (rawJson as Record<string, unknown>).message === "string"
+            const classified5a = classifyAccountOperationResponse(response.status, rawJson, {
+              operation: "personnel_from_account",
+            });
+            const isTeamAssignmentConflict5a = classified5a.kind === "active-team-assignment";
+            const msg = isTeamAssignmentConflict5a
+              ? classified5a.message
+              : typeof rawJson === "object" &&
+                  rawJson !== null &&
+                  typeof (rawJson as Record<string, unknown>).message === "string"
                 ? String((rawJson as Record<string, unknown>).message)
                 : "Chưa kích hoạt được hồ sơ tuyển dụng lúc này.";
             const isUncertain5a = response.status >= 500;
@@ -780,12 +786,16 @@ export function AccountProvisionAndLinkStepper({
               setStep5PartialFailure(msg);
               setFeedback({
                 tone: "warning",
-                title: isVersionConflict5a
-                  ? "Dữ liệu tài khoản vừa thay đổi trước khi kích hoạt tuyển dụng"
-                  : "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
-                message: isVersionConflict5a
-                  ? "Hãy bấm \"Tải lại dữ liệu tài khoản\" rồi thử lại, hoặc bấm \"Đóng & Mở hồ sơ\" để thiết lập tuyển dụng sau."
-                  : `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
+                title: isTeamAssignmentConflict5a
+                  ? "Nhân sự đang có phân công Tổ đội hoặc Trưởng nhóm tuyển dụng"
+                  : isVersionConflict5a
+                    ? "Dữ liệu tài khoản vừa thay đổi trước khi kích hoạt tuyển dụng"
+                    : "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
+                message: isTeamAssignmentConflict5a
+                  ? `${msg} Sau khi thu hồi hoặc đóng phân công ở Danh mục Tổ đội/Nhóm trưởng, hãy bấm "Tải lại dữ liệu tài khoản mới nhất" rồi bấm "Tiếp tục thiết lập tuyển dụng" (các bước 1–4 đã lưu được giữ nguyên), hoặc bấm "Đóng & Mở hồ sơ".`
+                  : isVersionConflict5a
+                    ? "Hãy bấm \"Tải lại dữ liệu tài khoản\" rồi thử lại, hoặc bấm \"Đóng & Mở hồ sơ\" để thiết lập tuyển dụng sau."
+                    : `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
               });
             }
             return;

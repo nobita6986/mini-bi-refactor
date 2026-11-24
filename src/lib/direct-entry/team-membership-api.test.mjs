@@ -94,9 +94,9 @@ function jsonRequest(body, path = "/api/admin/catalog/personnel/" + RECRUITER + 
     body: JSON.stringify(body),
   });
 }
-const ASSIGN_BODY = { valid_from: DAY, expected_version: 3,
+const ASSIGN_BODY = { valid_from: null, expected_version: 3,
   reason: "Synthetic reason", idempotency_key: KEY };
-const UNASSIGN_BODY = { valid_to: DAY, expected_version: 3,
+const UNASSIGN_BODY = { valid_to: null, expected_version: 3,
   reason: "Synthetic reason", idempotency_key: KEY };
 
 test("the contract accepts exactly the reviewed projection shapes", () => {
@@ -205,20 +205,16 @@ test("request projections are strict about keys, values and OCC", () => {
     assert.equal(parse({ ...valid, reason: "x".repeat(4001) }).ok, false);
   }
 
-  // FIX R1: ISO shape is not enough - the date must exist in the calendar.
-  for (const invalid of ["2026-02-30", "2026-13-01", "2026-00-10", "2026-04-31", "2026-11-00"]) {
+  // WP10-2 Level A: calendar-invalid AND any client date strings (including today) are rejected.
+  for (const invalid of ["2026-02-30", "2026-13-01", "2026-00-10", "2026-04-31", "2026-11-00", DAY]) {
     assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: invalid }).ok, false,
       "assign " + invalid);
     assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: invalid }).ok, false,
       "unassign " + invalid);
   }
-  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2024-02-29" }, "2024-02-29").ok, true,
-    "a leap day is valid on that business date");
-  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2024-02-29" }, "2024-02-29").ok, true);
-  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2024-02-29" }, "2026-11-12").ok, false,
-    "past date is rejected");
-  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2024-02-29" }, "2026-11-12").ok, false,
-    "past date is rejected");
+  assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2024-02-29" }).ok, false,
+    "Level A rejects client date string even if leap day");
+  assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2024-02-29" }).ok, false);
   assert.equal(teamMembershipAssignRequest({ ...ASSIGN_BODY, valid_from: "2028-02-29" }).ok, false,
     "future date is rejected");
   assert.equal(teamMembershipUnassignRequest({ ...UNASSIGN_BODY, valid_to: "2028-02-29" }).ok, false);
@@ -293,7 +289,7 @@ test("mutations project strict responses and sanitized failures", async () => {
   assert.equal(assigned.status, 200);
   assert.deepEqual(await assigned.json(), { ok: true, membership: MUTATION });
   assert.deepEqual(ok.calls.rpc[0][1], { ...ACTOR, recruiter_id: RECRUITER, team_id: TEAM,
-    valid_from: DAY, expected_version: 3, reason: "Synthetic reason", idempotency_key: KEY });
+    valid_from: null, expected_version: 3, reason: "Synthetic reason", idempotency_key: KEY });
 
   const expected = { denied: [403, "MEMBERSHIP_DENIED"], "not-found": [404, "MEMBERSHIP_NOT_FOUND"],
     conflict: [409, "MEMBERSHIP_CONFLICT"], invalid: [400, "MEMBERSHIP_INVALID"],
@@ -320,8 +316,8 @@ test("mutations project strict responses and sanitized failures", async () => {
   assert.equal(text.includes("MEMBERSHIP_UNAVAILABLE"), true);
 });
 
-test("calendar-invalid dates are rejected at the boundary before session and repository", async () => {
-  for (const invalid of ["2026-02-30", "2026-13-01", "2026-00-10"]) {
+test("WP10-2 Level A: any non-null client date string (including today) is rejected before session and repository", async () => {
+  for (const invalid of ["2026-02-30", "2026-13-01", "2026-00-10", DAY]) {
     const assign = deps({ ok: true, data: MUTATION });
     const assignResponse = await assignTeamMembership(
       jsonRequest({ ...ASSIGN_BODY, valid_from: invalid }), RECRUITER, TEAM, "true",

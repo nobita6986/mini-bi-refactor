@@ -1921,6 +1921,8 @@ export function classifyWp3DepartmentMutationFailure(
       "Phòng ban mặc định của hệ thống chỉ cho phép đổi tên, không thể ngừng hoạt động.",
     DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS:
       "Phòng ban vẫn còn thành viên đang hiệu lực hoặc Trưởng phòng chưa kết thúc nên chưa thể ngừng hoạt động.",
+    PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT:
+      "Nhân sự đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục). Vui lòng thu hồi hoặc đóng phân công Tổ/Trưởng nhóm trước rồi thử lại.",
     DEPARTMENT_INACTIVE: "Phòng ban đang ngừng hoạt động nên không thể gán thêm thành viên hoặc bổ nhiệm Trưởng phòng.",
     PERSON_INACTIVE:
       "Nhân sự đã ngừng hoạt động (INACTIVE), không thể gán vào phòng ban hoặc bổ nhiệm làm Trưởng phòng.",

@@ -984,6 +984,15 @@ test("WP4 department CRUD, HEAD, and Person membership builders enforce OCC, Ide
   assert.match(activeHeadErr.message, /Trưởng phòng/);
   assert.equal(activeHeadErr.preserveIdempotencyKey, false);
 
+  const activeTeamErr = model.classifyWp3DepartmentMutationFailure(409, {
+    ok: false,
+    code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT",
+  });
+  assert.equal(activeTeamErr.kind, "business-error");
+  assert.equal(activeTeamErr.code, "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT");
+  assert.match(activeTeamErr.message, /Tổ đội|Trưởng nhóm/);
+  assert.equal(activeTeamErr.preserveIdempotencyKey, false);
+
   const conflictErr = model.classifyWp3DepartmentMutationFailure(409, {
     ok: false,
     code: "VERSION_CONFLICT",
