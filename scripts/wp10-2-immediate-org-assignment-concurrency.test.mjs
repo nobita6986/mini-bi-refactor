@@ -20,6 +20,11 @@
  *                   Barrier 1 (`designate_team_leader(A->B)` vs `create_person_admin(A, recB)`),
  *                   Barrier 2 (held `advisory(B)` + `A FOR UPDATE NOWAIT` proves no reverse row lock + `PT409 RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT`),
  *                   and Disable/Enable Tier-U parity (`direct_entry_disable_app_user` + `direct_entry_enable_app_user`).
+ *   - F-01 (Round 2: post-Tier-2b `direct_entry_idempotency_begin`, pure actor Tier 2b `FOR SHARE`, zero premature `FOR KEY SHARE`):
+ *                   1) T1A `link_recruiter` vs `designate_team_leader` repro (`A` `NOWAIT` succeeds on `P_X` wait, `0` `40P01`, `w1` rolls back cleanly),
+ *                   2) Post-lock `NOWAIT` on `actor` for `create_personnel`, `assign_team_membership`, `move_team_membership`,
+ *                   3) Active G1+G2 TL Admin `actor` operating on `MARKETING` & `RECRUITMENT` targets without G1/G2/G3 self-block,
+ *                   4) Concurrent same-key single write + different-payload rejection (`22023`) + cross-midnight replay across all 4 RPCs.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -275,6 +280,8 @@ const LINK_RECRUITER_SQL =
   "select public.direct_entry_account_operation_link_recruiter($1::uuid, $2::uuid, $3::uuid, $4::int, $5::uuid, $6::int, $7, $8) as data";
 const ASSIGN_TEAM_SQL =
   "select public.direct_entry_assign_team_membership($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::int, $7, $8) as data";
+const MOVE_TEAM_SQL =
+  "select public.direct_entry_move_team_membership($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::int, $7, $8) as data";
 const UNASSIGN_TEAM_SQL =
   "select public.direct_entry_unassign_team_membership($1::uuid, $2::uuid, $3::uuid, $4::date, $5::int, $6, $7) as data";
 const DESIGNATE_TL_SQL =
@@ -288,7 +295,7 @@ const ENABLE_USER_SQL =
 const ASSIGN_GROUP_MEMBER_SQL =
   "select public.direct_entry_authz_assign_group_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6, $7::uuid, $8) as data";
 
-test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U advisory-before-row barriers, disable/enable parity, and 0 40P01 deadlocks", async () => {
+test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempotency lock-order & cross-midnight replay, 0 40P01", async () => {
   const initdb = binary("initdb");
   const pgCtl = binary("pg_ctl");
   assert.ok(initdb && pgCtl, "PostgreSQL 18 initdb/pg_ctl binaries are required for WP10-2 PG18 concurrency suite");
@@ -322,9 +329,10 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U advisory-before-row barri
 
     const setup = await connect(port, "wp10-2-setup");
     const observer = await connect(port, "wp10-2-observer");
+    const wH = await connect(port, "wp10-2-wh");
     const w1 = await connect(port, "wp10-2-w1");
     const w2 = await connect(port, "wp10-2-w2");
-    clients.push(setup, observer, w1, w2);
+    clients.push(setup, observer, wH, w1, w2);
 
     await setup.query(
       "create role anon; create role authenticated; create role service_role;" +
@@ -1551,6 +1559,961 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U advisory-before-row barri
 
       console.log(
         `[PG18 P2 Disable/Enable] A3=${p2b3.A.app} B3=${p2b3.B.app} disableWait=${JSON.stringify(waitDis)} enableWait=${JSON.stringify(waitEn)} enableRaceWait=${JSON.stringify(waitEnRace)} nowaitA3=SUCCEEDED(disable+enable) createPerson=PT409:RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT deadlocks=0`,
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // F-01 (Round 2): Post-Tier-2b `direct_entry_idempotency_begin` & pure actor Tier 2b `FOR SHARE`
+    // -------------------------------------------------------------------------
+    async function checkUserRowNowaitUnlocked(client, appUserId) {
+      await client.query("begin");
+      try {
+        const { rows } = await client.query(
+          "select app_user_id::text as app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update nowait",
+          [appUserId],
+        );
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].app_user_id, appUserId);
+      } finally {
+        await client.query("rollback").catch(() => {});
+      }
+    }
+
+    async function seedF01SystemAdmin(tag, { withRecruitmentTLTeamId = null } = {}) {
+      const acc = await seedPlainAccount(setup, `f01.${tag}`, `F01 Admin ${tag}`);
+      const assignRes = (
+        await serviceQuery(setup, ASSIGN_GROUP_MEMBER_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          acc.app,
+          sysAdminGroup.group_id,
+          1,
+          `Assign SYSTEM_ADMIN to F01 ${tag}`,
+          nextUuid(),
+          createHash("sha256").update(`f01:${tag}:admin:${acc.app}`).digest("hex"),
+        ])
+      ).rows[0].data;
+      let accVersion = assignRes.account_version;
+      let person = null;
+      let recruiterId = null;
+
+      if (withRecruitmentTLTeamId) {
+        const empCode = `EMP-F01-ADM-${tag.toUpperCase()}`;
+        person = (
+          await serviceQuery(setup, CREATE_PERSON_SQL, [
+            OWNER.auth,
+            OWNER.app,
+            empCode,
+            acc.name,
+            "2026-10-01",
+            deptByKey.RECRUITMENT,
+            acc.app,
+            accVersion,
+            null,
+            `Create F01 Admin person ${tag}`,
+            nextUuid(),
+            computeCreatePersonFingerprint(OWNER.app, {
+              employee_code: empCode,
+              full_name: acc.name,
+              joined_on: "2026-10-01",
+              initial_department_ref: deptByKey.RECRUITMENT,
+              account_ref: acc.app,
+              expected_account_version: accVersion,
+              recruiter_id: null,
+              reason: `Create F01 Admin person ${tag}`,
+            }),
+          ])
+        ).rows[0].data.person;
+        accVersion = person.active_account_link.account_version;
+        recruiterId = (
+          await serviceQuery(setup, CREATE_PERSONNEL_FROM_ACC_SQL, [
+            OWNER.auth,
+            OWNER.app,
+            acc.app,
+            accVersion,
+            acc.login,
+            "STAFF",
+            null,
+            `Create F01 Admin recruiter ${tag}`,
+            nextUuid(),
+          ])
+        ).rows[0].data.recruiter_id;
+        await serviceQuery(setup, ASSIGN_TEAM_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          recruiterId,
+          withRecruitmentTLTeamId,
+          null,
+          1,
+          `Assign F01 Admin ${tag} G1`,
+          nextUuid(),
+        ]);
+        const { rows: [teamRow] } = await observer.query(
+          "select version from public.teams where team_id = $1::uuid",
+          [withRecruitmentTLTeamId],
+        );
+        await serviceQuery(setup, DESIGNATE_TL_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          withRecruitmentTLTeamId,
+          acc.app,
+          null,
+          teamRow.version,
+          `Designate F01 Admin ${tag} TL`,
+          nextUuid(),
+        ]);
+        const { rows: [accRow] } = await observer.query(
+          "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+          [acc.app],
+        );
+        accVersion = accRow.version;
+      }
+
+      return { acc, accVersion, person, recruiterId };
+    }
+
+    // F-01 (1): Port T1A's `link_recruiter` vs `designate_team_leader` P2 idempotency repro
+    {
+      const teamF01Link = nextUuid();
+      await setup.query(
+        "insert into public.teams (team_id, code, display_name, active, version) values ($1::uuid, 'WP10_F01_LINK_T1', 'F01 Link Team 1', true, 1)",
+        [teamF01Link],
+      );
+      const adminA = await seedF01SystemAdmin("repro_a", { withRecruitmentTLTeamId: teamF01Link });
+
+      const rec1 = await seedPlainUnlinkedHrpRecruiter(setup, "f01.repro.r1", "F01 Repro Rec 1");
+      const rec2 = await seedPlainUnlinkedHrpRecruiter(setup, "f01.repro.r2", "F01 Repro Rec 2");
+      const p1 = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-R1",
+          "F01 Repro Rec 1",
+          "2026-10-01",
+          deptByKey.RECRUITMENT,
+          null,
+          null,
+          rec1,
+          "F01 candidate 1",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-R1",
+            full_name: "F01 Repro Rec 1",
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.RECRUITMENT,
+            account_ref: null,
+            expected_account_version: null,
+            recruiter_id: rec1,
+            reason: "F01 candidate 1",
+          }),
+        ])
+      ).rows[0].data.person;
+      const p2 = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-R2",
+          "F01 Repro Rec 2",
+          "2026-10-01",
+          deptByKey.RECRUITMENT,
+          null,
+          null,
+          rec2,
+          "F01 candidate 2",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-R2",
+            full_name: "F01 Repro Rec 2",
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.RECRUITMENT,
+            account_ref: null,
+            expected_account_version: null,
+            recruiter_id: rec2,
+            reason: "F01 candidate 2",
+          }),
+        ])
+      ).rows[0].data.person;
+
+      const [pXInfo, pBInfo] =
+        p1.person_id < p2.person_id
+          ? [{ person: p1, recId: rec1, codePrefix: "f01.repro.r1" }, { person: p2, recId: rec2, codePrefix: "f01.repro.r2" }]
+          : [{ person: p2, recId: rec2, codePrefix: "f01.repro.r2" }, { person: p1, recId: rec1, codePrefix: "f01.repro.r1" }];
+      const P_X = pXInfo.person.person_id;
+      const recX = pXInfo.recId;
+      const P_B = pBInfo.person.person_id;
+      const recB = pBInfo.recId;
+      assert.ok(P_X < P_B, `Expected P_X (${P_X}) < P_B (${P_B})`);
+
+      const B = await seedPlainAccount(setup, pBInfo.codePrefix, pBInfo.person.full_name);
+      await serviceQuery(setup, LINK_ACCOUNT_PERSON_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        B.app,
+        P_B,
+        1,
+        pBInfo.person.version,
+        recB,
+        "Link F01 B to P_B",
+        nextUuid(),
+        computeLinkAccountPersonFingerprint(OWNER.app, B.app, {
+          person_id: P_B,
+          expected_account_version: 1,
+          expected_person_version: pBInfo.person.version,
+          confirmed_recruiter_id: recB,
+          reason: "Link F01 B to P_B",
+        }),
+      ]);
+      await serviceQuery(setup, LINK_RECRUITER_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        recB,
+        1,
+        B.app,
+        2,
+        "Verify F01 recB on B",
+        nextUuid(),
+      ]);
+      await serviceQuery(setup, ASSIGN_TEAM_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        recB,
+        teamF01Link,
+        null,
+        1,
+        "Assign F01 recB to T1",
+        nextUuid(),
+      ]);
+      const { rows: [bAccRow] } = await observer.query(
+        "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+        [B.app],
+      );
+      const { rows: [t1PreRow] } = await observer.query(
+        "select version from public.teams where team_id = $1::uuid",
+        [teamF01Link],
+      );
+      assert.equal(t1PreRow.version, 2);
+
+      const linkKey = nextUuid();
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [P_X]);
+
+      await beginServiceTx(w1);
+      const pLink = settleInTx(
+        w1,
+        w1.query(LINK_RECRUITER_SQL, [
+          adminA.acc.auth,
+          adminA.acc.app,
+          recX,
+          1,
+          B.app,
+          bAccRow.version,
+          "F01 link_recruiter repro",
+          linkKey,
+        ]),
+      );
+
+      const waitW1OnPx = await waitUntilBlocked(observer, "wp10-2-w1");
+      assert.equal(waitW1OnPx.wait_event_type, "Lock");
+      assert.equal(waitW1OnPx.locktype, "advisory");
+
+      // Crucial F-01 proof: while w1 waits on P_X, A & B have NO premature FOR KEY SHARE / FOR UPDATE locks
+      await checkUserRowNowaitUnlocked(observer, adminA.acc.app);
+      await checkUserRowNowaitUnlocked(observer, B.app);
+
+      const { rows: [idemDuringWait] } = await observer.query(
+        `select count(*)::int as cnt
+           from public.direct_entry_rpc_idempotency
+          where app_user_id = $1::uuid and action = 'account_recruiter_link_create' and idempotency_key = $2`,
+        [adminA.acc.app, linkKey],
+      );
+      assert.equal(idemDuringWait.cnt, 0);
+
+      // w2 designates B as TL on teamF01Link (writes A outgoing + B incoming) without blocking on A!
+      await beginServiceTx(w2);
+      const designateRes = await w2.query(DESIGNATE_TL_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        teamF01Link,
+        B.app,
+        null,
+        2,
+        "F01 designate B TL on T1",
+        nextUuid(),
+      ]);
+      assert.equal(designateRes.rows[0].data.leader_app_user_id, B.app);
+
+      // Release wH on P_X so w1 advances to P_B and blocks cleanly on w2's advisory(P_B)
+      await wH.query("commit");
+      const waitW1OnPb = await waitUntilBlocked(observer, "wp10-2-w1");
+      assert.equal(waitW1OnPb.wait_event_type, "Lock");
+
+      await w2.query("commit");
+      const rLink = await pLink;
+      assertNotDeadlock(rLink, "F01 link_recruiter vs designate_team_leader");
+      assert.equal(rLink.status, "rejected");
+      assert.equal(rLink.reason?.code, "PT409");
+      assert.match(rLink.reason?.message ?? "", /RECRUITER_IDENTITY_CONFLICT/);
+
+      // Verify full DB outcomes & complete rollback of loser w1
+      const { rows: [t1PostRow] } = await observer.query(
+        "select version from public.teams where team_id = $1::uuid",
+        [teamF01Link],
+      );
+      assert.equal(t1PostRow.version, 3);
+      const { rows: tlaF01Rows } = await observer.query(
+        `select leader_app_user_id::text as uid, leader_recruiter_id::text as rid, is_current, valid_to::text
+           from public.direct_entry_team_leader_assignments
+          where team_id = $1::uuid
+          order by created_at asc`,
+        [teamF01Link],
+      );
+      assert.equal(tlaF01Rows.length, 2);
+      assert.deepEqual(
+        tlaF01Rows.find((r) => r.uid === adminA.acc.app),
+        { uid: adminA.acc.app, rid: adminA.recruiterId, is_current: false, valid_to: "2026-11-24" },
+      );
+      assert.deepEqual(
+        tlaF01Rows.find((r) => r.uid === B.app),
+        { uid: B.app, rid: recB, is_current: true, valid_to: null },
+      );
+      const { rows: sgF01Rows } = await observer.query(
+        `select app_user_id::text as uid, is_current
+           from public.direct_entry_scope_grants
+          where team_id = $1::uuid and scope_kind = 'team'
+          order by created_at asc`,
+        [teamF01Link],
+      );
+      assert.equal(sgF01Rows.find((r) => r.uid === adminA.acc.app)?.is_current, false);
+      assert.equal(sgF01Rows.find((r) => r.uid === B.app)?.is_current, true);
+      const { rows: cgF01Rows } = await observer.query(
+        `select app_user_id::text as uid, is_current
+           from public.direct_entry_capability_grants
+          where app_user_id = any($1::uuid[]) and capability = 'team_manager_assign'
+          order by created_at asc`,
+        [[adminA.acc.app, B.app]],
+      );
+      assert.equal(cgF01Rows.find((r) => r.uid === adminA.acc.app)?.is_current, false);
+      assert.equal(cgF01Rows.find((r) => r.uid === B.app)?.is_current, true);
+
+      const { rows: bLinksPost } = await observer.query(
+        `select recruiter_id::text as rid, verified, is_current
+           from public.direct_entry_app_user_recruiter_links
+          where app_user_id = $1::uuid or recruiter_id = $2::uuid`,
+        [B.app, recX],
+      );
+      assert.deepEqual(bLinksPost, [{ rid: recB, verified: true, is_current: true }]);
+      const { rows: [idemPost] } = await observer.query(
+        `select count(*)::int as cnt
+           from public.direct_entry_rpc_idempotency
+          where app_user_id = $1::uuid and action = 'account_recruiter_link_create' and idempotency_key = $2`,
+        [adminA.acc.app, linkKey],
+      );
+      assert.equal(idemPost.cnt, 0);
+
+      console.log(
+        `[PG18 F01 link_recruiter] A=${adminA.acc.app} B=${B.app} waitPx=${JSON.stringify(waitW1OnPx)} nowaitA_B=SUCCEEDED(0_55P03) waitPb=${JSON.stringify(waitW1OnPb)} winner=DESIGNATE_TL(B,v3) loser=LINK_RECRUITER(PT409:RECRUITER_IDENTITY_CONFLICT,rolled_back) deadlocks=0`,
+      );
+    }
+
+    // F-01 (2): Post-lock NOWAIT / zero premature FOR KEY SHARE on actor for the other 3 RPCs
+    {
+      const adminA2 = await seedF01SystemAdmin("nowait_a2");
+      const tgt = await seedPlainAccount(setup, "f01.nowait.tgt", "F01 Nowait Target");
+      const teamM1 = nextUuid();
+      const teamM2 = nextUuid();
+      await setup.query(
+        `insert into public.teams (team_id, code, display_name, active, version)
+         values ($1::uuid, 'WP10_F01_M1', 'F01 Team M1', true, 1),
+                ($2::uuid, 'WP10_F01_M2', 'F01 Team M2', true, 1)`,
+        [teamM1, teamM2],
+      );
+      const pTgt = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-NW-TGT",
+          tgt.name,
+          "2026-10-01",
+          deptByKey.RECRUITMENT,
+          tgt.app,
+          1,
+          null,
+          "F01 nowait target person",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-NW-TGT",
+            full_name: tgt.name,
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.RECRUITMENT,
+            account_ref: tgt.app,
+            expected_account_version: 1,
+            recruiter_id: null,
+            reason: "F01 nowait target person",
+          }),
+        ])
+      ).rows[0].data.person;
+      const tgtVer = pTgt.active_account_link.account_version;
+
+      // 2a. direct_entry_account_operation_create_personnel
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pTgt.person_id]);
+      await beginServiceTx(w1);
+      const pCp = settleInTx(
+        w1,
+        w1.query(CREATE_PERSONNEL_FROM_ACC_SQL, [
+          adminA2.acc.auth,
+          adminA2.acc.app,
+          tgt.app,
+          tgtVer,
+          tgt.login,
+          "STAFF",
+          null,
+          "F01 create_personnel nowait",
+          nextUuid(),
+        ]),
+      );
+      const waitCp = await waitUntilBlocked(observer, "wp10-2-w1");
+      assert.equal(waitCp.wait_event_type, "Lock");
+      assert.equal(waitCp.locktype, "advisory");
+      await checkUserRowNowaitUnlocked(observer, adminA2.acc.app);
+      await checkUserRowNowaitUnlocked(observer, tgt.app);
+      await wH.query("commit");
+      const rCp = await pCp;
+      assertNotDeadlock(rCp, "F01 create_personnel nowait");
+      assert.equal(rCp.status, "fulfilled");
+      const recTgtId = rCp.value.rows[0].data.recruiter_id;
+
+      // 2b. direct_entry_assign_team_membership
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pTgt.person_id]);
+      await beginServiceTx(w1);
+      const pAt = settleInTx(
+        w1,
+        w1.query(ASSIGN_TEAM_SQL, [
+          adminA2.acc.auth,
+          adminA2.acc.app,
+          recTgtId,
+          teamM1,
+          null,
+          1,
+          "F01 assign_team nowait",
+          nextUuid(),
+        ]),
+      );
+      const waitAt = await waitUntilBlocked(observer, "wp10-2-w1");
+      assert.equal(waitAt.wait_event_type, "Lock");
+      assert.equal(waitAt.locktype, "advisory");
+      await checkUserRowNowaitUnlocked(observer, adminA2.acc.app);
+      await checkUserRowNowaitUnlocked(observer, tgt.app);
+      await wH.query("commit");
+      const rAt = await pAt;
+      assertNotDeadlock(rAt, "F01 assign_team nowait");
+      assert.equal(rAt.status, "fulfilled");
+      assert.equal(rAt.value.rows[0].data.recruiter_version, 2);
+
+      // 2c. direct_entry_move_team_membership
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pTgt.person_id]);
+      await beginServiceTx(w1);
+      const pMv = settleInTx(
+        w1,
+        w1.query(MOVE_TEAM_SQL, [
+          adminA2.acc.auth,
+          adminA2.acc.app,
+          recTgtId,
+          teamM2,
+          null,
+          2,
+          "F01 move_team nowait",
+          nextUuid(),
+        ]),
+      );
+      const waitMv = await waitUntilBlocked(observer, "wp10-2-w1");
+      assert.equal(waitMv.wait_event_type, "Lock");
+      assert.equal(waitMv.locktype, "advisory");
+      await checkUserRowNowaitUnlocked(observer, adminA2.acc.app);
+      await checkUserRowNowaitUnlocked(observer, tgt.app);
+      await wH.query("commit");
+      const rMv = await pMv;
+      assertNotDeadlock(rMv, "F01 move_team nowait");
+      assert.equal(rMv.status, "fulfilled");
+      assert.equal(rMv.value.rows[0].data.recruiter_version, 3);
+
+      const { rows: mvRows } = await observer.query(
+        `select team_id::text as tid, is_current
+           from public.recruiter_team_memberships
+          where recruiter_id = $1::uuid
+          order by created_at asc`,
+        [recTgtId],
+      );
+      assert.deepEqual(mvRows, [
+        { tid: teamM1, is_current: false },
+        { tid: teamM2, is_current: true },
+      ]);
+
+      console.log(
+        `[PG18 F01 3-RPC-nowait] actor=${adminA2.acc.app} cpWait=${waitCp.locktype} atWait=${waitAt.locktype} mvWait=${waitMv.locktype} nowaitActor=SUCCEEDED(all3,0_55P03) finalTeam=${teamM2}(v3) deadlocks=0`,
+      );
+    }
+
+    // F-01 (3): Active G1 + G2 TL Admin actor operating on MARKETING & RECRUITMENT targets without self-block
+    {
+      const teamActor = nextUuid();
+      const teamTarget2 = nextUuid();
+      await setup.query(
+        `insert into public.teams (team_id, code, display_name, active, version)
+         values ($1::uuid, 'WP10_F01_ACT_T1', 'F01 Actor TL Team', true, 1),
+                ($2::uuid, 'WP10_F01_ACT_T2', 'F01 Target Team 2', true, 1)`,
+        [teamActor, teamTarget2],
+      );
+      const adminTl = await seedF01SystemAdmin("tl_actor", { withRecruitmentTLTeamId: teamActor });
+
+      // Target 1: MARKETING person + account (no team assignment) -> actor calls create_personnel
+      const mkt1 = await seedPlainAccount(setup, "f01.mkt1", "F01 Mkt User 1");
+      const pMkt1 = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-MKT1",
+          mkt1.name,
+          "2026-10-01",
+          deptByKey.MARKETING,
+          mkt1.app,
+          1,
+          null,
+          "F01 mkt1 person",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-MKT1",
+            full_name: mkt1.name,
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.MARKETING,
+            account_ref: mkt1.app,
+            expected_account_version: 1,
+            recruiter_id: null,
+            reason: "F01 mkt1 person",
+          }),
+        ])
+      ).rows[0].data.person;
+      const cpMktRes = (
+        await serviceQuery(setup, CREATE_PERSONNEL_FROM_ACC_SQL, [
+          adminTl.acc.auth,
+          adminTl.acc.app,
+          mkt1.app,
+          pMkt1.active_account_link.account_version,
+          mkt1.login,
+          "STAFF",
+          null,
+          "F01 actor G1/G2 non-self-block create_personnel",
+          nextUuid(),
+        ])
+      ).rows[0].data;
+      assert.ok(cpMktRes.recruiter_id);
+
+      // Target 2: MARKETING person + account + unlinked HRP recruiter -> actor calls link_recruiter
+      const recMkt2 = await seedPlainUnlinkedHrpRecruiter(setup, "f01.mkt2", "F01 Mkt User 2");
+      const mkt2 = await seedPlainAccount(setup, "f01.mkt2", "F01 Mkt User 2");
+      const pMkt2 = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-MKT2",
+          mkt2.name,
+          "2026-10-01",
+          deptByKey.MARKETING,
+          mkt2.app,
+          1,
+          null,
+          "F01 mkt2 person",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-MKT2",
+            full_name: mkt2.name,
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.MARKETING,
+            account_ref: mkt2.app,
+            expected_account_version: 1,
+            recruiter_id: null,
+            reason: "F01 mkt2 person",
+          }),
+        ])
+      ).rows[0].data.person;
+      const lrMktRes = (
+        await serviceQuery(setup, LINK_RECRUITER_SQL, [
+          adminTl.acc.auth,
+          adminTl.acc.app,
+          recMkt2,
+          1,
+          mkt2.app,
+          pMkt2.active_account_link.account_version,
+          "F01 actor G1/G2 non-self-block link_recruiter",
+          nextUuid(),
+        ])
+      ).rows[0].data;
+      assert.equal(lrMktRes.recruiter_id, recMkt2);
+
+      // Target 3: RECRUITMENT target -> actor calls assign_team_membership & move_team_membership
+      const rec3Meta = await makeActiveRecruitmentAccountPerson("f01.rec3");
+      const atRec3Res = (
+        await serviceQuery(setup, ASSIGN_TEAM_SQL, [
+          adminTl.acc.auth,
+          adminTl.acc.app,
+          rec3Meta.recruiterId,
+          teamActor,
+          null,
+          1,
+          "F01 actor assign rec3",
+          nextUuid(),
+        ])
+      ).rows[0].data;
+      assert.equal(atRec3Res.team_id, teamActor);
+      const mvRec3Res = (
+        await serviceQuery(setup, MOVE_TEAM_SQL, [
+          adminTl.acc.auth,
+          adminTl.acc.app,
+          rec3Meta.recruiterId,
+          teamTarget2,
+          null,
+          atRec3Res.recruiter_version,
+          "F01 actor move rec3",
+          nextUuid(),
+        ])
+      ).rows[0].data;
+      assert.equal(mvRec3Res.team_id, teamTarget2);
+
+      // Verify actor's own G1 + G2 TL assignment remained intact
+      const { rows: [actorState] } = await observer.query(
+        `select (select count(*)::int from public.recruiter_team_memberships where recruiter_id = $1::uuid and team_id = $2::uuid and is_current = true) as g1,
+                (select count(*)::int from public.direct_entry_team_leader_assignments where leader_app_user_id = $3::uuid and team_id = $2::uuid and is_current = true) as g2`,
+        [adminTl.recruiterId, teamActor, adminTl.acc.app],
+      );
+      assert.deepEqual(actorState, { g1: 1, g2: 1 });
+
+      console.log(
+        `[PG18 F01 actor-not-self-blocked] actor=${adminTl.acc.app}(G1=1,G2=1) createPersonnelMkt=${cpMktRes.recruiter_id} linkRecruiterMkt=${lrMktRes.link_id} assignMoveRec=${teamTarget2}`,
+      );
+    }
+
+    // F-01 (4): Concurrent same-key single write + different-payload rejection + cross-midnight replay (all 4 RPCs)
+    {
+      const adminIdem = await seedF01SystemAdmin("idem_a");
+      const teamIdem1 = nextUuid();
+      const teamIdem2 = nextUuid();
+      await setup.query(
+        `insert into public.teams (team_id, code, display_name, active, version)
+         values ($1::uuid, 'WP10_F01_IDEM_T1', 'F01 Idem Team 1', true, 1),
+                ($2::uuid, 'WP10_F01_IDEM_T2', 'F01 Idem Team 2', true, 1)`,
+        [teamIdem1, teamIdem2],
+      );
+
+      // 4a. create_personnel: concurrent same-key (2026-11-24) -> diff-payload 22023 -> cross-midnight replay (2026-11-25)
+      await setBusinessDate(setup, "2026-11-24");
+      const uCp = await seedPlainAccount(setup, "f01.idem.cp", "F01 Idem CP User");
+      const pCp = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-IDEM-CP",
+          uCp.name,
+          "2026-10-01",
+          deptByKey.RECRUITMENT,
+          uCp.app,
+          1,
+          null,
+          "F01 idem cp person",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-IDEM-CP",
+            full_name: uCp.name,
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.RECRUITMENT,
+            account_ref: uCp.app,
+            expected_account_version: 1,
+            recruiter_id: null,
+            reason: "F01 idem cp person",
+          }),
+        ])
+      ).rows[0].data.person;
+      const uCpInitVer = pCp.active_account_link.account_version;
+      const keyCp = nextUuid();
+      const cpParams = [
+        adminIdem.acc.auth,
+        adminIdem.acc.app,
+        uCp.app,
+        uCpInitVer,
+        uCp.login,
+        "STAFF",
+        null,
+        "F01 concurrent same-key cp",
+        keyCp,
+      ];
+
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pCp.person_id]);
+      await beginServiceTx(w1);
+      const pCp1 = settleInTx(w1, w1.query(CREATE_PERSONNEL_FROM_ACC_SQL, cpParams));
+      await beginServiceTx(w2);
+      const pCp2 = settleInTx(w2, w2.query(CREATE_PERSONNEL_FROM_ACC_SQL, cpParams));
+      await waitUntilBlocked(observer, "wp10-2-w1");
+      await waitUntilBlocked(observer, "wp10-2-w2");
+      await wH.query("commit");
+      const [rCp1, rCp2] = await Promise.all([pCp1, pCp2]);
+      assertNotDeadlock(rCp1, "F01 same-key cp 1");
+      assertNotDeadlock(rCp2, "F01 same-key cp 2");
+      assert.equal(rCp1.status, "fulfilled");
+      assert.equal(rCp2.status, "fulfilled");
+      assert.deepEqual(rCp1.value.rows[0].data, rCp2.value.rows[0].data);
+      const recCpId = rCp1.value.rows[0].data.recruiter_id;
+
+      const { rows: [cpDbCheck] } = await observer.query(
+        `select (select count(*)::int from public.recruiters where lower(personnel_code) = $1) as rec_cnt,
+                (select version from public.direct_entry_app_users where app_user_id = $2::uuid) as acc_ver,
+                (select count(*)::int from public.direct_entry_audit_events where action = 'personnel_created' and resource_ref = $3) as audit_cnt`,
+        [uCp.login, uCp.app, recCpId],
+      );
+      assert.deepEqual(cpDbCheck, { rec_cnt: 1, acc_ver: uCpInitVer + 1, audit_cnt: 1 });
+
+      await assert.rejects(
+        () =>
+          serviceQuery(setup, CREATE_PERSONNEL_FROM_ACC_SQL, [
+            adminIdem.acc.auth,
+            adminIdem.acc.app,
+            uCp.app,
+            uCpInitVer,
+            uCp.login,
+            "TEAM_LEADER",
+            null,
+            "F01 concurrent same-key cp",
+            keyCp,
+          ]),
+        (err) => err?.code === "22023" && /idempotency key reused with different input/.test(err?.message ?? ""),
+      );
+      const { rows: [cpPostDiff] } = await observer.query(
+        "select version, (select count(*)::int from public.recruiters where lower(personnel_code) = $1) as rec_cnt from public.direct_entry_app_users where app_user_id = $2::uuid",
+        [uCp.login, uCp.app],
+      );
+      assert.deepEqual(cpPostDiff, { version: uCpInitVer + 1, rec_cnt: 1 });
+
+      await setBusinessDate(setup, "2026-11-25");
+      const cpMidnight = (await serviceQuery(setup, CREATE_PERSONNEL_FROM_ACC_SQL, cpParams)).rows[0].data;
+      assert.deepEqual(cpMidnight, rCp1.value.rows[0].data);
+
+      // 4b. link_recruiter: concurrent same-key (2026-11-25) -> diff-payload 22023 -> cross-midnight replay (2026-11-26)
+      const recLr = await seedPlainUnlinkedHrpRecruiter(setup, "f01.idem.lr", "F01 Idem LR User");
+      const uLr = await seedPlainAccount(setup, "f01.idem.lr", "F01 Idem LR User");
+      const pLr = (
+        await serviceQuery(setup, CREATE_PERSON_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          "EMP-F01-IDEM-LR",
+          uLr.name,
+          "2026-10-01",
+          deptByKey.RECRUITMENT,
+          uLr.app,
+          1,
+          null,
+          "F01 idem lr person",
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: "EMP-F01-IDEM-LR",
+            full_name: uLr.name,
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.RECRUITMENT,
+            account_ref: uLr.app,
+            expected_account_version: 1,
+            recruiter_id: null,
+            reason: "F01 idem lr person",
+          }),
+        ])
+      ).rows[0].data.person;
+      const uLrInitVer = pLr.active_account_link.account_version;
+      const keyLr = nextUuid();
+      const lrParams = [
+        adminIdem.acc.auth,
+        adminIdem.acc.app,
+        recLr,
+        1,
+        uLr.app,
+        uLrInitVer,
+        "F01 concurrent same-key lr",
+        keyLr,
+      ];
+
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pLr.person_id]);
+      await beginServiceTx(w1);
+      const pLr1 = settleInTx(w1, w1.query(LINK_RECRUITER_SQL, lrParams));
+      await beginServiceTx(w2);
+      const pLr2 = settleInTx(w2, w2.query(LINK_RECRUITER_SQL, lrParams));
+      await waitUntilBlocked(observer, "wp10-2-w1");
+      await waitUntilBlocked(observer, "wp10-2-w2");
+      await wH.query("commit");
+      const [rLr1, rLr2] = await Promise.all([pLr1, pLr2]);
+      assertNotDeadlock(rLr1, "F01 same-key lr 1");
+      assertNotDeadlock(rLr2, "F01 same-key lr 2");
+      assert.equal(rLr1.status, "fulfilled");
+      assert.equal(rLr2.status, "fulfilled");
+      assert.deepEqual(rLr1.value.rows[0].data, rLr2.value.rows[0].data);
+
+      const { rows: [lrDbCheck] } = await observer.query(
+        `select (select count(*)::int from public.direct_entry_app_user_recruiter_links where app_user_id = $1::uuid and is_current = true) as link_cnt,
+                (select version from public.direct_entry_app_users where app_user_id = $1::uuid) as acc_ver,
+                (select count(*)::int from public.direct_entry_audit_events where action = 'link_create' and resource_ref = $1::text) as audit_cnt`,
+        [uLr.app],
+      );
+      assert.deepEqual(lrDbCheck, { link_cnt: 1, acc_ver: uLrInitVer + 1, audit_cnt: 1 });
+
+      await assert.rejects(
+        () =>
+          serviceQuery(setup, LINK_RECRUITER_SQL, [
+            adminIdem.acc.auth,
+            adminIdem.acc.app,
+            recLr,
+            1,
+            uLr.app,
+            uLrInitVer,
+            "F01 diff lr reason",
+            keyLr,
+          ]),
+        (err) => err?.code === "22023" && /idempotency key reused with different input/.test(err?.message ?? ""),
+      );
+      const { rows: [lrPostDiff] } = await observer.query(
+        "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+        [uLr.app],
+      );
+      assert.equal(lrPostDiff.version, uLrInitVer + 1);
+
+      await setBusinessDate(setup, "2026-11-26");
+      const lrMidnight = (await serviceQuery(setup, LINK_RECRUITER_SQL, lrParams)).rows[0].data;
+      assert.deepEqual(lrMidnight, rLr1.value.rows[0].data);
+
+      // 4c. assign_team_membership: concurrent same-key (2026-11-26, explicit date) -> diff-payload 22023 -> cross-midnight replay (2026-11-27)
+      const keyAt = nextUuid();
+      const atParams = [
+        adminIdem.acc.auth,
+        adminIdem.acc.app,
+        recLr,
+        teamIdem1,
+        "2026-11-26",
+        1,
+        "F01 concurrent same-key assign",
+        keyAt,
+      ];
+
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pLr.person_id]);
+      await beginServiceTx(w1);
+      const pAt1 = settleInTx(w1, w1.query(ASSIGN_TEAM_SQL, atParams));
+      await beginServiceTx(w2);
+      const pAt2 = settleInTx(w2, w2.query(ASSIGN_TEAM_SQL, atParams));
+      await waitUntilBlocked(observer, "wp10-2-w1");
+      await waitUntilBlocked(observer, "wp10-2-w2");
+      await wH.query("commit");
+      const [rAt1, rAt2] = await Promise.all([pAt1, pAt2]);
+      assertNotDeadlock(rAt1, "F01 same-key assign 1");
+      assertNotDeadlock(rAt2, "F01 same-key assign 2");
+      assert.equal(rAt1.status, "fulfilled");
+      assert.equal(rAt2.status, "fulfilled");
+      assert.deepEqual(rAt1.value.rows[0].data, rAt2.value.rows[0].data);
+
+      const { rows: [atDbCheck] } = await observer.query(
+        `select (select count(*)::int from public.recruiter_team_memberships where recruiter_id = $1::uuid) as mem_cnt,
+                (select version from public.recruiters where recruiter_id = $1::uuid) as rec_ver,
+                (select count(*)::int from public.direct_entry_audit_events where action = 'team_membership_assign' and resource_ref = $1::text) as audit_cnt`,
+        [recLr],
+      );
+      assert.deepEqual(atDbCheck, { mem_cnt: 1, rec_ver: 2, audit_cnt: 1 });
+
+      await assert.rejects(
+        () =>
+          serviceQuery(setup, ASSIGN_TEAM_SQL, [
+            adminIdem.acc.auth,
+            adminIdem.acc.app,
+            recLr,
+            teamIdem2,
+            "2026-11-26",
+            1,
+            "F01 concurrent same-key assign",
+            keyAt,
+          ]),
+        (err) => err?.code === "22023" && /idempotency key reused with different input/.test(err?.message ?? ""),
+      );
+      const { rows: [atPostDiff] } = await observer.query(
+        `select (select count(*)::int from public.recruiter_team_memberships where recruiter_id = $1::uuid) as mem_cnt,
+                (select version from public.recruiters where recruiter_id = $1::uuid) as rec_ver`,
+        [recLr],
+      );
+      assert.deepEqual(atPostDiff, { mem_cnt: 1, rec_ver: 2 });
+
+      await setBusinessDate(setup, "2026-11-27");
+      const atMidnight = (await serviceQuery(setup, ASSIGN_TEAM_SQL, atParams)).rows[0].data;
+      assert.deepEqual(atMidnight, rAt1.value.rows[0].data);
+
+      // 4d. move_team_membership: concurrent same-key (2026-11-27, explicit date) -> diff-payload 22023 -> cross-midnight replay (2026-11-28)
+      const keyMv = nextUuid();
+      const mvParams = [
+        adminIdem.acc.auth,
+        adminIdem.acc.app,
+        recLr,
+        teamIdem2,
+        "2026-11-27",
+        2,
+        "F01 concurrent same-key move",
+        keyMv,
+      ];
+
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select public.org_department__internal_lock_person($1::uuid)", [pLr.person_id]);
+      await beginServiceTx(w1);
+      const pMv1 = settleInTx(w1, w1.query(MOVE_TEAM_SQL, mvParams));
+      await beginServiceTx(w2);
+      const pMv2 = settleInTx(w2, w2.query(MOVE_TEAM_SQL, mvParams));
+      await waitUntilBlocked(observer, "wp10-2-w1");
+      await waitUntilBlocked(observer, "wp10-2-w2");
+      await wH.query("commit");
+      const [rMv1, rMv2] = await Promise.all([pMv1, pMv2]);
+      assertNotDeadlock(rMv1, "F01 same-key move 1");
+      assertNotDeadlock(rMv2, "F01 same-key move 2");
+      assert.equal(rMv1.status, "fulfilled");
+      assert.equal(rMv2.status, "fulfilled");
+      assert.deepEqual(rMv1.value.rows[0].data, rMv2.value.rows[0].data);
+
+      const { rows: [mvDbCheck] } = await observer.query(
+        `select (select count(*)::int from public.recruiter_team_memberships where recruiter_id = $1::uuid and is_current = true and team_id = $2::uuid) as cur_t2,
+                (select count(*)::int from public.recruiter_team_memberships where recruiter_id = $1::uuid) as mem_cnt,
+                (select version from public.recruiters where recruiter_id = $1::uuid) as rec_ver,
+                (select count(*)::int from public.direct_entry_audit_events where action = 'team_membership_move' and resource_ref = $1::text) as audit_cnt`,
+        [recLr, teamIdem2],
+      );
+      assert.deepEqual(mvDbCheck, { cur_t2: 1, mem_cnt: 2, rec_ver: 3, audit_cnt: 1 });
+
+      await assert.rejects(
+        () =>
+          serviceQuery(setup, MOVE_TEAM_SQL, [
+            adminIdem.acc.auth,
+            adminIdem.acc.app,
+            recLr,
+            teamIdem1,
+            "2026-11-27",
+            2,
+            "F01 concurrent same-key move",
+            keyMv,
+          ]),
+        (err) => err?.code === "22023" && /idempotency key reused with different input/.test(err?.message ?? ""),
+      );
+      const { rows: [mvPostDiff] } = await observer.query(
+        `select (select count(*)::int from public.recruiter_team_memberships where recruiter_id = $1::uuid) as mem_cnt,
+                (select version from public.recruiters where recruiter_id = $1::uuid) as rec_ver`,
+        [recLr],
+      );
+      assert.deepEqual(mvPostDiff, { mem_cnt: 2, rec_ver: 3 });
+
+      await setBusinessDate(setup, "2026-11-28");
+      const mvMidnight = (await serviceQuery(setup, MOVE_TEAM_SQL, mvParams)).rows[0].data;
+      assert.deepEqual(mvMidnight, rMv1.value.rows[0].data);
+
+      console.log(
+        `[PG18 F01 idempotency-midnight] cp(v=${cpDbCheck.acc_ver},cnt=1,22023=OK,midnight=2026-11-25) lr(v=${lrDbCheck.acc_ver},cnt=1,22023=OK,midnight=2026-11-26) assign(v=2,cnt=1,22023=OK,midnight=2026-11-27) move(v=3,cnt=2,22023=OK,midnight=2026-11-28) deadlocks=0`,
       );
     }
   } finally {

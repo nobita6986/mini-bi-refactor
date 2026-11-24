@@ -122,6 +122,7 @@ type AccountingDialogState =
 
 type DialogFeedback = {
   tone: "error" | "warning";
+  title?: string;
   message: string;
   needsReload: boolean;
 } | null;
@@ -2054,9 +2055,19 @@ function DepartmentPersonMembershipsSection({
           setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
         }
         setFeedback({
-          tone: outcome.kind === "conflict" || outcome.kind === "active-head-block" ? "warning" : "error",
+          tone:
+            outcome.kind === "conflict" ||
+            outcome.kind === "active-head-block" ||
+            (outcome.kind === "business-error" &&
+              outcome.code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT")
+              ? "warning"
+              : "error",
           message: outcome.message,
-          needsReload: outcome.kind === "conflict" || outcome.kind === "not-found",
+          needsReload:
+            outcome.kind === "conflict" ||
+            outcome.kind === "not-found" ||
+            (outcome.kind === "business-error" &&
+              outcome.code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
         });
         return;
       }
@@ -2094,7 +2105,12 @@ function DepartmentPersonMembershipsSection({
         setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
       }
       setFeedback({
-        tone: failure.kind === "conflict" || failure.kind === "active-head" ? "warning" : "error",
+        tone:
+          failure.kind === "conflict" ||
+          failure.kind === "active-head" ||
+          failure.code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"
+            ? "warning"
+            : "error",
         message: failure.message,
         needsReload: failure.needsReload,
       });
@@ -2855,6 +2871,24 @@ function AccountingDepartmentMembershipsSection({
     setDialog({ kind: "end", membership });
   };
 
+  const feedbackForMutationFailure = (
+    outcome: Exclude<ReturnType<typeof classifyDepartmentMutationResponse>, { kind: "applied" }>,
+  ): NonNullable<DialogFeedback> => ({
+    tone:
+      outcome.kind === "conflict" || outcome.kind === "active-team-assignment"
+        ? "warning"
+        : "error",
+    title:
+      outcome.kind === "active-team-assignment"
+        ? "Nhân sự đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng"
+        : undefined,
+    message: outcome.message,
+    needsReload:
+      outcome.kind === "conflict" ||
+      outcome.kind === "active-team-assignment" ||
+      outcome.kind === "not-found",
+  });
+
   async function handleAssignSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setDialogFeedback(null);
@@ -2928,11 +2962,7 @@ function AccountingDepartmentMembershipsSection({
         pendingIntentRef.current = null;
       }
 
-      setDialogFeedback({
-        tone: outcome.kind === "conflict" ? "warning" : "error",
-        message: outcome.message,
-        needsReload: outcome.kind === "conflict" || outcome.kind === "not-found",
-      });
+      setDialogFeedback(feedbackForMutationFailure(outcome));
     } catch {
       setBusy(false);
       setDialogFeedback({
@@ -3013,11 +3043,7 @@ function AccountingDepartmentMembershipsSection({
         pendingIntentRef.current = null;
       }
 
-      setDialogFeedback({
-        tone: outcome.kind === "conflict" ? "warning" : "error",
-        message: outcome.message,
-        needsReload: outcome.kind === "conflict" || outcome.kind === "not-found",
-      });
+      setDialogFeedback(feedbackForMutationFailure(outcome));
     } catch {
       setBusy(false);
       setDialogFeedback({
@@ -3508,9 +3534,10 @@ function AccountingDepartmentMembershipsSection({
               tone={dialogFeedback.tone}
               role="alert"
               title={
-                dialogFeedback.tone === "warning"
+                dialogFeedback.title ??
+                (dialogFeedback.tone === "warning"
                   ? "Cần đồng bộ lại dữ liệu"
-                  : "Không thể gán thành viên"
+                  : "Không thể gán thành viên")
               }
             >
               <p>{dialogFeedback.message}</p>
@@ -3634,9 +3661,10 @@ function AccountingDepartmentMembershipsSection({
                 tone={dialogFeedback.tone}
                 role="alert"
                 title={
-                  dialogFeedback.tone === "warning"
+                  dialogFeedback.title ??
+                  (dialogFeedback.tone === "warning"
                     ? "Cần đồng bộ lại dữ liệu"
-                    : "Không thể kết thúc tư cách thành viên"
+                    : "Không thể kết thúc tư cách thành viên")
                 }
               >
                 <p>{dialogFeedback.message}</p>

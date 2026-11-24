@@ -345,6 +345,7 @@ declare
   v_result jsonb;
   v_locked_dept_ids uuid[];
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
 begin
@@ -426,11 +427,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  perform u.app_user_id
-    from public.direct_entry_app_users u
-   where u.app_user_id = any(v_locked_user_ids)
-   order by u.app_user_id asc
-   for update;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select u.* into v_account
     from public.direct_entry_app_users u
@@ -799,6 +817,7 @@ declare
   v_proj jsonb;
   v_result jsonb;
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
 begin
@@ -863,13 +882,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
-  end if;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   if p_account_ref is not null then
     select u.* into v_account
@@ -1252,6 +1286,7 @@ declare
   v_locked_person_ids uuid[];
   v_locked_dept_ids uuid[];
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_locked_team_ids uuid[];
   v_acct_person public.organization_persons%rowtype;
@@ -1261,6 +1296,7 @@ declare
   v_login_id text;
   v_code text;
   v_payload_hash text;
+  v_prior_hash text;
   v_prior jsonb;
   v_reason_id uuid;
   v_link_id uuid;
@@ -1299,11 +1335,20 @@ begin
     'expected_account_version', p_expected_account_version,
     'reason', p_reason
   ));
-  v_prior := public.direct_entry_idempotency_begin(
-    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
-  );
-  if v_prior is not null then
-    return v_prior;
+  -- Pre-lock unlocked replay check only: avoid FK FOR KEY SHARE on U_actor before Tier 1/2
+  select i.request_hash, i.result
+    into v_prior_hash, v_prior
+    from public.direct_entry_rpc_idempotency i
+   where i.app_user_id = p_actor_app_user_id
+     and i.action = v_action
+     and i.idempotency_key = p_idempotency_key;
+  if found then
+    if v_prior_hash <> v_payload_hash then
+      raise exception 'idempotency key reused with different input' using errcode = '22023';
+    end if;
+    if v_prior is not null then
+      return v_prior;
+    end if;
   end if;
 
   select l.person_id
@@ -1391,11 +1436,35 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  perform u.app_user_id
-    from public.direct_entry_app_users u
-   where u.app_user_id = any(v_locked_user_ids)
-   order by u.app_user_id asc
-   for update;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_actor_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
+
+  v_prior := public.direct_entry_idempotency_begin(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
 
   select u.* into v_account
     from public.direct_entry_app_users u
@@ -1903,9 +1972,11 @@ declare
   v_related_recruiter_ids uuid[];
   v_tla_team_ids uuid[];
   v_lock_id uuid;
+  v_all_user_ids uuid[];
   v_lock_key text;
   v_person public.organization_persons;
   v_payload_hash text;
+  v_prior_hash text;
   v_prior jsonb;
   v_reason_id uuid;
   v_recruiter public.recruiters;
@@ -1945,14 +2016,20 @@ begin
     'personnel_code', v_code, 'personnel_position', v_position,
     'valid_from', p_valid_from, 'reason', p_reason
   ));
-  v_prior := public.direct_entry_idempotency_begin(
-    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
-  );
-  if v_prior is not null then return v_prior; end if;
-
-  v_valid_from := coalesce(p_valid_from, v_today);
-  if v_valid_from <> v_today then
-    raise exception 'provider valid from is invalid' using errcode = '22023';
+  -- Pre-lock unlocked replay check only: avoid FK FOR KEY SHARE on U_actor before Tier 1/2
+  select i.request_hash, i.result
+    into v_prior_hash, v_prior
+    from public.direct_entry_rpc_idempotency i
+   where i.app_user_id = p_actor_app_user_id
+     and i.action = v_action
+     and i.idempotency_key = p_idempotency_key;
+  if found then
+    if v_prior_hash <> v_payload_hash then
+      raise exception 'idempotency key reused with different input' using errcode = '22023';
+    end if;
+    if v_prior is not null then
+      return v_prior;
+    end if;
   end if;
 
   -- Phase 1: Unlocked Candidate Discovery
@@ -1997,10 +2074,45 @@ begin
 
   -- Phase 2: Canonical Tier 2 (U)
   perform public.org_department__internal_lock_app_user(p_account_ref);
+
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_actor_app_user_id as uid
+      union all
+      select p_account_ref as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = p_account_ref then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
+
+  v_prior := public.direct_entry_idempotency_begin(
+    p_actor_app_user_id, v_action, p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  v_valid_from := coalesce(p_valid_from, v_today);
+  if v_valid_from <> v_today then
+    raise exception 'provider valid from is invalid' using errcode = '22023';
+  end if;
+
   select u.* into v_account
     from public.direct_entry_app_users u
-   where u.app_user_id = p_account_ref
-   for update;
+   where u.app_user_id = p_account_ref;
   if not found then raise exception 'account not found' using errcode = 'P0002'; end if;
 
   -- Discover R_full & T before Tier 3/4 locks
@@ -2427,6 +2539,7 @@ declare
   v_result jsonb;
   v_locked_dept_ids uuid[];
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
 begin
@@ -2512,11 +2625,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  perform u.app_user_id
-    from public.direct_entry_app_users u
-   where u.app_user_id = any(v_locked_user_ids)
-   order by u.app_user_id asc
-   for update;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select u.* into v_account
     from public.direct_entry_app_users u
@@ -2744,6 +2874,7 @@ declare
   v_linked_app_user_id uuid;
   v_locked_dept_ids uuid[];
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
 begin
@@ -2827,13 +2958,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
-  end if;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select coalesce(array_agg(distinct rid order by rid), array[]::uuid[])
     into v_locked_recruiter_ids
@@ -3064,6 +3210,7 @@ declare
   v_base_payload jsonb;
   v_target_ref text;
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
 begin
@@ -3207,11 +3354,28 @@ begin
     pg_catalog.hashtext(v_dept.department_id::text || ':' || p_target_app_user_id::text)
   );
 
-  perform u.app_user_id
-    from public.direct_entry_app_users u
-   where u.app_user_id = any(v_locked_user_ids)
-   order by u.app_user_id asc
-   for update;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select u.*
     into v_target
@@ -3504,6 +3668,7 @@ declare
   v_lock_dept_id uuid;
   v_lock_id uuid;
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_dept public.organization_departments%rowtype;
   v_person public.organization_persons%rowtype;
@@ -3608,13 +3773,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
-  end if;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select coalesce(array_agg(distinct rid order by rid), array[]::uuid[])
     into v_locked_recruiter_ids
@@ -3893,6 +4073,7 @@ declare
   v_result jsonb;
   v_linked_app_user_id uuid;
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
 begin
@@ -3970,13 +4151,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
-  end if;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select coalesce(array_agg(distinct rid order by rid), array[]::uuid[])
     into v_locked_recruiter_ids
@@ -4181,6 +4377,7 @@ declare
   v_rec_row public.recruiters%rowtype;
   v_locked_dept_ids uuid[];
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_recruiter_ids uuid[];
   v_lock_id uuid;
   v_prev_name text;
@@ -4277,13 +4474,28 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
-  end if;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
 
   select coalesce(array_agg(distinct rid order by rid), array[]::uuid[])
     into v_locked_recruiter_ids
@@ -4558,9 +4770,12 @@ declare
   v_recruiter_version integer;
   v_revision_id uuid;
   v_changed text[];
+  v_payload_hash text;
+  v_prior_hash text;
   v_prior jsonb;
   v_result jsonb;
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_person_ids uuid[];
   v_locked_dept_ids uuid[];
   v_lock_id uuid;
@@ -4578,25 +4793,26 @@ begin
     raise exception 'idempotency key required' using errcode = '22023';
   end if;
 
-  v_prior := public.direct_entry_idempotency_begin(
-    p_app_user_id, 'team_membership_assign', p_idempotency_key,
-    public.direct_entry_payload_hash(jsonb_build_object(
-      'recruiter_id', p_recruiter_id,
-      'team_id', p_team_id,
-      'valid_from', p_valid_from,
-      'expected_version', p_expected_version
-    ))
-  );
-  if v_prior is not null then
-    return v_prior;
-  end if;
-
-  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
-  if p_valid_from > public.direct_entry_authorization_date() then
-    raise exception 'future team memberships require explicit activation' using errcode = '22023';
-  end if;
-  if p_valid_from < public.direct_entry_authorization_date() then
-    raise exception 'past team memberships are not allowed' using errcode = '22023';
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'recruiter_id', p_recruiter_id,
+    'team_id', p_team_id,
+    'valid_from', p_valid_from,
+    'expected_version', p_expected_version
+  ));
+  -- Pre-lock unlocked replay check only: avoid FK FOR KEY SHARE on U_actor before Tier 1/2
+  select i.request_hash, i.result
+    into v_prior_hash, v_prior
+    from public.direct_entry_rpc_idempotency i
+   where i.app_user_id = p_app_user_id
+     and i.action = 'team_membership_assign'
+     and i.idempotency_key = p_idempotency_key;
+  if found then
+    if v_prior_hash <> v_payload_hash then
+      raise exception 'idempotency key reused with different input' using errcode = '22023';
+    end if;
+    if v_prior is not null then
+      return v_prior;
+    end if;
   end if;
 
   -- Phase 1: Unlocked discovery of Org Persons & Users linked to p_recruiter_id
@@ -4672,12 +4888,42 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
+
+  v_prior := public.direct_entry_idempotency_begin(
+    p_app_user_id, 'team_membership_assign', p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
+  if p_valid_from > public.direct_entry_authorization_date() then
+    raise exception 'future team memberships require explicit activation' using errcode = '22023';
+  end if;
+  if p_valid_from < public.direct_entry_authorization_date() then
+    raise exception 'past team memberships are not allowed' using errcode = '22023';
   end if;
 
   -- Tier 3 (R) & Tier 4 (T)
@@ -4797,9 +5043,12 @@ declare
   v_recruiter_version integer;
   v_revision_id uuid;
   v_changed text[];
+  v_payload_hash text;
+  v_prior_hash text;
   v_prior jsonb;
   v_result jsonb;
   v_locked_user_ids uuid[];
+  v_all_user_ids uuid[];
   v_locked_person_ids uuid[];
   v_locked_dept_ids uuid[];
   v_lock_id uuid;
@@ -4817,25 +5066,26 @@ begin
     raise exception 'idempotency key required' using errcode = '22023';
   end if;
 
-  v_prior := public.direct_entry_idempotency_begin(
-    p_app_user_id, 'team_membership_move', p_idempotency_key,
-    public.direct_entry_payload_hash(jsonb_build_object(
-      'recruiter_id', p_recruiter_id,
-      'team_id', p_team_id,
-      'valid_from', p_valid_from,
-      'expected_version', p_expected_version
-    ))
-  );
-  if v_prior is not null then
-    return v_prior;
-  end if;
-
-  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
-  if p_valid_from > public.direct_entry_authorization_date() then
-    raise exception 'future team memberships require explicit activation' using errcode = '22023';
-  end if;
-  if p_valid_from < public.direct_entry_authorization_date() then
-    raise exception 'past team memberships are not allowed' using errcode = '22023';
+  v_payload_hash := public.direct_entry_payload_hash(jsonb_build_object(
+    'recruiter_id', p_recruiter_id,
+    'team_id', p_team_id,
+    'valid_from', p_valid_from,
+    'expected_version', p_expected_version
+  ));
+  -- Pre-lock unlocked replay check only: avoid FK FOR KEY SHARE on U_actor before Tier 1/2
+  select i.request_hash, i.result
+    into v_prior_hash, v_prior
+    from public.direct_entry_rpc_idempotency i
+   where i.app_user_id = p_app_user_id
+     and i.action = 'team_membership_move'
+     and i.idempotency_key = p_idempotency_key;
+  if found then
+    if v_prior_hash <> v_payload_hash then
+      raise exception 'idempotency key reused with different input' using errcode = '22023';
+    end if;
+    if v_prior is not null then
+      return v_prior;
+    end if;
   end if;
 
   -- Phase 1: Unlocked discovery
@@ -4911,12 +5161,42 @@ begin
     perform public.org_department__internal_lock_app_user(v_lock_id);
   end loop;
 
-  if cardinality(v_locked_user_ids) > 0 then
-    perform u.app_user_id
-      from public.direct_entry_app_users u
-     where u.app_user_id = any(v_locked_user_ids)
-     order by u.app_user_id asc
-     for update;
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select unnest(v_locked_user_ids) as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = any(v_locked_user_ids) then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
+
+  v_prior := public.direct_entry_idempotency_begin(
+    p_app_user_id, 'team_membership_move', p_idempotency_key, v_payload_hash
+  );
+  if v_prior is not null then
+    return v_prior;
+  end if;
+
+  p_valid_from := coalesce(p_valid_from, public.direct_entry_authorization_date());
+  if p_valid_from > public.direct_entry_authorization_date() then
+    raise exception 'future team memberships require explicit activation' using errcode = '22023';
+  end if;
+  if p_valid_from < public.direct_entry_authorization_date() then
+    raise exception 'past team memberships are not allowed' using errcode = '22023';
   end if;
 
   -- Tier 3 (R) & Tier 4 (T)

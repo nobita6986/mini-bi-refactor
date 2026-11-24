@@ -813,6 +813,45 @@ test("read & mutation classifiers cover every DepartmentErrorCode and idempotenc
     classifyDepartmentReadError(404, { ok: false, code: "DEPARTMENT_NOT_FOUND" }).kind,
     "not-found",
   );
+
+  // F-02: Accounting 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT is distinct from VERSION_CONFLICT & 503
+  for (const op of ["assign", "end"]) {
+    const teamBlock = classifyDepartmentMutationResponse(
+      409,
+      { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" },
+      op,
+    );
+    assert.equal(teamBlock.kind, "active-team-assignment");
+    if (teamBlock.kind === "active-team-assignment") {
+      assert.equal(teamBlock.code, "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT");
+      assert.equal(teamBlock.resetIdempotencyKey, true);
+      assert.match(teamBlock.message, /Tổ đội|Trưởng nhóm/);
+      assert.match(teamBlock.message, /thu hồi|kết thúc/i);
+      assert.match(teamBlock.message, /tải lại/i);
+      assert.doesNotMatch(teamBlock.message, /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+    }
+  }
+
+  for (const conflictCode of ["DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT", "VERSION_CONFLICT"]) {
+    const verConflict = classifyDepartmentMutationResponse(
+      409,
+      { ok: false, code: conflictCode },
+      "assign",
+    );
+    assert.equal(verConflict.kind, "conflict");
+    if (verConflict.kind === "conflict") {
+      assert.equal(verConflict.code, conflictCode);
+      assert.equal(verConflict.resetIdempotencyKey, true);
+      assert.match(verConflict.message, /Dữ liệu thành viên đã thay đổi/);
+      assert.doesNotMatch(verConflict.message, /Trưởng nhóm|Tổ đội/);
+    }
+  }
+
+  const unavailableOutcome = classifyDepartmentMutationResponse(503, null, "assign");
+  assert.equal(unavailableOutcome.kind, "unavailable");
+  if (unavailableOutcome.kind !== "applied") {
+    assert.equal(unavailableOutcome.resetIdempotencyKey, false);
+  }
 });
 
 test("department policy and membership capability helpers lock Recruitment read-only and Accounting text", () => {
@@ -991,7 +1030,9 @@ test("WP4 department CRUD, HEAD, and Person membership builders enforce OCC, Ide
   assert.equal(activeTeamErr.kind, "business-error");
   assert.equal(activeTeamErr.code, "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT");
   assert.match(activeTeamErr.message, /Tổ đội|Trưởng nhóm/);
+  assert.match(activeTeamErr.message, /tải lại/i);
   assert.equal(activeTeamErr.preserveIdempotencyKey, false);
+  assert.equal(activeTeamErr.needsReload, true);
 
   const conflictErr = model.classifyWp3DepartmentMutationFailure(409, {
     ok: false,

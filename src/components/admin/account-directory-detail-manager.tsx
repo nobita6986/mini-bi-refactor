@@ -440,6 +440,19 @@ export function AccountDirectoryDetailManager({
           return;
         }
         if (
+          outcome.kind === "business-error" &&
+          outcome.code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"
+        ) {
+          setPendingCompleteKey(null);
+          setConflictLocked(true);
+          setFeedback({
+            tone: "warning",
+            title: "Tài khoản đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng",
+            message: outcome.message,
+          });
+          return;
+        }
+        if (
           outcome.kind === "business-error" ||
           outcome.kind === "invalid" ||
           outcome.kind === "not-found" ||
@@ -563,6 +576,16 @@ export function AccountDirectoryDetailManager({
         setFeedback({
           tone: "warning",
           title: "Cần xác nhận hồ sơ tính công tuyển dụng",
+          message: outcome.message,
+        });
+        return;
+      }
+      if (outcome.kind === "active-team-assignment") {
+        setPendingCompleteKey(null);
+        setConflictLocked(true);
+        setFeedback({
+          tone: "warning",
+          title: "Nhân sự hoặc tài khoản đang giữ phân công Tổ đội hoặc Trưởng nhóm",
           message: outcome.message,
         });
         return;
