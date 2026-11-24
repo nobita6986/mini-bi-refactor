@@ -5272,7 +5272,14 @@ begin
     ) all_users
    where uid is not null;
 
-  -- Phase 2: Canonical Tier 2 (U: FOR UPDATE targets, FOR SHARE pure operator)
+  -- Phase 2a: Canonical Tier 2 (U advisory: sorted ascending, deduplicated write-target accounts FIRST)
+  foreach v_locked_id in array coalesce(v_write_user_ids, array[]::uuid[]) loop
+    if v_locked_id is not null then
+      perform public.org_department__internal_lock_app_user(v_locked_id);
+    end if;
+  end loop;
+
+  -- Phase 2b: Canonical Tier 2 (U row: ascending UUID order, FOR UPDATE targets, FOR SHARE pure operator)
   for v_locked_id in
     select u.app_user_id
       from public.direct_entry_app_users u
@@ -5280,7 +5287,6 @@ begin
      order by u.app_user_id asc
   loop
     if v_locked_id = any(v_write_user_ids) then
-      perform public.org_department__internal_lock_app_user(v_locked_id);
       perform u.app_user_id
         from public.direct_entry_app_users u
        where u.app_user_id = v_locked_id
@@ -6428,7 +6434,10 @@ begin
     end if;
   end if;
 
-  -- Tier 2 (U)
+  -- Tier 2a (U advisory: lock write-target account BEFORE any direct_entry_app_users row lock)
+  perform public.org_department__internal_lock_app_user(p_target_app_user_id);
+
+  -- Tier 2b (U row: ascending UUID order, FOR UPDATE target, FOR SHARE pure operator)
   for v_locked_id in
     select u.app_user_id
       from public.direct_entry_app_users u
@@ -6436,7 +6445,6 @@ begin
      order by u.app_user_id asc
   loop
     if v_locked_id = p_target_app_user_id then
-      perform public.org_department__internal_lock_app_user(v_locked_id);
       perform u.app_user_id
         from public.direct_entry_app_users u
        where u.app_user_id = v_locked_id

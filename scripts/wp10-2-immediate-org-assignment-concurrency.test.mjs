@@ -16,9 +16,14 @@
  *                            and mutual lock-wait `revoke(B)` vs `unassign_team_membership(recA)` (both orders)
  *   - C5b (`F-03`): Pure API `revoke(B)` vs `transfer(pA, ACCOUNTING)` after `unassign(recA)` (both orders),
  *                   plus a clearly labeled defensive drifted-Org lock-wait proof where `A` still holds `G1` while `pA` turns `INACTIVE`.
+ *   - P2 (Tier U advisory-before-row lock ordering, `A.app < B.app`, Admin A unmapped + legacy unmapped Recruiter B):
+ *                   Barrier 1 (`designate_team_leader(A->B)` vs `create_person_admin(A, recB)`),
+ *                   Barrier 2 (held `advisory(B)` + `A FOR UPDATE NOWAIT` proves no reverse row lock + `PT409 RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT`),
+ *                   and Disable/Enable Tier-U parity (`direct_entry_disable_app_user` + `direct_entry_enable_app_user`).
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -278,8 +283,12 @@ const REVOKE_TL_SQL =
   "select public.direct_entry_revoke_team_leader($1::uuid, $2::uuid, $3::uuid, $4::date, $5::int, $6, $7) as data";
 const DISABLE_USER_SQL =
   "select public.direct_entry_disable_app_user($1::uuid, $2::uuid, $3::uuid, $4::int, $5, $6) as data";
+const ENABLE_USER_SQL =
+  "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4::int, $5, $6) as data";
+const ASSIGN_GROUP_MEMBER_SQL =
+  "select public.direct_entry_authz_assign_group_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6, $7::uuid, $8) as data";
 
-test("WP10-2 Real PG18 Concurrency: C0-C5b bidirectional lock serialization, suspended links, same-day revoke v_restore, and 0 40P01 deadlocks", async () => {
+test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U advisory-before-row barriers, disable/enable parity, and 0 40P01 deadlocks", async () => {
   const initdb = binary("initdb");
   const pgCtl = binary("pg_ctl");
   assert.ok(initdb && pgCtl, "PostgreSQL 18 initdb/pg_ctl binaries are required for WP10-2 PG18 concurrency suite");
@@ -1168,6 +1177,380 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b bidirectional lock serialization, sus
       assert.equal(st.cgRows.find((r) => r.uid === c5bDrift.metaB.acc.app)?.is_current, false);
       console.log(
         `[PG18 C5b defensive-drift] wait=${JSON.stringify(waitInfo)} outcome=REVOKE_SUCCEEDED(v_restore=false, A+SG+CG stay closed, B closed 0-len+grants closed)`,
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // P2 (T0 finding): Tier U advisory-before-row lock ordering (`A.app < B.app`).
+    //   - A is an active SYSTEM_ADMIN (with synced legacy grants) and NO Org Person link.
+    //   - B is an eligible legacy Recruiter (unmapped `recruiters` + `hrp` + verified link + G1, NO Org Person).
+    // -------------------------------------------------------------------------
+    const { rows: [sysAdminGroup] } = await setup.query(
+      "select group_id from public.authz_user_groups where code = 'SYSTEM_ADMIN' and active = true",
+    );
+    assert.ok(sysAdminGroup?.group_id, "SYSTEM_ADMIN permission group must exist");
+
+    async function seedP2AdminAndLegacyLeaderPair(tag) {
+      const A = await seedPlainAccount(setup, `p2.${tag}.a`, `P2 Admin ${tag}`);
+      const B = await seedPlainAccount(setup, `p2.${tag}.b`, `P2 Legacy TL ${tag}`);
+      assert.ok(A.app < B.app, `Expected A.app (${A.app}) < B.app (${B.app})`);
+
+      const assignAdminRes = (
+        await serviceQuery(setup, ASSIGN_GROUP_MEMBER_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          A.app,
+          sysAdminGroup.group_id,
+          1,
+          `Assign SYSTEM_ADMIN to P2 ${tag} A`,
+          nextUuid(),
+          createHash("sha256").update(`p2:${tag}:assign-admin:${A.app}`).digest("hex"),
+        ])
+      ).rows[0].data;
+      const accVersionA = assignAdminRes.account_version;
+      assert.equal(accVersionA, 2);
+
+      const { rows: [authzA] } = await observer.query(
+        `select public.direct_entry_authz__internal_has_paired_capability($1::uuid, 'team_master_manage', 'ALL', null) as has_tm,
+                public.direct_entry_authz__internal_has_paired_capability($1::uuid, 'entry_admin', 'ALL', null) as has_ea,
+                (select count(*)::int from public.organization_account_person_links where app_user_id = $1::uuid) as person_links`,
+        [A.app],
+      );
+      assert.deepEqual(authzA, { has_tm: true, has_ea: true, person_links: 0 });
+
+      const teamId = nextUuid();
+      await setup.query(
+        "insert into public.teams (team_id, code, display_name, active, version) values ($1::uuid, $2, $3, true, 1)",
+        [teamId, `WP10_P2_${tag.toUpperCase()}`, `P2 Team ${tag}`],
+      );
+
+      const recB = await seedPlainUnlinkedHrpRecruiter(setup, `p2.${tag}.recb`, `P2 Legacy Rec ${tag}`);
+      await setup.query(
+        `insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current)
+         values ($1::uuid, $2::uuid, true, '2026-11-23', true)`,
+        [B.app, recB],
+      );
+      await serviceQuery(setup, ASSIGN_TEAM_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        recB,
+        teamId,
+        null,
+        1,
+        `P2 ${tag} B G1`,
+        nextUuid(),
+      ]);
+
+      const { rows: [orgB] } = await observer.query(
+        `select (select count(*)::int from public.organization_persons where recruiter_id = $1::uuid) as rec_persons,
+                (select count(*)::int from public.organization_account_person_links where app_user_id = $2::uuid) as b_links`,
+        [recB, B.app],
+      );
+      assert.deepEqual(orgB, { rec_persons: 0, b_links: 0 });
+
+      return { A, B, accVersionA, teamId, recB };
+    }
+
+    function buildCreatePersonParamsForP2(tag, pair) {
+      const code = `EMP-P2-${tag.toUpperCase()}`;
+      const fullName = `P2 Conflict Person ${tag}`;
+      const reason = `P2 create person conflict (${tag})`;
+      return {
+        code,
+        params: [
+          OWNER.auth,
+          OWNER.app,
+          code,
+          fullName,
+          "2026-10-01",
+          deptByKey.RECRUITMENT,
+          pair.A.app,
+          pair.accVersionA,
+          pair.recB,
+          reason,
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: code,
+            full_name: fullName,
+            joined_on: "2026-10-01",
+            initial_department_ref: deptByKey.RECRUITMENT,
+            account_ref: pair.A.app,
+            expected_account_version: pair.accVersionA,
+            recruiter_id: pair.recB,
+            reason,
+          }),
+        ],
+      };
+    }
+
+    async function assertNoOrgSideEffects(pair, empCode) {
+      const { rows: [orgState] } = await observer.query(
+        `select (select count(*)::int from public.organization_persons where recruiter_id = $1::uuid or lower(employee_code) = lower($2)) as persons,
+                (select count(*)::int from public.organization_account_person_links where app_user_id = any($3::uuid[])) as links`,
+        [pair.recB, empCode, [pair.A.app, pair.B.app]],
+      );
+      assert.deepEqual(orgState, { persons: 0, links: 0 });
+    }
+
+    async function assertActiveTeamLeaderWithGrants(pair) {
+      const { rows: tlaRows } = await observer.query(
+        `select leader_app_user_id::text as uid, leader_recruiter_id::text as rid, is_current, valid_to::text
+           from public.direct_entry_team_leader_assignments
+          where team_id = $1::uuid`,
+        [pair.teamId],
+      );
+      assert.equal(tlaRows.length, 1);
+      assert.deepEqual(tlaRows[0], {
+        uid: pair.B.app,
+        rid: pair.recB,
+        is_current: true,
+        valid_to: null,
+      });
+
+      const { rows: sgRows } = await observer.query(
+        `select app_user_id::text as uid, scope_kind, team_id::text as tid, is_current
+           from public.direct_entry_scope_grants
+          where team_id = $1::uuid and scope_kind = 'team' and is_current = true`,
+        [pair.teamId],
+      );
+      assert.equal(sgRows.length, 1);
+      assert.deepEqual(sgRows[0], {
+        uid: pair.B.app,
+        scope_kind: "team",
+        tid: pair.teamId,
+        is_current: true,
+      });
+
+      const { rows: cgRows } = await observer.query(
+        `select app_user_id::text as uid, capability, is_current
+           from public.direct_entry_capability_grants
+          where app_user_id = $1::uuid and capability = 'team_manager_assign' and is_current = true`,
+        [pair.B.app],
+      );
+      assert.equal(cgRows.length, 1);
+      assert.deepEqual(cgRows[0], {
+        uid: pair.B.app,
+        capability: "team_manager_assign",
+        is_current: true,
+      });
+    }
+
+    // P2 Barrier 1 (Direct RPC-vs-RPC race, A.app < B.app)
+    {
+      const p2b1 = await seedP2AdminAndLegacyLeaderPair("b1");
+      const { code, params: createParams } = buildCreatePersonParamsForP2("b1", p2b1);
+
+      await beginServiceTx(w1);
+      await w1.query(DESIGNATE_TL_SQL, [
+        p2b1.A.auth,
+        p2b1.A.app,
+        p2b1.teamId,
+        p2b1.B.app,
+        null,
+        1,
+        "P2 Barrier 1 designate TL B",
+        nextUuid(),
+      ]);
+
+      await beginServiceTx(w2);
+      const p2 = settleInTx(w2, w2.query(CREATE_PERSON_SQL, createParams));
+      const waitInfo = await waitUntilBlocked(observer, "wp10-2-w2");
+      assert.equal(waitInfo.wait_event_type, "Lock");
+
+      await w1.query("commit");
+      const r2 = await p2;
+      assertNotDeadlock(r2, "P2 Barrier 1");
+      assert.equal(r2.status, "rejected");
+      assert.equal(r2.reason?.code, "PT409");
+      assert.match(r2.reason?.message ?? "", /RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT/);
+
+      await assertNoOrgSideEffects(p2b1, code);
+      await assertActiveTeamLeaderWithGrants(p2b1);
+      console.log(
+        `[PG18 P2 Barrier1] A=${p2b1.A.app} B=${p2b1.B.app} wait=${JSON.stringify(waitInfo)} winner=DESIGNATE_TL(B+SG+CG) loser=CREATE_PERSON(PT409:RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT rolled_back) deadlocks=0`,
+      );
+    }
+
+    // P2 Barrier 2 (Deterministic deadlock-trap proof matching T0's exact interleaving, A2.app < B2.app)
+    {
+      const p2b2 = await seedP2AdminAndLegacyLeaderPair("b2");
+      const { code, params: createParams } = buildCreatePersonParamsForP2("b2", p2b2);
+
+      await w1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await w1.query("select public.org_department__internal_lock_app_user($1::uuid)", [p2b2.B.app]);
+
+      await beginServiceTx(w2);
+      const p2 = settleInTx(
+        w2,
+        w2.query(DESIGNATE_TL_SQL, [
+          p2b2.A.auth,
+          p2b2.A.app,
+          p2b2.teamId,
+          p2b2.B.app,
+          null,
+          1,
+          "P2 Barrier 2 designate TL B2",
+          nextUuid(),
+        ]),
+      );
+
+      const waitInfo = await waitUntilBlocked(observer, "wp10-2-w2");
+      assert.equal(waitInfo.wait_event_type, "Lock");
+      assert.equal(waitInfo.locktype, "advisory", `Expected advisory lock wait on B2, got ${JSON.stringify(waitInfo)}`);
+
+      const { rows: nowaitRows } = await w1.query(
+        "select app_user_id::text as app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update nowait",
+        [p2b2.A.app],
+      );
+      assert.equal(nowaitRows.length, 1);
+      assert.equal(nowaitRows[0].app_user_id, p2b2.A.app);
+
+      await w1.query("savepoint sp_p2_b2");
+      await w1.query("set local role service_role");
+      await assert.rejects(
+        () => w1.query(CREATE_PERSON_SQL, createParams),
+        (err) => {
+          assert.notEqual(err?.code, "40P01", `Unexpected 40P01 in w1 create_person_admin: ${err?.message}`);
+          return err?.code === "PT409" && /RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT/.test(err?.message ?? "");
+        },
+      );
+      await w1.query("rollback to savepoint sp_p2_b2");
+      await w1.query("release savepoint sp_p2_b2");
+
+      await w1.query("commit");
+      const r2 = await p2;
+      assertNotDeadlock(r2, "P2 Barrier 2");
+      assert.equal(r2.status, "fulfilled", `Expected designate TL B2 to commit cleanly after w1 release, got ${r2.reason?.message}`);
+
+      await assertNoOrgSideEffects(p2b2, code);
+      await assertActiveTeamLeaderWithGrants(p2b2);
+      console.log(
+        `[PG18 P2 Barrier2] A2=${p2b2.A.app} B2=${p2b2.B.app} wait=${JSON.stringify(waitInfo)} nowaitA2=SUCCEEDED createPerson=PT409:RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT designate=FULFILLED(B2+SG+CG) deadlocks=0`,
+      );
+    }
+
+    // P2 Disable/Enable Tier-U parity (A3.app < B3.app)
+    {
+      const p2b3 = await seedP2AdminAndLegacyLeaderPair("b3");
+      const { code: codeDis, params: createParamsDis } = buildCreatePersonParamsForP2("b3_dis", p2b3);
+
+      // Disable Barrier 2: w1 holds advisory(B3), w2 disable_app_user blocks on advisory(B3),
+      // while w1 acquires A3 FOR UPDATE NOWAIT and create_person_admin(A3, recB3) raises PT409 RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT.
+      await w1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await w1.query("select public.org_department__internal_lock_app_user($1::uuid)", [p2b3.B.app]);
+
+      await beginServiceTx(w2);
+      const pDis = settleInTx(
+        w2,
+        w2.query(DISABLE_USER_SQL, [p2b3.A.auth, p2b3.A.app, p2b3.B.app, 1, "P2 disable B3", nextUuid()]),
+      );
+      const waitDis = await waitUntilBlocked(observer, "wp10-2-w2");
+      assert.equal(waitDis.wait_event_type, "Lock");
+      assert.equal(waitDis.locktype, "advisory", `Expected advisory lock wait on B3 during disable, got ${JSON.stringify(waitDis)}`);
+
+      const { rows: nowaitDisRows } = await w1.query(
+        "select app_user_id::text as app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update nowait",
+        [p2b3.A.app],
+      );
+      assert.equal(nowaitDisRows.length, 1);
+      assert.equal(nowaitDisRows[0].app_user_id, p2b3.A.app);
+
+      await w1.query("savepoint sp_p2_dis");
+      await w1.query("set local role service_role");
+      await assert.rejects(
+        () => w1.query(CREATE_PERSON_SQL, createParamsDis),
+        (err) => {
+          assert.notEqual(err?.code, "40P01", `Unexpected 40P01 in w1 create_person_admin during disable: ${err?.message}`);
+          return err?.code === "PT409" && /RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT/.test(err?.message ?? "");
+        },
+      );
+      await w1.query("rollback to savepoint sp_p2_dis");
+      await w1.query("release savepoint sp_p2_dis");
+
+      await w1.query("commit");
+      const rDis = await pDis;
+      assertNotDeadlock(rDis, "P2 Disable Barrier 2");
+      assert.equal(rDis.status, "fulfilled", `Expected disable B3 to commit cleanly, got ${rDis.reason?.message}`);
+      await assertNoOrgSideEffects(p2b3, codeDis);
+
+      const { rows: [bAfterDis] } = await observer.query(
+        `select u.enabled, u.version, l.verified, l.is_current, l.suspended_by_account_disable
+           from public.direct_entry_app_users u
+           join public.direct_entry_app_user_recruiter_links l on l.app_user_id = u.app_user_id
+          where u.app_user_id = $1::uuid and l.recruiter_id = $2::uuid`,
+        [p2b3.B.app, p2b3.recB],
+      );
+      assert.deepEqual(bAfterDis, {
+        enabled: false,
+        version: 2,
+        verified: true,
+        is_current: false,
+        suspended_by_account_disable: true,
+      });
+
+      // Enable Barrier 2: w1 holds advisory(B3), w2 enable_app_user blocks on advisory(B3),
+      // while w1 immediately acquires A3 FOR UPDATE NOWAIT.
+      await w1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await w1.query("select public.org_department__internal_lock_app_user($1::uuid)", [p2b3.B.app]);
+
+      await beginServiceTx(w2);
+      const pEn = settleInTx(
+        w2,
+        w2.query(ENABLE_USER_SQL, [p2b3.A.auth, p2b3.A.app, p2b3.B.app, 2, "P2 enable B3", nextUuid()]),
+      );
+      const waitEn = await waitUntilBlocked(observer, "wp10-2-w2");
+      assert.equal(waitEn.wait_event_type, "Lock");
+      assert.equal(waitEn.locktype, "advisory", `Expected advisory lock wait on B3 during enable, got ${JSON.stringify(waitEn)}`);
+
+      const { rows: nowaitEnRows } = await w1.query(
+        "select app_user_id::text as app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update nowait",
+        [p2b3.A.app],
+      );
+      assert.equal(nowaitEnRows.length, 1);
+      assert.equal(nowaitEnRows[0].app_user_id, p2b3.A.app);
+
+      await w1.query("commit");
+      const rEn = await pEn;
+      assertNotDeadlock(rEn, "P2 Enable Barrier 2");
+      assert.equal(rEn.status, "fulfilled", `Expected enable B3 to commit cleanly, got ${rEn.reason?.message}`);
+
+      // Enable Barrier 1 (RPC-vs-RPC): disable B3 again, then race enable_app_user(w1) vs create_person_admin(A3, recB3)(w2)
+      await serviceQuery(setup, DISABLE_USER_SQL, [p2b3.A.auth, p2b3.A.app, p2b3.B.app, 3, "P2 re-disable B3", nextUuid()]);
+      const { code: codeEnRace, params: createParamsEnRace } = buildCreatePersonParamsForP2("b3_en", p2b3);
+
+      await beginServiceTx(w1);
+      await w1.query(ENABLE_USER_SQL, [p2b3.A.auth, p2b3.A.app, p2b3.B.app, 4, "P2 enable race B3", nextUuid()]);
+
+      await beginServiceTx(w2);
+      const pEnRace = settleInTx(w2, w2.query(CREATE_PERSON_SQL, createParamsEnRace));
+      const waitEnRace = await waitUntilBlocked(observer, "wp10-2-w2");
+      assert.equal(waitEnRace.wait_event_type, "Lock");
+
+      await w1.query("commit");
+      const rEnRace = await pEnRace;
+      assertNotDeadlock(rEnRace, "P2 Enable Barrier 1");
+      assert.equal(rEnRace.status, "rejected");
+      assert.equal(rEnRace.reason?.code, "PT409");
+      assert.match(rEnRace.reason?.message ?? "", /RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT/);
+      await assertNoOrgSideEffects(p2b3, codeEnRace);
+
+      const { rows: [bAfterEn] } = await observer.query(
+        `select u.enabled, u.version, l.verified, l.is_current, l.suspended_by_account_disable
+           from public.direct_entry_app_users u
+           join public.direct_entry_app_user_recruiter_links l on l.app_user_id = u.app_user_id
+          where u.app_user_id = $1::uuid and l.recruiter_id = $2::uuid`,
+        [p2b3.B.app, p2b3.recB],
+      );
+      assert.deepEqual(bAfterEn, {
+        enabled: true,
+        version: 5,
+        verified: true,
+        is_current: true,
+        suspended_by_account_disable: false,
+      });
+
+      console.log(
+        `[PG18 P2 Disable/Enable] A3=${p2b3.A.app} B3=${p2b3.B.app} disableWait=${JSON.stringify(waitDis)} enableWait=${JSON.stringify(waitEn)} enableRaceWait=${JSON.stringify(waitEnRace)} nowaitA3=SUCCEEDED(disable+enable) createPerson=PT409:RECRUITER_ALREADY_LINKED_TO_OTHER_ACCOUNT deadlocks=0`,
       );
     }
   } finally {
