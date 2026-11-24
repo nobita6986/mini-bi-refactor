@@ -630,11 +630,13 @@ test("(#2) Full W2S2 Salary Advance WP1 acceptance across all 7 mandatory verifi
          values ($1::uuid, 'hrp', '2026-01-01', true)`,
         [person.recruiter],
       );
-      await db.query(
-        `insert into public.recruiter_team_memberships (recruiter_id, team_id, valid_from, is_current)
-         values ($1::uuid, $2::uuid, '2026-01-01', true)`,
-        [person.recruiter, TEAM_ALPHA],
-      );
+      if (person === PM_1 || person === PM_1B || person === PM_2) {
+        await db.query(
+          `insert into public.recruiter_team_memberships (recruiter_id, team_id, valid_from, is_current)
+           values ($1::uuid, $2::uuid, '2026-01-01', true)`,
+          [person.recruiter, TEAM_ALPHA],
+        );
+      }
       await db.query(
         `insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current)
          values ($1::uuid, $2::uuid, true, '2026-01-01', true)`,
