@@ -286,7 +286,7 @@ test(
         [PM.app],
       );
 
-      for (const person of [PM, ACCT]) {
+      for (const person of [PM]) {
         await setup.query(
           `insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active)
            values ($1::uuid, $2, $3, 'STAFF', true)`,
