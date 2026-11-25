@@ -298,7 +298,7 @@ test("AG-01, AG-02, AG-03, AG-15: compliance due/completed/on-time/late/pending/
   const { rows: assignCreated } = await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
-       'DAILY', true, 1, '23:59:59'::time, false, '2026-10-01'::date, null, $5
+       'DAILY', true, 1, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
     [BOD_ADMIN.auth, BOD_ADMIN.app, templateId, TEAM_A, KEY("assign_comp")],
   );
@@ -471,7 +471,7 @@ test("AG-04, AG-05, AG-06, AG-07, AG-08, AG-09, AG-11, AG-16, AG-17 & SEC-WR mat
   await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'USER_SET', null, null, $4::uuid[],
-       'DAILY', true, 5, '23:59:59'::time, false, '2026-01-01'::date, null, $5
+       'DAILY', true, 5, '23:59:59'::time, false, null::date, null::date, $5
      )`,
     [
       LEADER_A.auth,
@@ -484,7 +484,7 @@ test("AG-04, AG-05, AG-06, AG-07, AG-08, AG-09, AG-11, AG-16, AG-17 & SEC-WR mat
   await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null,
-       'DAILY', true, 5, '23:59:59'::time, false, '2026-01-01'::date, null, $5
+       'DAILY', true, 5, '23:59:59'::time, false, null::date, null::date, $5
      )`,
     [LEADER_B.auth, LEADER_B.app, templateId, STAFF_B1.app, KEY("assign_team_b")],
   );
@@ -1029,7 +1029,7 @@ test("contributions keyset pagination neither skips nor duplicates rows when a n
   const { rows: assignRows } = await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
-       'DAILY', true, 1, '23:59:59'::time, false, '2026-10-01'::date, null, $5
+       'DAILY', true, 1, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
     [BOD_ADMIN.auth, BOD_ADMIN.app, templateId, TEAM_B, KEY("assign_keyset")],
   );
@@ -1268,7 +1268,7 @@ test("HF: work_report_analytics_filter_options supports analytics-only actors, e
   await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
-       'DAILY', true, 0, '23:59:59'::time, false, '2026-01-01'::date, null, $5
+       'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
      )`,
     [BOD_ADMIN.auth, BOD_ADMIN.app, bOnlyTplId, TEAM_B, KEY("hf_b_only_assign")],
   );

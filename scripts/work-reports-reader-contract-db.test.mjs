@@ -438,7 +438,7 @@ test("ACL, Full Admin & Team Leader scoping, filter_options isolation, submitted
     const { rows: assignDirectRows } = await db.query(
       `select public.work_report_create_assignment(
          $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
-         'DAILY', true, 30, '23:59:59'::time, false, '2026-10-01'::date, null, $5
+         'DAILY', true, 30, '23:59:59'::time, false, null::date, null::date, $5
        ) as result`,
       [FULL_ADMIN.auth, FULL_ADMIN.app, tplDirect.templateId, TEAM_A, nextKey("asg_d")],
     );
@@ -447,7 +447,7 @@ test("ACL, Full Admin & Team Leader scoping, filter_options isolation, submitted
     const { rows: assignReviewRows } = await db.query(
       `select public.work_report_create_assignment(
          $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
-         'DAILY', true, 30, '23:59:59'::time, false, '2026-10-01'::date, null, $5
+         'DAILY', true, 30, '23:59:59'::time, false, null::date, null::date, $5
        ) as result`,
       [FULL_ADMIN.auth, FULL_ADMIN.app, tplReview.templateId, TEAM_A, nextKey("asg_r")],
     );

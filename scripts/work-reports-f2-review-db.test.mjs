@@ -203,10 +203,10 @@ async function createReviewTemplate({ requiresReview = true, templateCode = "F2_
   return { templateId: created.template_id, versionId: created.draft_version_id };
 }
 
-async function createAssignment(templateId, targetKind, teamId, userId, startDate) {
+async function createAssignment(templateId, targetKind, teamId, userId, _startDate) {
   const { rows } = await db.query(`select public.work_report_create_assignment(
     $1::uuid, $2::uuid, $3::uuid, $4::text, $5::uuid, $6::uuid, null::uuid[],
-    'DAILY', true, 0, '23:59:59'::time, false, $7::date, null::date, $8
+    'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $7
   ) as result`, [
     ADMIN.auth,
     ADMIN.app,
@@ -214,7 +214,6 @@ async function createAssignment(templateId, targetKind, teamId, userId, startDat
     targetKind,
     userId,
     teamId,
-    startDate,
     idempotencyKey("assignment"),
   ]);
   return rows[0].result.assignment_id;
