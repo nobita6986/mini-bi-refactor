@@ -46,6 +46,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/pr28-cleanup-preflight-concurrency.test.mjs",
   "scripts/wp10-2-immediate-org-assignment-concurrency.test.mjs",
   "scripts/wp10-cross-department-recruitment-db.test.mjs",
+  "scripts/wp10-3-leave-org-cutover-db.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
