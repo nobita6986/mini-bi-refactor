@@ -229,6 +229,7 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       "public.direct_entry_move_team_membership(uuid,uuid,uuid,uuid,date,integer,text,text)",
     ];
     const internalFns = [
+      "public.org_department__internal_person_is_active_in_org(uuid,timestamptz)",
       "public.org_department__internal_person_is_active_in_recruitment(uuid,timestamptz)",
       "public.org_department__internal_subject_has_blocking_team_assignment(uuid[],uuid[],date)",
       "public.org_department__internal_person_has_blocking_team_assignment(uuid,date)",
@@ -310,11 +311,17 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
 
     const TEAM_A = nextUuid();
     const TEAM_B = nextUuid();
+    const TEAM_MKT_TL = nextUuid();
+    const TEAM_G3_OK = nextUuid();
+    const TEAM_G3_BLK = nextUuid();
     await db.query(
       `insert into public.teams (team_id, code, display_name, active, version)
        values ($1::uuid, 'WP10_TEAM_A', 'Đội Tuyển Dụng A', true, 1),
-              ($2::uuid, 'WP10_TEAM_B', 'Đội Tuyển Dụng B', true, 1)`,
-      [TEAM_A, TEAM_B],
+              ($2::uuid, 'WP10_TEAM_B', 'Đội Tuyển Dụng B', true, 1),
+              ($3::uuid, 'WP10_TEAM_MKT_TL', 'Đội MKT TL', true, 1),
+              ($4::uuid, 'WP10_TEAM_G3_OK', 'Đội G3 OK', true, 1),
+              ($5::uuid, 'WP10_TEAM_G3_BLK', 'Đội G3 BLK', true, 1)`,
+      [TEAM_A, TEAM_B, TEAM_MKT_TL, TEAM_G3_OK, TEAM_G3_BLK],
     );
 
     // -------------------------------------------------------------------------
@@ -362,7 +369,7 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
     ])).rows[0].data;
     const recruiter1 = fromAcc1.recruiter_id;
 
-    // Non-RECRUITMENT Person (no G1/G2/G3 yet): creating plain HRP recruiter succeeds, then Team/Leader assignment is blocked!
+    // Cross-dept MARKETING Person (active Org + HRP recruiter): Team & Leader assignments NOW succeed!
     const accMkt = await seedPlainAccount(db, "wp10.mkt1", "Marketing 1");
     const createMktRes = (await serviceQuery(db, CREATE_PERSON_SQL, [
       OWNER.auth,
@@ -398,33 +405,30 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       "Plain HRP recruiter on Marketing person",
       nextUuid(),
     ])).rows[0].data.recruiter_id;
-    await assert.rejects(
-      () => serviceQuery(db, ASSIGN_TEAM_SQL, [
-        OWNER.auth, OWNER.app, recMkt, TEAM_A, null, 1, "Blocked team assign for Marketing", nextUuid(),
-      ]),
-      (err) => err?.code === "23514",
-    );
-    await assert.rejects(
-      () => serviceQuery(db, DESIGNATE_TL_SQL, [
-        OWNER.auth, OWNER.app, TEAM_B, accMkt.app, null, 1, "Blocked TL designate for Marketing", nextUuid(),
-      ]),
-      (err) => err?.code === "23514",
-    );
+    const mktTeamAssign = (await serviceQuery(db, ASSIGN_TEAM_SQL, [
+      OWNER.auth, OWNER.app, recMkt, TEAM_MKT_TL, null, 1, "Cross-dept team assign for Marketing", nextUuid(),
+    ])).rows[0].data;
+    assert.equal(mktTeamAssign.team_id, TEAM_MKT_TL);
+    const mktTlDesignate = (await serviceQuery(db, DESIGNATE_TL_SQL, [
+      OWNER.auth, OWNER.app, TEAM_MKT_TL, accMkt.app, null, 1, "Cross-dept TL designate for Marketing", nextUuid(),
+    ])).rows[0].data;
+    assert.equal(mktTlDesignate.leader_app_user_id, accMkt.app);
 
-    // Non-RECRUITMENT Person WITH pre-existing G2/G3 on Account (even without recruiter_id) MUST block create_personnel with PT409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT!
-    const accMktBlocked = await seedPlainAccount(db, "wp10.mktblk", "Marketing Blocked");
-    const createMktBlockedRes = (await serviceQuery(db, CREATE_PERSON_SQL, [
-      OWNER.auth, OWNER.app, "EMP-WP10-02B", accMktBlocked.name, "2026-10-01", deptByKey.MARKETING,
-      accMktBlocked.app, 1, null, "Onboard MARKETING for create_personnel guard", nextUuid(),
+    // Active MARKETING Person WITH pre-existing suspended G3 on Account now SUCCEEDS create_personnel,
+    // whereas an unassigned Person (no active Org dept) WITH suspended G3 STILL blocks with PT409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT!
+    const accMktAllowed = await seedPlainAccount(db, "wp10.mktg3ok", "Marketing G3 Allowed");
+    const createMktAllowedRes = (await serviceQuery(db, CREATE_PERSON_SQL, [
+      OWNER.auth, OWNER.app, "EMP-WP10-02B", accMktAllowed.name, "2026-10-01", deptByKey.MARKETING,
+      accMktAllowed.app, 1, null, "Onboard MARKETING for create_personnel cross-dept", nextUuid(),
       computeCreatePersonFingerprint(OWNER.app, {
         employee_code: "EMP-WP10-02B",
-        full_name: accMktBlocked.name,
+        full_name: accMktAllowed.name,
         joined_on: "2026-10-01",
         initial_department_ref: deptByKey.MARKETING,
-        account_ref: accMktBlocked.app,
+        account_ref: accMktAllowed.app,
         expected_account_version: 1,
         recruiter_id: null,
-        reason: "Onboard MARKETING for create_personnel guard",
+        reason: "Onboard MARKETING for create_personnel cross-dept",
       }),
     ])).rows[0].data;
     const dummyRec = nextUuid();
@@ -436,18 +440,57 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       `insert into public.direct_entry_team_leader_assignments
          (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, suspended_by_account_disable)
        values ($1::uuid, $2::uuid, $3::uuid, '2026-11-24', null, false, true)`,
-      [TEAM_B, accMktBlocked.app, dummyRec],
+      [TEAM_G3_OK, accMktAllowed.app, dummyRec],
+    );
+    const createMktG3Personnel = (await serviceQuery(db, CREATE_PERSONNEL_FROM_ACC_SQL, [
+      OWNER.auth,
+      OWNER.app,
+      accMktAllowed.app,
+      createMktAllowedRes.person.active_account_link.account_version,
+      accMktAllowed.login,
+      "STAFF",
+      null,
+      "Allowed create personnel when Account holds suspended G3 on active MARKETING Person",
+      nextUuid(),
+    ])).rows[0].data;
+    assert.ok(createMktG3Personnel.recruiter_id);
+
+    const accNoDeptBlocked = await seedPlainAccount(db, "wp10.nodeptblk", "No Dept Blocked");
+    const createNoDeptBlockedRes = (await serviceQuery(db, CREATE_PERSON_SQL, [
+      OWNER.auth, OWNER.app, "EMP-WP10-02C", accNoDeptBlocked.name, "2026-10-01", null,
+      accNoDeptBlocked.app, 1, null, "Onboard unassigned person for create_personnel guard", nextUuid(),
+      computeCreatePersonFingerprint(OWNER.app, {
+        employee_code: "EMP-WP10-02C",
+        full_name: accNoDeptBlocked.name,
+        joined_on: "2026-10-01",
+        initial_department_ref: null,
+        account_ref: accNoDeptBlocked.app,
+        expected_account_version: 1,
+        recruiter_id: null,
+        reason: "Onboard unassigned person for create_personnel guard",
+      }),
+    ])).rows[0].data;
+    const dummyRecNoDept = nextUuid();
+    await db.query(
+      "insert into public.recruiters (recruiter_id, display_name, active, version) values ($1::uuid, 'Dummy G3 Rec NoDept', true, 1)",
+      [dummyRecNoDept],
+    );
+    await db.query(
+      `insert into public.direct_entry_team_leader_assignments
+         (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, suspended_by_account_disable)
+       values ($1::uuid, $2::uuid, $3::uuid, '2026-11-24', null, false, true)`,
+      [TEAM_G3_BLK, accNoDeptBlocked.app, dummyRecNoDept],
     );
     await assert.rejects(
       () => serviceQuery(db, CREATE_PERSONNEL_FROM_ACC_SQL, [
         OWNER.auth,
         OWNER.app,
-        accMktBlocked.app,
-        createMktBlockedRes.person.active_account_link.account_version,
-        accMktBlocked.login,
+        accNoDeptBlocked.app,
+        createNoDeptBlockedRes.person.active_account_link.account_version,
+        accNoDeptBlocked.login,
         "STAFF",
         null,
-        "Blocked create personnel when Account holds suspended G3 on Marketing",
+        "Blocked create personnel when Account holds suspended G3 without active Org dept",
         nextUuid(),
       ]),
       (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
@@ -509,14 +552,11 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
     assert.deepEqual(tlDesignateReplay, tlDesignate1, "Cross-midnight TL replay must return Day-1 result");
     await setBusinessDate(db, "2026-11-24");
 
-    // Active G1 + G2 MUST block ALL Org exits / transitions:
-    // - transfer to CUSTOM_OPS (system_key IS NULL) — T0 #2
-    // - transfer to MARKETING
-    // - end RECRUITMENT membership
-    // - assign_accounting_member
-    // - update_person_admin(INACTIVE)
-    // - unlink_account_person_admin
-    const { rows: [p1Cur] } = await db.query(
+    // Active G1 + G2:
+    // - transfer to CUSTOM_OPS (system_key IS NULL), MARKETING, and ACCOUNTING NOW SUCCEED!
+    // - assign_accounting_member on active ACCOUNTING person with G1+G2 NOW SUCCEEDS!
+    // - end membership, update_person_admin(INACTIVE), and unlink_account_person_admin STILL BLOCK with PT409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT!
+    const { rows: [p1Init] } = await db.query(
       `select p.version as pv, l.link_id, u.version as av
          from public.organization_persons p
          join public.organization_account_person_links l on l.person_id = p.person_id and l.ended_at is null
@@ -524,52 +564,106 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
         where p.person_id = $1::uuid`,
       [personRec],
     );
-    await assert.rejects(
-      () => serviceQuery(db, TRANSFER_MEMBER_SQL, [
-        OWNER.auth, OWNER.app, personRec, customDeptId, p1Cur.pv, recMembershipId, "Transfer custom", nextUuid(),
-        computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
-          target_department_ref: customDeptId,
-          expected_person_version: p1Cur.pv,
-          expected_current_membership_id: recMembershipId,
-          reason: "Transfer custom",
-        }),
-      ]),
-      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
+    const trCust = (await serviceQuery(db, TRANSFER_MEMBER_SQL, [
+      OWNER.auth, OWNER.app, personRec, customDeptId, p1Init.pv, recMembershipId, "Transfer custom", nextUuid(),
+      computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
+        target_department_ref: customDeptId,
+        expected_person_version: p1Init.pv,
+        expected_current_membership_id: recMembershipId,
+        reason: "Transfer custom",
+      }),
+    ])).rows[0].data;
+    assert.equal(trCust.active_membership.department_id, customDeptId);
+
+    const trMkt = (await serviceQuery(db, TRANSFER_MEMBER_SQL, [
+      OWNER.auth, OWNER.app, personRec, deptByKey.MARKETING, trCust.person_version, trCust.active_membership.membership_id, "Transfer mkt", nextUuid(),
+      computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
+        target_department_ref: deptByKey.MARKETING,
+        expected_person_version: trCust.person_version,
+        expected_current_membership_id: trCust.active_membership.membership_id,
+        reason: "Transfer mkt",
+      }),
+    ])).rows[0].data;
+    assert.equal(trMkt.active_membership.department_id, deptByKey.MARKETING);
+
+    const trAcct = (await serviceQuery(db, TRANSFER_MEMBER_SQL, [
+      OWNER.auth, OWNER.app, personRec, deptByKey.ACCOUNTING, trMkt.person_version, trMkt.active_membership.membership_id, "Transfer accounting", nextUuid(),
+      computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
+        target_department_ref: deptByKey.ACCOUNTING,
+        expected_person_version: trMkt.person_version,
+        expected_current_membership_id: trMkt.active_membership.membership_id,
+        reason: "Transfer accounting",
+      }),
+    ])).rows[0].data;
+    assert.equal(trAcct.active_membership.department_id, deptByKey.ACCOUNTING);
+
+    // org_department_assign_accounting_member:
+    // - unlinked account with active G1 -> SUCCEEDS (no PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT)
+    // - linked active ACCOUNTING account with active G1+G2 (already synced by trAcct at pair_version=1) -> passes cross-domain guard & hits DEPARTMENT_MEMBERSHIP_OVERLAP (23P01), NOT PT409!
+    const accAcctLegacyG1 = await seedPlainAccount(db, "wp10.acctg1", "Acct Legacy G1");
+    const recAcctLegacyG1 = nextUuid();
+    await db.query(
+      `insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active, version)
+       values ($1::uuid, $2, $3, 'STAFF', true, 1)`,
+      [recAcctLegacyG1, accAcctLegacyG1.name, accAcctLegacyG1.login],
     );
-    await assert.rejects(
-      () => serviceQuery(db, TRANSFER_MEMBER_SQL, [
-        OWNER.auth, OWNER.app, personRec, deptByKey.MARKETING, p1Cur.pv, recMembershipId, "Transfer mkt", nextUuid(),
-        computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
-          target_department_ref: deptByKey.MARKETING,
-          expected_person_version: p1Cur.pv,
-          expected_current_membership_id: recMembershipId,
-          reason: "Transfer mkt",
-        }),
-      ]),
-      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
+    await db.query(
+      `insert into public.recruiter_provider_memberships (recruiter_id, provider_type, vendor_id, valid_from, is_current)
+       values ($1::uuid, 'hrp', null, '2026-01-01', true)`,
+      [recAcctLegacyG1],
     );
-    await assert.rejects(
-      () => serviceQuery(db, END_MEMBER_SQL, [
-        OWNER.auth, OWNER.app, deptByKey.RECRUITMENT, recMembershipId, p1Cur.pv, "End RECRUITMENT", nextUuid(),
-        computeEndPersonMemberFingerprint({
-          actor_app_user_id: OWNER.app,
-          department_id: deptByKey.RECRUITMENT,
-          membership_id: recMembershipId,
-          expected_person_version: p1Cur.pv,
-          reason: "End RECRUITMENT",
-        }),
-      ]),
-      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
+    await db.query(
+      `insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current)
+       values ($1::uuid, $2::uuid, true, '2026-11-24', true)`,
+      [accAcctLegacyG1.app, recAcctLegacyG1],
     );
+    await serviceQuery(db, ASSIGN_TEAM_SQL, [
+      OWNER.auth, OWNER.app, recAcctLegacyG1, TEAM_A, null, 1, "Legacy G1 before assign accounting", nextUuid(),
+    ]);
+    const acctAssignLegacy = (await serviceQuery(db, ASSIGN_ACCOUNTING_SQL, [
+      OWNER.auth, OWNER.app, accAcctLegacyG1.app, 0, null, "Assign Accounting with active G1", nextUuid(),
+      computeAssignAccountingMemberFingerprint({
+        actor_app_user_id: OWNER.app,
+        account_ref: accAcctLegacyG1.app,
+        expected_pair_version: 0,
+        effective_from: null,
+        reason: "Assign Accounting with active G1",
+      }),
+    ])).rows[0].data;
+    assert.equal(acctAssignLegacy.membership.department_id, deptByKey.ACCOUNTING);
+
     await assert.rejects(
       () => serviceQuery(db, ASSIGN_ACCOUNTING_SQL, [
-        OWNER.auth, OWNER.app, accRec.app, 0, null, "Assign Accounting", nextUuid(),
+        OWNER.auth, OWNER.app, accRec.app, 1, null, "Assign Accounting already synced on active ACCOUNTING person", nextUuid(),
         computeAssignAccountingMemberFingerprint({
           actor_app_user_id: OWNER.app,
           account_ref: accRec.app,
-          expected_pair_version: 0,
+          expected_pair_version: 1,
           effective_from: null,
-          reason: "Assign Accounting",
+          reason: "Assign Accounting already synced on active ACCOUNTING person",
+        }),
+      ]),
+      (err) => err?.code === "23P01" && err?.message?.includes("DEPARTMENT_MEMBERSHIP_OVERLAP"),
+    );
+
+    const { rows: [p1Cur] } = await db.query(
+      `select p.version as pv, l.link_id, u.version as av, m.membership_id as cur_mem_id, m.department_id as cur_dept_id
+         from public.organization_persons p
+         join public.organization_account_person_links l on l.person_id = p.person_id and l.ended_at is null
+         join public.direct_entry_app_users u on u.app_user_id = l.app_user_id
+         join public.organization_person_department_memberships m on m.person_id = p.person_id and m.ended_at is null
+        where p.person_id = $1::uuid`,
+      [personRec],
+    );
+    await assert.rejects(
+      () => serviceQuery(db, END_MEMBER_SQL, [
+        OWNER.auth, OWNER.app, p1Cur.cur_dept_id, p1Cur.cur_mem_id, p1Cur.pv, "End active org membership", nextUuid(),
+        computeEndPersonMemberFingerprint({
+          actor_app_user_id: OWNER.app,
+          department_id: p1Cur.cur_dept_id,
+          membership_id: p1Cur.cur_mem_id,
+          expected_person_version: p1Cur.pv,
+          reason: "End active org membership",
         }),
       ]),
       (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
@@ -602,10 +696,11 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
     );
 
     // -------------------------------------------------------------------------
-    // Test remaining two IS DISTINCT FROM 'RECRUITMENT' operations (T0 #2):
-    //   create_person_admin(..., CUSTOM_OPS, recruiter_id=recWithApiG1)
-    //   assign_person_member_admin(..., CUSTOM_OPS, personId)
-    // Seed unlinked recruiter with API-created G1 (via RECRUITMENT person -> or unlinked pre-WP10 legacy API G1)
+    // Test remaining cross-dept operations + fail-closed null-dept guard:
+    //   transfer(tmpUnassignedPerson, CUSTOM_OPS) -> SUCCEEDS
+    //   create_person_admin(..., null, recruiter_id=recCreateCustG1) -> BLOCKED (no active Org dept)
+    //   create_person_admin(..., CUSTOM_OPS, recruiter_id=recCreateCustG1) -> SUCCEEDS
+    //   assign_person_member_admin(..., CUSTOM_OPS, createdNullDept) -> SUCCEEDS (heals into active CUSTOM_OPS)
     // -------------------------------------------------------------------------
     const accCustG1 = await seedPlainAccount(db, "wp10.custg1", "Custom Guard G1");
     const recCustG1 = nextUuid();
@@ -619,7 +714,6 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
        values ($1::uuid, 'hrp', null, '2026-01-01', true)`,
       [recCustG1],
     );
-    // Create temporary RECRUITMENT Person to obtain genuine API G1, OR test assign_person_member_admin on unassigned person
     const tmpUnassignedPerson = (await serviceQuery(db, CREATE_PERSON_SQL, [
       OWNER.auth, OWNER.app, "EMP-WP10-UNASS", "Unassigned G1", "2026-10-01", deptByKey.RECRUITMENT, null, null, recCustG1,
       "Temp RECRUITMENT for API G1", nextUuid(),
@@ -635,24 +729,21 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       }),
     ])).rows[0].data.person;
     await serviceQuery(db, ASSIGN_TEAM_SQL, [
-      OWNER.auth, OWNER.app, recCustG1, TEAM_B, null, 2, "API G1 before detach check", nextUuid(),
+      OWNER.auth, OWNER.app, recCustG1, TEAM_B, null, 2, "API G1 before transfer check", nextUuid(),
     ]);
-    // Transfer tmpUnassignedPerson to customDeptId blocked by API G1!
-    await assert.rejects(
-      () => serviceQuery(db, TRANSFER_MEMBER_SQL, [
-        OWNER.auth, OWNER.app, tmpUnassignedPerson.person_id, customDeptId, tmpUnassignedPerson.version,
-        tmpUnassignedPerson.active_department.membership_id, "Transfer to custom blocked", nextUuid(),
-        computeTransferPersonDepartmentFingerprint(OWNER.app, tmpUnassignedPerson.person_id, {
-          target_department_ref: customDeptId,
-          expected_person_version: tmpUnassignedPerson.version,
-          expected_current_membership_id: tmpUnassignedPerson.active_department.membership_id,
-          reason: "Transfer to custom blocked",
-        }),
-      ]),
-      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
-    );
+    // Transfer tmpUnassignedPerson to customDeptId NOW SUCCEEDS with API G1!
+    const tmpTransferred = (await serviceQuery(db, TRANSFER_MEMBER_SQL, [
+      OWNER.auth, OWNER.app, tmpUnassignedPerson.person_id, customDeptId, tmpUnassignedPerson.version,
+      tmpUnassignedPerson.active_department.membership_id, "Transfer to custom allowed", nextUuid(),
+      computeTransferPersonDepartmentFingerprint(OWNER.app, tmpUnassignedPerson.person_id, {
+        target_department_ref: customDeptId,
+        expected_person_version: tmpUnassignedPerson.version,
+        expected_current_membership_id: tmpUnassignedPerson.active_department.membership_id,
+        reason: "Transfer to custom allowed",
+      }),
+    ])).rows[0].data;
+    assert.equal(tmpTransferred.active_membership.department_id, customDeptId);
 
-    // Build an unassigned Person linked to a Recruiter holding API G1 (detach simulated via pre-existing G1 fixture)
     const recCreateCustG1 = nextUuid();
     await db.query(
       `insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active, version)
@@ -668,26 +759,7 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       OWNER.auth, OWNER.app, recCreateCustG1, TEAM_B, null, 1, "API G1 on unmapped recruiter", nextUuid(),
     ]);
 
-    // (2a) create_person_admin into CUSTOM_OPS (system_key IS NULL) MUST block!
-    await assert.rejects(
-      () => serviceQuery(db, CREATE_PERSON_SQL, [
-        OWNER.auth, OWNER.app, "EMP-WP10-C1", "Create Custom G1", "2026-10-01", customDeptId, null, null, recCreateCustG1,
-        "Create into custom dept", nextUuid(),
-        computeCreatePersonFingerprint(OWNER.app, {
-          employee_code: "EMP-WP10-C1",
-          full_name: "Create Custom G1",
-          joined_on: "2026-10-01",
-          initial_department_ref: customDeptId,
-          account_ref: null,
-          expected_account_version: null,
-          recruiter_id: recCreateCustG1,
-          reason: "Create into custom dept",
-        }),
-      ]),
-      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
-    );
-
-    // Also verify create_person_admin with initial_department_id = null blocks when recruiter has G1
+    // Verify create_person_admin with initial_department_id = null STILL blocks when recruiter has G1
     await assert.rejects(
       () => serviceQuery(db, CREATE_PERSON_SQL, [
         OWNER.auth, OWNER.app, "EMP-WP10-C1N", "Null Dept Custom G1", "2026-10-01", null, null, null, recCreateCustG1,
@@ -706,7 +778,24 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
     );
 
-    // (2b) Defensive fixture: Person created without dept + drifted G1 -> assign_person_member_admin into CUSTOM_OPS blocks, into RECRUITMENT heals!
+    // (2a) create_person_admin into active CUSTOM_OPS (system_key IS NULL) NOW SUCCEEDS!
+    const createdCustomG1 = (await serviceQuery(db, CREATE_PERSON_SQL, [
+      OWNER.auth, OWNER.app, "EMP-WP10-C1", "Create Custom G1", "2026-10-01", customDeptId, null, null, recCreateCustG1,
+      "Create into custom dept", nextUuid(),
+      computeCreatePersonFingerprint(OWNER.app, {
+        employee_code: "EMP-WP10-C1",
+        full_name: "Create Custom G1",
+        joined_on: "2026-10-01",
+        initial_department_ref: customDeptId,
+        account_ref: null,
+        expected_account_version: null,
+        recruiter_id: recCreateCustG1,
+        reason: "Create into custom dept",
+      }),
+    ])).rows[0].data.person;
+    assert.equal(createdCustomG1.active_department.department_id, customDeptId);
+
+    // (2b) Defensive fixture: Person created without dept + drifted G1 -> assign_person_member_admin into active CUSTOM_OPS heals!
     const recAssignCustG1 = nextUuid();
     await db.query(
       `insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active, version)
@@ -737,30 +826,17 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
        values ($1::uuid, $2::uuid, '2026-11-24', true)`,
       [recAssignCustG1, TEAM_B],
     );
-    await assert.rejects(
-      () => serviceQuery(db, ASSIGN_MEMBER_SQL, [
-        OWNER.auth, OWNER.app, customDeptId, createdNullDept.person_id, createdNullDept.version, "Assign custom", nextUuid(),
-        computeAssignPersonMemberFingerprint({
-          actor_app_user_id: OWNER.app,
-          department_id: customDeptId,
-          person_id: createdNullDept.person_id,
-          expected_person_version: createdNullDept.version,
-          reason: "Assign custom",
-        }),
-      ]),
-      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
-    );
     const healedNullDept = (await serviceQuery(db, ASSIGN_MEMBER_SQL, [
-      OWNER.auth, OWNER.app, deptByKey.RECRUITMENT, createdNullDept.person_id, createdNullDept.version, "Heal to RECRUITMENT", nextUuid(),
+      OWNER.auth, OWNER.app, customDeptId, createdNullDept.person_id, createdNullDept.version, "Heal to CUSTOM_OPS", nextUuid(),
       computeAssignPersonMemberFingerprint({
         actor_app_user_id: OWNER.app,
-        department_id: deptByKey.RECRUITMENT,
+        department_id: customDeptId,
         person_id: createdNullDept.person_id,
         expected_person_version: createdNullDept.version,
-        reason: "Heal to RECRUITMENT",
+        reason: "Heal to CUSTOM_OPS",
       }),
     ])).rows[0].data;
-    assert.equal(healedNullDept.membership.department_id, deptByKey.RECRUITMENT);
+    assert.equal(healedNullDept.membership.department_id, customDeptId);
 
     // -------------------------------------------------------------------------
     // 3. Account Disable Suspension Ca S1..S3
@@ -768,25 +844,52 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
     await serviceQuery(db, DISABLE_USER_SQL, [
       OWNER.auth, OWNER.app, accRec.app, p1Cur.av, "Disable user suspends link and TL", nextUuid(),
     ]);
-    // Verify suspended link & TL STILL block transfer/end/deactivate/unlink!
+    // Verify transfer to active MARKETING succeeds while suspended, whereas end/INACTIVE/unlink STILL block!
+    const trSuspended = (await serviceQuery(db, TRANSFER_MEMBER_SQL, [
+      OWNER.auth, OWNER.app, personRec, deptByKey.MARKETING, p1Cur.pv, p1Cur.cur_mem_id, "Transfer while suspended", nextUuid(),
+      computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
+        target_department_ref: deptByKey.MARKETING,
+        expected_person_version: p1Cur.pv,
+        expected_current_membership_id: p1Cur.cur_mem_id,
+        reason: "Transfer while suspended",
+      }),
+    ])).rows[0].data;
+    assert.equal(trSuspended.active_membership.department_id, deptByKey.MARKETING);
     await assert.rejects(
-      () => serviceQuery(db, TRANSFER_MEMBER_SQL, [
-        OWNER.auth, OWNER.app, personRec, deptByKey.MARKETING, p1Cur.pv, recMembershipId, "Transfer while suspended", nextUuid(),
-        computeTransferPersonDepartmentFingerprint(OWNER.app, personRec, {
-          target_department_ref: deptByKey.MARKETING,
-          expected_person_version: p1Cur.pv,
-          expected_current_membership_id: recMembershipId,
-          reason: "Transfer while suspended",
+      () => serviceQuery(db, END_MEMBER_SQL, [
+        OWNER.auth, OWNER.app, deptByKey.MARKETING, trSuspended.active_membership.membership_id, trSuspended.person_version,
+        "End while suspended", nextUuid(),
+        computeEndPersonMemberFingerprint({
+          actor_app_user_id: OWNER.app,
+          department_id: deptByKey.MARKETING,
+          membership_id: trSuspended.active_membership.membership_id,
+          expected_person_version: trSuspended.person_version,
+          reason: "End while suspended",
+        }),
+      ]),
+      (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
+    );
+    await assert.rejects(
+      () => serviceQuery(db, UPDATE_PERSON_SQL, [
+        OWNER.auth, OWNER.app, personRec, trSuspended.person_version, "EMP-WP10-01", accRec.name, "2026-10-01",
+        "INACTIVE", "Deactivate while suspended", nextUuid(),
+        computeUpdatePersonFingerprint(OWNER.app, personRec, {
+          expected_person_version: trSuspended.person_version,
+          employee_code: "EMP-WP10-01",
+          full_name: accRec.name,
+          joined_on: "2026-10-01",
+          status: "INACTIVE",
+          reason: "Deactivate while suspended",
         }),
       ]),
       (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
     );
     await assert.rejects(
       () => serviceQuery(db, UNLINK_ACCOUNT_PERSON_SQL, [
-        OWNER.auth, OWNER.app, accRec.app, p1Cur.av + 1, p1Cur.pv, p1Cur.link_id, "Unlink while suspended", nextUuid(),
+        OWNER.auth, OWNER.app, accRec.app, p1Cur.av + 1, trSuspended.person_version, p1Cur.link_id, "Unlink while suspended", nextUuid(),
         computeUnlinkAccountPersonFingerprint(OWNER.app, accRec.app, {
           expected_account_version: p1Cur.av + 1,
-          expected_person_version: p1Cur.pv,
+          expected_person_version: trSuspended.person_version,
           expected_link_id: p1Cur.link_id,
           reason: "Unlink while suspended",
         }),
@@ -929,9 +1032,23 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
         reason: "Deactivate before link_recruiter",
       }),
     ]);
+    const recPrecLr = nextUuid();
+    await db.query(
+      `insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active, version)
+       values ($1::uuid, 'Legacy Prec LR G1', 'legacy.preclr', 'STAFF', true, 1)`,
+      [recPrecLr],
+    );
+    await db.query(
+      `insert into public.recruiter_provider_memberships (recruiter_id, provider_type, vendor_id, valid_from, is_current)
+       values ($1::uuid, 'hrp', null, '2026-01-01', true)`,
+      [recPrecLr],
+    );
+    await serviceQuery(db, ASSIGN_TEAM_SQL, [
+      OWNER.auth, OWNER.app, recPrecLr, TEAM_B, null, 1, "Legacy API G1 before link_recruiter prec", nextUuid(),
+    ]);
     await assert.rejects(
       () => serviceQuery(db, LINK_RECRUITER_SQL, [
-        OWNER.auth, OWNER.app, recCreateCustG1, 2, accInactiveLinked.app, accInactPerson.active_account_link.account_version,
+        OWNER.auth, OWNER.app, recPrecLr, 2, accInactiveLinked.app, accInactPerson.active_account_link.account_version,
         "Precedence test", nextUuid(),
       ]),
       (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
