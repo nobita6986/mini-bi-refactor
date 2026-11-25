@@ -748,7 +748,8 @@
   position: fixed;
   z-index: 50;
   inset: 0;
-  background: rgb(15 23 42 / 52%);
+  background: var(--backdrop, rgb(15 23 42 / 52%));
+  backdrop-filter: blur(7px);
 }
 
 .drawer {
@@ -764,13 +765,15 @@
   background: var(--surface);
   color: var(--foreground);
   padding: 24px;
-  box-shadow: -16px 0 40px rgb(15 23 42 / 18%);
+  box-shadow: var(--shadow-dialog, -16px 0 40px rgb(15 23 42 / 18%));
 }
 
 .drawerTitle {
   margin: 0;
-  font-size: 22px;
-  font-weight: 700;
+  color: var(--navy, var(--foreground));
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
 }
 
 .drawerDescription {
@@ -789,8 +792,9 @@
   display: grid;
   min-width: 0;
   gap: 6px;
-  font-size: 14px;
-  font-weight: 600;
+  color: var(--navy, var(--foreground));
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .field input,
@@ -803,10 +807,12 @@
   min-height: 44px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--surface);
+  background: var(--surface-muted, var(--surface));
   color: var(--foreground);
   padding: 8px 10px;
   font: inherit;
+  font-weight: 500;
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
 }
 
 .field output {
@@ -828,8 +834,10 @@
 .field select:focus-visible,
 .field textarea:focus-visible,
 .field :global([role="combobox"]):focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--ring) 55%, transparent);
-  outline-offset: 1px;
+  background: var(--surface);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+  outline: none;
 }
 
 .field textarea {
@@ -843,8 +851,9 @@
   gap: 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--background) 44%, var(--surface));
-  padding: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  padding: 16px;
 }
 
 .documentSection {
@@ -853,13 +862,19 @@
   gap: 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--background) 44%, var(--surface));
-  padding: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  padding: 16px;
 }
 
 .documentTitle {
   margin: 0;
-  font-size: 17px;
+  color: var(--navy, var(--foreground));
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border-bottom: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+  padding-bottom: 8px;
 }
 
 .documentList {
@@ -1839,23 +1854,29 @@
   margin: 0;
 }
 
-/* P1.7-H06: hop thoai tong hop "Hồ sơ NLĐ" gom CCCD hai mat + hợp đồng lao động. */
+/* P1.7-H06 & Editorial Royal Navy: hop thoai tong hop "Hồ sơ NLĐ" (2-column fixed-height centered modal on desktop). */
 .documentsDialog {
   box-sizing: border-box;
   position: fixed;
   z-index: 51;
-  inset: 0 0 0 auto;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   display: flex;
-  width: min(720px, 100vw);
-  max-width: 100vw;
+  width: min(1100px, 95vw);
+  max-width: 95vw;
+  height: min(760px, calc(100svh - 48px));
+  max-height: calc(100svh - 32px);
   flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
-  border-left: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--primary);
+  border-radius: 14px;
   background: var(--surface);
   color: var(--foreground);
   padding: 24px;
-  box-shadow: -16px 0 40px rgb(15 23 42 / 18%);
+  box-shadow: var(--shadow-dialog, 0 28px 100px rgba(4, 18, 66, 0.32));
 }
 
 .documentsDialogHeader {
@@ -1863,14 +1884,81 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.workerDetailGrid {
+  display: grid;
+  grid-template-columns: minmax(380px, 0.94fr) minmax(0, 1.06fr);
+  gap: 14px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted);
+  padding: 14px;
+}
+
+.workerDetailSidebar {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.workerDetailMain {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.documentSection .submissionMeta {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 8px 16px;
+  align-items: baseline;
+}
+
+.documentSection .submissionMeta dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.documentSection .submissionMeta dd {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+@media (max-width: 860px) {
+  .workerDetailGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 768px) {
+  .documentsDialog[data-ui-drawer-motion="right"] {
+    animation-name: ui-dialog-enter;
+  }
 }
 
 @media (max-width: 767px) {
   .documentsDialog {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: none;
     width: 100vw;
+    max-width: 100vw;
+    height: auto;
     max-height: 92dvh;
     border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-radius: 16px 16px 0 0;
     padding: 16px;
     padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
@@ -2033,18 +2121,33 @@
 .profileFieldList {
   display: grid;
   margin: 0;
-  gap: 4px;
-  grid-template-columns: minmax(140px, 200px) 1fr;
-  font-size: 13px;
+  gap: 8px 16px;
+  grid-template-columns: minmax(112px, 148px) minmax(0, 1fr);
+  align-items: baseline;
+  font-size: 13.5px;
+}
+
+.workerDetailSidebar .profileFieldList {
+  grid-template-columns: 116px minmax(0, 1fr);
+}
+
+.workerDetailMain .profileFieldList {
+  grid-template-columns: 180px minmax(0, 1fr);
 }
 
 .profileFieldList dt {
   color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
 }
 
 .profileFieldList dd {
   margin: 0;
-  overflow-wrap: anywhere;
+  color: var(--foreground);
+  font-weight: 500;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .profileNote {

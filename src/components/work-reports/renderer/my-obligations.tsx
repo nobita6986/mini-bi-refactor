@@ -1,8 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { StatusBadge } from "@/components/ui/badge";
+import { StatusBadge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DATA_TABLE_CLASS,
+  DATA_TABLE_HEAD_CLASS,
+  DATA_TABLE_ROW_CLASS,
+  DATA_TABLE_TD_CLASS,
+  DATA_TABLE_TH_CLASS,
+  DataTableContainer,
+  RowActionCluster,
+} from "@/components/ui/data-table";
 import { useNotify } from "@/components/ui/notify-provider";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { WorkReportFormRenderer, type WorkReportRendererDetail } from "./work-report-form-renderer";
@@ -58,6 +67,23 @@ function submissionStateLabel(item: Obligation): string {
   }
 }
 
+function submissionStateTone(item: Obligation): BadgeTone {
+  if (item.is_overdue) return "danger";
+  switch (item.submission_state) {
+    case "APPROVED":
+      return "success";
+    case "SUBMITTED":
+    case "PENDING_REVIEW":
+      return "info";
+    case "REJECTED":
+      return "danger";
+    case "DRAFT":
+      return "warning";
+    default:
+      return "neutral";
+  }
+}
+
 export function MyObligations({ history = false }: { history?: boolean }) {
   const notify = useNotify();
   const [items, setItems] = useState<Obligation[]>([]);
@@ -105,7 +131,7 @@ export function MyObligations({ history = false }: { history?: boolean }) {
     history ? isHistoryObligation(item) : isActionableObligation(item),
   );
 
-  return <div className="space-y-5">
+  return <div className="space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="text-sm text-muted">
         {history
@@ -117,32 +143,68 @@ export function MyObligations({ history = false }: { history?: boolean }) {
     {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
     {busy && items.length === 0 ? <p role="status" className="text-sm text-muted">Đang tải nghĩa vụ báo cáo…</p> : null}
     {!busy && visibleItems.length === 0 ? <StatusBanner>Không có báo cáo nào trong danh sách này.</StatusBanner> : null}
-    <ul className="divide-y divide-border rounded-xl border border-border">
-      {visibleItems.map((item) => <li key={item.obligation_id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="font-medium">{item.template_name}</p>
-            {item.is_overdue ? (
-              <StatusBadge tone="danger">Quá hạn</StatusBadge>
-            ) : item.submission_state === "REJECTED" ? (
-              <StatusBadge tone="warning">Cần nộp lại</StatusBadge>
-            ) : null}
-          </div>
-          <p className="mt-1 text-sm text-muted">Kỳ {item.period_key} · Hạn {new Date(item.due_at).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}</p>
-          <p className="mt-1 text-xs text-muted">{submissionStateLabel(item)}</p>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => void open(item)}>
-          {history || item.is_overdue
-            ? "Xem lịch sử"
-            : item.submission_state === "NOT_STARTED"
-              ? "Bắt đầu"
-              : item.submission_state === "REJECTED"
-                ? "Sửa & nộp lại"
-                : "Mở báo cáo"}
-        </Button>
-      </li>)}
-    </ul>
-    {selected ? <div className="rounded-xl border border-border bg-surface p-4 sm:p-6">
+    {visibleItems.length > 0 ? (
+      <DataTableContainer>
+        <table className={DATA_TABLE_CLASS}>
+          <thead className={DATA_TABLE_HEAD_CLASS}>
+            <tr>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Mẫu báo cáo</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Kỳ báo cáo</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Hạn nộp</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Trạng thái</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS + " text-right"}>Thao tác</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleItems.map((item) => (
+              <tr key={item.obligation_id} className={DATA_TABLE_ROW_CLASS}>
+                <td className={DATA_TABLE_TD_CLASS + " font-semibold text-[var(--navy)]"} data-card-header="true">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span>{item.template_name}</span>
+                    {item.is_overdue ? (
+                      <StatusBadge tone="danger">Quá hạn</StatusBadge>
+                    ) : item.submission_state === "REJECTED" ? (
+                      <StatusBadge tone="warning">Cần nộp lại</StatusBadge>
+                    ) : null}
+                  </div>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Kỳ báo cáo">
+                  <span className="inline-flex items-center rounded-md border border-border/80 bg-surface-muted/75 px-2 py-0.5 font-mono text-xs font-medium text-[var(--navy)]">
+                    Kỳ {item.period_key}
+                  </span>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " font-mono text-xs tabular-nums text-muted whitespace-nowrap"} data-label="Hạn nộp">
+                  {new Date(item.due_at).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Trạng thái">
+                  <StatusBadge tone={submissionStateTone(item)} dot>
+                    {submissionStateLabel(item)}
+                  </StatusBadge>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " text-right whitespace-nowrap"} data-card-actions="true">
+                  <RowActionCluster>
+                    <Button
+                      variant={history || item.is_overdue ? "secondary" : "soft"}
+                      size="sm"
+                      onClick={() => void open(item)}
+                    >
+                      {history || item.is_overdue
+                        ? "Xem lịch sử"
+                        : item.submission_state === "NOT_STARTED"
+                          ? "Bắt đầu"
+                          : item.submission_state === "REJECTED"
+                            ? "Sửa & nộp lại"
+                            : "Mở báo cáo"}
+                    </Button>
+                  </RowActionCluster>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </DataTableContainer>
+    ) : null}
+    {selected ? <div className="rounded-[22px] border border-border/80 bg-surface p-4 sm:p-6 shadow-[var(--shadow-card)]">
       <div className="mb-5 flex justify-end"><Button variant="ghost" size="sm" onClick={() => setSelected(null)}>Đóng</Button></div>
       <WorkReportFormRenderer key={selected.detail.obligation.obligation_id} detail={{ ...selected.detail,
         obligation: { ...selected.detail.obligation, period_start_date: selected.periodStart, period_end_date: selected.periodEnd } }}

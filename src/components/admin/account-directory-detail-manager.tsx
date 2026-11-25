@@ -1145,16 +1145,16 @@ export function AccountDirectoryDetailManager({
                 </Button>
               </div>
             </div>
-            <dl className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-3">
+            <dl className="grid grid-cols-1 gap-4 rounded-2xl border border-border/80 bg-surface-muted/40 p-4 text-sm sm:grid-cols-3">
               <div>
                 <dt className="text-xs font-medium text-muted">Tên hiển thị</dt>
-                <dd className="mt-1 font-medium text-foreground">
+                <dd className="mt-1 font-semibold text-[var(--navy)]">
                   {account.display_name ?? entry.display_name}
                 </dd>
               </div>
               <div>
                 <dt className="text-xs font-medium text-muted">Tên đăng nhập</dt>
-                <dd className="mt-1 font-mono text-xs text-foreground">
+                <dd className="mt-1 font-mono text-xs font-medium text-[var(--navy)]">
                   {account.login_id ?? "—"}
                 </dd>
               </div>
@@ -1244,7 +1244,7 @@ export function AccountDirectoryDetailManager({
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button type="button" variant="secondary" disabled={busy} onClick={closeDialog}>
                 Đóng
               </Button>
@@ -1308,7 +1308,7 @@ export function AccountDirectoryDetailManager({
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button type="button" variant="secondary" disabled={busy} onClick={closeDialog}>
                 Đóng
               </Button>
@@ -1381,7 +1381,7 @@ export function AccountDirectoryDetailManager({
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button type="button" variant="secondary" disabled={busy} onClick={closeDialog}>
                 Đóng
               </Button>
@@ -1444,12 +1444,18 @@ export function AccountDirectoryDetailManager({
 
             <fieldset
               disabled={busy || conflictLocked || pendingCompleteKey !== null}
-              className="space-y-2 rounded-lg border border-border bg-surface-muted/30 p-3"
+              className="space-y-2 rounded-2xl border border-border/80 bg-surface-muted/35 p-3.5"
             >
-              <legend className="px-1 text-sm font-medium text-foreground">
+              <legend className="px-1 text-sm font-semibold text-[var(--navy)]">
                 Chọn cách hoàn thiện hồ sơ nhân viên
               </legend>
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-md p-1.5 text-sm hover:bg-surface">
+              <label
+                className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 text-sm transition-colors ${
+                  completeMode === "create"
+                    ? "border-primary bg-[var(--selected-bg)]"
+                    : "border-transparent hover:border-border/80 hover:bg-surface"
+                }`}
+              >
                 <input
                   type="radio"
                   name="complete-profile-mode"
@@ -1465,7 +1471,7 @@ export function AccountDirectoryDetailManager({
                   className="mt-1 h-4 w-4 accent-primary"
                 />
                 <span>
-                  <span className="block font-medium text-foreground">
+                  <span className="block font-semibold text-[var(--navy)]">
                     Tạo hồ sơ nhân viên mới &amp; chọn phòng ban
                   </span>
                   <span className="block text-xs text-muted">
@@ -1476,7 +1482,13 @@ export function AccountDirectoryDetailManager({
                 </span>
               </label>
 
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-md p-1.5 text-sm hover:bg-surface">
+              <label
+                className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-2.5 text-sm transition-colors ${
+                  completeMode === "link-existing"
+                    ? "border-primary bg-[var(--selected-bg)]"
+                    : "border-transparent hover:border-border/80 hover:bg-surface"
+                }`}
+              >
                 <input
                   type="radio"
                   name="complete-profile-mode"
@@ -1492,7 +1504,7 @@ export function AccountDirectoryDetailManager({
                   className="mt-1 h-4 w-4 accent-primary"
                 />
                 <span>
-                  <span className="block font-medium text-foreground">
+                  <span className="block font-semibold text-[var(--navy)]">
                     Gắn với hồ sơ nhân viên đã có (chưa có tài khoản)
                   </span>
                   <span className="block text-xs text-muted">
@@ -1589,8 +1601,8 @@ export function AccountDirectoryDetailManager({
                 />
 
                 {selectedExistingPerson ? (
-                  <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm">
-                    <p className="font-medium text-foreground">
+                  <div className="rounded-2xl border border-primary/35 bg-[var(--selected-bg)] p-3.5 text-sm">
+                    <p className="font-semibold text-[var(--navy)]">
                       Hồ sơ đã chọn: {selectedExistingPerson.full_name} (
                       <span className="font-mono text-xs">{selectedExistingPerson.employee_code}</span>)
                     </p>
@@ -1631,7 +1643,7 @@ export function AccountDirectoryDetailManager({
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button type="button" variant="secondary" disabled={busy} onClick={closeDialog}>
                 Đóng
               </Button>

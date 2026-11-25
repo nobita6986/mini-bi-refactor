@@ -18,7 +18,7 @@ export function ReportTableContainer({
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-xl border border-border bg-surface shadow-2xs",
+        "overflow-hidden rounded-[22px] border border-border/80 bg-surface shadow-[var(--shadow-card)]",
         className,
       )}
     >
@@ -37,12 +37,12 @@ export const REPORT_TABLE_CLASS =
   "r22-report-table w-full border-collapse text-left text-xs sm:text-sm";
 
 export const REPORT_TABLE_HEAD_CLASS =
-  "border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted";
+  "border-b border-border bg-surface-muted text-xs font-bold uppercase tracking-wider text-[var(--navy)]";
 
 export const REPORT_TABLE_TH_CLASS =
-  "px-3 py-2.5 font-semibold whitespace-nowrap";
+  "px-3.5 py-2.5 font-bold whitespace-nowrap";
 
 export const REPORT_TABLE_ROW_CLASS =
-  "border-b border-border/70 last:border-b-0 transition-colors hover:bg-surface-hover";
+  "border-b border-border/65 last:border-b-0 transition-colors hover:bg-[var(--selected-bg)]";
 
-export const REPORT_TABLE_TD_CLASS = "px-3 py-2 align-middle";
+export const REPORT_TABLE_TD_CLASS = "px-3.5 py-2.5 align-middle";

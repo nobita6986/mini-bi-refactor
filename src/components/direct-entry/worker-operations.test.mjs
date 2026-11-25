@@ -283,7 +283,7 @@ test("W06: a11y - filter co label, dialog focus/escape khong mutation", () => {
 });
 
 test("W06 hotfix: modal opaque, correctly layered, scroll body only, theme tokens are real", () => {
-  assert.match(source, /Dialog\.Overlay className="fixed inset-0 z-40 bg-black\/50"/);
+  assert.match(source, /Dialog\.Overlay className="fixed inset-0 z-40 (?:bg-black\/50|bg-\[var\(--backdrop\)\][^"]*)"/);
   assert.match(source, /z-50 flex max-h-\[calc\(100dvh-2rem\)\]/);
   assert.match(source, /overflow-hidden rounded-2xl border border-border bg-surface/);
   assert.match(source, /min-h-0 flex-1 space-y-4 overflow-y-auto/);
@@ -565,7 +565,7 @@ test("T1A Hotfix Issue #2: WorkerTable RowActionCluster omits read-only explanat
   assert.match(tableSource, /\{!canDirectEdit && cta\.show \? \(/);
   assert.match(tableSource, /Đề xuất thay đổi/);
   assert.match(tableSource, /\{canDirectEdit \? \(/);
-  assert.match(tableSource, /Sửa trực tiếp/);
+  assert.match(tableSource, /Sửa (?:trực tiếp|thông tin)/);
   assert.doesNotMatch(
     tableSource,
     /cta\.message/,

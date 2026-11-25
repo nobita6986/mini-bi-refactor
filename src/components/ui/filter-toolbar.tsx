@@ -19,7 +19,7 @@ export function FilterToolbar({
     <section
       data-testid={dataTestId}
       className={cn(
-        "rounded-xl border border-border bg-surface p-3.5 shadow-2xs space-y-2.5",
+        "rounded-[22px] border border-border/80 bg-surface px-4 py-3.5 shadow-[var(--shadow-card)] space-y-2.5",
         className,
       )}
     >
@@ -32,7 +32,7 @@ export function FilterToolbar({
         ) : null}
       </div>
       {summary ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2.5 text-xs text-muted">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/75 pt-2.5 text-xs text-muted">
           {summary}
         </div>
       ) : null}

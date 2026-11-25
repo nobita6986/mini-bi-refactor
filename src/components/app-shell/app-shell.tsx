@@ -133,15 +133,15 @@ export async function AppShell({
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
-      <header className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur print:hidden">
-        <div className="mx-auto flex min-h-14 w-full max-w-6xl flex-wrap items-center gap-3 px-4 py-2 sm:px-6">
+      <header className="sticky top-0 z-20 border-b border-border/60 bg-background/88 backdrop-blur-md print:hidden">
+        <div className="mx-auto flex min-h-14 w-full max-w-6xl flex-wrap items-center gap-3 px-4 py-2.5 sm:px-6">
           {/* Mobile: hamburger trigger */}
           <MobileNav items={mobileMenuItems} />
 
           {/* Logo HR Partner */}
           <Link
             href="/dashboard"
-            className="inline-flex items-center gap-2 text-sm font-semibold text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded"
+            className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-[var(--navy)] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-full py-0.5"
           >
             <Image src="/brand/hrpartner-logo.png" alt="HR Partner" width={2166} height={1706} className="h-9 w-auto" />
             <span>HR Partner</span>

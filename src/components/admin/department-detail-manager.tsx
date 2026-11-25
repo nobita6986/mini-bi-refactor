@@ -692,7 +692,7 @@ function DepartmentGovernanceHeaderCard({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-xl font-bold text-foreground">{department.name}</h1>
+              <h1 className="text-xl font-bold tracking-tight text-[var(--navy)]">{department.name}</h1>
               <StatusBadge tone={isCustom ? "info" : "neutral"}>
                 {isCustom ? "Phòng tùy chỉnh" : "Phòng mặc định hệ thống"}
               </StatusBadge>
@@ -713,7 +713,7 @@ function DepartmentGovernanceHeaderCard({
             </Button>
             {isCustom ? (
               <Button
-                variant={department.is_active ? "secondary" : "primary"}
+                variant={department.is_active ? "secondary" : "soft"}
                 size="sm"
                 disabled={dialogLocked}
                 onClick={openToggle}
@@ -725,15 +725,15 @@ function DepartmentGovernanceHeaderCard({
         </div>
 
         <div className="grid gap-3 text-sm sm:grid-cols-2">
-          <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
+          <div className="rounded-2xl border border-border/80 bg-surface-muted/40 p-3.5">
             <div className="text-xs text-muted">Quy mô hiện tại</div>
-            <div className="mt-1 font-medium text-foreground tabular-nums">
+            <div className="mt-1 font-semibold text-[var(--navy)] tabular-nums">
               {departmentScaleSummary(department)}
             </div>
           </div>
-          <div className="rounded-lg border border-border bg-surface-muted/40 p-3">
+          <div className="rounded-2xl border border-border/80 bg-surface-muted/40 p-3.5">
             <div className="text-xs text-muted">Trưởng phòng (HEAD) hiện tại</div>
-            <div className="mt-1 font-medium text-foreground">
+            <div className="mt-1 font-semibold text-[var(--navy)]">
               {department.active_head ? (
                 <Link
                   href={`/admin/organization/persons/${encodeURIComponent(department.active_head.person_id)}`}
@@ -841,7 +841,7 @@ function DepartmentGovernanceHeaderCard({
               </Alert>
             ) : null}
 
-            <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button
                 variant="secondary"
                 size="md"
@@ -1410,7 +1410,7 @@ function DepartmentHeadManagementSection({
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-surface-muted/40 p-4 text-sm">
+        <div className="rounded-2xl border border-border/80 bg-surface-muted/40 p-4 text-sm">
           <div className="text-xs font-medium uppercase tracking-wide text-muted">
             Trưởng phòng hiện hành
           </div>
@@ -1559,16 +1559,16 @@ function DepartmentHeadManagementSection({
                       Trưởng phòng phải là nhân sự đang hoạt động (ACTIVE) thuộc chính phòng ban này. Hãy thêm nhân sự vào phòng trước khi bổ nhiệm.
                     </Alert>
                   ) : candidatesState.kind === "ready" ? (
-                    <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-border p-2">
+                    <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-2xl border border-border/80 bg-surface-muted/20 p-2.5">
                       {candidatesState.items.map((member) => {
                         const selected = selectedPersonId === member.person_id;
                         return (
                           <label
                             key={member.membership_id}
-                            className={`flex cursor-pointer items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm ${
+                            className={`flex cursor-pointer items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm transition-colors ${
                               selected
-                                ? "border-primary bg-primary/10"
-                                : "border-border/70 bg-surface hover:border-primary/40"
+                                ? "border-primary bg-[var(--selected-bg)]"
+                                : "border-border/80 bg-surface hover:border-primary/40"
                             }`}
                           >
                             <span className="flex items-center gap-2">
@@ -1577,6 +1577,7 @@ function DepartmentHeadManagementSection({
                                 name="department-head-candidate"
                                 checked={selected}
                                 disabled={fieldsLocked}
+                                className="h-4 w-4 accent-primary"
                                 onChange={() => {
                                   if (fieldsLocked) return;
                                   setPendingIntent(null);
@@ -1584,7 +1585,7 @@ function DepartmentHeadManagementSection({
                                 }}
                               />
                               <span>
-                                <span className="font-medium text-foreground">{member.full_name}</span>{" "}
+                                <span className="font-semibold text-[var(--navy)]">{member.full_name}</span>{" "}
                                 <span className="font-mono text-xs text-muted">
                                   ({member.employee_code})
                                 </span>
@@ -1645,7 +1646,7 @@ function DepartmentHeadManagementSection({
               </Alert>
             ) : null}
 
-            <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button
                 variant="secondary"
                 size="md"
@@ -2559,7 +2560,7 @@ function DepartmentPersonMembershipsSection({
               </Alert>
             ) : null}
 
-            <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button
                 variant="secondary"
                 size="md"
@@ -3113,11 +3114,11 @@ function AccountingDepartmentMembershipsSection({
           title="Quyền mặc định Phòng Kế toán (chỉ đọc)"
           description="Chính sách cố định theo phòng ban hệ thống; áp dụng tự động khi tư cách thành viên đang hiệu lực."
         />
-        <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-border bg-surface-muted/60 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2.5 rounded-2xl border border-border/80 bg-surface-muted/50 px-4 py-3">
           <StatusBadge tone="primary" dot>
             Chính sách cố định
           </StatusBadge>
-          <span className="text-sm font-semibold text-foreground">
+          <span className="text-sm font-semibold text-[var(--navy)]">
             {departmentDefaultPolicyDescription(department)}
           </span>
         </div>
@@ -3146,13 +3147,13 @@ function AccountingDepartmentMembershipsSection({
           className="mb-4"
           actions={
             <div
-              className="flex flex-wrap items-center gap-1.5"
+              className="inline-flex flex-wrap items-center gap-1 rounded-full border border-border/80 bg-surface p-1 shadow-2xs"
               role="group"
               aria-label="Chế độ xem lịch sử thành viên"
             >
               <Button
-                variant={!includeHistory ? "soft" : "secondary"}
-                size="md"
+                variant={!includeHistory ? "primary" : "ghost"}
+                size="sm"
                 aria-pressed={!includeHistory}
                 onClick={() => {
                   setIncludeHistory(false);
@@ -3162,8 +3163,8 @@ function AccountingDepartmentMembershipsSection({
                 Hiện tại &amp; sắp hiệu lực
               </Button>
               <Button
-                variant={includeHistory ? "soft" : "secondary"}
-                size="md"
+                variant={includeHistory ? "primary" : "ghost"}
+                size="sm"
                 aria-pressed={includeHistory}
                 onClick={() => {
                   setIncludeHistory(true);
@@ -3277,7 +3278,7 @@ function AccountingDepartmentMembershipsSection({
                       <tr key={membership.membership_id} className={DATA_TABLE_ROW_CLASS}>
                         <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-semibold text-foreground">
+                            <span className="font-semibold text-[var(--navy)]">
                               {membership.display_name}
                             </span>
                             {!membership.account_enabled ? (
@@ -3561,7 +3562,7 @@ function AccountingDepartmentMembershipsSection({
             </Alert>
           ) : null}
 
-          <div className="flex flex-wrap justify-end gap-2 pt-2">
+          <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
             <Button
               variant="secondary"
               size="md"
@@ -3689,7 +3690,7 @@ function AccountingDepartmentMembershipsSection({
               </Alert>
             ) : null}
 
-            <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button
                 variant="secondary"
                 size="md"

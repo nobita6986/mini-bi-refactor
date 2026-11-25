@@ -25,11 +25,11 @@ import {
 
 const TOKEN_KEYS = ["bg", "fg", "surface", "muted", "border", "primary", "secondary", "accent", "ring", "tooltip", "onPrimary"];
 
-test("F1. registry có đúng 5 theme và ID không trùng", () => {
-  assert.equal(THEMES.length, 5);
-  assert.equal(new Set(THEMES.map((t) => t.id)).size, 5);
+test("F1. registry có đúng 6 theme và ID không trùng", () => {
+  assert.equal(THEMES.length, 6);
+  assert.equal(new Set(THEMES.map((t) => t.id)).size, 6);
   const ids = THEMES.map((t) => t.id);
-  assert.deepEqual(ids, ["hr-partner", "ocean-trust", "emerald-growth", "violet-future", "executive-gold"]);
+  assert.deepEqual(ids, ["hr-partner", "royal-navy", "ocean-trust", "emerald-growth", "violet-future", "executive-gold"]);
 });
 
 test("F1b. mỗi theme có đủ light+dark token và 8 chart seed", () => {
@@ -114,7 +114,8 @@ test("F8. đổi theme chỉ đổi màu, không đổi value/chart data", () =>
 });
 
 test("resolveColor: chart slot -> seed đúng, semantic -> cố định", () => {
-  assert.equal(resolveColor("chart-1", getTheme("hr-partner"), "light"), "#3745A5");
+  assert.equal(resolveColor("chart-1", getTheme("hr-partner"), "light"), "#C2410C");
+  assert.equal(resolveColor("chart-1", getTheme("royal-navy"), "light"), "#3745A5");
   assert.equal(resolveColor("chart-1", getTheme("hr-partner"), "dark"), getTheme("hr-partner").dark.chart[0]);
   assert.equal(resolveColor("chart-8", getTheme("executive-gold"), "light"), "#64748B");
 });

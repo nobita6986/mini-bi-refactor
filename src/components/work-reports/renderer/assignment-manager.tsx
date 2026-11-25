@@ -725,7 +725,7 @@ export function AssignmentManager({
       {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
 
       {activeSubView === "assignments" && showCreateForm ? (
-        <Card className="max-w-5xl">
+        <Card className="w-full">
           <CardHeader
             title="Tạo đợt giao"
             description="Thiết lập mẫu báo cáo, đối tượng/nhóm nhận, chu kỳ và hạn nộp. Khi đợt giao có hiệu lực trong ngày, hệ thống tự động phát sinh ngay nghĩa vụ kỳ hiện tại cho nhân viên."
@@ -1193,120 +1193,181 @@ export function AssignmentManager({
           {trackingLoadedTeamId !== teamId ? (
             <p role="status" className="text-sm text-muted">Đang tải danh sách đợt giao…</p>
           ) : filteredAssignments.length === 0 ? (
-            <p className="rounded-lg border border-border p-4 text-sm text-muted">
+            <p className="rounded-[22px] border border-border/80 bg-surface p-4 text-sm text-muted shadow-[var(--shadow-card)]">
               Không có đợt giao nào ở trạng thái {stateLabel(stateFilter)}.
             </p>
           ) : (
-            <div className="space-y-3">
-              {filteredAssignments.map((assignment) => {
-                const incompleteCount = assignment.not_started_count + assignment.draft_count;
-                const isSelected = selectedAssignment?.assignment_id === assignment.assignment_id;
-                return (
-                  <article
-                    key={assignment.assignment_id}
-                    className={
-                      "rounded-xl border bg-surface p-4 transition-colors " +
-                      (isSelected ? "border-primary ring-1 ring-primary/30" : "border-border")
-                    }
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-semibold">{assignment.template_name}</h3>
-                          <StatusBadge
-                            tone={
-                              assignment.state === "ACTIVE"
-                                ? "success"
-                                : assignment.state === "PAUSED"
-                                  ? "warning"
-                                  : "neutral"
+            <div className="space-y-4">
+              <div className="relative overflow-hidden rounded-xl [border-radius:22px] border border-border/80 bg-surface shadow-[var(--shadow-card)]">
+                <div className="relative overflow-x-auto">
+                  <table className="r22-card-table w-full border-collapse text-left text-sm">
+                    <thead className="border-b border-border bg-surface-muted text-xs font-bold uppercase tracking-wider text-[var(--navy)]">
+                      <tr>
+                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Mẫu báo cáo & Đối tượng nhận</th>
+                        <th scope="col" className="px-3.5 py-3 text-center font-bold whitespace-nowrap">Trạng thái</th>
+                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Đã nộp</th>
+                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Chưa hoàn thành</th>
+                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Quá hạn chưa nộp</th>
+                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Tổng nghĩa vụ</th>
+                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Miễn / huỷ</th>
+                        <th scope="col" className="px-3.5 py-3 text-right font-bold whitespace-nowrap">Thao tác</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredAssignments.map((assignment) => {
+                        const incompleteCount = assignment.not_started_count + assignment.draft_count;
+                        const overdueCount = assignment.overdue_count ?? 0;
+                        const exemptCancelCount = assignment.exempted_count + assignment.cancelled_count;
+                        const isSelected = selectedAssignment?.assignment_id === assignment.assignment_id;
+                        return (
+                          <tr
+                            key={assignment.assignment_id}
+                            className={
+                              "border-b border-border/65 last:border-b-0 transition-colors hover:bg-[var(--selected-bg)] align-middle " +
+                              (isSelected ? "bg-[var(--selected-bg)]" : "")
                             }
                           >
-                            {stateLabel(assignment.state)}
-                          </StatusBadge>
-                        </div>
-                        <p className="text-sm text-muted">
-                          {targetKindLabel(assignment.target_kind)}: {assignment.target_label}
-                          {typeof assignment.target_member_count === "number"
-                            ? ` (${assignment.target_member_count} thành viên)`
-                            : ""}{" "}
-                          · Tần suất: {frequencyLabel(assignment.frequency)}
-                        </p>
-                        <p className="text-xs text-muted">
-                          Từ {assignment.effective_from}
-                          {assignment.effective_to ? ` đến ${assignment.effective_to}` : " · không giới hạn ngày kết thúc"}
-                          {typeof assignment.due_time_local === "string"
-                            ? ` · Hạn nộp +${assignment.due_day_offset ?? 0} ngày lúc ${assignment.due_time_local}`
-                            : ""}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={isSelected ? "primary" : "outline"}
-                          onClick={() =>
-                            setSelectedAssignmentId(
-                              isSelected ? null : assignment.assignment_id,
-                            )
-                          }
-                        >
-                          {isSelected ? "Đóng chi tiết" : "Xem chi tiết"}
-                        </Button>
-                        {assignment.state === "ACTIVE" ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            disabled={trackingBusy}
-                            onClick={() => requestUpdateAssignment(assignment, "PAUSED")}
-                          >
-                            Tạm dừng
-                          </Button>
-                        ) : null}
-                        {assignment.state === "PAUSED" ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            disabled={trackingBusy}
-                            onClick={() => requestUpdateAssignment(assignment, "ACTIVE")}
-                          >
-                            Kích hoạt lại
-                          </Button>
-                        ) : null}
-                        {assignment.state !== "REVOKED" ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            disabled={trackingBusy}
-                            onClick={() => requestUpdateAssignment(assignment, "REVOKED")}
-                          >
-                            Thu hồi
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
+                            <td className="px-3.5 py-3 align-middle text-foreground" data-card-header="true">
+                              <div className="font-semibold text-[var(--navy)]">{assignment.template_name}</div>
+                              <div className="mt-0.5 text-xs font-medium text-foreground/85">
+                                {targetKindLabel(assignment.target_kind)}: {assignment.target_label}
+                                {typeof assignment.target_member_count === "number"
+                                  ? ` (${assignment.target_member_count} thành viên)`
+                                  : ""}{" "}
+                                · Tần suất: {frequencyLabel(assignment.frequency)}
+                              </div>
+                              <div className="mt-0.5 font-mono text-[11px] text-muted">
+                                Từ {assignment.effective_from}
+                                {assignment.effective_to ? ` đến ${assignment.effective_to}` : " · không giới hạn ngày kết thúc"}
+                                {typeof assignment.due_time_local === "string"
+                                  ? ` · Hạn nộp +${assignment.due_day_offset ?? 0} ngày lúc ${assignment.due_time_local}`
+                                  : ""}
+                              </div>
+                            </td>
+                            <td className="px-3.5 py-3 align-middle text-center whitespace-nowrap" data-label="Trạng thái">
+                              <StatusBadge
+                                dot
+                                tone={
+                                  assignment.state === "ACTIVE"
+                                    ? "success"
+                                    : assignment.state === "PAUSED"
+                                      ? "warning"
+                                      : "neutral"
+                                }
+                              >
+                                {stateLabel(assignment.state)}
+                              </StatusBadge>
+                            </td>
+                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Đã nộp">
+                              <span
+                                className={
+                                  "inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 font-mono text-xs font-bold tabular-nums " +
+                                  (assignment.submitted_count > 0
+                                    ? "border-emerald-500/30 bg-emerald-500/12 text-emerald-800 dark:text-emerald-200"
+                                    : "border-border/80 bg-surface-muted/70 text-muted")
+                                }
+                              >
+                                {assignment.submitted_count}
+                              </span>
+                            </td>
+                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Chưa hoàn thành">
+                              <span
+                                className={
+                                  "inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 font-mono text-xs font-bold tabular-nums " +
+                                  (incompleteCount > 0
+                                    ? "border-amber-500/30 bg-amber-500/12 text-amber-800 dark:text-amber-200"
+                                    : "border-border/80 bg-surface-muted/70 text-muted")
+                                }
+                              >
+                                {incompleteCount}
+                              </span>
+                            </td>
+                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Quá hạn chưa nộp">
+                              <span
+                                className={
+                                  "inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 font-mono text-xs font-bold tabular-nums " +
+                                  (overdueCount > 0
+                                    ? "border-rose-500/30 bg-rose-500/12 text-rose-800 dark:text-rose-200"
+                                    : "border-border/80 bg-surface-muted/70 text-muted")
+                                }
+                              >
+                                {overdueCount}
+                              </span>
+                            </td>
+                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Tổng nghĩa vụ">
+                              <span className="inline-flex min-w-8 items-center justify-center rounded-full border border-primary/25 bg-[var(--selected-bg)] px-2.5 py-0.5 font-mono text-xs font-bold tabular-nums text-primary">
+                                {assignment.obligation_total}
+                              </span>
+                            </td>
+                            <td className="px-2.5 py-3 align-middle text-center font-mono text-xs tabular-nums text-muted whitespace-nowrap" data-label="Miễn / huỷ">
+                              {exemptCancelCount}
+                            </td>
+                            <td className="px-3.5 py-3 align-middle text-right whitespace-nowrap" data-card-actions="true">
+                              <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant={isSelected ? "primary" : "soft"}
+                                  onClick={() =>
+                                    setSelectedAssignmentId(
+                                      isSelected ? null : assignment.assignment_id,
+                                    )
+                                  }
+                                >
+                                  {isSelected ? "Đóng chi tiết" : "Xem chi tiết"}
+                                </Button>
+                                {assignment.state === "ACTIVE" ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="secondary"
+                                    disabled={trackingBusy}
+                                    onClick={() => requestUpdateAssignment(assignment, "PAUSED")}
+                                  >
+                                    Tạm dừng
+                                  </Button>
+                                ) : null}
+                                {assignment.state === "PAUSED" ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="secondary"
+                                    disabled={trackingBusy}
+                                    onClick={() => requestUpdateAssignment(assignment, "ACTIVE")}
+                                  >
+                                    Kích hoạt lại
+                                  </Button>
+                                ) : null}
+                                {assignment.state !== "REVOKED" ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="danger-outline"
+                                    disabled={trackingBusy}
+                                    onClick={() => requestUpdateAssignment(assignment, "REVOKED")}
+                                  >
+                                    Thu hồi
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
 
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
-                      <Progress label="Đã nộp" value={assignment.submitted_count} />
-                      <Progress label="Chưa hoàn thành" value={incompleteCount} />
-                      <Progress label="Quá hạn chưa nộp" value={assignment.overdue_count ?? 0} />
-                      <Progress label="Tổng nghĩa vụ" value={assignment.obligation_total} />
-                      <Progress label="Miễn / huỷ" value={assignment.exempted_count + assignment.cancelled_count} />
-                    </div>
-
-                    {isSelected ? (
-                      <AssignmentDetailPanel
-                        assignment={assignment}
-                        busy={trackingBusy}
-                        onAction={(nextState) => requestUpdateAssignment(assignment, nextState)}
-                      />
-                    ) : null}
-                  </article>
-                );
-              })}
+              {selectedAssignment ? (
+                <div className="rounded-[22px] border border-primary/35 bg-surface p-5 shadow-[var(--shadow-card)]">
+                  <AssignmentDetailPanel
+                    assignment={selectedAssignment}
+                    busy={trackingBusy}
+                    onAction={(nextState) => requestUpdateAssignment(selectedAssignment, nextState)}
+                  />
+                </div>
+              ) : null}
             </div>
           )}
         </section>
@@ -1782,14 +1843,5 @@ function stateLabel(value: string) {
   return (
     ({ ACTIVE: "đang hoạt động", PAUSED: "tạm dừng", REVOKED: "đã thu hồi" } as Record<string, string>)[value] ??
     value
-  );
-}
-
-function Progress({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-md bg-subtle px-3 py-2">
-      <div className="text-xs text-muted">{label}</div>
-      <div className="font-medium tabular-nums">{value}</div>
-    </div>
   );
 }

@@ -469,7 +469,7 @@ export function PersonListManager({
 
       {readyList && listState.kind !== "denied" ? (
         <div
-          className="flex flex-wrap items-center gap-2 text-xs"
+          className="inline-flex flex-wrap items-center gap-1 max-w-full rounded-full border border-border/80 bg-surface p-1 text-xs shadow-[var(--shadow-card)]"
           data-testid="user-directory-summary-strip"
         >
           <button
@@ -478,10 +478,10 @@ export function PersonListManager({
               setRecordKindFilter("all");
               setPage(1);
             }}
-            className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+            className={`min-h-10 sm:min-h-8 rounded-full px-3.5 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 ${
               recordKindFilter === "all"
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border bg-surface text-muted hover:text-foreground"
+                ? "bg-primary font-semibold text-on-primary shadow-[0_6px_16px_-6px_color-mix(in_srgb,var(--primary)_58%,transparent)]"
+                : "text-muted hover:bg-surface-muted hover:text-[var(--navy)]"
             }`}
           >
             Tất cả ({readyList.summary.total_all})
@@ -492,10 +492,10 @@ export function PersonListManager({
               setRecordKindFilter("person");
               setPage(1);
             }}
-            className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+            className={`min-h-10 sm:min-h-8 rounded-full px-3.5 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 ${
               recordKindFilter === "person"
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border bg-surface text-muted hover:text-foreground"
+                ? "bg-primary font-semibold text-on-primary shadow-[0_6px_16px_-6px_color-mix(in_srgb,var(--primary)_58%,transparent)]"
+                : "text-muted hover:bg-surface-muted hover:text-[var(--navy)]"
             }`}
           >
             Hồ sơ nhân viên ({readyList.summary.linked_count + readyList.summary.person_only_count})
@@ -507,10 +507,10 @@ export function PersonListManager({
                 setRecordKindFilter("unlinked_account");
                 setPage(1);
               }}
-              className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+              className={`min-h-10 sm:min-h-8 rounded-full px-3.5 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 ${
                 recordKindFilter === "unlinked_account"
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-surface text-muted hover:text-foreground"
+                  ? "bg-primary font-semibold text-on-primary shadow-[0_6px_16px_-6px_color-mix(in_srgb,var(--primary)_58%,transparent)]"
+                  : "text-muted hover:bg-surface-muted hover:text-[var(--navy)]"
               }`}
             >
               Tài khoản chưa gắn hồ sơ ({readyList.summary.unlinked_account_count})
@@ -523,10 +523,10 @@ export function PersonListManager({
                 setRecordKindFilter("conflict");
                 setPage(1);
               }}
-              className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+              className={`min-h-10 sm:min-h-8 rounded-full px-3.5 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 ${
                 recordKindFilter === "conflict"
-                  ? "border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-300"
-                  : "border-amber-400/60 bg-amber-500/5 text-amber-700 dark:text-amber-300"
+                  ? "bg-amber-600 font-semibold text-white shadow-2xs"
+                  : "bg-amber-500/10 text-amber-800 hover:bg-amber-500/15 dark:text-amber-300"
               }`}
             >
               Cần kiểm tra xung đột ({readyList.summary.conflict_count})
@@ -863,11 +863,11 @@ export function PersonListManager({
 
                 return (
                   <tr key={entry.directory_entry_key} className={DATA_TABLE_ROW_CLASS}>
-                    <td data-label="Người dùng" className={DATA_TABLE_TD_CLASS}>
+                    <td data-card-header="true" data-label="Người dùng" className={DATA_TABLE_TD_CLASS}>
                       <div className="space-y-0.5">
                         <Link
                           href={detailHref}
-                          className="font-semibold text-foreground hover:text-primary hover:underline"
+                          className="font-semibold text-[var(--navy)] hover:text-primary hover:underline"
                         >
                           {entry.display_name}
                         </Link>
@@ -896,7 +896,7 @@ export function PersonListManager({
                           href={`/admin/departments/${encodeURIComponent(entry.person.active_department.department_id)}`}
                           className="inline-flex flex-col hover:underline"
                         >
-                          <span className="font-medium text-foreground">
+                          <span className="font-medium text-[var(--navy)] hover:text-primary">
                             {entry.person.active_department.name}
                           </span>
                           <span className="font-mono text-xs text-muted">
@@ -911,7 +911,7 @@ export function PersonListManager({
                     <td data-label="Đăng nhập" className={DATA_TABLE_TD_CLASS}>
                       <div className="space-y-1">
                         {entry.account?.login_id ? (
-                          <p className="font-mono text-xs font-medium text-foreground">
+                          <p className="font-mono text-xs font-medium text-[var(--navy)]">
                             {entry.account.login_id}
                           </p>
                         ) : null}
@@ -921,7 +921,7 @@ export function PersonListManager({
                       </div>
                     </td>
 
-                    <td data-label="Thao tác" className={`${DATA_TABLE_TD_CLASS} text-right`}>
+                    <td data-card-actions="true" data-label="Thao tác" className={`${DATA_TABLE_TD_CLASS} text-right`}>
                       <RowActionCluster>
                         <Link
                           href={detailHref}

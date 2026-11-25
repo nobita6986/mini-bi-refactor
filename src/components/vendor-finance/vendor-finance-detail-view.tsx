@@ -1490,13 +1490,13 @@ export function VendorFinanceDetailView({
             <table className={DATA_TABLE_CLASS}>
               <thead className={DATA_TABLE_HEAD_CLASS}>
                 <tr>
-                  <th scope="col" className={`${DATA_TABLE_TH_CLASS} !px-2.5 !py-2.5 md:max-w-[16rem]`}>
+                  <th scope="col" className={`${DATA_TABLE_TH_CLASS} !px-2.5 !py-2.5 md:max-w-[16rem] !whitespace-normal`}>
                     Chứng từ / Sổ dự án
                   </th>
                   <th scope="col" className={`${DATA_TABLE_TH_CLASS} !px-2.5 !py-2.5 whitespace-nowrap`}>
                     Ngày hiệu lực
                   </th>
-                  <th scope="col" className={`${DATA_TABLE_TH_CLASS} !px-2.5 !py-2.5`}>
+                  <th scope="col" className={`${DATA_TABLE_TH_CLASS} !px-2.5 !py-2.5 !whitespace-normal`}>
                     Loại bút toán & Lý do
                   </th>
                   <th scope="col" className={`${DATA_TABLE_TH_CLASS} !px-2.5 !py-2.5 text-right whitespace-nowrap`}>

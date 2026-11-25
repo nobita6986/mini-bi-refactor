@@ -817,13 +817,13 @@ export function ProjectOperations({ canManageProjectMasterForEmptyList }: { canM
       <Dialog.Root open={dialog.kind !== "none"}
         onOpenChange={(open) => { if (!open && !busy) closeDialog(); }}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-40 bg-black/55 backdrop-blur-[1px]" />
+          <Dialog.Overlay className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]" />
           <Dialog.Content
             onOpenAutoFocus={(event) => {
               event.preventDefault();
               dialogFocusRef.current?.focus();
             }}
-            className="fixed inset-x-2 top-[max(env(safe-area-inset-top),0.5rem)] bottom-[max(env(safe-area-inset-bottom),0.5rem)] z-50 mx-auto flex w-auto max-w-xl flex-col overflow-y-auto rounded-2xl border border-border bg-surface p-4 text-foreground shadow-2xl outline-none sm:inset-x-6 sm:top-1/2 sm:bottom-auto sm:max-h-[min(90dvh,48rem)] sm:w-[min(94vw,36rem)] sm:-translate-y-1/2 sm:p-6">
+            className="fixed inset-x-2 top-[max(env(safe-area-inset-top),0.5rem)] bottom-[max(env(safe-area-inset-bottom),0.5rem)] z-50 mx-auto flex w-auto max-w-xl flex-col overflow-y-auto rounded-2xl border border-border bg-surface border-t-2 border-t-primary p-4 text-foreground shadow-[var(--shadow-dialog)] outline-none sm:inset-x-6 sm:top-1/2 sm:bottom-auto sm:max-h-[min(90dvh,48rem)] sm:w-[min(94vw,36rem)] sm:-translate-y-1/2 sm:p-6">
             <Dialog.Close asChild>
               <button type="button" aria-label="Đóng hộp thoại"
                 className="absolute right-3 top-3 inline-flex h-9 w-9 items-center justify-center rounded-full text-muted hover:bg-muted/10 hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"

@@ -71,6 +71,7 @@ function contrastRatio(hexA, hexB) {
 
 const EXPECTED_THEME_IDS = [
   "hr-partner",
+  "royal-navy",
   "ocean-trust",
   "emerald-growth",
   "violet-future",

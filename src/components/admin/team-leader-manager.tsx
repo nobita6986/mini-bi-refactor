@@ -416,15 +416,19 @@ export function TeamLeaderManager({
       if (!open && workflow.phase !== "sending" && workflow.phase !== "reload") onClose();
     }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
+        <Dialog.Overlay
+          data-ui-overlay-motion="true"
+          className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]"
+        />
         <Dialog.Content
+          data-ui-dialog-motion="true"
           onCloseAutoFocus={(event) => { if (busyTeam !== null) event.preventDefault(); }}
           aria-describedby="team-leader-description"
-          className="fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[min(52rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-xl focus:outline-none sm:p-6"
+          className="fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[min(52rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border border-t-2 border-t-primary bg-surface p-5 text-foreground shadow-[var(--shadow-dialog)] focus:outline-none sm:p-6"
         >
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start justify-between gap-4 border-b border-border pb-3.5">
             <div>
-              <Dialog.Title className="text-xl font-semibold text-foreground">
+              <Dialog.Title className="text-xl font-semibold tracking-tight text-[var(--navy)]">
                 Trưởng nhóm{team ? ` · ${team.display_name}` : ""}
               </Dialog.Title>
               <Dialog.Description id="team-leader-description" className="mt-1 text-sm text-muted">
@@ -434,7 +438,7 @@ export function TeamLeaderManager({
             <Dialog.Close asChild>
               <button type="button" aria-label="Đóng hộp thoại"
                 disabled={workflow.phase === "sending" || workflow.phase === "reload"}
-                className="min-h-10 rounded-md border border-border px-3 disabled:opacity-50">
+                className="inline-flex min-h-11 sm:min-h-9 items-center justify-center rounded-lg border border-border bg-surface-muted px-3 text-sm font-medium text-[var(--navy)] transition-colors hover:border-primary hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50">
                 Đóng
               </button>
             </Dialog.Close>
@@ -485,12 +489,12 @@ export function TeamLeaderManager({
                 </Alert>
               ) : null}
 
-              <div role="tablist" aria-label="Lịch sử trưởng nhóm" className="flex flex-wrap gap-2 overflow-x-auto whitespace-nowrap border-b border-border">
+              <div role="tablist" aria-label="Lịch sử trưởng nhóm" className="inline-flex flex-wrap gap-1 overflow-x-auto whitespace-nowrap">
                 {visibleStates.map((state) => (
                   <button key={state} type="button" role="tab" aria-selected={activeState === state}
                     onClick={() => setActiveState(state)}
-                    className={`min-h-11 sm:min-h-10 whitespace-nowrap shrink-0 border-b-2 px-3 text-sm ${activeState === state
-                      ? "border-primary font-semibold text-primary" : "border-transparent text-muted"}`}>
+                    className={`min-h-11 sm:min-h-9 whitespace-nowrap shrink-0 rounded-full px-3.5 text-sm ${activeState === state
+                      ? "font-semibold" : "text-muted"}`}>
                     {stateLabel(state)}
                   </button>
                 ))}
@@ -511,7 +515,7 @@ export function TeamLeaderManager({
               ) : null}
               {activeList && activeList.leaders.length > 0 ? (
                 <div className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs">
-                  <table className="r22-card-table w-full min-w-[430px] border-collapse text-left text-sm">
+                  <table className="r22-card-table w-full border-collapse text-left text-sm">
                     <caption className="sr-only">{stateLabel(activeState)} của nhóm {team.display_name}</caption>
                     <thead className="border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted">
                       <tr>
@@ -572,12 +576,12 @@ export function TeamLeaderManager({
                           <span className="mt-1 flex flex-col gap-2 sm:flex-row">
                             <input id="team-leader-search" value={candidateSearchInput} maxLength={256}
                               onChange={(event) => setCandidateSearchInput(event.currentTarget.value)}
-                              className="min-h-11 sm:min-h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-base sm:text-sm" />
+                              className="min-h-11 sm:min-h-10 min-w-0 flex-1 rounded-lg border border-border bg-surface px-3 text-base sm:text-sm" />
                             <button type="button" onClick={() => {
                               setCandidateSearch(candidateSearchInput.trim());
                               setCandidatePage(1);
                               setCandidateReloadToken((value) => value + 1);
-                            }} className="min-h-11 sm:min-h-10 whitespace-nowrap shrink-0 rounded-md border border-border px-3">Tìm</button>
+                            }} className="min-h-11 sm:min-h-10 whitespace-nowrap shrink-0 rounded-lg border border-border bg-surface px-3 hover:bg-surface-muted">Tìm</button>
                           </span>
                         </label>
                         {candidateState.kind === "loading" ? <p role="status">Đang tải nhân sự đủ điều kiện…</p> : null}
@@ -601,7 +605,7 @@ export function TeamLeaderManager({
                               <select id="team-leader-candidate" value={form.appUserId}
                                 onChange={(event) => setForm({ ...form, appUserId: event.currentTarget.value })}
                                 required
-                                className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-md border border-border bg-background px-3 text-base sm:text-sm">
+                                className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-base sm:text-sm">
                                 <option value="">Chọn nhân sự</option>
                                 {candidateList.candidates.map((candidate) => (
                                   <option key={candidate.app_user_id} value={candidate.app_user_id}>
@@ -633,10 +637,10 @@ export function TeamLeaderManager({
                       Lý do thay đổi (không bắt buộc)
                       <textarea id="team-leader-reason" value={form.reason} maxLength={4000} rows={3}
                         onChange={(event) => setForm({ ...form, reason: event.currentTarget.value })}
-                        className="mt-1 block w-full rounded-md border border-border bg-background px-3 py-2 text-base sm:text-sm" />
+                        className="mt-1 block w-full rounded-lg border border-border bg-surface px-3 py-2 text-base sm:text-sm" />
                     </label>
                     {formError ? <p role="alert" className="text-sm text-red-700">{formError}</p> : null}
-                    <div className="flex flex-wrap justify-end gap-2">
+                    <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
                       <button type="button" onClick={() => setForm(null)}
                         className="min-h-11 whitespace-nowrap shrink-0 rounded-md border border-border px-4">Hủy</button>
                       <button type="submit" disabled={busyTeam !== null || workflow.phase !== "idle" ||

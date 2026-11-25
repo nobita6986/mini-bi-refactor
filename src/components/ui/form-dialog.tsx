@@ -52,7 +52,7 @@ export function FormDialog({
       <Dialog.Portal>
         <Dialog.Overlay
           data-ui-overlay-motion="true"
-          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[1px]"
+          className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]"
         />
         <Dialog.Content
           data-testid={dataTestId}
@@ -75,8 +75,8 @@ export function FormDialog({
             }
           }}
           className={cn(
-            "fixed inset-x-0 bottom-0 z-50 max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl border border-border bg-surface p-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-foreground shadow-xl focus:outline-none",
-            "sm:inset-x-auto sm:bottom-auto sm:left-1/2 sm:top-1/2 sm:max-h-[90dvh] sm:w-[min(38rem,calc(100vw-2rem))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:p-6",
+            "fixed inset-x-0 bottom-0 z-50 max-h-[92dvh] w-full overflow-y-auto rounded-t-[24px] border border-border/80 border-t-2 border-t-primary bg-surface p-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-foreground shadow-[var(--shadow-dialog)] focus:outline-none",
+            "sm:inset-x-auto sm:bottom-auto sm:left-1/2 sm:top-1/2 sm:max-h-[90dvh] sm:w-[min(38rem,calc(100vw-2rem))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-[24px] sm:p-6",
             contentClassName,
           )}
         >
@@ -85,9 +85,9 @@ export function FormDialog({
             aria-hidden="true"
             className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-border sm:hidden"
           />
-          <div className="flex items-start justify-between gap-4 border-b border-border pb-3">
+          <div className="flex items-start justify-between gap-4 border-b border-border pb-3.5">
             <div>
-              <Dialog.Title className="text-lg sm:text-xl font-semibold text-foreground">
+              <Dialog.Title className="text-lg sm:text-xl font-semibold tracking-tight text-[var(--navy)]">
                 {title}
               </Dialog.Title>
               {description ? (
@@ -101,7 +101,7 @@ export function FormDialog({
                 type="button"
                 aria-label={closeAriaLabel}
                 disabled={closeDisabled}
-                className="inline-flex min-h-11 min-w-11 sm:min-h-10 sm:min-w-10 items-center justify-center rounded-lg border border-border bg-surface px-3 text-sm font-medium text-foreground transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none hover:bg-muted/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex min-h-11 min-w-11 sm:min-h-9 sm:min-w-9 items-center justify-center rounded-full border border-border bg-surface-muted px-3 text-sm font-medium text-[var(--navy)] transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none hover:border-primary hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 ×
               </button>

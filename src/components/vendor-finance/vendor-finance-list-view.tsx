@@ -1,15 +1,20 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   ArrowRight,
   BarChart3,
+  Building2,
   Download,
   FileSpreadsheet,
+  Layers,
+  Receipt,
   RefreshCw,
+  Scale,
   Search,
   Settings2,
+  Wallet,
   X,
 } from "lucide-react";
 
@@ -17,6 +22,7 @@ import { Alert } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button, buttonClasses } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { CatalogFilterCombobox, type CatalogFilterOption } from "@/components/ui/catalog-filter-combobox";
 import {
   DATA_TABLE_CLASS,
   DATA_TABLE_HEAD_CLASS,
@@ -81,7 +87,7 @@ function buildSubLedgerHref(vendorId: string, sub: VendorFinanceListSubLedgerIte
   return `/finance/vendors/${encodeURIComponent(vendorId)}?${sp.toString()}`;
 }
 
-const LIST_TH_CLASS = `${DATA_TABLE_TH_CLASS} !px-2 !py-2.5 text-[11px] leading-tight align-middle`;
+const LIST_TH_CLASS = `${DATA_TABLE_TH_CLASS} !px-2 !py-2.5 text-[11px] leading-tight !text-center align-middle`;
 const LIST_TD_CLASS = `${DATA_TABLE_TD_CLASS} !px-2 !py-2.5 align-middle`;
 
 export function VendorFinanceListView({
@@ -255,6 +261,15 @@ export function VendorFinanceListView({
   const activeAssignedProjectCount = data?.allowed_actions.active_assigned_project_count ?? 0;
 
   const summary = data?.summary ?? null;
+  const projectFilterOptions = useMemo<CatalogFilterOption[]>(
+    () =>
+      (contextData?.projects ?? []).map((proj) => ({
+        id: proj.project_id,
+        label: proj.display_name,
+        keywords: proj.project_id,
+      })),
+    [contextData?.projects],
+  );
   const pageCount = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
   const hasActiveFilters =
     searchInput.trim().length > 0 ||
@@ -443,78 +458,128 @@ export function VendorFinanceListView({
         className={`grid grid-cols-1 gap-3 sm:grid-cols-2 ${canViewSharedAdvance ? "xl:grid-cols-5" : "xl:grid-cols-4"}`}
         data-testid="vfin-company-kpis"
       >
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Tổng phải trả (cộng các sổ dương)</p>
+        <Card className="relative overflow-hidden p-4 border-border/80 transition-transform duration-150 hover:-translate-y-[1px]">
+          <div className="absolute inset-x-0 top-0 h-[2px] bg-amber-500/85" aria-hidden />
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-xs font-medium text-muted">Tổng phải trả Vendor</p>
+            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/12 text-amber-700 dark:text-amber-300" aria-hidden>
+              <Receipt className="h-3.5 w-3.5" />
+            </span>
+          </div>
           <p
             data-testid="vfin-kpi-payable"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-[var(--navy)]"
           >
             {summary ? formatVndMinor(summary.total_payable_minor) : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">
+          {summary && summary.total_vendor_count > 0 ? (
+            <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-amber-500/15" aria-hidden>
+              <div
+                className="h-full rounded-full bg-amber-500/80"
+                style={{
+                  width: `${Math.min(100, Math.round((summary.vendors_with_payable_count / summary.total_vendor_count) * 100))}%`,
+                }}
+              />
+            </div>
+          ) : null}
+          <p className="mt-1.5 text-xs text-muted">
             {summary
-              ? `${summary.vendors_with_payable_count} Vendor có sổ đang phải trả (không bù trừ chéo)`
+              ? `${summary.vendors_with_payable_count} Vendor có sổ phải trả`
               : "Đang tải dữ liệu…"}
           </p>
         </Card>
 
         {canViewSharedAdvance ? (
-          <Card className="p-4 border-primary/30 bg-primary/5">
-            <p className="text-xs font-medium text-muted">Số dư ứng dùng chung</p>
+          <Card className="relative overflow-hidden p-4 border-primary/25 bg-primary/[0.03] transition-transform duration-150 hover:-translate-y-[1px]">
+            <div className="absolute inset-x-0 top-0 h-[2px] bg-primary" aria-hidden />
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-xs font-medium text-muted">Số dư ứng dùng chung</p>
+              <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary" aria-hidden>
+                <Wallet className="h-3.5 w-3.5" />
+              </span>
+            </div>
             <p
               data-testid="vfin-kpi-shared-advance"
               className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-primary"
             >
               {summary ? formatVndMinor(summary.total_shared_advance_minor ?? "0") : "—"}
             </p>
-            <p className="mt-1 text-xs text-muted">
-              Tổng số dư ứng cấp Vendor (tách biệt với công nợ sổ dự án)
+            <p className="mt-1.5 text-xs text-muted">
+              Quỹ tạm ứng cấp Vendor (khấu trừ khi thanh toán)
             </p>
           </Card>
         ) : null}
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Tổng dư ứng (cộng các sổ âm)</p>
+        <Card className="relative overflow-hidden p-4 border-border/80 transition-transform duration-150 hover:-translate-y-[1px]">
+          <div className="absolute inset-x-0 top-0 h-[2px] bg-sky-500/85" aria-hidden />
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-xs font-medium text-muted">Tổng dư ứng theo sổ</p>
+            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-500/12 text-sky-700 dark:text-sky-300" aria-hidden>
+              <Layers className="h-3.5 w-3.5" />
+            </span>
+          </div>
           <p
             data-testid="vfin-kpi-advance"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-[var(--navy)]"
           >
             {summary ? formatVndMinor(summary.total_advance_minor) : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">
+          <p className="mt-1.5 text-xs text-muted">
             {summary
-              ? `${summary.vendors_with_advance_count} Vendor có sổ đang dư ứng (không bù trừ chéo)`
+              ? `${summary.vendors_with_advance_count} Vendor có sổ đang dư ứng`
               : "Đang tải dữ liệu…"}
           </p>
         </Card>
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Số Vendor & Sổ dự án trong phạm vi</p>
+        <Card className="relative overflow-hidden p-4 border-border/80 transition-transform duration-150 hover:-translate-y-[1px]">
+          <div className="absolute inset-x-0 top-0 h-[2px] bg-emerald-500/85" aria-hidden />
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-xs font-medium text-muted">Vendor & Sổ dự án</p>
+            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/12 text-emerald-700 dark:text-emerald-300" aria-hidden>
+              <Building2 className="h-3.5 w-3.5" />
+            </span>
+          </div>
           <p
             data-testid="vfin-kpi-nonzero-count"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-[var(--navy)]"
           >
             {summary
               ? `${summary.vendors_with_nonzero_balance_count} / ${summary.total_vendor_count}`
               : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">
+          {summary && summary.total_vendor_count > 0 ? (
+            <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-emerald-500/15" aria-hidden>
+              <div
+                className="h-full rounded-full bg-emerald-500/80"
+                style={{
+                  width: `${Math.min(100, Math.round((summary.vendors_with_nonzero_balance_count / summary.total_vendor_count) * 100))}%`,
+                }}
+              />
+            </div>
+          ) : null}
+          <p className="mt-1.5 text-xs text-muted">
             {summary
-              ? `${summary.sub_ledger_count} sổ chi tiết · ${summary.uninitialized_vendor_count} sổ chưa mở đầu kỳ`
+              ? `${summary.sub_ledger_count} sổ chi tiết · ${summary.uninitialized_vendor_count} chưa mở đầu kỳ`
               : "Đang tải dữ liệu…"}
           </p>
         </Card>
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Tổng tham khảo phạm vi lọc</p>
+        <Card className="relative overflow-hidden p-4 border-border/80 transition-transform duration-150 hover:-translate-y-[1px]">
+          <div className="absolute inset-x-0 top-0 h-[2px] bg-violet-500/85" aria-hidden />
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-xs font-medium text-muted">Tổng tham khảo phạm vi lọc</p>
+            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-500/12 text-violet-700 dark:text-violet-300" aria-hidden>
+              <Scale className="h-3.5 w-3.5" />
+            </span>
+          </div>
           <p
             data-testid="vfin-kpi-net"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-[var(--navy)]"
           >
             {summary ? formatSignedVndDelta(summary.net_balance_minor) : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">
-            Tổng tham khảo — không thay thế số dư riêng từng sổ kế toán / dự án / loại hợp đồng
+          <p className="mt-1.5 text-xs text-muted">
+            Tổng tham khảo các sổ trong phạm vi đang lọc
           </p>
         </Card>
       </section>
@@ -559,13 +624,13 @@ export function VendorFinanceListView({
           ) : null
         }
       >
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          <div className="space-y-1.5">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
+          <div className="space-y-1">
             <label
               htmlFor={searchInputId}
               className="block text-xs sm:text-sm font-semibold text-foreground"
             >
-              Tìm Vendor gần đúng (tên hoặc mã Vendor)
+              Tìm Vendor gần đúng
             </label>
             <div className="relative">
               <Search
@@ -579,37 +644,28 @@ export function VendorFinanceListView({
                 placeholder="Nhập tên Vendor cần tra cứu…"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface pl-9 pr-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                className="min-h-11 sm:min-h-9 w-full rounded-lg border border-border bg-surface pl-9 pr-3 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
               />
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <label
-              htmlFor={projectSelectId}
-              className="block text-xs sm:text-sm font-semibold text-foreground"
-            >
-              Dự án
-            </label>
-            <select
-              id={projectSelectId}
-              value={projectFilter}
-              onChange={(e) => {
-                setProjectFilter(e.target.value);
-                setPage(1);
-              }}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-            >
-              <option value="">Tất cả dự án được phép xem</option>
-              {(contextData?.projects ?? []).map((proj) => (
-                <option key={proj.project_id} value={proj.project_id}>
-                  {proj.display_name} ({proj.project_id})
-                </option>
-              ))}
-            </select>
-          </div>
+          <CatalogFilterCombobox
+            id={projectSelectId}
+            label="Dự án"
+            allLabel="Tất cả dự án"
+            placeholder="Gõ tên hoặc mã dự án"
+            options={projectFilterOptions}
+            value={projectFilter}
+            containerClassName="relative space-y-1"
+            labelClassName="block text-xs sm:text-sm font-semibold text-foreground"
+            inputClassName="min-h-11 sm:min-h-9 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            onChange={(nextValue) => {
+              setProjectFilter(nextValue);
+              setPage(1);
+            }}
+          />
 
-          <div className="space-y-1.5">
+          <div className="space-y-1">
             <label
               htmlFor={accountantSelectId}
               className="block text-xs sm:text-sm font-semibold text-foreground"
@@ -623,7 +679,7 @@ export function VendorFinanceListView({
                 setAccountantFilter(e.target.value);
                 setPage(1);
               }}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="min-h-11 sm:min-h-9 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <option value="">Tất cả kế toán trong phạm vi</option>
               {(contextData?.accountants ?? []).map((acc) => (
@@ -634,7 +690,7 @@ export function VendorFinanceListView({
             </select>
           </div>
 
-          <div className="space-y-1.5">
+          <div className="space-y-1">
             <label
               htmlFor={contractTypeSelectId}
               className="block text-xs sm:text-sm font-semibold text-foreground"
@@ -649,7 +705,7 @@ export function VendorFinanceListView({
                 setContractTypeFilter(e.target.value as VendorFinanceContractTypeFilter);
                 setPage(1);
               }}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="min-h-11 sm:min-h-9 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               {VFIN_UI_CONTRACT_TYPE_FILTERS.map((opt) => (
                 <option key={opt} value={opt}>
@@ -659,7 +715,7 @@ export function VendorFinanceListView({
             </select>
           </div>
 
-          <div className="space-y-1.5">
+          <div className="space-y-1">
             <label
               htmlFor={balanceSelectId}
               className="block text-xs sm:text-sm font-semibold text-foreground"
@@ -673,7 +729,7 @@ export function VendorFinanceListView({
                 setBalanceFilter(e.target.value as VendorFinanceBalanceFilter);
                 setPage(1);
               }}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="min-h-11 sm:min-h-9 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               {VFIN_UI_BALANCE_FILTERS.map((opt) => (
                 <option key={opt} value={opt}>
@@ -683,7 +739,7 @@ export function VendorFinanceListView({
             </select>
           </div>
 
-          <div className="space-y-1.5">
+          <div className="space-y-1">
             <label
               htmlFor={activeSelectId}
               className="block text-xs sm:text-sm font-semibold text-foreground"
@@ -697,7 +753,7 @@ export function VendorFinanceListView({
                 setActiveFilter(e.target.value as VendorFinanceActiveFilter);
                 setPage(1);
               }}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="min-h-11 sm:min-h-9 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               {VFIN_UI_ACTIVE_FILTERS.map((opt) => (
                 <option key={opt} value={opt}>
@@ -789,15 +845,15 @@ export function VendorFinanceListView({
           <table className={DATA_TABLE_CLASS}>
             <thead className={DATA_TABLE_HEAD_CLASS}>
               <tr>
-                <th scope="col" className={`${LIST_TH_CLASS} md:w-[10.5rem] md:max-w-[10.5rem]`}>
+                <th scope="col" className={`${LIST_TH_CLASS} md:w-[10.5rem] md:max-w-[10.5rem] !whitespace-normal`}>
                   Vendor
                 </th>
-                <th scope="col" className={`${LIST_TH_CLASS} md:max-w-[17rem]`}>
-                  Sổ theo Dự án × Kế toán phụ trách × Loại HĐ
+                <th scope="col" className={`${LIST_TH_CLASS} md:min-w-[20rem] md:max-w-[24rem] !whitespace-normal`}>
+                  Sổ theo DA x KT x HĐ
                 </th>
                 <th
                   scope="col"
-                  className={`${LIST_TH_CLASS} md:max-w-[10.5rem] text-right whitespace-nowrap`}
+                  className={`${LIST_TH_CLASS} md:max-w-[10.5rem] whitespace-nowrap`}
                 >
                   Số dư theo sổ
                 </th>
@@ -805,21 +861,21 @@ export function VendorFinanceListView({
                   <th
                     scope="col"
                     data-testid="vfin-th-shared-advance"
-                    className={`${LIST_TH_CLASS} text-right whitespace-nowrap`}
+                    className={`${LIST_TH_CLASS} whitespace-nowrap`}
                   >
                     Dư ứng
                   </th>
                 ) : null}
-                <th scope="col" className={`${LIST_TH_CLASS} md:max-w-[9.5rem]`}>
-                  Trạng thái công nợ
+                <th scope="col" className={`${LIST_TH_CLASS} md:max-w-[9.5rem] !whitespace-normal`}>
+                  Công nợ
                 </th>
-                <th scope="col" className={`${LIST_TH_CLASS} text-right whitespace-nowrap`}>
+                <th scope="col" className={`${LIST_TH_CLASS} whitespace-nowrap`}>
                   Bút toán
                 </th>
                 <th scope="col" className={`${LIST_TH_CLASS} whitespace-nowrap`}>
-                  Giao dịch gần nhất
+                  GD gần nhất
                 </th>
-                <th scope="col" className={`${LIST_TH_CLASS} text-right whitespace-nowrap`}>
+                <th scope="col" className={`${LIST_TH_CLASS} whitespace-nowrap`}>
                   Thao tác
                 </th>
               </tr>
@@ -842,10 +898,10 @@ export function VendorFinanceListView({
                   <tr key={vendor.vendor_id} className={DATA_TABLE_ROW_CLASS}>
                     <td
                       data-card-header="true"
-                      className={`${LIST_TD_CLASS} md:w-[10.5rem] md:max-w-[10.5rem] whitespace-normal break-words`}
+                      className={`${LIST_TD_CLASS} md:w-[10.5rem] md:max-w-[10.5rem] md:text-center whitespace-normal break-words`}
                     >
-                      <div className="space-y-1">
-                        <div className="flex flex-wrap items-center gap-1.5">
+                      <div className="space-y-1 md:flex md:flex-col md:items-center md:text-center">
+                        <div className="flex flex-wrap items-center md:justify-center gap-1.5">
                           <Link
                             href={detailHref}
                             className="font-semibold text-foreground hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded break-words"
@@ -864,13 +920,13 @@ export function VendorFinanceListView({
                     </td>
 
                     <td
-                      data-label="Sổ theo Dự án × Kế toán phụ trách × Loại HĐ"
-                      className={`${LIST_TD_CLASS} max-md:flex-col max-md:items-stretch max-md:!text-left md:max-w-[17rem] whitespace-normal break-words`}
+                      data-label="Sổ theo DA x KT x HĐ"
+                      className={`${LIST_TD_CLASS} max-md:flex-col max-md:items-stretch max-md:!text-left md:min-w-[20rem] md:max-w-[24rem] text-left whitespace-normal break-words`}
                     >
                       {vendor.sub_ledgers.length === 0 ? (
                         <span className="text-xs text-muted">Chưa liên kết sổ dự án</span>
                       ) : (
-                        <div className="w-full space-y-1.5" data-testid="vfin-vendor-subledger-list">
+                        <div className="w-full space-y-1.5 text-left" data-testid="vfin-vendor-subledger-list">
                           {vendor.sub_ledgers.map((sub, idx) => {
                             const subBal = formatVendorBalancePresentation({
                               current_balance_minor: sub.current_balance_minor,
@@ -883,7 +939,7 @@ export function VendorFinanceListView({
                               <Link
                                 key={subKey}
                                 href={buildSubLedgerHref(vendor.vendor_id, sub)}
-                                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-muted/40 px-2 py-1.5 text-xs hover:border-primary/40 hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-muted/40 px-2.5 py-1.5 text-left text-xs transition-all duration-150 hover:border-primary/50 hover:bg-surface hover:shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                               >
                                 <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 leading-snug">
                                   <StatusBadge
@@ -920,7 +976,7 @@ export function VendorFinanceListView({
 
                     <td
                       data-label="Số dư theo sổ"
-                      className={`${LIST_TD_CLASS} md:max-w-[10.5rem] text-right font-mono tabular-nums`}
+                      className={`${LIST_TD_CLASS} md:max-w-[10.5rem] md:text-center font-mono tabular-nums`}
                     >
                       {vendor.balance_direction === "MULTI_LEDGER" ? (
                         <div className="space-y-0.5 text-xs">
@@ -951,7 +1007,7 @@ export function VendorFinanceListView({
                       <td
                         data-label="Dư ứng"
                         data-testid="vfin-vendor-shared-advance"
-                        className={`${LIST_TD_CLASS} text-right font-mono tabular-nums whitespace-nowrap`}
+                        className={`${LIST_TD_CLASS} md:text-center font-mono tabular-nums whitespace-nowrap`}
                       >
                         <span
                           className={`whitespace-nowrap ${
@@ -965,10 +1021,10 @@ export function VendorFinanceListView({
                       </td>
                     ) : null}
 
-                    <td data-label="Trạng thái công nợ" className={`${LIST_TD_CLASS} md:max-w-[9.5rem]`}>
+                    <td data-label="Công nợ" className={`${LIST_TD_CLASS} md:max-w-[9.5rem] md:text-center`}>
                       <StatusBadge
                         tone={balanceInfo.tone}
-                        className="!whitespace-normal text-left leading-tight"
+                        className="!whitespace-normal justify-center text-center leading-tight"
                       >
                         {balanceInfo.statusLabel}
                       </StatusBadge>
@@ -976,12 +1032,12 @@ export function VendorFinanceListView({
 
                     <td
                       data-label="Bút toán"
-                      className={`${LIST_TD_CLASS} text-right font-mono tabular-nums whitespace-nowrap`}
+                      className={`${LIST_TD_CLASS} md:text-center font-mono tabular-nums whitespace-nowrap`}
                     >
                       {vendor.entry_count}
                     </td>
 
-                    <td data-label="Giao dịch gần nhất" className={LIST_TD_CLASS}>
+                    <td data-label="GD gần nhất" className={`${LIST_TD_CLASS} md:text-center`}>
                       <div className="text-xs space-y-0.5 whitespace-nowrap">
                         <p>
                           <span className="text-muted">GD: </span>
@@ -998,15 +1054,19 @@ export function VendorFinanceListView({
                       </div>
                     </td>
 
-                    <td data-card-actions="true" className={`${LIST_TD_CLASS} text-right whitespace-nowrap`}>
-                      <RowActionCluster>
+                    <td data-card-actions="true" className={`${LIST_TD_CLASS} md:text-center`}>
+                      <RowActionCluster className="md:justify-center">
                         <Link
                           href={detailHref}
                           aria-label={`Xem sổ cái của ${vendor.display_name}`}
-                          className={`${buttonClasses({ variant: "secondary", size: "sm" })} whitespace-nowrap`}
+                          className={`${buttonClasses({ variant: "secondary", size: "sm" })} md:!h-auto md:!min-h-8 md:!px-2.5 md:!py-1.5 md:!text-xs !whitespace-normal text-center leading-tight`}
                         >
-                          Sổ cái & Đối soát
-                          <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+                          <span className="inline-block text-center leading-tight">
+                            Sổ cái
+                            <br />
+                            &amp; Đối soát
+                          </span>
+                          <ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden />
                         </Link>
                       </RowActionCluster>
                     </td>

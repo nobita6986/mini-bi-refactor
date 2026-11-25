@@ -613,14 +613,14 @@ export function DepartmentListManager() {
                       className={DATA_TABLE_ROW_CLASS}
                     >
                       <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-foreground">{department.name}</span>
+                        <div className="font-semibold text-[var(--navy)]">{department.name}</div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
                           <StatusBadge tone={isCustom ? "info" : "neutral"}>
                             {isCustom ? "Tùy chỉnh" : "Mặc định hệ thống"}
                           </StatusBadge>
-                        </div>
-                        <div className="mt-0.5 font-mono text-xs text-muted">
-                          Mã: {department.code}
+                          <span className="font-mono text-xs text-muted">
+                            Mã: {department.code}
+                          </span>
                         </div>
                       </td>
                       <td data-label="Trạng thái" className={DATA_TABLE_TD_CLASS}>
@@ -647,7 +647,7 @@ export function DepartmentListManager() {
                       </td>
                       <td
                         data-label="Quy mô hiện tại"
-                        className={`${DATA_TABLE_TD_CLASS} tabular-nums`}
+                        className={`${DATA_TABLE_TD_CLASS} whitespace-nowrap text-xs font-medium tabular-nums`}
                       >
                         {departmentScaleSummary(department)}
                       </td>
@@ -656,7 +656,7 @@ export function DepartmentListManager() {
                           <StatusBadge tone={isAccounting ? "primary" : "neutral"}>
                             {departmentMembershipModeLabel(department)}
                           </StatusBadge>
-                          <p className="max-w-md text-xs text-muted whitespace-normal">
+                          <p className="text-xs leading-snug text-muted whitespace-normal">
                             {departmentDefaultPolicyDescription(department)}
                           </p>
                         </div>
@@ -676,7 +676,7 @@ export function DepartmentListManager() {
                           </Button>
                           {isCustom ? (
                             <Button
-                              variant={department.is_active ? "secondary" : "primary"}
+                              variant={department.is_active ? "secondary" : "soft"}
                               size="sm"
                               disabled={dialogLocked}
                               onClick={() => openToggleDialog(department)}
@@ -687,7 +687,7 @@ export function DepartmentListManager() {
                           <Link
                             href={`/admin/departments/${encodeURIComponent(department.department_id)}`}
                             className={buttonClasses({
-                              variant: isAccounting ? "primary" : "secondary",
+                              variant: isAccounting ? "soft" : "secondary",
                               size: "sm",
                             })}
                           >

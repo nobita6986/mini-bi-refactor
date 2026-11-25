@@ -22,7 +22,7 @@ import { getDefaultFormSaveUploadJobManager } from "@/lib/direct-entry/form-save
 type SessionState = "loading" | "auth" | "anon" | "unavailable";
 
 const linkClass =
-  "inline-flex h-11 items-center rounded-md px-3 text-sm font-medium text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40";
+  "inline-flex h-11 items-center rounded-full border border-border/80 bg-surface px-4 text-sm font-medium text-foreground shadow-[var(--shadow-card)] hover:bg-surface-muted focus-visible:ring-2 focus-visible:ring-ring/40";
 
 export async function executeSessionLogout({
   fetchImpl = fetch,
@@ -122,7 +122,7 @@ export function UserSessionControl() {
   }
 
   if (state === "loading") {
-    return <span aria-hidden className="inline-block h-11 w-28 animate-pulse motion-reduce:animate-none rounded bg-muted" />;
+    return <span aria-hidden className="inline-block h-11 w-28 animate-pulse motion-reduce:animate-none rounded-full bg-muted/25" />;
   }
   if (state !== "auth" || displayName === null) {
     return <Link href="/login" className={linkClass}>Đăng nhập</Link>;
@@ -133,7 +133,7 @@ export function UserSessionControl() {
       <DropdownMenu.Trigger
         aria-label={"Tài khoản: " + displayName}
         title={displayName}
-        className="inline-flex h-11 min-w-0 max-w-[12rem] items-center gap-1 rounded-md px-3 text-sm font-medium text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40 sm:max-w-none"
+        className="inline-flex h-11 min-w-0 max-w-[12rem] items-center gap-1.5 rounded-full border border-border/80 bg-surface px-3.5 text-sm font-medium text-foreground shadow-[var(--shadow-card)] transition-colors hover:bg-surface-muted focus-visible:ring-2 focus-visible:ring-ring/40 sm:max-w-none"
       >
         <span className="min-w-0 truncate">{displayName}</span>
         <span aria-hidden className="shrink-0 text-xs text-muted">▾</span>
@@ -141,13 +141,13 @@ export function UserSessionControl() {
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           align="end"
-          sideOffset={6}
-          className="z-50 min-w-48 rounded-lg border border-border bg-surface p-1 shadow-md"
+          sideOffset={8}
+          className="z-50 min-w-48 rounded-[18px] border border-border/80 bg-surface p-1.5 shadow-[var(--shadow-card-hover)]"
         >
           <DropdownMenu.Item asChild>
             <Link
               href="/dashboard/account/password"
-              className="flex h-11 cursor-pointer items-center rounded-md px-3 text-sm text-foreground outline-none data-[highlighted]:bg-muted"
+              className="flex h-11 cursor-pointer items-center rounded-xl px-3 text-sm text-foreground outline-none data-[highlighted]:bg-[var(--selected-bg)] data-[highlighted]:text-primary"
             >
               Đổi mật khẩu
             </Link>
@@ -159,7 +159,7 @@ export function UserSessionControl() {
             }}
             disabled={busy}
             aria-busy={busy}
-            className="flex h-11 cursor-pointer items-center rounded-md px-3 text-sm text-foreground outline-none data-[highlighted]:bg-muted data-[disabled]:opacity-60"
+            className="flex h-11 cursor-pointer items-center rounded-xl px-3 text-sm text-foreground outline-none data-[highlighted]:bg-[var(--selected-bg)] data-[highlighted]:text-primary data-[disabled]:opacity-60"
           >
             {busy ? "Đang đăng xuất…" : "Đăng xuất"}
           </DropdownMenu.Item>

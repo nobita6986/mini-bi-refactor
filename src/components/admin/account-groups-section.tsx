@@ -527,11 +527,11 @@ export function AccountGroupsSection({
           ) : null}
 
           <div className="space-y-2.5">
-            <h3 className="text-sm font-semibold text-foreground">
+            <h3 className="text-sm font-semibold text-[var(--navy)]">
               Nhóm quyền đang tham gia ({readyData.memberships.length})
             </h3>
             {readyData.memberships.length === 0 ? (
-              <p className="rounded-lg border border-dashed border-border px-4 py-4 text-sm text-muted">
+              <p className="rounded-2xl border border-dashed border-border px-4 py-4 text-sm text-muted">
                 {readyData.resource_assignments.length > 0
                   ? "Chưa tham gia nhóm quyền nào. Quyền hiện tại chỉ đến từ các phân công nghiệp vụ bên dưới và các tính năng cơ bản của nhân viên."
                   : "Chưa tham gia nhóm quyền nào (chỉ sử dụng các tính năng cơ bản của nhân viên như chấm công, nghỉ phép và báo cáo được giao)."}
@@ -547,11 +547,11 @@ export function AccountGroupsSection({
                   return (
                     <div
                       key={membership.membership_id}
-                      className="flex flex-col gap-3 rounded-lg border border-border bg-surface-muted/20 p-3.5 sm:flex-row sm:items-start sm:justify-between"
+                      className="flex flex-col gap-3 rounded-2xl border border-border/80 bg-surface-muted/30 p-4 transition-colors hover:border-primary/35 hover:bg-[var(--selected-bg)]/45 sm:flex-row sm:items-start sm:justify-between"
                     >
                       <div className="min-w-0 space-y-1.5">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-foreground">
+                          <span className="font-semibold text-[var(--navy)]">
                             {membership.group_name}
                           </span>
                           <StatusBadge tone="info">{membership.department_name}</StatusBadge>
@@ -569,13 +569,13 @@ export function AccountGroupsSection({
                           {actionLabels.slice(0, 6).map((label) => (
                             <span
                               key={label}
-                              className="inline-flex rounded-md border border-border/80 bg-surface px-2 py-0.5 text-xs text-foreground"
+                              className="inline-flex rounded-full border border-border/80 bg-surface px-2.5 py-0.5 text-xs text-foreground"
                             >
                               {label}
                             </span>
                           ))}
                           {actionLabels.length > 6 ? (
-                            <span className="inline-flex rounded-md bg-surface-muted px-2 py-0.5 text-xs text-muted">
+                            <span className="inline-flex rounded-full bg-surface-muted px-2.5 py-0.5 text-xs text-muted">
                               +{actionLabels.length - 6} quyền khác
                             </span>
                           ) : null}
@@ -612,7 +612,7 @@ export function AccountGroupsSection({
           </div>
 
           <div className="space-y-2 border-t border-border pt-4">
-            <h3 className="text-sm font-semibold text-foreground">
+            <h3 className="text-sm font-semibold text-[var(--navy)]">
               Phân công theo dự án, tổ đội và phòng ban ({readyData.resource_assignments.length})
             </h3>
             {readyData.resource_assignments.length === 0 ? (
@@ -626,10 +626,10 @@ export function AccountGroupsSection({
                   return (
                     <div
                       key={`${item.assignment_kind}:${item.resource_ref}`}
-                      className="inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs"
+                      className="inline-flex flex-wrap items-center gap-1.5 rounded-full border border-border/80 bg-surface px-3 py-1.5 text-xs shadow-2xs"
                     >
                       <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>
-                      <span className="font-medium text-foreground">{item.resource_label}</span>
+                      <span className="font-medium text-[var(--navy)]">{item.resource_label}</span>
                     </div>
                   );
                 })}
@@ -701,11 +701,11 @@ export function AccountGroupsSection({
                   ))}
                 </select>
                 {selectedAssignGroup ? (
-                  <div className="rounded-lg border border-border bg-surface-muted/30 p-3 text-xs space-y-1.5">
+                  <div className="rounded-2xl border border-border/80 bg-surface-muted/35 p-3.5 text-xs space-y-1.5">
                     {selectedAssignGroup.description ? (
                       <p className="text-muted">{selectedAssignGroup.description}</p>
                     ) : null}
-                    <p className="font-medium text-foreground">Hành động được phép:</p>
+                    <p className="font-semibold text-[var(--navy)]">Hành động được phép:</p>
                     <ul className="list-disc pl-4 space-y-0.5 text-muted">
                       {summarizeGroupBusinessActions(selectedAssignGroup).map((item) => (
                         <li key={item}>{item}</li>
@@ -738,7 +738,7 @@ export function AccountGroupsSection({
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button type="button" variant="secondary" disabled={busy} onClick={closeDialog}>
                 Đóng
               </Button>
