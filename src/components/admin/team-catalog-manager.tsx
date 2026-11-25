@@ -568,7 +568,7 @@ export function TeamCatalogManager({
                     type="button"
                     aria-label="Đóng hộp thoại"
                     disabled={dismissLocked}
-                    className="inline-flex min-h-11 min-w-11 sm:min-h-9 sm:min-w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-muted px-3 text-sm font-medium text-[var(--navy)] transition-colors hover:border-primary hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-muted text-sm font-medium text-[var(--navy)] transition-colors hover:border-primary hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50 sm:size-10"
                   >
                     <span aria-hidden="true">×</span>
                   </button>
