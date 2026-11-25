@@ -15,7 +15,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Building2, CalendarDays, ChevronDown, ClipboardList, FileDiff, Landmark, LayoutDashboard, NotebookPen, ShieldCheck, Users } from "lucide-react";
+import { Banknote, Building2, CalendarDays, ChevronDown, ClipboardList, FileDiff, Landmark, LayoutDashboard, NotebookPen, Receipt, ShieldCheck, Users } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
 import {
@@ -37,10 +37,10 @@ const NAV_ICONS: Record<string, typeof LayoutDashboard> = {
   "work-reports": NotebookPen,
   "work-report-management": ClipboardList,
   "attendance-report": CalendarDays,
-  finance: Landmark,
+  finance: Receipt,
   leave: CalendarDays,
   "leave-admin": CalendarDays,
-  "salary-advances": Landmark,
+  "salary-advances": Banknote,
   "recruitment-posts": ClipboardList,
   admin: ShieldCheck,
 } as const;
