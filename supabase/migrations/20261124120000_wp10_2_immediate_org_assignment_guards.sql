@@ -3639,6 +3639,359 @@ end;
 $function$;
 
 -- =============================================================================
+-- 8B. Writer Group #7B: org_department_end_accounting_member (Tier U actor + target)
+-- =============================================================================
+
+create or replace function public.org_department_end_accounting_member(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_membership_id uuid,
+  p_expected_pair_version integer,
+  p_effective_to date,
+  p_reason text,
+  p_idempotency_key uuid,
+  p_request_fingerprint text
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_today date;
+  v_effective_to date;
+  v_reason text;
+  v_now timestamptz;
+  v_dept public.organization_departments%rowtype;
+  v_idem public.organization_department_idempotency%rowtype;
+  v_target_user_id uuid;
+  v_all_user_ids uuid[];
+  v_lock_id uuid;
+  v_linked_person_id uuid := null;
+  v_person public.organization_persons%rowtype;
+  v_curr_pm public.organization_person_department_memberships%rowtype;
+  v_target public.direct_entry_app_users%rowtype;
+  v_membership public.organization_department_memberships%rowtype;
+  v_updated public.organization_department_memberships%rowtype;
+  v_current_pair_version integer;
+  v_before jsonb;
+  v_after jsonb;
+  v_base_payload jsonb;
+  v_target_ref text;
+  v_prev_cancel text := pg_catalog.current_setting('org_department.membership_cancel_marker', true);
+begin
+  perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
+
+  if p_membership_id is null
+     or p_expected_pair_version is null
+     or p_expected_pair_version < 1
+     or p_idempotency_key is null
+     or p_request_fingerprint is null
+     or p_request_fingerprint !~ '^[0-9a-f]{64}$' then
+    raise exception 'DEPARTMENT_MEMBERSHIP_PAYLOAD_INVALID'
+      using errcode = '22023';
+  end if;
+
+  v_reason := case when p_reason is null then null else pg_catalog.btrim(p_reason) end;
+  if v_reason is null
+     or pg_catalog.length(v_reason) not between 1 and 4000
+     or v_reason ~ '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' then
+    raise exception 'DEPARTMENT_MEMBERSHIP_REASON_INVALID'
+      using errcode = '22023';
+  end if;
+
+  v_today := public.direct_entry_authorization_date();
+  v_target_ref := 'accounting_end:' || p_membership_id::text;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('org_department_idem_v1'),
+    pg_catalog.hashtext(p_app_user_id::text || ':' || p_idempotency_key::text)
+  );
+
+  select i.*
+    into v_idem
+    from public.organization_department_idempotency i
+   where i.actor_user_id = p_app_user_id
+     and i.idempotency_key = p_idempotency_key;
+
+  if found then
+    if v_idem.action <> 'ACCOUNTING_MEMBER_ENDED'
+       or (v_idem.target_ref <> '' and v_idem.target_ref <> v_target_ref)
+       or v_idem.request_fingerprint <> p_request_fingerprint then
+      raise exception 'IDEMPOTENCY_CONFLICT'
+        using errcode = '23505';
+    end if;
+    return v_idem.result_payload || pg_catalog.jsonb_build_object('replayed', true);
+  end if;
+
+  select d.department_id
+    into v_dept.department_id
+    from public.organization_departments d
+   where d.system_key = 'ACCOUNTING';
+
+  if v_dept.department_id is null then
+    raise exception 'DEPARTMENT_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  select m.app_user_id
+    into v_target_user_id
+    from public.organization_department_memberships m
+   where m.membership_id = p_membership_id
+     and m.department_id = v_dept.department_id;
+
+  if not found then
+    raise exception 'DEPARTMENT_MEMBERSHIP_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  select l.person_id
+    into v_linked_person_id
+    from public.organization_account_person_links l
+   where l.app_user_id = v_target_user_id
+     and l.ended_at is null
+   limit 1;
+
+  if v_linked_person_id is not null then
+    perform public.org_department__internal_lock_person(v_linked_person_id);
+    select p.*
+      into v_person
+      from public.organization_persons p
+     where p.person_id = v_linked_person_id
+     for update;
+  end if;
+
+  perform public.org_department__internal_lock_department(v_dept.department_id);
+
+  select d.*
+    into v_dept
+    from public.organization_departments d
+   where d.department_id = v_dept.department_id
+   for update;
+
+  perform public.org_department__internal_lock_app_user(v_target_user_id);
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('org_department_membership_v1'),
+    pg_catalog.hashtext(v_dept.department_id::text || ':' || v_target_user_id::text)
+  );
+
+  select coalesce(array_agg(distinct uid order by uid), array[]::uuid[])
+    into v_all_user_ids
+    from (
+      select p_app_user_id as uid
+      union all
+      select v_target_user_id as uid
+    ) s
+   where uid is not null;
+
+  foreach v_lock_id in array v_all_user_ids loop
+    if v_lock_id = v_target_user_id then
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for update;
+    else
+      perform u.app_user_id
+        from public.direct_entry_app_users u
+       where u.app_user_id = v_lock_id
+       for share;
+    end if;
+  end loop;
+
+  select u.*
+    into v_target
+    from public.direct_entry_app_users u
+   where u.app_user_id = v_target_user_id;
+
+  if not found then
+    raise exception 'TARGET_ACCOUNT_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  if exists (
+    select 1
+      from public.organization_account_person_links l
+     where l.app_user_id = v_target_user_id
+       and l.ended_at is null
+       and l.person_id is distinct from v_linked_person_id
+  ) then
+    raise exception 'DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
+
+  select m.*
+    into v_membership
+    from public.organization_department_memberships m
+   where m.membership_id = p_membership_id
+     and m.department_id = v_dept.department_id
+   for update;
+
+  if not found then
+    raise exception 'DEPARTMENT_MEMBERSHIP_NOT_FOUND'
+      using errcode = 'P0002';
+  end if;
+
+  select coalesce(max(m.version), 0)::integer
+    into v_current_pair_version
+    from public.organization_department_memberships m
+   where m.department_id = v_dept.department_id
+     and m.app_user_id = v_target_user_id;
+
+  if v_current_pair_version <> p_expected_pair_version
+     or v_membership.version <> p_expected_pair_version then
+    raise exception 'DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT'
+      using errcode = 'PT409';
+  end if;
+
+  if v_membership.valid_to is not null then
+    raise exception 'DEPARTMENT_MEMBERSHIP_ALREADY_ENDED'
+      using errcode = 'PT409';
+  end if;
+
+  if p_effective_to is not null and p_effective_to <> v_today then
+    raise exception 'DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID'
+      using errcode = '22023';
+  end if;
+
+  if p_effective_to is not null and p_effective_to < v_membership.valid_from then
+    raise exception 'DEPARTMENT_MEMBERSHIP_EFFECTIVE_DATE_INVALID'
+      using errcode = '22023';
+  end if;
+
+  v_effective_to := greatest(coalesce(p_effective_to, v_today), v_membership.valid_from);
+  v_now := pg_catalog.clock_timestamp();
+
+  if v_person.person_id is not null then
+    select m.*
+      into v_curr_pm
+      from public.organization_person_department_memberships m
+     where m.person_id = v_person.person_id
+       and m.department_id = v_dept.department_id
+       and m.ended_at is null
+     for update;
+
+    if found then
+      if exists (
+        select 1
+          from public.organization_department_heads h
+         where h.department_id = v_dept.department_id
+           and h.person_id = v_person.person_id
+           and h.ended_at is null
+      ) then
+        raise exception 'PERSON_IS_ACTIVE_DEPARTMENT_HEAD'
+          using errcode = 'PT409';
+      end if;
+
+      v_now := greatest(v_now, v_curr_pm.started_at);
+
+      update public.organization_person_department_memberships
+         set ended_at = v_now,
+             ended_reason = pg_catalog.left(v_reason, 500),
+             ended_by_app_user_id = p_app_user_id,
+             version = v_curr_pm.version + 1,
+             updated_at = v_now
+       where membership_id = v_curr_pm.membership_id;
+
+      update public.organization_persons
+         set version = v_person.version + 1,
+             updated_at = v_now,
+             updated_by_app_user_id = p_app_user_id
+       where person_id = v_person.person_id;
+    end if;
+  end if;
+
+  v_before := public.org_department__internal_membership_projection(
+    v_membership,
+    v_current_pair_version,
+    v_today
+  );
+
+  if v_effective_to = v_membership.valid_from then
+    perform pg_catalog.set_config('org_department.membership_cancel_marker', 'on', true);
+  end if;
+
+  update public.organization_department_memberships
+     set valid_to = v_effective_to,
+         revoked_by_user_id = p_app_user_id,
+         revoke_reason = v_reason,
+         revoked_at = v_now,
+         version = v_current_pair_version + 1
+   where membership_id = p_membership_id
+  returning * into v_updated;
+
+  perform pg_catalog.set_config('org_department.membership_cancel_marker', coalesce(v_prev_cancel, ''), true);
+
+  perform public.org_department__internal_sync_leave_profile_from_org(
+    v_target_user_id,
+    p_app_user_id,
+    v_now,
+    true
+  );
+
+  v_after := public.org_department__internal_membership_projection(
+    v_updated,
+    v_updated.version,
+    v_today
+  );
+
+  insert into public.organization_department_audit_events (
+    department_id,
+    membership_id,
+    target_app_user_id,
+    target_person_id,
+    actor_user_id,
+    action,
+    reason,
+    before_snapshot,
+    after_snapshot,
+    idempotency_key
+  ) values (
+    v_dept.department_id,
+    v_updated.membership_id,
+    v_target_user_id,
+    v_person.person_id,
+    p_app_user_id,
+    'ACCOUNTING_MEMBER_ENDED',
+    v_reason,
+    v_before,
+    v_after,
+    p_idempotency_key
+  );
+
+  v_base_payload := pg_catalog.jsonb_build_object('membership', v_after);
+
+  insert into public.organization_department_idempotency (
+    actor_user_id,
+    idempotency_key,
+    action,
+    target_ref,
+    request_fingerprint,
+    result_payload
+  ) values (
+    p_app_user_id,
+    p_idempotency_key,
+    'ACCOUNTING_MEMBER_ENDED',
+    v_target_ref,
+    p_request_fingerprint,
+    v_base_payload
+  );
+
+  return v_base_payload || pg_catalog.jsonb_build_object('replayed', false);
+exception
+  when others then
+    perform pg_catalog.set_config('org_department.membership_cancel_marker', coalesce(v_prev_cancel, ''), true);
+    raise;
+end;
+$function$;
+
+revoke all on function public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text)
+  to service_role;
+
+-- =============================================================================
 -- 9. Writer Group #8: org_department_transfer_person_member_admin (IS DISTINCT FROM)
 -- =============================================================================
 
@@ -7236,6 +7589,7 @@ declare
     'public.org_department_unlink_account_person_admin(uuid, uuid, uuid, integer, integer, uuid, text, uuid, text)',
     'public.org_department_assign_person_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)',
     'public.org_department_assign_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text)',
+    'public.org_department_end_accounting_member(uuid, uuid, uuid, integer, date, text, uuid, text)',
     'public.org_department_transfer_person_member_admin(uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text)',
     'public.org_department_end_person_member_admin(uuid, uuid, uuid, uuid, integer, text, uuid, text)',
     'public.org_department_update_person_admin(uuid, uuid, uuid, integer, text, text, date, text, text, uuid, text)',

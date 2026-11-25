@@ -25,6 +25,10 @@
  *                   2) Post-lock `NOWAIT` on `actor` for `create_personnel`, `assign_team_membership`, `move_team_membership`,
  *                   3) Active G1+G2 TL Admin `actor` operating on `MARKETING` & `RECRUITMENT` targets without G1/G2/G3 self-block,
  *                   4) Concurrent same-key single write + different-payload rejection (`22023`) + cross-midnight replay across all 4 RPCs.
+ *   - P2-end-accounting (`org_department_end_accounting_member` Tier-U ascending row lock `[actor, target]` vs `create_personnel`, `A < B`):
+ *                   1) End-first barrier (`wH` holds `membership_B`, `w1` ends `B` as `A`, `w2` creates personnel for `A` as `B`) -> both succeed (`0` `40P01`), replay & OCC intact,
+ *                   2) Create-personnel-first barrier (`wH` holds `B2`, `w2` creates personnel for `A2` as `B2`, `w1` ends `B2` as `A2`) -> both succeed (`0` `40P01`),
+ *                   3) Same-account dedupe (`actor = target = C` ends own Accounting membership cleanly).
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -36,7 +40,11 @@ import path from "node:path";
 import { test } from "node:test";
 import { Client } from "pg";
 
-import { computeCreateDepartmentFingerprint } from "../src/lib/departments/department-contract.ts";
+import {
+  computeAssignAccountingMemberFingerprint,
+  computeCreateDepartmentFingerprint,
+  computeEndAccountingMemberFingerprint,
+} from "../src/lib/departments/department-contract.ts";
 import {
   computeCreatePersonFingerprint,
   computeLinkAccountPersonFingerprint,
@@ -294,6 +302,10 @@ const ENABLE_USER_SQL =
   "select public.direct_entry_enable_app_user($1::uuid, $2::uuid, $3::uuid, $4::int, $5, $6) as data";
 const ASSIGN_GROUP_MEMBER_SQL =
   "select public.direct_entry_authz_assign_group_member_admin($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int, $6, $7::uuid, $8) as data";
+const ASSIGN_ACCOUNTING_SQL =
+  "select public.org_department_assign_accounting_member($1::uuid, $2::uuid, $3::uuid, $4::int, $5::date, $6::text, $7::uuid, $8::text) as data";
+const END_ACCOUNTING_SQL =
+  "select public.org_department_end_accounting_member($1::uuid, $2::uuid, $3::uuid, $4::int, $5::date, $6::text, $7::uuid, $8::text) as data";
 
 test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempotency lock-order & cross-midnight replay, 0 40P01", async () => {
   const initdb = binary("initdb");
@@ -2514,6 +2526,342 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
 
       console.log(
         `[PG18 F01 idempotency-midnight] cp(v=${cpDbCheck.acc_ver},cnt=1,22023=OK,midnight=2026-11-25) lr(v=${lrDbCheck.acc_ver},cnt=1,22023=OK,midnight=2026-11-26) assign(v=2,cnt=1,22023=OK,midnight=2026-11-27) move(v=3,cnt=2,22023=OK,midnight=2026-11-28) deadlocks=0`,
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // P2-end-accounting: `org_department_end_accounting_member` Tier-U [actor, target]
+    // vs `direct_entry_account_operation_create_personnel` (`A < B`) + same-account dedupe
+    // -------------------------------------------------------------------------
+    {
+      await setBusinessDate(setup, "2026-11-24");
+
+      async function seedAccountingCrossAdminPair(tag) {
+        const A = await seedPlainAccount(setup, `p2end.${tag}.a`, `P2 End Admin A ${tag}`);
+        const B = await seedPlainAccount(setup, `p2end.${tag}.b`, `P2 End Admin B ${tag}`);
+        assert.ok(A.app < B.app, `Expected A.app < B.app (${A.app} vs ${B.app})`);
+
+        for (const acc of [A, B]) {
+          const rSys = (
+            await serviceQuery(setup, ASSIGN_GROUP_MEMBER_SQL, [
+              OWNER.auth,
+              OWNER.app,
+              acc.app,
+              sysAdminGroup.group_id,
+              1,
+              `Assign SYSTEM_ADMIN ${acc.login}`,
+              nextUuid(),
+              createHash("sha256").update(`p2end:${tag}:sysadmin:${acc.app}`).digest("hex"),
+            ])
+          ).rows[0].data;
+          acc.version = rSys.account_version;
+        }
+
+        const empCode = `EMP-P2END-${tag.toUpperCase()}-A`;
+        const personA = (
+          await serviceQuery(setup, CREATE_PERSON_SQL, [
+            OWNER.auth,
+            OWNER.app,
+            empCode,
+            A.name,
+            "2026-10-01",
+            deptByKey.RECRUITMENT,
+            A.app,
+            A.version,
+            null,
+            `Onboard ${A.login}`,
+            nextUuid(),
+            computeCreatePersonFingerprint(OWNER.app, {
+              employee_code: empCode,
+              full_name: A.name,
+              joined_on: "2026-10-01",
+              initial_department_ref: deptByKey.RECRUITMENT,
+              account_ref: A.app,
+              expected_account_version: A.version,
+              recruiter_id: null,
+              reason: `Onboard ${A.login}`,
+            }),
+          ])
+        ).rows[0].data.person;
+        A.version = personA.active_account_link.account_version;
+
+        const assignB = (
+          await serviceQuery(setup, ASSIGN_ACCOUNTING_SQL, [
+            OWNER.auth,
+            OWNER.app,
+            B.app,
+            0,
+            null,
+            `Assign Accounting ${B.login}`,
+            nextUuid(),
+            computeAssignAccountingMemberFingerprint({
+              actor_app_user_id: OWNER.app,
+              account_ref: B.app,
+              expected_pair_version: 0,
+              effective_from: null,
+              reason: `Assign Accounting ${B.login}`,
+            }),
+          ])
+        ).rows[0].data;
+
+        return { A, B, personA, membershipBId: assignB.membership.membership_id };
+      }
+
+      // Case 1: End-first barrier (`wH` locks membership_B; `w1` end(A->B) blocks on wH; `w2` create_personnel(B->A) blocks on w1)
+      const c1 = await seedAccountingCrossAdminPair("case1");
+      const endKey1 = nextUuid();
+      const endReason1 = "P2-end Case 1 A ends B accounting";
+      const endFp1 = computeEndAccountingMemberFingerprint({
+        actor_app_user_id: c1.A.app,
+        membership_id: c1.membershipBId,
+        expected_pair_version: 1,
+        effective_to: null,
+        reason: endReason1,
+      });
+
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query(
+        "select membership_id from public.organization_department_memberships where membership_id = $1::uuid for update",
+        [c1.membershipBId],
+      );
+
+      await beginServiceTx(w1);
+      const pEnd1 = settleInTx(
+        w1,
+        w1.query(END_ACCOUNTING_SQL, [c1.A.auth, c1.A.app, c1.membershipBId, 1, null, endReason1, endKey1, endFp1]),
+      );
+      const waitEndFirst1 = await waitUntilBlocked(observer, "wp10-2-w1");
+
+      await beginServiceTx(w2);
+      const pCreate2 = settleInTx(
+        w2,
+        w2.query(CREATE_PERSONNEL_FROM_ACC_SQL, [
+          c1.B.auth,
+          c1.B.app,
+          c1.A.app,
+          c1.A.version,
+          c1.A.login,
+          "STAFF",
+          null,
+          "P2-end Case 1 B creates personnel for A",
+          nextUuid(),
+        ]),
+      );
+      const waitCreateSecond1 = await waitUntilBlocked(observer, "wp10-2-w2");
+
+      await wH.query("commit");
+      const [rEnd1, rCreate1] = await Promise.all([pEnd1, pCreate2]);
+      assertNotDeadlock(rEnd1, "P2-end Case 1 end_accounting_member");
+      assertNotDeadlock(rCreate1, "P2-end Case 1 create_personnel");
+      assert.equal(rEnd1.status, "fulfilled");
+      assert.equal(rCreate1.status, "fulfilled");
+      assert.equal(rEnd1.value.rows[0].data.replayed, false);
+      assert.equal(rEnd1.value.rows[0].data.membership.valid_to, "2026-11-24");
+      assert.equal(rEnd1.value.rows[0].data.membership.version, 2);
+
+      const recA1 = rCreate1.value.rows[0].data.recruiter_id;
+      const { rows: [c1Db] } = await observer.query(
+        `select m.valid_to::text as valid_to,
+                m.revoked_by_user_id::text as revoked_by_user_id,
+                m.version as mem_ver,
+                (select count(*)::int from public.organization_department_audit_events where membership_id = m.membership_id and action = 'ACCOUNTING_MEMBER_ENDED') as end_audit_cnt,
+                (select count(*)::int from public.organization_department_idempotency where actor_user_id = $2::uuid and idempotency_key = $3::uuid and action = 'ACCOUNTING_MEMBER_ENDED') as end_idem_cnt,
+                (select count(*)::int from public.recruiters r where r.recruiter_id = $4::uuid and r.personnel_code = $5 and r.active = true) as rec_cnt,
+                (select count(*)::int from public.direct_entry_app_user_recruiter_links l where l.app_user_id = $2::uuid and l.recruiter_id = $4::uuid and l.is_current = true and l.verified = true) as url_cnt,
+                (select count(*)::int from public.direct_entry_audit_events ae where ae.action = 'personnel_created' and ae.resource_ref = $4::text) as cp_audit_cnt,
+                (select count(*)::int from public.direct_entry_audit_events ae where ae.action = 'link_create' and ae.resource_ref = $2::text) as link_audit_cnt
+           from public.organization_department_memberships m
+          where m.membership_id = $1::uuid`,
+        [c1.membershipBId, c1.A.app, endKey1, recA1, c1.A.login],
+      );
+      assert.deepEqual(c1Db, {
+        valid_to: "2026-11-24",
+        revoked_by_user_id: c1.A.app,
+        mem_ver: 2,
+        end_audit_cnt: 1,
+        end_idem_cnt: 1,
+        rec_cnt: 1,
+        url_cnt: 1,
+        cp_audit_cnt: 1,
+        link_audit_cnt: 1,
+      });
+
+      const replayEnd1 = (
+        await serviceQuery(setup, END_ACCOUNTING_SQL, [
+          c1.A.auth,
+          c1.A.app,
+          c1.membershipBId,
+          1,
+          null,
+          endReason1,
+          endKey1,
+          endFp1,
+        ])
+      ).rows[0].data;
+      assert.equal(replayEnd1.replayed, true);
+      assert.deepEqual(replayEnd1.membership, rEnd1.value.rows[0].data.membership);
+
+      await assert.rejects(
+        () =>
+          serviceQuery(setup, END_ACCOUNTING_SQL, [
+            c1.A.auth,
+            c1.A.app,
+            c1.membershipBId,
+            1,
+            null,
+            endReason1,
+            nextUuid(),
+            endFp1,
+          ]),
+        (err) => err?.code === "PT409" && /DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT/.test(err?.message ?? ""),
+      );
+
+      // Case 2: Create-personnel-first barrier (`wH` locks B2; `w2` create_personnel(B2->A2) holds A2 and blocks on B2; `w1` end(A2->B2) blocks on A2)
+      const c2 = await seedAccountingCrossAdminPair("case2");
+      const endKey2 = nextUuid();
+      const endReason2 = "P2-end Case 2 A2 ends B2 accounting";
+      const endFp2 = computeEndAccountingMemberFingerprint({
+        actor_app_user_id: c2.A.app,
+        membership_id: c2.membershipBId,
+        expected_pair_version: 1,
+        effective_to: null,
+        reason: endReason2,
+      });
+
+      await wH.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '8s'");
+      await wH.query("select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update", [
+        c2.B.app,
+      ]);
+
+      await beginServiceTx(w2);
+      const pCreateFirst2 = settleInTx(
+        w2,
+        w2.query(CREATE_PERSONNEL_FROM_ACC_SQL, [
+          c2.B.auth,
+          c2.B.app,
+          c2.A.app,
+          c2.A.version,
+          c2.A.login,
+          "STAFF",
+          null,
+          "P2-end Case 2 B2 creates personnel for A2",
+          nextUuid(),
+        ]),
+      );
+      const waitCreateFirst2 = await waitUntilBlocked(observer, "wp10-2-w2");
+
+      await beginServiceTx(w1);
+      const pEndSecond2 = settleInTx(
+        w1,
+        w1.query(END_ACCOUNTING_SQL, [c2.A.auth, c2.A.app, c2.membershipBId, 1, null, endReason2, endKey2, endFp2]),
+      );
+      const waitEndSecond2 = await waitUntilBlocked(observer, "wp10-2-w1");
+
+      await wH.query("commit");
+      const [rCreate2, rEnd2] = await Promise.all([pCreateFirst2, pEndSecond2]);
+      assertNotDeadlock(rCreate2, "P2-end Case 2 create_personnel");
+      assertNotDeadlock(rEnd2, "P2-end Case 2 end_accounting_member");
+      assert.equal(rCreate2.status, "fulfilled");
+      assert.equal(rEnd2.status, "fulfilled");
+      assert.equal(rEnd2.value.rows[0].data.membership.valid_to, "2026-11-24");
+      assert.equal(rEnd2.value.rows[0].data.membership.version, 2);
+
+      const recA2 = rCreate2.value.rows[0].data.recruiter_id;
+      const { rows: [c2Db] } = await observer.query(
+        `select m.valid_to::text as valid_to,
+                m.revoked_by_user_id::text as revoked_by_user_id,
+                m.version as mem_ver,
+                (select count(*)::int from public.organization_department_audit_events where membership_id = m.membership_id and action = 'ACCOUNTING_MEMBER_ENDED') as end_audit_cnt,
+                (select count(*)::int from public.recruiters r where r.recruiter_id = $3::uuid and r.personnel_code = $4 and r.active = true) as rec_cnt,
+                (select count(*)::int from public.direct_entry_app_user_recruiter_links l where l.app_user_id = $2::uuid and l.recruiter_id = $3::uuid and l.is_current = true and l.verified = true) as url_cnt,
+                (select count(*)::int from public.direct_entry_audit_events ae where ae.action = 'personnel_created' and ae.resource_ref = $3::text) as cp_audit_cnt
+           from public.organization_department_memberships m
+          where m.membership_id = $1::uuid`,
+        [c2.membershipBId, c2.A.app, recA2, c2.A.login],
+      );
+      assert.deepEqual(c2Db, {
+        valid_to: "2026-11-24",
+        revoked_by_user_id: c2.A.app,
+        mem_ver: 2,
+        end_audit_cnt: 1,
+        rec_cnt: 1,
+        url_cnt: 1,
+        cp_audit_cnt: 1,
+      });
+
+      // Case 3: Same-account dedupe (`actor = target = C` ends own Accounting membership cleanly)
+      const C = await seedPlainAccount(setup, "p2end.self.c", "P2 End Self Admin C");
+      await serviceQuery(setup, ASSIGN_GROUP_MEMBER_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        C.app,
+        sysAdminGroup.group_id,
+        1,
+        "Assign SYSTEM_ADMIN P2-end self C",
+        nextUuid(),
+        createHash("sha256").update(`p2end:self:${C.app}`).digest("hex"),
+      ]);
+      const membershipCId = (
+        await serviceQuery(setup, ASSIGN_ACCOUNTING_SQL, [
+          OWNER.auth,
+          OWNER.app,
+          C.app,
+          0,
+          null,
+          "Assign Accounting self C",
+          nextUuid(),
+          computeAssignAccountingMemberFingerprint({
+            actor_app_user_id: OWNER.app,
+            account_ref: C.app,
+            expected_pair_version: 0,
+            effective_from: null,
+            reason: "Assign Accounting self C",
+          }),
+        ])
+      ).rows[0].data.membership.membership_id;
+
+      const endKeySelf = nextUuid();
+      const endReasonSelf = "P2-end Case 3 C ends own accounting";
+      const endFpSelf = computeEndAccountingMemberFingerprint({
+        actor_app_user_id: C.app,
+        membership_id: membershipCId,
+        expected_pair_version: 1,
+        effective_to: null,
+        reason: endReasonSelf,
+      });
+      const selfRes = (
+        await serviceQuery(setup, END_ACCOUNTING_SQL, [
+          C.auth,
+          C.app,
+          membershipCId,
+          1,
+          null,
+          endReasonSelf,
+          endKeySelf,
+          endFpSelf,
+        ])
+      ).rows[0].data;
+      assert.equal(selfRes.replayed, false);
+      assert.equal(selfRes.membership.valid_to, "2026-11-24");
+      assert.equal(selfRes.membership.version, 2);
+
+      const selfReplay = (
+        await serviceQuery(setup, END_ACCOUNTING_SQL, [
+          C.auth,
+          C.app,
+          membershipCId,
+          1,
+          null,
+          endReasonSelf,
+          endKeySelf,
+          endFpSelf,
+        ])
+      ).rows[0].data;
+      assert.equal(selfReplay.replayed, true);
+      assert.deepEqual(selfReplay.membership, selfRes.membership);
+
+      console.log(
+        `[PG18 P2-end-accounting] c1(A=${c1.A.app},B=${c1.B.app},waitEnd=${waitEndFirst1.wait_event},waitCreate=${waitCreateSecond1.wait_event},memVer=${c1Db.mem_ver},rec=${c1Db.rec_cnt}) c2(A2=${c2.A.app},B2=${c2.B.app},waitCreate=${waitCreateFirst2.wait_event},waitEnd=${waitEndSecond2.wait_event},memVer=${c2Db.mem_ver},rec=${c2Db.rec_cnt}) c3(self=${C.app},memVer=${selfRes.membership.version},replayed=true) deadlocks=0`,
       );
     }
   } finally {
