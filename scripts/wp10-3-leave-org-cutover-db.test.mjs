@@ -40,6 +40,8 @@ import {
   computeTransferPersonDepartmentFingerprint,
   computeUpdatePersonFingerprint,
 } from "../src/lib/organization/person-contract.ts";
+import { leaveHttpStatusForError, parsePatchAdminConfigBody } from "../src/lib/leave/leave-contract.ts";
+import { createLeaveRepository } from "../src/lib/leave/leave-repository.ts";
 import { PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME } from "./lib/migration-validation.mjs";
 import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 
@@ -686,6 +688,98 @@ test("WP10-3 Leave Org Cutover (PG18): Before vs After across all 6 personas, pr
       [[preUnlinkedExp.explanation.explanation_id, preCrossTlExp.explanation.explanation_id, preOpsExp.explanation.explanation_id]],
     );
 
+    // P2 Pre-Cutover (ddbf84c7 baseline): save UPSERT_EMPLOYEE_PROFILE using exact ddbf84c7 fingerprint
+    // (which includes unit_kind = "MARKETING" for explicit legacy payload and "UNCLASSIFIED" when omitted)
+    const ddbf84c7UpsertFingerprint = (targetAppId, payload) =>
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            op: "UPSERT_EMPLOYEE_PROFILE",
+            target_app_user_id: targetAppId.toLowerCase(),
+            employment_status: payload.employment_status,
+            unit_kind: payload.unit_kind ?? "UNCLASSIFIED",
+            work_start_date: payload.work_start_date ?? null,
+            official_effective_date: payload.official_effective_date ?? null,
+            next_seniority_effective_date: payload.next_seniority_effective_date ?? null,
+            next_seniority_units: payload.next_seniority_units ?? 0,
+            expected_row_version: payload.expected_row_version ?? 0,
+            reason: payload.reason ?? null,
+          }),
+          "utf8",
+        )
+        .digest("hex");
+
+    const p2LegacyMktPayload = {
+      operation: "UPSERT_EMPLOYEE_PROFILE",
+      target_app_user_id: mktHead.acc.app,
+      employment_status: "OFFICIAL",
+      unit_kind: "MARKETING",
+      work_start_date: "2024-05-01",
+      official_effective_date: "2024-07-01",
+      next_seniority_effective_date: "2029-05-01",
+      next_seniority_units: 2,
+      expected_row_version: 1,
+      reason: "P2 baseline save with MARKETING",
+      idempotency_key: "wp10-3-p2-legacy-mkt-replay",
+    };
+    const p2PreMktSaved = await serviceRpc(setup, "leave_management_upsert_employee_profile_admin", [
+      OWNER.auth,
+      OWNER.app,
+      p2LegacyMktPayload.target_app_user_id,
+      p2LegacyMktPayload.employment_status,
+      p2LegacyMktPayload.unit_kind,
+      p2LegacyMktPayload.work_start_date,
+      p2LegacyMktPayload.official_effective_date,
+      p2LegacyMktPayload.next_seniority_effective_date,
+      p2LegacyMktPayload.next_seniority_units,
+      p2LegacyMktPayload.expected_row_version,
+      p2LegacyMktPayload.reason,
+      p2LegacyMktPayload.idempotency_key,
+      ddbf84c7UpsertFingerprint(mktHead.acc.app, p2LegacyMktPayload),
+    ]);
+    assert.equal(p2PreMktSaved.replayed, false);
+    assert.equal(p2PreMktSaved.profile.unit_kind, "MARKETING");
+    assert.equal(p2PreMktSaved.profile.row_version, 2);
+
+    const p2UnlinkedAcc = await seedPlainAccount(setup, "wp103.p2unlinked", "P2 Unlinked Replay");
+    const p2OmittedPayload = {
+      operation: "UPSERT_EMPLOYEE_PROFILE",
+      target_app_user_id: p2UnlinkedAcc.app,
+      employment_status: "PROBATION",
+      work_start_date: "2026-08-01",
+      official_effective_date: null,
+      next_seniority_effective_date: null,
+      next_seniority_units: 0,
+      expected_row_version: 0,
+      reason: "P2 baseline save without unit_kind",
+      idempotency_key: "wp10-3-p2-omitted-unit-replay",
+    };
+    const p2PreOmittedSaved = await serviceRpc(setup, "leave_management_upsert_employee_profile_admin", [
+      OWNER.auth,
+      OWNER.app,
+      p2OmittedPayload.target_app_user_id,
+      p2OmittedPayload.employment_status,
+      "UNCLASSIFIED",
+      p2OmittedPayload.work_start_date,
+      p2OmittedPayload.official_effective_date,
+      p2OmittedPayload.next_seniority_effective_date,
+      p2OmittedPayload.next_seniority_units,
+      p2OmittedPayload.expected_row_version,
+      p2OmittedPayload.reason,
+      p2OmittedPayload.idempotency_key,
+      ddbf84c7UpsertFingerprint(p2UnlinkedAcc.app, p2OmittedPayload),
+    ]);
+    assert.equal(p2PreOmittedSaved.replayed, false);
+    assert.equal(p2PreOmittedSaved.profile.row_version, 1);
+
+    const { rows: [{ cnt: p2PreAuditCount }] } = await observer.query(
+      `select count(*)::int as cnt
+         from public.leave_audit_events
+        where target_app_user_id = any($1::uuid[])
+          and event_type = 'EMPLOYEE_PROFILE_UPSERTED'`,
+      [[mktHead.acc.app, p2UnlinkedAcc.app]],
+    );
+
     // -------------------------------------------------------------------------
     // Phase 1: Apply 241 (`20261125150000_wp10_3_leave_org_department_cutover.sql`)
     // -------------------------------------------------------------------------
@@ -896,6 +990,117 @@ test("WP10-3 Leave Org Cutover (PG18): Before vs After across all 6 personas, pr
     ]);
     assert.equal(saveUnlinkedLegacy.profile.unit_kind, "UNCLASSIFIED", "Cannot revive legacy MARKETING on unlinked profile");
     assert.equal(saveUnlinkedLegacy.profile.notes, "Cannot revive legacy MARKETING on unlinked");
+
+    // P2 Post-Cutover Replay Regression via NEW parsePatchAdminConfigBody + createLeaveRepository:
+    const postLeaveRepo = createLeaveRepository(async (fn, args) => {
+      assert.equal(fn, "leave_management_upsert_employee_profile_admin");
+      try {
+        const data = await serviceRpc(setup, fn, [
+          args.p_actor_auth_subject,
+          args.p_actor_app_user_id,
+          args.p_target_app_user_id,
+          args.p_employment_status,
+          args.p_unit_kind,
+          args.p_work_start_date,
+          args.p_official_effective_date,
+          args.p_next_seniority_effective_date,
+          args.p_next_seniority_units,
+          args.p_expected_row_version,
+          args.p_reason,
+          args.p_idempotency_key,
+          args.p_request_fingerprint,
+        ]);
+        return { data, error: null };
+      } catch (err) {
+        return { data: null, error: { code: err?.code, message: err?.message } };
+      }
+    });
+
+    // P2.1: Replay exact baseline MARKETING payload through new parser & repository -> replayed: true, single write
+    const p2ParsedMktReplay = parsePatchAdminConfigBody(p2LegacyMktPayload);
+    assert.equal(p2ParsedMktReplay.ok, true);
+    assert.equal("unit_kind" in p2ParsedMktReplay.data, false);
+    const p2PostMktReplay = await postLeaveRepo.patchAdminConfig({
+      auth_subject: OWNER.auth,
+      app_user_id: OWNER.app,
+      ...p2ParsedMktReplay.data,
+    });
+    assert.equal(p2PostMktReplay.ok, true, "P2 replay from baseline MARKETING must succeed without 409");
+    assert.equal(p2PostMktReplay.data.replayed, true);
+    assert.deepEqual(p2PostMktReplay.data.profile, p2PreMktSaved.profile);
+
+    // P2.2: Replay omitted-unit_kind baseline payload -> replayed: true, single write
+    const p2ParsedOmittedReplay = parsePatchAdminConfigBody(p2OmittedPayload);
+    assert.equal(p2ParsedOmittedReplay.ok, true);
+    const p2PostOmittedReplay = await postLeaveRepo.patchAdminConfig({
+      auth_subject: OWNER.auth,
+      app_user_id: OWNER.app,
+      ...p2ParsedOmittedReplay.data,
+    });
+    assert.equal(p2PostOmittedReplay.ok, true);
+    assert.equal(p2PostOmittedReplay.data.replayed, true);
+    assert.deepEqual(p2PostOmittedReplay.data.profile, p2PreOmittedSaved.profile);
+
+    // P2.3: Same idempotency_key with real profile field changed -> MUST reject 409 LEAVE_IDEMPOTENCY_FINGERPRINT_MISMATCH
+    const p2ParsedRealChange = parsePatchAdminConfigBody({
+      ...p2LegacyMktPayload,
+      work_start_date: "2024-05-02",
+    });
+    assert.equal(p2ParsedRealChange.ok, true);
+    const p2PostMismatch = await postLeaveRepo.patchAdminConfig({
+      auth_subject: OWNER.auth,
+      app_user_id: OWNER.app,
+      ...p2ParsedRealChange.data,
+    });
+    assert.deepEqual(p2PostMismatch, {
+      ok: false,
+      code: "LEAVE_IDEMPOTENCY_FINGERPRINT_MISMATCH",
+    });
+    assert.equal(leaveHttpStatusForError(p2PostMismatch.code), 409);
+
+    const { rows: [{ cnt: p2PostReplayAuditCount }] } = await observer.query(
+      `select count(*)::int as cnt
+         from public.leave_audit_events
+        where target_app_user_id = any($1::uuid[])
+          and event_type = 'EMPLOYEE_PROFILE_UPSERTED'`,
+      [[mktHead.acc.app, p2UnlinkedAcc.app]],
+    );
+    assert.equal(p2PostReplayAuditCount, p2PreAuditCount, "Replays & mismatch must produce zero extra audit writes");
+
+    // P2.4: New write sending conflicting legacy unit_kind = 'IT' for MARKETING Org persists MARKETING & replays cleanly
+    const p2NewLegacyConflictPayload = {
+      operation: "UPSERT_EMPLOYEE_PROFILE",
+      target_app_user_id: mktHead.acc.app,
+      employment_status: "OFFICIAL",
+      unit_kind: "IT",
+      work_start_date: "2024-05-01",
+      official_effective_date: "2024-07-01",
+      next_seniority_effective_date: "2029-05-01",
+      next_seniority_units: 4,
+      expected_row_version: 2,
+      reason: "P2 post-cutover new write with conflicting IT",
+      idempotency_key: "wp10-3-p2-new-key-mkt-conflict",
+    };
+    const p2ParsedNewConflict = parsePatchAdminConfigBody(p2NewLegacyConflictPayload);
+    assert.equal(p2ParsedNewConflict.ok, true);
+    const p2NewWrite = await postLeaveRepo.patchAdminConfig({
+      auth_subject: OWNER.auth,
+      app_user_id: OWNER.app,
+      ...p2ParsedNewConflict.data,
+    });
+    assert.equal(p2NewWrite.ok, true);
+    assert.equal(p2NewWrite.data.replayed, false);
+    assert.equal(p2NewWrite.data.profile.unit_kind, "MARKETING");
+    assert.equal(p2NewWrite.data.profile.next_seniority_units, 4);
+
+    const p2NewWriteReplay = await postLeaveRepo.patchAdminConfig({
+      auth_subject: OWNER.auth,
+      app_user_id: OWNER.app,
+      ...parsePatchAdminConfigBody(p2NewLegacyConflictPayload).data,
+    });
+    assert.equal(p2NewWriteReplay.ok, true);
+    assert.equal(p2NewWriteReplay.data.replayed, true);
+    assert.deepEqual(p2NewWriteReplay.data.profile, p2NewWrite.data.profile);
 
     // Invalid p_unit_kind still rejected with LEAVE_PROFILE_INVALID
     await assert.rejects(

@@ -925,16 +925,17 @@ export function parsePatchAdminConfigBody(
     if (!LEAVE_EMPLOYMENT_STATUSES.includes(empStatus as LeaveEmploymentStatus)) {
       return { ok: false, code: "LEAVE_PROFILE_INVALID" };
     }
+    let fingerprintUnitKind: LeaveUnitKind = "UNCLASSIFIED";
     if (body.unit_kind !== undefined && body.unit_kind !== null) {
       if (typeof body.unit_kind !== "string") {
         return { ok: false, code: "LEAVE_PROFILE_INVALID" };
       }
       const rawUnitKind = body.unit_kind.trim().toUpperCase();
-      if (
-        rawUnitKind.length > 0 &&
-        !LEAVE_UNIT_KINDS.includes(rawUnitKind as LeaveUnitKind)
-      ) {
-        return { ok: false, code: "LEAVE_PROFILE_INVALID" };
+      if (rawUnitKind.length > 0) {
+        if (!LEAVE_UNIT_KINDS.includes(rawUnitKind as LeaveUnitKind)) {
+          return { ok: false, code: "LEAVE_PROFILE_INVALID" };
+        }
+        fingerprintUnitKind = rawUnitKind as LeaveUnitKind;
       }
     }
 
@@ -980,6 +981,7 @@ export function parsePatchAdminConfigBody(
       op: "UPSERT_EMPLOYEE_PROFILE",
       target_app_user_id: targetAppUserId,
       employment_status: empStatus,
+      unit_kind: fingerprintUnitKind,
       work_start_date: workStartDate,
       official_effective_date: officialEffectiveDate,
       next_seniority_effective_date: nextSeniorityDate,

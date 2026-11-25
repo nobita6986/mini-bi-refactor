@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import {
@@ -352,8 +353,27 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
   });
   assert.equal(patchGrant.ok, false);
 
-  // WP10-3: UPSERT_EMPLOYEE_PROFILE omits unit_kind from canonical payload & fingerprint;
-  // legacy non-blank unit_kind is validated but cannot override Org department.
+  // WP10-3: UPSERT_EMPLOYEE_PROFILE omits unit_kind from canonical payload, while
+  // preserving exact baseline (ddbf84c7) unit_kind fingerprint hashing for replay parity.
+  const expectedBaselineHash = (unitKindValue, workStartDate = null, reason = null) =>
+    createHash("sha256")
+      .update(
+        JSON.stringify({
+          op: "UPSERT_EMPLOYEE_PROFILE",
+          target_app_user_id: TARGET_APP,
+          employment_status: "UNCONFIGURED",
+          unit_kind: unitKindValue,
+          work_start_date: workStartDate,
+          official_effective_date: null,
+          next_seniority_effective_date: null,
+          next_seniority_units: 0,
+          expected_row_version: 0,
+          reason,
+        }),
+        "utf8",
+      )
+      .digest("hex");
+
   const profileWithoutUnit = parsePatchAdminConfigBody({
     operation: "UPSERT_EMPLOYEE_PROFILE",
     target_app_user_id: TARGET_APP,
@@ -368,6 +388,7 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
   assert.equal(profileWithoutUnit.ok, true);
   assert.equal("unit_kind" in profileWithoutUnit.data, false);
   assert.equal(profileWithoutUnit.data.employment_status, "UNCONFIGURED");
+  assert.equal(profileWithoutUnit.data.request_fingerprint, expectedBaselineHash("UNCLASSIFIED"));
 
   const profileWithLegacyUnit = parsePatchAdminConfigBody({
     operation: "UPSERT_EMPLOYEE_PROFILE",
@@ -385,7 +406,30 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
   assert.equal("unit_kind" in profileWithLegacyUnit.data, false);
   assert.equal(
     profileWithLegacyUnit.data.request_fingerprint,
+    expectedBaselineHash("MARKETING"),
+  );
+  assert.notEqual(
+    profileWithLegacyUnit.data.request_fingerprint,
     profileWithoutUnit.data.request_fingerprint,
+  );
+
+  const profileWithChangedField = parsePatchAdminConfigBody({
+    operation: "UPSERT_EMPLOYEE_PROFILE",
+    target_app_user_id: TARGET_APP,
+    employment_status: "UNCONFIGURED",
+    unit_kind: "marketing",
+    work_start_date: "2026-02-01",
+    official_effective_date: null,
+    next_seniority_effective_date: null,
+    next_seniority_units: 0,
+    expected_row_version: 0,
+    reason: "Thay đổi ngày",
+    idempotency_key: "idem-prof-legacy",
+  });
+  assert.equal(profileWithChangedField.ok, true);
+  assert.notEqual(
+    profileWithChangedField.data.request_fingerprint,
+    profileWithLegacyUnit.data.request_fingerprint,
   );
 
   const profileWithBlankUnit = parsePatchAdminConfigBody({
