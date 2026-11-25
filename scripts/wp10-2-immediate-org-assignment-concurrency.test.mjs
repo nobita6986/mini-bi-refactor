@@ -532,17 +532,15 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, "C0 transfer_first");
-        assert.equal(r2.status, "fulfilled", "Plain HRP recruiter creation in CUSTOM_OPS allowed per Direction 3");
+        assert.equal(r2.status, "fulfilled", "Plain HRP recruiter creation in CUSTOM_OPS allowed");
         const recId = r2.value.rows[0].data.recruiter_id;
-        await assert.rejects(
-          () => serviceQuery(setup, ASSIGN_TEAM_SQL, [OWNER.auth, OWNER.app, recId, TEAM_A, null, 1, "C0 post check", nextUuid()]),
-          (err) => err?.code === "23514",
-        );
+        const c0Assign = (await serviceQuery(setup, ASSIGN_TEAM_SQL, [OWNER.auth, OWNER.app, recId, TEAM_A, null, 1, "C0 post check", nextUuid()])).rows[0].data;
+        assert.equal(c0Assign.team_id, TEAM_A);
       }
     }
 
     // -------------------------------------------------------------------------
-    // C1 (both orders): assign_team_membership vs link_recruiter on MARKETING Account
+    // C1 (both orders): assign_team_membership vs link_recruiter on MARKETING Account (cross-dept allowed!)
     // -------------------------------------------------------------------------
     for (const order of ["assign_first", "link_first"]) {
       const recId = await seedPlainUnlinkedHrpRecruiter(setup, `c1.${order}`, `C1 Rec ${order}`);
@@ -597,25 +595,25 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         assertNotDeadlock(r2, "C1 assign_first");
         assert.equal(r2.status, "rejected");
         assert.equal(r2.reason?.code, "PT409");
-        await assert.rejects(
-          () =>
-            serviceQuery(setup, LINK_RECRUITER_SQL, [
-              OWNER.auth,
-              OWNER.app,
-              recId,
-              2,
-              acc.app,
-              pMkt.active_account_link.account_version,
-              "C1 retry fresh ver",
-              nextUuid(),
-            ]),
-          (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
-        );
+        assert.doesNotMatch(r2.reason?.message ?? "", /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+        const c1Retry = (
+          await serviceQuery(setup, LINK_RECRUITER_SQL, [
+            OWNER.auth,
+            OWNER.app,
+            recId,
+            2,
+            acc.app,
+            pMkt.active_account_link.account_version,
+            "C1 retry fresh ver cross-dept",
+            nextUuid(),
+          ])
+        ).rows[0].data;
+        assert.equal(c1Retry.recruiter_id, recId);
         const { rows: links } = await observer.query(
           "select count(*)::int as cnt from public.direct_entry_app_user_recruiter_links where recruiter_id = $1::uuid and is_current = true",
           [recId],
         );
-        assert.equal(links[0].cnt, 0);
+        assert.equal(links[0].cnt, 1);
       } else {
         await w1.query(LINK_RECRUITER_SQL, [
           OWNER.auth,
@@ -634,24 +632,25 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         const r2 = await p2;
         assertNotDeadlock(r2, "C1 link_first");
         assert.equal(r2.status, "rejected");
-        const { rows: teamRows } = await observer.query(
-          "select count(*)::int as cnt from public.recruiter_team_memberships where recruiter_id = $1::uuid and is_current = true",
-          [recId],
-        );
-        assert.equal(teamRows[0].cnt, 0);
+        assert.equal(r2.reason?.code, "PT409");
         const { rows: [recCur] } = await observer.query(
           "select version from public.recruiters where recruiter_id = $1::uuid",
           [recId],
         );
-        await assert.rejects(
-          () => serviceQuery(setup, ASSIGN_TEAM_SQL, [OWNER.auth, OWNER.app, recId, TEAM_A, null, recCur.version, "C1 assign retry after link", nextUuid()]),
-          (err) => err?.code === "23514",
+        const c1LinkRetry = (
+          await serviceQuery(setup, ASSIGN_TEAM_SQL, [OWNER.auth, OWNER.app, recId, TEAM_A, null, recCur.version, "C1 assign retry after cross-dept link", nextUuid()])
+        ).rows[0].data;
+        assert.equal(c1LinkRetry.team_id, TEAM_A);
+        const { rows: teamRows } = await observer.query(
+          "select count(*)::int as cnt from public.recruiter_team_memberships where recruiter_id = $1::uuid and is_current = true",
+          [recId],
         );
+        assert.equal(teamRows[0].cnt, 1);
       }
     }
 
     // -------------------------------------------------------------------------
-    // C2 (both orders): transfer(ACCOUNTING) vs assign_team_membership (no optimistic version conflict!)
+    // C2 (both orders): transfer(ACCOUNTING) vs assign_team_membership (cross-dept allowed, 0 40P01!)
     // -------------------------------------------------------------------------
     for (const order of ["assign_first", "transfer_first"]) {
       const s = await makeActiveRecruitmentAccountPerson(`c2.${order}`);
@@ -680,14 +679,12 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, "C2 assign_first");
-        assert.equal(r2.status, "rejected");
-        assert.equal(r2.reason?.code, "PT409");
-        assert.match(r2.reason?.message ?? "", /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+        assert.equal(r2.status, "fulfilled", "Cross-dept transfer to ACCOUNTING succeeds with active G1");
         const { rows: [curMem] } = await observer.query(
           "select department_id from public.organization_person_department_memberships where person_id = $1::uuid and ended_at is null",
           [s.person.person_id],
         );
-        assert.equal(curMem.department_id, deptByKey.RECRUITMENT);
+        assert.equal(curMem.department_id, deptByKey.ACCOUNTING);
       } else {
         await w1.query(TRANSFER_MEMBER_SQL, transferParams);
         await beginServiceTx(w2);
@@ -696,18 +693,17 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, "C2 transfer_first");
-        assert.equal(r2.status, "rejected");
-        assert.equal(r2.reason?.code, "23514");
+        assert.equal(r2.status, "fulfilled", "Cross-dept assign_team succeeds after transfer to ACCOUNTING");
         const { rows: teamRows } = await observer.query(
           "select count(*)::int as cnt from public.recruiter_team_memberships where recruiter_id = $1::uuid and is_current = true",
           [s.recruiterId],
         );
-        assert.equal(teamRows[0].cnt, 0);
+        assert.equal(teamRows[0].cnt, 1);
       }
     }
 
     // -------------------------------------------------------------------------
-    // C3 (both orders): CUSTOM_OPS transfer & update_person(INACTIVE) vs assign_team_membership
+    // C3 (both orders): CUSTOM_OPS transfer (cross-dept allowed) & update_person(INACTIVE) (still blocked!) vs assign_team_membership
     // -------------------------------------------------------------------------
     for (const order of ["assign_first", "custom_transfer_first"]) {
       const s = await makeActiveRecruitmentAccountPerson(`c3a.${order}`);
@@ -736,9 +732,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, "C3a assign_first");
-        assert.equal(r2.status, "rejected");
-        assert.equal(r2.reason?.code, "PT409");
-        assert.match(r2.reason?.message ?? "", /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+        assert.equal(r2.status, "fulfilled", "Cross-dept transfer to CUSTOM_OPS succeeds with active G1");
       } else {
         await w1.query(TRANSFER_MEMBER_SQL, customParams);
         await beginServiceTx(w2);
@@ -747,8 +741,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, "C3a custom_transfer_first");
-        assert.equal(r2.status, "rejected");
-        assert.equal(r2.reason?.code, "23514");
+        assert.equal(r2.status, "fulfilled", "Cross-dept assign_team succeeds after transfer to CUSTOM_OPS");
       }
     }
 
@@ -886,23 +879,23 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         assertNotDeadlock(r2, `C4 ${order}`);
         assert.equal(r2.status, "rejected");
         assert.equal(r2.reason?.code, "PT409");
-        await assert.rejects(
-          () => serviceQuery(setup, ASSIGN_TEAM_SQL, [OWNER.auth, OWNER.app, recSusp, TEAM_A, null, 1, "C4 link_first retry", nextUuid()]),
-          (err) => err?.code === "23514",
-        );
+        const c4Retry = (
+          await serviceQuery(setup, ASSIGN_TEAM_SQL, [OWNER.auth, OWNER.app, recSusp, TEAM_A, null, 1, "C4 link_first retry", nextUuid()])
+        ).rows[0].data;
+        assert.equal(c4Retry.team_id, TEAM_A);
 
         const { rows: openLinks } = await observer.query(
           "select count(*)::int as cnt from public.organization_account_person_links where app_user_id = $1::uuid and person_id = $2::uuid and ended_at is null",
           [accSusp.app, pMkt.person_id],
         );
         const { rows: teamRows } = await observer.query(
-          "select count(*)::int as cnt from public.recruiter_team_memberships where recruiter_id = $1::uuid",
+          "select count(*)::int as cnt from public.recruiter_team_memberships where recruiter_id = $1::uuid and is_current = true",
           [recSusp],
         );
         assert.equal(openLinks[0].cnt, 1);
-        assert.equal(teamRows[0].cnt, 0);
+        assert.equal(teamRows[0].cnt, 1);
         console.log(
-          `[PG18 C4 link_first] wait=${JSON.stringify(waitInfo)} winner=LINK_ACCOUNT_PERSON loser=ASSIGN_TEAM(PT409 post_lock_completeness -> 23514 on retry, rolled_back) openLinks=1 teamRows=0`,
+          `[PG18 C4 link_first] wait=${JSON.stringify(waitInfo)} winner=LINK_ACCOUNT_PERSON loser=ASSIGN_TEAM(PT409 post_lock_completeness -> SUCCEEDED on retry for active MARKETING) openLinks=1 teamRows=1`,
         );
       } else {
         await w1.query(ASSIGN_TEAM_SQL, assignParams);
@@ -912,23 +905,21 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, `C4 ${order}`);
-        assert.equal(r2.status, "rejected");
-        assert.equal(r2.reason?.code, "PT409");
-        assert.match(r2.reason?.message ?? "", /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+        assert.equal(r2.status, "fulfilled", "Cross-dept link_account_person to active MARKETING succeeds after assign_team");
 
         const { rows: openLinks } = await observer.query(
-          "select count(*)::int as cnt from public.organization_account_person_links where app_user_id = $1::uuid or person_id = $2::uuid",
+          "select count(*)::int as cnt from public.organization_account_person_links where app_user_id = $1::uuid and person_id = $2::uuid and ended_at is null",
           [accSusp.app, pMkt.person_id],
         );
         const { rows: teamRows } = await observer.query(
           "select is_current, valid_to from public.recruiter_team_memberships where recruiter_id = $1::uuid",
           [recSusp],
         );
-        assert.equal(openLinks[0].cnt, 0);
+        assert.equal(openLinks[0].cnt, 1);
         assert.equal(teamRows.length, 1);
         assert.equal(teamRows[0].is_current, true);
         console.log(
-          `[PG18 C4 assign_first] wait=${JSON.stringify(waitInfo)} winner=ASSIGN_TEAM loser=LINK_ACCOUNT_PERSON(PT409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT rolled_back) openLinks=0 activeG1=1`,
+          `[PG18 C4 assign_first] wait=${JSON.stringify(waitInfo)} winner=ASSIGN_TEAM link=LINK_ACCOUNT_PERSON(FULFILLED for active MARKETING) openLinks=1 activeG1=1`,
         );
       }
     }
@@ -994,10 +985,11 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
 
     // -------------------------------------------------------------------------
     // C5a (BOTH ORDERS + mutual G1 unassign race — pure API):
-    //   A keeps active G1 on TEAM; race `revoke(B)` vs `transfer(pA, ACCOUNTING)` and vs `unassign(recA)`.
+    //   A keeps active G1 on TEAM; race `revoke(B)` vs `transfer(pA, ACCOUNTING)` (both succeed & restore A!)
+    //   and vs `unassign(recA)`.
     // -------------------------------------------------------------------------
     {
-      // C5a Order 1: revoke(B) uncommitted holds P(A) -> transfer(pA, ACCOUNTING) waits on Lock -> rejects PT409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT
+      // C5a Order 1: revoke(B) uncommitted holds P(A) -> transfer(pA, ACCOUNTING) waits on Lock -> succeeds cleanly and A+SG+CG stay restored!
       const c5a1 = await setupC5Team("5A1");
       const transferA = [
         OWNER.auth,
@@ -1023,12 +1015,10 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
       await w1.query("commit");
       const r2 = await p2;
       assertNotDeadlock(r2, "C5a Order 1");
-      assert.equal(r2.status, "rejected");
-      assert.equal(r2.reason?.code, "PT409");
-      assert.match(r2.reason?.message ?? "", /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+      assert.equal(r2.status, "fulfilled", "Cross-dept transfer(pA, ACCOUNTING) succeeds after revoke(B)");
 
       const st = await inspectC5State(c5a1.tId, c5a1.metaA.acc.app, c5a1.metaB.acc.app, c5a1.metaA.person.person_id);
-      assert.equal(st.deptA, "RECRUITMENT");
+      assert.equal(st.deptA, "ACCOUNTING");
       assert.equal(st.tlaRows.find((r) => r.uid === c5a1.metaA.acc.app)?.is_current, true);
       assert.deepEqual(st.tlaRows.find((r) => r.uid === c5a1.metaB.acc.app)?.valid_to, "2026-11-24");
       assert.equal(st.sgRows.find((r) => r.uid === c5a1.metaA.acc.app)?.is_current, true);
@@ -1036,40 +1026,36 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
       assert.equal(st.cgRows.find((r) => r.uid === c5a1.metaA.acc.app)?.is_current, true);
       assert.equal(st.cgRows.find((r) => r.uid === c5a1.metaB.acc.app)?.is_current, false);
       console.log(
-        `[PG18 C5a Order 1 revoke_first] wait=${JSON.stringify(waitInfo)} winner=REVOKE(v_restore=true, A+SG+CG restored, B closed 0-len) loser=TRANSFER(PT409 rolled_back) deptA=RECRUITMENT`,
+        `[PG18 C5a Order 1 revoke_first] wait=${JSON.stringify(waitInfo)} winner=REVOKE(v_restore=true, A+SG+CG restored, B closed 0-len) transfer=FULFILLED(deptA=ACCOUNTING)`,
       );
     }
 
     {
-      // C5a Order 2 (T0 note): while A keeps active G1, transfer(pA, ACCOUNTING) upfront is rejected immediately by G1, then revoke(B) commits restoring A
+      // C5a Order 2: transfer(pA, ACCOUNTING) succeeds upfront, then revoke(B) commits restoring A+SG+CG cleanly!
       const c5a2 = await setupC5Team("5A2");
-      await assert.rejects(
-        () =>
-          serviceQuery(setup, TRANSFER_MEMBER_SQL, [
-            OWNER.auth,
-            OWNER.app,
-            c5a2.metaA.person.person_id,
-            deptByKey.ACCOUNTING,
-            c5a2.pARow.pv,
-            c5a2.pARow.membership_id,
-            "C5a2 transfer blocked by G1",
-            nextUuid(),
-            computeTransferPersonDepartmentFingerprint(OWNER.app, c5a2.metaA.person.person_id, {
-              target_department_ref: deptByKey.ACCOUNTING,
-              expected_person_version: c5a2.pARow.pv,
-              expected_current_membership_id: c5a2.pARow.membership_id,
-              reason: "C5a2 transfer blocked by G1",
-            }),
-          ]),
-        (err) => err?.code === "PT409" && err?.message?.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"),
-      );
-      await serviceQuery(setup, REVOKE_TL_SQL, [OWNER.auth, OWNER.app, c5a2.tId, null, 3, "C5a2 revoke B after rejected transfer", nextUuid()]);
+      await serviceQuery(setup, TRANSFER_MEMBER_SQL, [
+        OWNER.auth,
+        OWNER.app,
+        c5a2.metaA.person.person_id,
+        deptByKey.ACCOUNTING,
+        c5a2.pARow.pv,
+        c5a2.pARow.membership_id,
+        "C5a2 transfer A to ACCOUNTING",
+        nextUuid(),
+        computeTransferPersonDepartmentFingerprint(OWNER.app, c5a2.metaA.person.person_id, {
+          target_department_ref: deptByKey.ACCOUNTING,
+          expected_person_version: c5a2.pARow.pv,
+          expected_current_membership_id: c5a2.pARow.membership_id,
+          reason: "C5a2 transfer A to ACCOUNTING",
+        }),
+      ]);
+      await serviceQuery(setup, REVOKE_TL_SQL, [OWNER.auth, OWNER.app, c5a2.tId, null, 3, "C5a2 revoke B after cross-dept transfer", nextUuid()]);
       const st = await inspectC5State(c5a2.tId, c5a2.metaA.acc.app, c5a2.metaB.acc.app, c5a2.metaA.person.person_id);
-      assert.equal(st.deptA, "RECRUITMENT");
+      assert.equal(st.deptA, "ACCOUNTING");
       assert.equal(st.tlaRows.find((r) => r.uid === c5a2.metaA.acc.app)?.is_current, true);
       assert.equal(st.sgRows.find((r) => r.uid === c5a2.metaA.acc.app)?.is_current, true);
       assert.equal(st.cgRows.find((r) => r.uid === c5a2.metaA.acc.app)?.is_current, true);
-      console.log("[PG18 C5a Order 2 transfer_first_blocked_by_G1] pre-check=TRANSFER_REJECTED(PT409 rolled_back) followUp=REVOKE(v_restore=true, A+SG+CG restored)");
+      console.log("[PG18 C5a Order 2 transfer_first_cross_dept] transfer=FULFILLED(deptA=ACCOUNTING) followUp=REVOKE(v_restore=true, A+SG+CG restored)");
     }
 
     // Genuine 2-order Lock wait on C5a: revoke(B) vs unassign_team_membership(recA)
