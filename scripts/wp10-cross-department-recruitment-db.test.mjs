@@ -11,7 +11,7 @@
  *   - Case 3: Disabled/paused Marketing Recruiter (disable, INACTIVE person, unlinked Source C, ended Org)
  *             blocks team/catalog; re-enable/restore unlocks immediately; TL revoke in Marketing Org restores G1+TL.
  *   - Case 4: Leave & Attendance Explanation routing for cross-dept Recruitment TL routes to primary dept's
- *             `leave_department_approvers` (`DEPARTMENT_HEAD`, NOT `ADMIN_BOD_DIRECT`), preserves `PENDING` snapshots,
+ *             Org Department Head (`organization_department_heads`, `DEPARTMENT_HEAD`, NOT `ADMIN_BOD_DIRECT`), preserves `PENDING` snapshots,
  *             while `RECRUITMENT` TL still routes `ADMIN_BOD_DIRECT`.
  *   - Case 5: Admin Org transfer between active non-RECRUITMENT departments preserves active team/TL & unblocked state,
  *             while end-membership / INACTIVE / unlink still fail closed (`PT409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT`),
@@ -29,6 +29,7 @@ import { Client } from "pg";
 
 import {
   computeAssignPersonMemberFingerprint,
+  computeDesignateHeadFingerprint,
   computeEndPersonMemberFingerprint,
 } from "../src/lib/departments/department-contract.ts";
 import {
@@ -962,19 +963,62 @@ test("WP10 Cross-Department Recruitment (PG18): Cases 1-5 (Direct Entry, Negativ
     // =========================================================================
     // CASE 4: Leave & Attendance Explanation routing for cross-dept Recruitment TL
     // =========================================================================
-    const mktApprover = await seedPlainAccount(setup, "xd.mktapp", "Marketing Approver");
-    const itApprover = await seedPlainAccount(setup, "xd.itapp", "IT Approver");
-    const acctApprover = await seedPlainAccount(setup, "xd.acctapp", "Accounting Approver");
+    async function onboardOrgDeptHead(tag, deptKey, displayName) {
+      const acc = await seedPlainAccount(setup, tag, displayName);
+      const empCode = `EMP-XD-${tag.toUpperCase().replace(/[^A-Z0-9]/g, "")}`;
+      const created = (
+        await serviceRpc(setup, "org_department_create_person_admin", [
+          OWNER.auth,
+          OWNER.app,
+          empCode,
+          acc.name,
+          "2026-01-01",
+          deptByKey[deptKey],
+          acc.app,
+          1,
+          null,
+          `Onboard ${deptKey} Head`,
+          nextUuid(),
+          computeCreatePersonFingerprint(OWNER.app, {
+            employee_code: empCode,
+            full_name: acc.name,
+            joined_on: "2026-01-01",
+            initial_department_ref: deptByKey[deptKey],
+            account_ref: acc.app,
+            expected_account_version: 1,
+            recruiter_id: null,
+            reason: `Onboard ${deptKey} Head`,
+          }),
+        ])
+      ).person;
+      const { rows: [dRow] } = await observer.query(
+        "select version from public.organization_departments where department_id = $1::uuid",
+        [deptByKey[deptKey]],
+      );
+      await serviceRpc(setup, "org_department_designate_head_admin", [
+        OWNER.auth,
+        OWNER.app,
+        deptByKey[deptKey],
+        created.person_id,
+        dRow.version,
+        null,
+        `Designate ${deptKey} Head`,
+        nextUuid(),
+        computeDesignateHeadFingerprint({
+          actor_app_user_id: OWNER.app,
+          department_id: deptByKey[deptKey],
+          person_id: created.person_id,
+          expected_department_version: dRow.version,
+          expected_current_head_assignment_id: null,
+          reason: `Designate ${deptKey} Head`,
+        }),
+      ]);
+      return acc;
+    }
 
-    await serviceRpc(setup, "leave_management_set_department_approver_admin", [
-      OWNER.auth, OWNER.app, "MARKETING", mktApprover.app, null, 0, "Set MKT approver", `app-mkt-${seq++}`, sha256("app-mkt"),
-    ]);
-    await serviceRpc(setup, "leave_management_set_department_approver_admin", [
-      OWNER.auth, OWNER.app, "IT", itApprover.app, null, 0, "Set IT approver", `app-it-${seq++}`, sha256("app-it"),
-    ]);
-    await serviceRpc(setup, "leave_management_set_department_approver_admin", [
-      OWNER.auth, OWNER.app, "ACCOUNTING", acctApprover.app, null, 0, "Set ACCT approver", `app-acct-${seq++}`, sha256("app-acct"),
-    ]);
+    const mktApprover = await onboardOrgDeptHead("xd.mktapp", "MARKETING", "Marketing Approver");
+    const itApprover = await onboardOrgDeptHead("xd.itapp", "IT", "IT Approver");
+    const acctApprover = await onboardOrgDeptHead("xd.acctapp", "ACCOUNTING", "Accounting Approver");
 
     const itTl = await onboardPersonWithRecruiter("ittl", "IT", { position: "TEAM_LEADER", teamId: TEAM_SALES });
     const TEAM_ACCT_TL = nextUuid();

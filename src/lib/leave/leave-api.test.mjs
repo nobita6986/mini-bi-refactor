@@ -353,6 +353,23 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
   });
   assert.equal(patchGrant.ok, false);
 
+  // WP10-4: SET_DEPARTMENT_APPROVER is retired; department heads are managed exclusively via Organization Departments (/admin/departments).
+  assert.deepEqual(
+    parsePatchAdminConfigBody({
+      operation: "SET_DEPARTMENT_APPROVER",
+      unit_kind: "MARKETING",
+      approver_app_user_id: TARGET_APP,
+      valid_from: null,
+      expected_row_version: 0,
+      idempotency_key: "idem-dept-retired-1",
+    }),
+    { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN" },
+  );
+  assert.deepEqual(
+    parsePatchAdminConfigBody({ operation: "SET_DEPARTMENT_APPROVER" }),
+    { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN" },
+  );
+
   // WP10-3: UPSERT_EMPLOYEE_PROFILE omits unit_kind from canonical payload, while
   // preserving exact baseline (ddbf84c7) unit_kind fingerprint hashing for replay parity.
   const expectedBaselineHash = (unitKindValue, workStartDate = null, reason = null) =>
@@ -786,6 +803,44 @@ test("leave-api monthly report and .xlsx export return valid workbook with forma
     deps,
   );
   assert.equal(adminPatchRes.status, 200);
+
+  assert.equal(
+    mapLeaveRpcError({
+      code: "PT409",
+      message: "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN",
+    }),
+    "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN",
+  );
+  assert.equal(leaveHttpStatusForError("LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN"), 409);
+
+  let patchCalled = false;
+  const retiredPatchRes = await handlePatchLeaveAdminConfig(
+    new Request("https://bi.example.com/api/leave/admin/config", {
+      method: "PATCH",
+      headers: sameOriginHeaders,
+      body: JSON.stringify({
+        operation: "SET_DEPARTMENT_APPROVER",
+        unit_kind: "MARKETING",
+        approver_app_user_id: TARGET_APP,
+        valid_from: null,
+        expected_row_version: 0,
+        idempotency_key: "idem-retired-patch-1",
+      }),
+    }),
+    "true",
+    {
+      resolveSession: mockActiveSession(),
+      repository: createNoopRepo({
+        async patchAdminConfig() {
+          patchCalled = true;
+          return { ok: true, data: { replayed: false } };
+        },
+      }),
+    },
+  );
+  assert.equal(retiredPatchRes.status, 409);
+  assert.equal((await retiredPatchRes.json()).code, "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN");
+  assert.equal(patchCalled, false);
 
   const previewRes = await handlePostPreviewOpeningBalances(
     new Request("https://bi.example.com/api/leave/admin/opening-balances/preview", {

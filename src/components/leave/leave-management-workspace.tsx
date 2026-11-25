@@ -26,7 +26,6 @@ import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import { StatusBanner } from "@/components/ui/status-banner";
 import type { LeaveAdminAccountStatusFilter } from "@/lib/leave/leave-contract";
 import {
-  LEAVE_DEPARTMENT_APPROVER_UNIT_KINDS,
   LEAVE_EMPLOYMENT_STATUSES,
   LEAVE_REQUEST_STATUS_FILTERS,
   LEAVE_SESSION_CODES,
@@ -45,7 +44,6 @@ import {
   fetchAllLeaveAdminEmployeeOptions,
   formatHalfDayUnits,
   formatIsoDateVi,
-  formatLeaveAdminAccountOptionLabel,
   formatLeaveOrgDepartmentDisplay,
   formatSignedHalfDayUnits,
   halfDayUnitsToDays,
@@ -71,23 +69,18 @@ import {
   parseOpeningBalanceBulkText,
   resolveAdminSelectorEmployeeOptions,
   resolveAppliedOpeningRowCount,
-  resolveDepartmentApproverMutationPayload,
   resolveKnownLeaveAccountLabel,
   resolveLeaveOpeningBalanceEmployees,
   resolveOpeningRowSelectOptions,
   resolveRequestTypeBreakdown,
   resolveVisibleLeaveTabs,
   todayVietnamIsoDate,
-  transitionDepartmentApproverAfterMutation,
-  transitionDepartmentApproverAfterReload,
   validateApproverDecisionInput,
-  type DepartmentApproverPendingState,
   type LeaveAccountProjection,
   type LeaveAdminEmployeeItemProjection,
   type LeaveAdminOverviewProjection,
   type LeaveApprovalInboxProjection,
   type LeaveDecisionCode,
-  type LeaveDepartmentApproverUnitKind,
   type LeaveDraftDayRow,
   type LeaveEmploymentStatus,
   type LeaveMeSummaryProjection,
@@ -291,16 +284,6 @@ export function LeaveManagementWorkspace({
   const [policyExpiryDay, setPolicyExpiryDay] = useState<string>("31");
   const [policyReason, setPolicyReason] = useState<string>("");
   const [savingPolicy, setSavingPolicy] = useState<boolean>(false);
-
-  // Admin Department Approver Form State
-  const [deptUnitKind, setDeptUnitKind] = useState<LeaveDepartmentApproverUnitKind>("MARKETING");
-  const [deptApproverUserId, setDeptApproverUserId] = useState<string>("");
-  const [deptReason, setDeptReason] = useState<string>("");
-  const [savingDeptApprover, setSavingDeptApprover] = useState<boolean>(false);
-  const [reloadingDeptApprover, setReloadingDeptApprover] = useState<boolean>(false);
-  const [deptApproverPendingState, setDeptApproverPendingState] =
-    useState<DepartmentApproverPendingState | null>(null);
-  const deptApproverLocked = deptApproverPendingState !== null;
 
   // Admin Employee Profile Dialog State
   const [editingEmployee, setEditingEmployee] =
@@ -931,190 +914,6 @@ export function LeaveManagementWorkspace({
       });
     } finally {
       setSavingPolicy(false);
-    }
-  };
-
-  const handleSaveDepartmentApprover = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!adminData || savingDeptApprover || reloadingDeptApprover) return;
-    if (deptApproverPendingState?.phase === "reload_required") return;
-
-    const retryPendingPayload =
-      deptApproverPendingState?.phase === "ambiguous_retry"
-        ? deptApproverPendingState.payload
-        : null;
-
-    if (!retryPendingPayload && !deptApproverUserId.trim()) {
-      notify.warning({
-        title: "Thiếu thông tin người duyệt",
-        description: "Vui lòng chọn người duyệt bộ phận.",
-      });
-      return;
-    }
-
-    const existingCurrent = adminData.department_approvers.find(
-      (item) => item.unit_kind === deptUnitKind && item.is_current,
-    );
-    const payload = retryPendingPayload
-      ? resolveDepartmentApproverMutationPayload({
-          unitKind: retryPendingPayload.unit_kind,
-          approverAppUserId: retryPendingPayload.approver_app_user_id,
-          expectedRowVersion: retryPendingPayload.expected_row_version,
-          reason: retryPendingPayload.reason,
-          pendingPayload: retryPendingPayload,
-        })
-      : resolveDepartmentApproverMutationPayload({
-          unitKind: deptUnitKind,
-          approverAppUserId: deptApproverUserId,
-          expectedRowVersion: existingCurrent?.row_version ?? 0,
-          reason: deptReason,
-          pendingPayload: null,
-        });
-
-    setSavingDeptApprover(true);
-    try {
-      const response = await fetch("/api/leave/admin/config", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": payload.idempotency_key,
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          ...payload,
-          operation: "SET_DEPARTMENT_APPROVER",
-        }),
-      });
-      const parsed = await parseJsonResponse(response);
-      if (!parsed.ok) {
-        if (parsed.errorCode === "LEAVE_ROW_VERSION_CONFLICT") {
-          const reloaded = await loadAdminConfig(
-            adminAppliedSearch,
-            adminPage,
-            adminAccountStatus,
-            { silentErrorState: true },
-          );
-          const transition = transitionDepartmentApproverAfterMutation({
-            payload,
-            mutationResult: {
-              ok: false,
-              status: parsed.status,
-              errorCode: parsed.errorCode,
-            },
-            postMutationReloadSucceeded: reloaded !== null,
-          });
-          setDeptApproverPendingState(transition.nextPendingState);
-          if (transition.unlocked) {
-            notify.warning({
-              title: "Dữ liệu người duyệt đã thay đổi",
-              description: `${leaveErrorMessage(parsed.errorCode)} Đã tải lại cấu hình mới nhất từ máy chủ.`,
-            });
-          } else {
-            notify.warning({
-              title: "Xung đột phiên bản cấu hình",
-              description: "Cấu hình trên máy chủ đã thay đổi nhưng chưa tải lại được dữ liệu mới nhất. Vui lòng bấm Tải lại cấu hình để đối chiếu.",
-            });
-          }
-          return;
-        }
-
-        const transition = transitionDepartmentApproverAfterMutation({
-          payload,
-          mutationResult: {
-            ok: false,
-            status: parsed.status,
-            errorCode: parsed.errorCode ?? null,
-          },
-        });
-        setDeptApproverPendingState(transition.nextPendingState);
-        notify.error({
-          title: "Không thể cập nhật người duyệt bộ phận",
-          description: leaveErrorMessage(parsed.errorCode),
-        });
-        return;
-      }
-
-      const reloaded = await loadAdminConfig(
-        adminAppliedSearch,
-        adminPage,
-        adminAccountStatus,
-        { silentErrorState: true },
-      );
-      const transition = transitionDepartmentApproverAfterMutation({
-        payload,
-        mutationResult: { ok: true },
-        postMutationReloadSucceeded: reloaded !== null,
-      });
-      setDeptApproverPendingState(transition.nextPendingState);
-      if (transition.shouldClearReason) {
-        setDeptReason("");
-      }
-      if (reloaded !== null) {
-        notify.success({
-          title: "Đã lưu người duyệt bộ phận",
-          description: `Đã cập nhật người duyệt cho bộ phận ${leaveUnitKindLabel(payload.unit_kind)}.`,
-        });
-      } else {
-        notify.warning({
-          title: "Đã lưu người duyệt nhưng cần tải lại cấu hình",
-          description: "Thay đổi đã được máy chủ ghi nhận nhưng chưa tải lại được dữ liệu mới nhất. Vui lòng bấm Tải lại cấu hình để đối chiếu.",
-        });
-      }
-    } catch {
-      const transition = transitionDepartmentApproverAfterMutation({
-        payload,
-        mutationResult: "network_error",
-      });
-      setDeptApproverPendingState(transition.nextPendingState);
-      notify.error({
-        title: "Lỗi kết nối",
-        description: "Chưa xác định được kết quả cập nhật người duyệt. Vui lòng thử lại lưu người duyệt hoặc tải lại cấu hình để đối chiếu.",
-      });
-    } finally {
-      setSavingDeptApprover(false);
-    }
-  };
-
-  const handleReloadDepartmentApproverConfig = async () => {
-    if (!deptApproverPendingState || savingDeptApprover || reloadingDeptApprover) return;
-    setReloadingDeptApprover(true);
-    try {
-      const freshOverview = await loadAdminConfig(
-        adminAppliedSearch,
-        adminPage,
-        adminAccountStatus,
-        { silentErrorState: true },
-      );
-      const transition = transitionDepartmentApproverAfterReload({
-        pendingState: deptApproverPendingState,
-        reloadResult: freshOverview
-          ? { ok: true, departmentApprovers: freshOverview.department_approvers }
-          : { ok: false },
-      });
-      setDeptApproverPendingState(transition.nextPendingState);
-      if (!transition.unlocked) {
-        notify.error({
-          title: "Không thể tải lại cấu hình",
-          description: "Chưa tải được dữ liệu đối chiếu từ máy chủ. Biểu mẫu vẫn giữ khóa và bảo toàn thao tác đang chờ.",
-        });
-        return;
-      }
-      if (transition.shouldClearReason) {
-        setDeptReason("");
-      }
-      if (transition.appliedOnServer) {
-        notify.success({
-          title: "Đã đối chiếu cấu hình mới nhất",
-          description: "Thay đổi người duyệt bộ phận đã có hiệu lực trên máy chủ. Biểu mẫu đã được mở khóa.",
-        });
-      } else {
-        notify.info({
-          title: "Đã tải lại cấu hình để đối chiếu",
-          description: "Dữ liệu mới nhất từ máy chủ đã được cập nhật. Biểu mẫu đã được mở khóa.",
-        });
-      }
-    } finally {
-      setReloadingDeptApprover(false);
     }
   };
 
@@ -2746,31 +2545,44 @@ export function LeaveManagementWorkspace({
                     </form>
                   </Card>
 
-                  {/* Card 2: Department Approvers (Marketing / IT / Accounting) */}
-                  <Card className="lg:col-span-7 space-y-4">
-                    <CardHeader
-                      title="Cấu hình Trưởng phòng duyệt phép (Marketing / IT / Kế toán)"
-                      description="Khối Tuyển dụng tự động định tuyến theo Team Leader hiện có. Các bộ phận Marketing, IT, Kế toán định tuyến theo người duyệt cấu hình tại đây."
-                    />
+                  {/* Card 2: Read-only Org-sourced Department Heads (WP10-4 unified management in /admin/departments) */}
+                  <Card className="lg:col-span-7 space-y-4" data-testid="leave-org-department-heads-card">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <CardHeader
+                        title="Trưởng phòng duyệt phép theo Tổ chức"
+                        description="Khối Tuyển dụng định tuyến theo Team Leader hiện có. Các phòng ban hoạt động khác (ngoài Ban Giám đốc) định tuyến theo Trưởng phòng được bổ nhiệm tại Quản trị -> Phòng ban (cũng áp dụng cho Giải trình chấm công); IT/Kế toán hoặc phòng chưa có Trưởng phòng sẽ chuyển về Ban Giám đốc/Admin dự phòng."
+                      />
+                      {authority.is_full_admin ? (
+                        <Link
+                          href="/admin/departments"
+                          className={buttonClasses({ variant: "secondary", size: "sm" })}
+                        >
+                          Quản lý tại Phòng ban
+                        </Link>
+                      ) : null}
+                    </div>
                     <div className="space-y-2">
                       {adminData.department_approvers.length === 0 ? (
                         <p className="text-xs text-muted">
-                          Chưa có cấu hình người duyệt bộ phận (đơn sẽ chuyển về hàng đợi Admin/BoD dự phòng).
+                          Chưa có Trưởng phòng hoạt động nào được bổ nhiệm (đơn của các phòng ban ngoài Tuyển dụng sẽ chuyển về hàng đợi Ban Giám đốc/Admin dự phòng).
                         </p>
                       ) : (
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                           {adminData.department_approvers.map((da) => (
                             <div
-                              key={da.approver_assignment_id}
+                              key={da.department_id ?? da.approver_assignment_id}
                               className="rounded-lg border border-border bg-surface-muted/40 p-2.5 text-xs"
                             >
                               <div className="font-semibold text-foreground">
-                                {leaveUnitKindLabel(da.unit_kind)}
+                                {da.department_name ?? leaveUnitKindLabel(da.unit_kind)}
                               </div>
                               <div className="mt-1 text-foreground">
-                                Người duyệt:{" "}
+                                Trưởng phòng:{" "}
                                 <strong>
                                   {da.approver?.display_name ?? da.approver?.login_id ?? "—"}
+                                  {da.approver?.display_name && da.approver?.login_id
+                                    ? ` (@${da.approver.login_id})`
+                                    : ""}
                                 </strong>
                               </div>
                               <div className="mt-0.5 text-muted font-mono">
@@ -2781,147 +2593,6 @@ export function LeaveManagementWorkspace({
                         </div>
                       )}
                     </div>
-
-                    {deptApproverPendingState ? (
-                      <StatusBanner
-                        tone="warning"
-                        title={
-                          deptApproverPendingState.phase === "ambiguous_retry"
-                            ? "Thao tác lưu người duyệt chưa có kết quả xác nhận"
-                            : "Cần tải lại cấu hình để đối chiếu trước khi chỉnh sửa tiếp"
-                        }
-                        dataTestId="leave-dept-approver-pending-banner"
-                      >
-                        <p>{deptApproverPendingState.message}</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            size="sm"
-                            loading={reloadingDeptApprover}
-                            disabled={savingDeptApprover || reloadingDeptApprover}
-                            onClick={() => void handleReloadDepartmentApproverConfig()}
-                            data-testid="leave-reload-dept-approver-btn"
-                          >
-                            Tải lại cấu hình để đối chiếu
-                          </Button>
-                        </div>
-                      </StatusBanner>
-                    ) : null}
-
-                    <form
-                      onSubmit={handleSaveDepartmentApprover}
-                      className="space-y-3 border-t border-border pt-3"
-                    >
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <div>
-                          <label className="block text-xs font-medium text-muted mb-1">
-                            Bộ phận
-                          </label>
-                          <select
-                            value={deptUnitKind}
-                            disabled={
-                              savingDeptApprover ||
-                              reloadingDeptApprover ||
-                              deptApproverLocked ||
-                              (!authority.is_full_admin && !authority.is_bod)
-                            }
-                            onChange={(e) => {
-                              if (deptApproverLocked) return;
-                              setDeptUnitKind(
-                                e.target.value as LeaveDepartmentApproverUnitKind,
-                              );
-                            }}
-                            data-testid="leave-dept-unit-select"
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          >
-                            {LEAVE_DEPARTMENT_APPROVER_UNIT_KINDS.map((uk) => (
-                              <option key={uk} value={uk}>
-                                {leaveUnitKindLabel(uk)}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-muted mb-1">
-                            Người duyệt
-                          </label>
-                          <select
-                            value={deptApproverUserId}
-                            disabled={
-                              savingDeptApprover ||
-                              reloadingDeptApprover ||
-                              deptApproverLocked ||
-                              (!authority.is_full_admin && !authority.is_bod)
-                            }
-                            onChange={(e) => {
-                              if (deptApproverLocked) return;
-                              setDeptApproverUserId(e.target.value);
-                            }}
-                            data-testid="leave-dept-approver-select"
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          >
-                            <option value="">-- Chọn tài khoản duyệt --</option>
-                            {nonSharedEmployees.map((emp) => (
-                              <option
-                                key={emp.account.app_user_id}
-                                value={emp.account.app_user_id}
-                              >
-                                {formatLeaveAdminAccountOptionLabel(emp.account)}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <span className="block text-xs font-medium text-muted mb-1">
-                            Hiệu lực từ ngày
-                          </span>
-                          <div className="flex min-h-10 items-center rounded-lg border border-border bg-surface-muted/60 px-3 py-1.5 text-sm font-mono text-foreground">
-                            {todayVietnamIsoDate()} (ngay lập tức)
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-                        <div className="flex-1">
-                          <label className="block text-xs font-medium text-muted mb-1">
-                            Lý do phân công (không bắt buộc)
-                          </label>
-                          <input
-                            type="text"
-                            disabled={
-                              savingDeptApprover ||
-                              reloadingDeptApprover ||
-                              deptApproverLocked ||
-                              (!authority.is_full_admin && !authority.is_bod)
-                            }
-                            value={deptReason}
-                            onChange={(e) => {
-                              if (deptApproverLocked) return;
-                              setDeptReason(e.target.value);
-                            }}
-                            placeholder="Nhập lý do cấu hình người duyệt bộ phận..."
-                            data-testid="leave-dept-reason-input"
-                            className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
-                          />
-                        </div>
-                        <Button
-                          type="submit"
-                          variant="primary"
-                          loading={savingDeptApprover}
-                          disabled={
-                            savingDeptApprover ||
-                            reloadingDeptApprover ||
-                            deptApproverPendingState?.phase === "reload_required" ||
-                            (!authority.is_full_admin && !authority.is_bod)
-                          }
-                          data-testid="leave-save-dept-approver-btn"
-                        >
-                          {deptApproverPendingState?.phase === "ambiguous_retry"
-                            ? "Thử lại lưu người duyệt"
-                            : "Lưu người duyệt"}
-                        </Button>
-                      </div>
-                    </form>
                   </Card>
 
                   {/* Card 3: Read-only group-sourced Leave operators (D4 unified management in /admin/access/groups) */}

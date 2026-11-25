@@ -650,7 +650,7 @@ test("WP1/S1: API & contract layers reject future and past effective/end dates a
     serverToday,
   );
   assert.equal(leaveRes.ok, false);
-  assert.equal(leaveRes.code, "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN");
+  assert.equal(leaveRes.code, "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN");
 
   const leavePastRes = parsePatchAdminConfigBody(
     {
@@ -665,7 +665,7 @@ test("WP1/S1: API & contract layers reject future and past effective/end dates a
     serverToday,
   );
   assert.equal(leavePastRes.ok, false);
-  assert.equal(leavePastRes.code, "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN");
+  assert.equal(leavePastRes.code, "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN");
 
   const leaveDefault = parsePatchAdminConfigBody(
     {
@@ -678,25 +678,8 @@ test("WP1/S1: API & contract layers reject future and past effective/end dates a
     },
     serverToday,
   );
-  assert.equal(leaveDefault.ok, true);
-  assert.equal(leaveDefault.data.valid_from, null);
-  const leaveDefaultTomorrow = parsePatchAdminConfigBody(
-    {
-      operation: "SET_DEPARTMENT_APPROVER",
-      unit_kind: "MARKETING",
-      approver_app_user_id: validUuid,
-      expected_row_version: 0,
-      reason: "Default leave approver today",
-      idempotency_key: validIdem,
-    },
-    futureDate,
-  );
-  assert.equal(leaveDefaultTomorrow.ok, true);
-  assert.equal(
-    leaveDefault.data.request_fingerprint,
-    leaveDefaultTomorrow.data.request_fingerprint,
-    "Cross-midnight leave department approver request fingerprint must remain identical when valid_from is omitted",
-  );
+  assert.equal(leaveDefault.ok, false);
+  assert.equal(leaveDefault.code, "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN");
 
   // 6. Vendor Finance UI model builders reject both future and past dates and accept null
   for (const invalidDate of [futureDate, pastDate]) {
@@ -2154,16 +2137,7 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
     );
 
     // -------------------------------------------------------------------------
-    // 15. Dedicated Suite H: Leave Department Approver Optional Reason + Cross-Midnight Form & Retry E2E
-    //     (`20261112180000_hf_wp1_leave_department_approver_optional_reason.sql` + `handlePatchLeaveAdminConfig`
-    //      + `createLeaveRepository` + `resolveDepartmentApproverMutationPayload`)
-    //     - `reason = null`, `""`, `"   "` succeed (200 OK) and store `reason = null`
-    //     - Valid non-empty `reason` succeeds (200 OK) and stores trimmed `reason`
-    //     - Invalid `reason` (> 500 chars or control character) fails with 422 `LEAVE_REASON_INVALID`
-    //     - Form opened on day D (2026-11-17) and submitted on day D+1 (2026-11-18) with `valid_from: null`
-    //       succeeds with `valid_from = 2026-11-18`
-    //     - Ambiguous failure (lost response / 431 / 503) followed by retry on day D+2 (2026-11-19) preserves
-    //       exact payload & `idempotency_key` and replays 200 OK (`replayed: true`)
+    // 15. Dedicated Suite H: Pre-PR28 Leave Department Approver Optional Reason SQL + WP10-4 API Fail-Closed Retirement
     // -------------------------------------------------------------------------
     const leaveRepo = createLeaveRepository(pgliteNamedRpc);
     const leaveApiDeps = {
@@ -2197,7 +2171,7 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
         leaveApiDeps,
       );
 
-    // 15.1 Form opened on 2026-11-17 (`as_of_date = 2026-11-17`), submitted after midnight on 2026-11-18 with `reason = ""`
+    // 15.1 WP10-4 API boundary rejects SET_DEPARTMENT_APPROVER with 409 LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN
     await setBusinessDate(db, "2026-11-18");
     const nullReasonPayload = resolveDepartmentApproverMutationPayload({
       unitKind: "IT",
@@ -2210,18 +2184,28 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
     assert.equal(nullReasonPayload.valid_from, null);
     assert.equal(nullReasonPayload.reason, null);
 
-    const nullReasonRes = await callPatchLeaveDeptApprover(nullReasonPayload);
-    assert.equal(nullReasonRes.status, 200);
-    const nullReasonJson = await nullReasonRes.json();
-    assert.equal(nullReasonJson.ok, true);
-    assert.equal(nullReasonJson.data.replayed, false);
-    assert.equal(nullReasonJson.data.department_approver.unit_kind, "IT");
-    assert.equal(nullReasonJson.data.department_approver.approver_app_user_id, ACTORS.mktApprover1.app);
-    assert.equal(nullReasonJson.data.department_approver.valid_from, "2026-11-18");
-    assert.equal(nullReasonJson.data.department_approver.reason, null);
-    assert.equal(nullReasonJson.data.department_approver.row_version, 1);
+    const retiredApiRes = await callPatchLeaveDeptApprover(nullReasonPayload);
+    assert.equal(retiredApiRes.status, 409);
+    const retiredApiJson = await retiredApiRes.json();
+    assert.equal(retiredApiJson.code, "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN");
 
-    // 15.2 Whitespace-only reason (`"   "`) via API -> Repository -> SQL also normalizes to `null` and succeeds
+    // 15.2 Pre-PR28 SQL RPC: null/blank/valid reasons + cross-midnight idempotent replay + invalid reason
+    const {
+      rows: [{ result: sqlNullReasonResult }],
+    } = await db.query(
+      `select public.leave_management_set_department_approver_admin(
+         $1::uuid, $2::uuid, 'IT', $3::uuid, null, 0,
+         null, 'hf-dept-approver-null-reason-1', 'fp-hf-dept-approver-null-reason-1'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.mktApprover1.app],
+    );
+    assert.equal(sqlNullReasonResult.replayed, false);
+    assert.equal(sqlNullReasonResult.department_approver.unit_kind, "IT");
+    assert.equal(sqlNullReasonResult.department_approver.approver_app_user_id, ACTORS.mktApprover1.app);
+    assert.equal(sqlNullReasonResult.department_approver.valid_from, "2026-11-18");
+    assert.equal(sqlNullReasonResult.department_approver.reason, null);
+    assert.equal(sqlNullReasonResult.department_approver.row_version, 1);
+
     const blankReasonPayload = resolveDepartmentApproverMutationPayload({
       unitKind: "IT",
       approverAppUserId: ACTORS.mktApprover2.app,
@@ -2230,15 +2214,21 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
       pendingPayload: null,
       createIdempotencyKey: () => "hf-dept-approver-blank-reason-2",
     });
-    const blankReasonRes = await callPatchLeaveDeptApprover(blankReasonPayload);
-    assert.equal(blankReasonRes.status, 200);
-    const blankReasonJson = await blankReasonRes.json();
-    assert.equal(blankReasonJson.ok, true);
-    assert.equal(blankReasonJson.data.department_approver.approver_app_user_id, ACTORS.mktApprover2.app);
-    assert.equal(blankReasonJson.data.department_approver.reason, null);
-    assert.equal(blankReasonJson.data.department_approver.row_version, 2);
+    assert.equal(blankReasonPayload.reason, null);
 
-    // Also verify direct SQL RPC call with whitespace-only `p_reason = '   '` stores `reason = null`
+    const {
+      rows: [{ result: sqlBlankItResult }],
+    } = await db.query(
+      `select public.leave_management_set_department_approver_admin(
+         $1::uuid, $2::uuid, 'IT', $3::uuid, null, 1,
+         '   ', 'hf-dept-approver-blank-reason-2', 'fp-hf-dept-approver-blank-reason-2'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.mktApprover2.app],
+    );
+    assert.equal(sqlBlankItResult.department_approver.approver_app_user_id, ACTORS.mktApprover2.app);
+    assert.equal(sqlBlankItResult.department_approver.reason, null);
+    assert.equal(sqlBlankItResult.department_approver.row_version, 2);
+
     const {
       rows: [{ result: sqlBlankReasonResult }],
     } = await db.query(
@@ -2250,7 +2240,7 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
     );
     assert.equal(sqlBlankReasonResult.department_approver.reason, null);
 
-    // 15.3 Valid non-empty reason + ambiguous failure followed by cross-midnight retry (`2026-11-18` -> `2026-11-19`)
+    // 15.3 Valid non-empty reason + ambiguous failure helper + cross-midnight replay (`2026-11-18` -> `2026-11-19`)
     const validReasonPayload = resolveDepartmentApproverMutationPayload({
       unitKind: "IT",
       approverAppUserId: ACTORS.mktApprover1.app,
@@ -2261,19 +2251,20 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
     });
     assert.equal(validReasonPayload.reason, "Bổ nhiệm lại người duyệt IT");
 
-    // First attempt commits on 2026-11-18, but client experiences an ambiguous failure (e.g. network drop / 431 / 503)
-    const committedResBeforeDrop = await callPatchLeaveAdminConfigWithCapture(validReasonPayload);
-    async function callPatchLeaveAdminConfigWithCapture(payload) {
-      return callPatchLeaveDeptApprover(payload);
-    }
-    assert.equal(committedResBeforeDrop.status, 200);
-    const committedJson = await committedResBeforeDrop.json();
-    assert.equal(committedJson.data.replayed, false);
-    assert.equal(committedJson.data.department_approver.reason, "Bổ nhiệm lại người duyệt IT");
-    assert.equal(committedJson.data.department_approver.valid_from, "2026-11-18");
-    assert.equal(committedJson.data.department_approver.row_version, 3);
+    const {
+      rows: [{ result: sqlValidReasonResult }],
+    } = await db.query(
+      `select public.leave_management_set_department_approver_admin(
+         $1::uuid, $2::uuid, 'IT', $3::uuid, null, 2,
+         $4::text, 'hf-dept-approver-valid-reason-3', 'fp-hf-dept-approver-valid-reason-3'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.mktApprover1.app, validReasonPayload.reason],
+    );
+    assert.equal(sqlValidReasonResult.replayed, false);
+    assert.equal(sqlValidReasonResult.department_approver.reason, "Bổ nhiệm lại người duyệt IT");
+    assert.equal(sqlValidReasonResult.department_approver.valid_from, "2026-11-18");
+    assert.equal(sqlValidReasonResult.department_approver.row_version, 3);
 
-    // Simulate ambiguous failure classification and cross-midnight retry on 2026-11-19
     assert.equal(
       isAmbiguousLeaveMutationFailure({ ok: false, status: 431, errorCode: "LEAVE_INTERNAL_ERROR" }),
       true,
@@ -2289,29 +2280,21 @@ test("WP1/S1: Pre/Post Migration Baseline Parity, RPC Future-Date Rejection, Imm
     });
     assert.equal(retryPayloadAcrossMidnight, validReasonPayload);
 
-    const replayedResAcrossMidnight = await callPatchLeaveDeptApprover(retryPayloadAcrossMidnight);
-    assert.equal(replayedResAcrossMidnight.status, 200);
-    const replayedJson = await replayedResAcrossMidnight.json();
-    assert.equal(replayedJson.ok, true);
-    assert.equal(replayedJson.data.replayed, true);
-    assert.equal(replayedJson.data.department_approver.valid_from, "2026-11-18");
-    assert.equal(replayedJson.data.department_approver.reason, "Bổ nhiệm lại người duyệt IT");
-    assert.equal(replayedJson.data.department_approver.row_version, 3);
+    const {
+      rows: [{ result: sqlReplayAcrossMidnight }],
+    } = await db.query(
+      `select public.leave_management_set_department_approver_admin(
+         $1::uuid, $2::uuid, 'IT', $3::uuid, null, 2,
+         $4::text, 'hf-dept-approver-valid-reason-3', 'fp-hf-dept-approver-valid-reason-3'
+       ) as result`,
+      [ACTORS.fullAdmin.auth, ACTORS.fullAdmin.app, ACTORS.mktApprover1.app, retryPayloadAcrossMidnight.reason],
+    );
+    assert.equal(sqlReplayAcrossMidnight.replayed, true);
+    assert.equal(sqlReplayAcrossMidnight.department_approver.valid_from, "2026-11-18");
+    assert.equal(sqlReplayAcrossMidnight.department_approver.reason, "Bổ nhiệm lại người duyệt IT");
+    assert.equal(sqlReplayAcrossMidnight.department_approver.row_version, 3);
 
-    // 15.4 Invalid non-empty reason (> 2000 chars or control character) is still rejected with `LEAVE_REASON_INVALID`
-    const overlongReasonRes = await callPatchLeaveDeptApprover({
-      operation: "SET_DEPARTMENT_APPROVER",
-      unit_kind: "IT",
-      approver_app_user_id: ACTORS.mktApprover2.app,
-      valid_from: null,
-      expected_row_version: 3,
-      reason: "x".repeat(2001),
-      idempotency_key: "hf-dept-approver-overlong-reason",
-    });
-    assert.equal(overlongReasonRes.status, 400);
-    const overlongJson = await overlongReasonRes.json();
-    assert.equal(overlongJson.code, "LEAVE_REASON_INVALID");
-
+    // 15.4 Invalid non-empty reason (> 2000 chars) still rejected at SQL layer (`22023 LEAVE_REASON_INVALID`)
     await assert.rejects(
       () =>
         db.query(
