@@ -38,8 +38,9 @@ test("Navigation & AppShell register Tài chính group with Công nợ Vendor (/
   assert.match(navRegistry, /path:\s*"\/finance"/);
   assert.match(navRegistry, /capability:\s*"finance"/);
   assert.match(navRegistry, /group:\s*"finance"/);
-  assert.match(desktopNav, /finance:\s*Landmark/);
-  assert.match(mobileNav, /finance:\s*Landmark/);
+  assert.match(desktopNav, /"finance":\s*Landmark/);
+  assert.match(desktopNav, /finance:\s*Receipt/);
+  assert.match(mobileNav, /finance:\s*Receipt/);
   assert.match(appShell, /entry\.id !== "finance" \|\| vendorFinanceEnabled/);
   assert.match(appShell, /process\.env\.DIRECT_ENTRY_API_ENABLED === "true"/);
   assert.match(appShell, /print:hidden/);
