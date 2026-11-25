@@ -146,7 +146,15 @@ export type DepartmentMutationOutcome =
       message: string;
     }
   | {
-      kind: "conflict" | "unauthenticated" | "denied" | "not-found" | "invalid" | "unavailable";
+      kind:
+        | "active-team-assignment"
+        | "conflict"
+        | "unauthenticated"
+        | "denied"
+        | "not-found"
+        | "invalid"
+        | "unavailable";
+      code?: DepartmentErrorCode | "NOT_FOUND" | null;
       message: string;
       resetIdempotencyKey: boolean;
     };
@@ -1109,7 +1117,12 @@ export function buildEndAccountingMemberRequest(input: {
 }
 
 function extractDepartmentErrorCode(payload: unknown): DepartmentErrorCode | "NOT_FOUND" | null {
-  if (!isRecord(payload) || payload.ok !== false || typeof payload.code !== "string") {
+  if (
+    !isRecord(payload) ||
+    payload.ok === true ||
+    (payload.ok !== undefined && payload.ok !== false) ||
+    typeof payload.code !== "string"
+  ) {
     return null;
   }
   return payload.code as DepartmentErrorCode | "NOT_FOUND";
@@ -1255,23 +1268,40 @@ export function classifyDepartmentMutationResponse(
   }
 
   if (status === 409) {
-    if (code === "DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT") {
+    if (code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT") {
+      return {
+        kind: "active-team-assignment",
+        code,
+        message:
+          "Nhân sự này đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục). Vui lòng thu hồi phân công Trưởng nhóm hoặc kết thúc tư cách thành viên Tổ trước, rồi tải lại dữ liệu mới nhất trước khi gửi lại.",
+        resetIdempotencyKey: true,
+      };
+    }
+    if (
+      code === "DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT" ||
+      code === "VERSION_CONFLICT"
+    ) {
       return {
         kind: "conflict",
-        message: "Dữ liệu thành viên đã thay đổi ở phiên làm việc khác. Vui lòng tải lại dữ liệu mới nhất trước khi tiếp tục.",
+        code,
+        message:
+          "Dữ liệu thành viên đã thay đổi ở phiên làm việc khác. Vui lòng tải lại dữ liệu mới nhất trước khi tiếp tục.",
         resetIdempotencyKey: true,
       };
     }
     if (code === "DEPARTMENT_MEMBERSHIP_OVERLAP") {
       return {
         kind: "conflict",
-        message: "Tài khoản này đã là thành viên hoặc có khoảng thời gian hiệu lực trùng lặp tại Phòng Kế toán.",
+        code,
+        message:
+          "Tài khoản này đã là thành viên hoặc có khoảng thời gian hiệu lực trùng lặp tại Phòng Kế toán.",
         resetIdempotencyKey: true,
       };
     }
     if (code === "DEPARTMENT_MEMBERSHIP_ALREADY_ENDED") {
       return {
         kind: "conflict",
+        code,
         message: "Tư cách thành viên này đã được kết thúc trước đó. Vui lòng tải lại danh sách.",
         resetIdempotencyKey: true,
       };
@@ -1279,6 +1309,7 @@ export function classifyDepartmentMutationResponse(
     if (code === "TARGET_ACCOUNT_DISABLED") {
       return {
         kind: "conflict",
+        code,
         message: "Tài khoản được chọn đang ngừng hoạt động nên không thể gán vào Phòng Kế toán.",
         resetIdempotencyKey: true,
       };
@@ -1286,12 +1317,15 @@ export function classifyDepartmentMutationResponse(
     if (code === "IDEMPOTENCY_CONFLICT") {
       return {
         kind: "conflict",
-        message: "Khóa chống gửi trùng đã gắn với yêu cầu khác. Hệ thống đã làm mới khóa, vui lòng gửi lại.",
+        code,
+        message:
+          "Khóa chống gửi trùng đã gắn với yêu cầu khác. Hệ thống đã làm mới khóa, vui lòng gửi lại.",
         resetIdempotencyKey: true,
       };
     }
     return {
       kind: "conflict",
+      code,
       message: "Dữ liệu đã thay đổi ở nơi khác. Vui lòng tải lại trước khi thực hiện tiếp.",
       resetIdempotencyKey: true,
     };
@@ -1921,6 +1955,8 @@ export function classifyWp3DepartmentMutationFailure(
       "Phòng ban mặc định của hệ thống chỉ cho phép đổi tên, không thể ngừng hoạt động.",
     DEPARTMENT_HAS_ACTIVE_ASSIGNMENTS:
       "Phòng ban vẫn còn thành viên đang hiệu lực hoặc Trưởng phòng chưa kết thúc nên chưa thể ngừng hoạt động.",
+    PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT:
+      "Nhân sự đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục). Vui lòng thu hồi phân công Trưởng nhóm hoặc kết thúc tư cách thành viên Tổ trước, rồi tải lại dữ liệu mới nhất trước khi thử lại.",
     DEPARTMENT_INACTIVE: "Phòng ban đang ngừng hoạt động nên không thể gán thêm thành viên hoặc bổ nhiệm Trưởng phòng.",
     PERSON_INACTIVE:
       "Nhân sự đã ngừng hoạt động (INACTIVE), không thể gán vào phòng ban hoặc bổ nhiệm làm Trưởng phòng.",
@@ -1942,7 +1978,7 @@ export function classifyWp3DepartmentMutationFailure(
       code: rawCode,
       message: businessMessages[rawCode],
       preserveIdempotencyKey: false,
-      needsReload: false,
+      needsReload: rawCode === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT",
     };
   }
 

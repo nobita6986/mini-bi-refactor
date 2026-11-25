@@ -1103,6 +1103,15 @@ test("5. PR28-T0-R2 Cutover Oracle: pre-upgrade CASH_HOLDER + HR_LEAVE_OPERATOR 
       [MODULE_USER.app, OWNER.app],
     );
     await db.exec("commit;");
+    // Also close raw-seeded independent TL & team membership before ending ACCOUNTING dept under WP10-2 guards
+    await db.query(
+      "update public.direct_entry_team_leader_assignments set valid_to = '2026-01-02', is_current = false where team_id = $1::uuid and leader_app_user_id = $2::uuid",
+      [teamR2, MODULE_USER.app],
+    );
+    await db.query(
+      "update public.recruiter_team_memberships set valid_to = '2026-01-02', is_current = false where recruiter_id = $1::uuid and team_id = $2::uuid",
+      [recR2, teamR2],
+    );
     const vfinNoPa = (
       await db.query("select public.vendor_finance__internal_resolve_authority($1::uuid, $2::uuid) as auth", [
         MODULE_USER.auth,

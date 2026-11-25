@@ -324,6 +324,7 @@ test("organization fingerprints isolate operation and target cleanly and error t
     assert.ok(Number.isInteger(organizationErrorStatus(code)));
   }
   assert.equal(organizationErrorStatus("PERSON_IS_ACTIVE_DEPARTMENT_HEAD"), 409);
+  assert.equal(organizationErrorStatus("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT"), 409);
   assert.equal(organizationErrorStatus("IDEMPOTENCY_KEY_MISMATCH"), 400);
 });
 

@@ -541,6 +541,45 @@ test("WP1/S1: API & contract layers reject future and past effective/end dates a
     );
   }
 
+  // Level A (WP10-2): Team Membership & Team Leader request parsers reject ANY non-null client date string (including today)
+  assert.equal(
+    teamMembershipAssignRequest({
+      valid_from: serverToday,
+      expected_version: 1,
+      reason: "Level A today string",
+      idempotency_key: validIdem,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    teamMembershipUnassignRequest({
+      valid_to: serverToday,
+      expected_version: 1,
+      reason: "Level A today string",
+      idempotency_key: validIdem,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    teamLeaderDesignateRequest({
+      leader_app_user_id: validUuid,
+      effective_date: serverToday,
+      expected_version: 1,
+      reason: "Level A today string",
+      idempotency_key: validIdem,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    teamLeaderRevokeRequest({
+      effective_date: serverToday,
+      expected_version: 1,
+      reason: "Level A today string",
+      idempotency_key: validIdem,
+    }).ok,
+    false,
+  );
+
   const tmAssignDefault = teamMembershipAssignRequest(
     {
       expected_version: 1,

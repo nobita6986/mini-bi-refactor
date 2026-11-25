@@ -45,7 +45,13 @@ export type AccountOperationOutcome<T> =
   | { ok: true; data: T }
   | { ok: false; kind: AccountOperationErrorKind };
 export type AccountOperationErrorKind =
-  | "conflict" | "denied" | "invalid" | "not-found" | "blocked" | "unavailable";
+  | "conflict"
+  | "active-team-assignment"
+  | "denied"
+  | "invalid"
+  | "not-found"
+  | "blocked"
+  | "unavailable";
 
 export type AccountOperationRepository = {
   begin(input: AccountOperationActor & {
@@ -93,6 +99,13 @@ function serviceRoleRpc(): Rpc {
 export function classifyAccountOperationError(
   error: { code?: string; message?: string },
 ): AccountOperationErrorKind {
+  if (
+    error.code === "PT409" &&
+    typeof error.message === "string" &&
+    error.message.includes("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT")
+  ) {
+    return "active-team-assignment";
+  }
   if (error.code === "PT409" || error.code === "40001" || error.code === "23505" || error.code === "23P01") return "conflict";
   if (error.code === "42501") return "denied";
   if (error.code === "P0002") return "not-found";

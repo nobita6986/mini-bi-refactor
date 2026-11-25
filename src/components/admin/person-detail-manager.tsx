@@ -803,6 +803,11 @@ export function PersonDetailManager({
         return;
       }
       setPendingIntent(null);
+      if (outcome.kind === "active-team-assignment") {
+        setConflictMsg(outcome.message);
+        setDialog((prev) => (prev ? { ...prev, conflictLocked: true } : null));
+        return;
+      }
       if (outcome.kind === "conflict") {
         setConflictMsg(
           "Tài khoản đã có hồ sơ tính công tuyển dụng hoặc phiên bản vừa thay đổi. Kiểm tra tại Danh mục hồ sơ tính công hoặc tải lại dữ liệu mới nhất.",

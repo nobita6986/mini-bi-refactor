@@ -183,6 +183,11 @@ export type AccountOperationUiOutcome =
   | { kind: "needs-reconcile"; intentId: string; state: string; message: string }
   | { kind: "denied"; message: string }
   | { kind: "conflict"; message: string }
+  | {
+      kind: "active-team-assignment";
+      code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT";
+      message: string;
+    }
   | { kind: "invalid"; message: string }
   | {
       kind: "unavailable";
@@ -504,6 +509,14 @@ export function classifyAccountOperationResponse(
   }
   if (status === 401) return { kind: "denied", message: "Phiên đăng nhập không còn hiệu lực." };
   if (status === 403) return { kind: "denied", message: "Bạn không có quyền thực hiện thao tác này." };
+  if (status === 409 && record?.code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT") {
+    return {
+      kind: "active-team-assignment",
+      code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT",
+      message:
+        "Nhân sự hoặc tài khoản này đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục). Vui lòng thu hồi hoặc đóng phân công Tổ/Trưởng nhóm trước, rồi tải lại dữ liệu mới nhất.",
+    };
+  }
   if (status === 409) return { kind: "conflict", message: "Có xung đột hoặc thao tác đang được xử lý." };
   if (status === 400 || status === 422) return { kind: "invalid", message: "Thông tin gửi lên không hợp lệ." };
   if (status === 404) return { kind: "invalid", message: "Không tìm thấy tài khoản hoặc chức năng chưa được bật." };

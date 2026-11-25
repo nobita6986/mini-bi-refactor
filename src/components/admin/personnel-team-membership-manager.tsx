@@ -70,7 +70,7 @@ const INITIAL_LISTS: MembershipLists = {
   HISTORY: { kind: "loading" },
 };
 const INITIAL_PAGES: MembershipPages = { CURRENT: 1, SCHEDULED: 1, HISTORY: 1 };
-const EMPTY_FORM = { teamId: "", date: "", reason: "" };
+const EMPTY_FORM = { teamId: "", reason: "" };
 
 function stateLabel(state: MembershipState): string {
   if (state === "CURRENT") return "Đang hiệu lực";
@@ -462,7 +462,7 @@ export function PersonnelTeamMembershipManager({
     const request = operation.kind === "close"
       ? buildUnassignMembershipRequest({
           recruiterId: personnel.recruiter_id,
-          validTo: form.date,
+          validTo: null,
           expectedVersion: operation.membership.recruiter_version,
           reason: form.reason,
           idempotencyKey,
@@ -470,7 +470,7 @@ export function PersonnelTeamMembershipManager({
       : buildAssignMembershipRequest({
           recruiterId: personnel.recruiter_id,
           teamId: form.teamId,
-          validFrom: form.date,
+          validFrom: null,
           expectedVersion: operation.kind === "move" ? operation.expectedVersion : personnel.version,
           reason: form.reason,
           idempotencyKey,

@@ -1,7 +1,6 @@
 import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
-import { parseIsoDate } from "./direct-entry-date-format.ts";
 import { readBoundedJson } from "./write-api.ts";
 import type {
   TeamLeaderErrorKind,
@@ -21,18 +20,6 @@ const STATE_MAP: Readonly<Record<string, TeamLeaderState>> = {
 };
 const REASON_MAX = 4000;
 const SEARCH_MAX = 256;
-const VIETNAM_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Asia/Ho_Chi_Minh",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function resolveBusinessTodayVn(todayVn?: string): string {
-  return todayVn && parseIsoDate(todayVn) !== null
-    ? todayVn
-    : VIETNAM_DATE_FORMATTER.format(new Date());
-}
 
 export type TeamLeaderDependencies = {
   resolveSession(): Promise<DirectEntrySessionResult>;
@@ -64,10 +51,6 @@ function text(value: unknown, max: number): string | null {
 
 function uuid(value: unknown): string | null {
   return typeof value === "string" && UUID.test(value) ? value : null;
-}
-
-function date(value: unknown): string | null {
-  return typeof value === "string" && parseIsoDate(value) !== null ? value : null;
 }
 
 function version(value: unknown): number | null {
@@ -181,43 +164,39 @@ async function readMutationBody(request: Request): Promise<Parsed<unknown>> {
     : { ok: true, value: body };
 }
 
-export function designateRequest(value: unknown, todayVn?: string): Parsed<DesignateRequest> {
+export function designateRequest(value: unknown): Parsed<DesignateRequest> {
   if (!record(value)) return { ok: false, response: fail("LEADER_INVALID", 400) };
   const normalized = "effective_date" in value ? value : { ...value, effective_date: null };
   if (!hasExactKeysWithOptionalReason(normalized, [
     "effective_date", "expected_version", "idempotency_key", "leader_app_user_id", "reason",
   ])) return { ok: false, response: fail("LEADER_INVALID", 400) };
-  const businessToday = resolveBusinessTodayVn(todayVn);
   const leader_app_user_id = uuid(value.leader_app_user_id);
   const omittedOrNull = value.effective_date === undefined || value.effective_date === null;
-  const effective_date = omittedOrNull ? null : date(value.effective_date);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (!leader_app_user_id || (!omittedOrNull && (!effective_date || effective_date !== businessToday)) ||
+  if (!leader_app_user_id || !omittedOrNull ||
       expected_version === null || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("LEADER_INVALID", 400) };
   }
-  return { ok: true, value: { leader_app_user_id, effective_date, expected_version, reason: reason.value, idempotency_key } };
+  return { ok: true, value: { leader_app_user_id, effective_date: null, expected_version, reason: reason.value, idempotency_key } };
 }
 
-export function revokeRequest(value: unknown, todayVn?: string): Parsed<RevokeRequest> {
+export function revokeRequest(value: unknown): Parsed<RevokeRequest> {
   if (!record(value)) return { ok: false, response: fail("LEADER_INVALID", 400) };
   const normalized = "effective_date" in value ? value : { ...value, effective_date: null };
   if (!hasExactKeysWithOptionalReason(normalized, [
     "effective_date", "expected_version", "idempotency_key", "reason",
   ])) return { ok: false, response: fail("LEADER_INVALID", 400) };
-  const businessToday = resolveBusinessTodayVn(todayVn);
   const omittedOrNull = value.effective_date === undefined || value.effective_date === null;
-  const effective_date = omittedOrNull ? null : date(value.effective_date);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if ((!omittedOrNull && (!effective_date || effective_date !== businessToday)) ||
+  if (!omittedOrNull ||
       expected_version === null || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("LEADER_INVALID", 400) };
   }
-  return { ok: true, value: { effective_date, expected_version, reason: reason.value, idempotency_key } };
+  return { ok: true, value: { effective_date: null, expected_version, reason: reason.value, idempotency_key } };
 }
 
 function idempotencyMismatch(request: Request, key: string): Response | null {

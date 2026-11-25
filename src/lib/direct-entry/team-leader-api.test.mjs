@@ -38,11 +38,11 @@ const MUTATION = {
   version: 2, revision_id: REVISION, change: "designate",
 };
 const DESIGNATE_BODY = {
-  leader_app_user_id: TARGET, effective_date: DAY, expected_version: 1,
+  leader_app_user_id: TARGET, effective_date: null, expected_version: 1,
   reason: "Synthetic reason", idempotency_key: KEY,
 };
 const REVOKE_BODY = {
-  effective_date: DAY, expected_version: 1, reason: "Synthetic reason", idempotency_key: KEY,
+  effective_date: null, expected_version: 1, reason: "Synthetic reason", idempotency_key: KEY,
 };
 
 function dependencies({
@@ -147,18 +147,32 @@ test("same-origin and body shape/authority/idempotency fail before session", asy
   assert.equal((await nested.json()).code, "CLIENT_AUTHORITY_FIELD_FORBIDDEN");
   assert.equal((await designateTeamLeader(post({ ...DESIGNATE_BODY, expected_version: 0 }),
     TEAM, "true", d.value)).status, 400);
-  assert.equal((await designateTeamLeader(post({ ...DESIGNATE_BODY, effective_date: "2026-02-30" }),
-    TEAM, "true", d.value)).status, 400);
+  for (const invalidDate of ["2026-02-30", "", "2024-02-29", "2028-02-29", DAY]) {
+    const designateBadDate = await designateTeamLeader(
+      post({ ...DESIGNATE_BODY, effective_date: invalidDate }),
+      TEAM, "true", d.value);
+    assert.equal(designateBadDate.status, 400, "designate invalidDate=" + invalidDate);
+    assert.equal((await designateBadDate.json()).code, "LEADER_INVALID");
+
+    const revokeBadDate = await revokeTeamLeader(
+      post({ ...REVOKE_BODY, effective_date: invalidDate }, `/api/admin/catalog/teams/${TEAM}/leaders/revoke`),
+      TEAM, "true", d.value);
+    assert.equal(revokeBadDate.status, 400, "revoke invalidDate=" + invalidDate);
+    assert.equal((await revokeBadDate.json()).code, "LEADER_INVALID");
+  }
   assert.equal((await designateTeamLeader(post({ ...DESIGNATE_BODY, team_id: TEAM }),
     TEAM, "true", d.value)).status, 400);
   for (const reason of [123, "x".repeat(4001)]) {
     const invalid = await designateTeamLeader(post({ ...DESIGNATE_BODY, reason }), TEAM, "true", d.value);
     assert.equal(invalid.status, 400);
   }
-  const mismatch = await designateTeamLeader(
-    post(DESIGNATE_BODY, undefined, { "idempotency-key": TARGET }),
-    TEAM, "true", d.value);
-  assert.equal((await mismatch.json()).code, "IDEMPOTENCY_KEY_MISMATCH");
+  for (const badHeader of [TARGET, ""]) {
+    const mismatch = await designateTeamLeader(
+      post(DESIGNATE_BODY, undefined, { "idempotency-key": badHeader }),
+      TEAM, "true", d.value);
+    assert.equal(mismatch.status, 400);
+    assert.equal((await mismatch.json()).code, "IDEMPOTENCY_KEY_MISMATCH");
+  }
   assert.equal((await designateTeamLeader(post(DESIGNATE_BODY), "not-a-uuid", "true", d.value)).status, 400);
   assert.equal((await revokeTeamLeader(post({ ...REVOKE_BODY, leader_app_user_id: TARGET },
     `/api/admin/catalog/teams/${TEAM}/leaders/revoke`), TEAM, "true", d.value)).status, 400);
@@ -191,6 +205,16 @@ test("mutation submits only trusted actor and path team, and revocation has no t
     `/api/admin/catalog/teams/${TEAM}/leaders/revoke`), TEAM, "true", d.value)).status, 200);
   assert.equal(d.calls.repository.length, 2);
   assert.equal(Object.hasOwn(d.calls.repository[1][1], "leader_app_user_id"), false);
+
+  const omittedDateDeps = dependencies({ result: { ok: true, data: MUTATION } });
+  const omittedDesignate = { leader_app_user_id: TARGET, expected_version: 1, reason: "No date", idempotency_key: KEY };
+  assert.equal((await designateTeamLeader(post(omittedDesignate), TEAM, "true", omittedDateDeps.value)).status, 200);
+  assert.equal(omittedDateDeps.calls.repository[0][1].effective_date, null);
+  const omittedRevoke = { expected_version: 1, reason: "No date", idempotency_key: KEY };
+  assert.equal((await revokeTeamLeader(
+    post(omittedRevoke, `/api/admin/catalog/teams/${TEAM}/leaders/revoke`),
+    TEAM, "true", omittedDateDeps.value)).status, 200);
+  assert.equal(omittedDateDeps.calls.repository[1][1].effective_date, null);
 
   for (const reason of [undefined, null, "", "  "]) {
     const optional = dependencies({ result: { ok: true, data: MUTATION } });

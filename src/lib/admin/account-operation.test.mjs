@@ -31,6 +31,10 @@ import {
   linkRecruiterToAccount,
   reclassifyAccountOperations,
 } from "./account-operation-api.ts";
+import {
+  classifyAccountOperationError,
+  createAccountOperationRepository,
+} from "./account-operation-repository.ts";
 
 const AUTH_SUBJECT = "91000000-0000-4000-8000-000000000001";
 const APP_USER = "92000000-0000-4000-8000-000000000001";
@@ -1107,4 +1111,189 @@ test("HF-Replay: resetPassword claim loser stays strictly 409 (no replay) and ne
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), { ok: false, code: "ACCOUNT_OPERATION_CONFLICT" });
   assert.equal(resetCalled, false, "resetPassword must never replay Auth on claim loss");
+});
+
+test("WP10-2: /from-account and /link-account validate optional Idempotency-Key header, classify PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT as 409, and preserve valid_from", async () => {
+  // 1) Repository classification distinguishes PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT from generic PT409
+  assert.equal(
+    classifyAccountOperationError({ code: "PT409", message: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" }),
+    "active-team-assignment",
+  );
+  assert.equal(
+    classifyAccountOperationError({ code: "PT409", message: "VERSION_CONFLICT" }),
+    "conflict",
+  );
+  const blockedRepo = createAccountOperationRepository(async () => ({
+    data: null,
+    error: { code: "PT409", message: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" },
+  }));
+  assert.deepEqual(
+    await blockedRepo.linkRecruiterToAccount({
+      auth_subject: AUTH_SUBJECT,
+      app_user_id: APP_USER,
+      recruiter_id: CREATED_AUTH,
+      expected_recruiter_version: 1,
+      account_ref: APP_USER,
+      expected_account_version: 1,
+      reason: "Link",
+      idempotency_key: AUTH_SUBJECT,
+    }),
+    { ok: false, kind: "active-team-assignment" },
+  );
+
+  // 2) HTTP 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT for both /from-account and /link-account
+  const blockedDeps = deps({
+    repository: repository({
+      async createPersonnelFromAccount() { return { ok: false, kind: "active-team-assignment" }; },
+      async linkRecruiterToAccount() { return { ok: false, kind: "active-team-assignment" }; },
+    }),
+  });
+  const fromAccBlocked = await createPersonnelFromAccount(
+    fakeRequest({
+      account_ref: APP_USER,
+      expected_account_version: 1,
+      personnel_code: LOGIN_ID,
+      personnel_position: "STAFF",
+      valid_from: TODAY_VN,
+      reason: "create",
+      idempotency_key: AUTH_SUBJECT,
+    }),
+    "true",
+    blockedDeps,
+  );
+  assert.equal(fromAccBlocked.status, 409);
+  assert.deepEqual(await fromAccBlocked.json(), { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+
+  const linkBlocked = await linkRecruiterToAccount(
+    fakeRequest({
+      account_ref: APP_USER,
+      expected_account_version: 1,
+      expected_recruiter_version: 1,
+      reason: "link",
+      idempotency_key: AUTH_SUBJECT,
+    }),
+    CREATED_AUTH,
+    "true",
+    blockedDeps,
+  );
+  assert.equal(linkBlocked.status, 409);
+  assert.deepEqual(await linkBlocked.json(), { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+
+  // 3) Optional Idempotency-Key header: omitted/matching allowed; empty "" or mismatched -> 400 before repo/session
+  for (const badHeader of ["", TOKEN]) {
+    let sessions = 0;
+    let calls = 0;
+    const guardDeps = deps({
+      resolveSession: async () => { sessions += 1; return { actor: { ok: true, actor: { auth_subject: AUTH_SUBJECT, app_user_id: APP_USER } } }; },
+      repository: repository({
+        async createPersonnelFromAccount() { calls += 1; return { ok: true, data: {} }; },
+        async linkRecruiterToAccount() { calls += 1; return { ok: true, data: {} }; },
+      }),
+    });
+    const res1 = await createPersonnelFromAccount(
+      fakeRequest({
+        account_ref: APP_USER,
+        expected_account_version: 1,
+        personnel_code: LOGIN_ID,
+        personnel_position: "STAFF",
+        valid_from: null,
+        reason: "create",
+        idempotency_key: AUTH_SUBJECT,
+      }, { "idempotency-key": badHeader }),
+      "true",
+      guardDeps,
+    );
+    assert.equal(res1.status, 400);
+    assert.deepEqual(await res1.json(), { ok: false, code: "IDEMPOTENCY_KEY_MISMATCH" });
+
+    const res2 = await linkRecruiterToAccount(
+      fakeRequest({
+        account_ref: APP_USER,
+        expected_account_version: 1,
+        expected_recruiter_version: 1,
+        idempotency_key: AUTH_SUBJECT,
+      }, { "idempotency-key": badHeader }),
+      CREATED_AUTH,
+      "true",
+      guardDeps,
+    );
+    assert.equal(res2.status, 400);
+    assert.deepEqual(await res2.json(), { ok: false, code: "IDEMPOTENCY_KEY_MISMATCH" });
+    assert.equal(sessions, 0);
+    assert.equal(calls, 0);
+  }
+
+  // Matching header works on both endpoints
+  const okDeps = deps({
+    repository: repository({
+      async createPersonnelFromAccount() {
+        return {
+          ok: true,
+          data: {
+            recruiter_id: CREATED_AUTH,
+            display_name: "Nguyen Van A",
+            personnel_code: LOGIN_ID,
+            personnel_position: "STAFF",
+            version: 1,
+            link_id: REV,
+            membership_id: INTENT,
+            app_user_version: 2,
+            app_user_revision_id: REV,
+            personnel_revision_id: REV,
+          },
+        };
+      },
+      async linkRecruiterToAccount() {
+        return {
+          ok: true,
+          data: {
+            link_id: INTENT,
+            app_user_id: APP_USER,
+            app_user_version: 2,
+            app_user_revision_id: REV,
+            recruiter_id: CREATED_AUTH,
+            recruiter_version: 1,
+            personnel_code: LOGIN_ID,
+            valid_from: TODAY_VN,
+          },
+        };
+      },
+    }),
+  });
+  const okFromAcc = await createPersonnelFromAccount(
+    fakeRequest({
+      account_ref: APP_USER,
+      expected_account_version: 1,
+      personnel_code: LOGIN_ID,
+      personnel_position: "STAFF",
+      valid_from: TODAY_VN,
+      reason: "create",
+      idempotency_key: AUTH_SUBJECT,
+    }, { "idempotency-key": AUTH_SUBJECT }),
+    "true",
+    okDeps,
+  );
+  assert.equal(okFromAcc.status, 200);
+  const okLink = await linkRecruiterToAccount(
+    fakeRequest({
+      account_ref: APP_USER,
+      expected_account_version: 1,
+      expected_recruiter_version: 1,
+      idempotency_key: AUTH_SUBJECT,
+    }, { "idempotency-key": AUTH_SUBJECT }),
+    CREATED_AUTH,
+    "true",
+    okDeps,
+  );
+  assert.equal(okLink.status, 200);
+
+  // 4) /from-account valid_from parser preserved (today/null/omitted allowed; past/future rejected)
+  assert.equal(parseCreatePersonnelFromAccount({
+    account_ref: APP_USER, expected_account_version: 1, personnel_code: LOGIN_ID,
+    personnel_position: "STAFF", valid_from: TODAY_VN, idempotency_key: AUTH_SUBJECT,
+  }).ok, true);
+  assert.equal(parseCreatePersonnelFromAccount({
+    account_ref: APP_USER, expected_account_version: 1, personnel_code: LOGIN_ID,
+    personnel_position: "STAFF", valid_from: "2028-02-29", idempotency_key: AUTH_SUBJECT,
+  }).ok, false);
 });

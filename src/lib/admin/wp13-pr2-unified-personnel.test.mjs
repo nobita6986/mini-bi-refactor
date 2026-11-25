@@ -3768,6 +3768,151 @@ test("UX-04/P1 regression: Step 5 UNCERTAIN preserves sessionStorage checkpoint 
   assert.equal(completedStep3.length, 0, "Step 3 reload must NOT finish early while step4_groups or step5_recruiter are pending");
   assert.equal(step3PendingStorage.store.has(ACTOR_A_STORAGE_KEY), true, "Checkpoint must remain intact for pending Step 4/5");
   run4.unmount();
+
+  // (e) WP10-2: Step 5a returns 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT -> keeps saved Steps 1..4 COMMITTED intact,
+  //     resets only step5_recruiter to IDLE, renders dedicated Tổ đội/Trưởng nhóm guidance + reload button,
+  //     and after account version reload retries ONLY Step 5 (never re-posting Steps 1..4)!
+  const teamBlockStorage = makeMemoryStorage();
+  const teamBlockCp = makeStep5Checkpoint();
+  assert.equal(persistAndVerifyCheckpoint(teamBlockCp, teamBlockStorage).ok, true);
+  const completedAfterTeamResolve = [];
+  const run5 = mount(AccountProvisionAndLinkStepper, {
+    open: true,
+    mode: { kind: "resume-checkpoint", checkpoint: teamBlockCp },
+    checkpointActorScope: ACTOR_A_SCOPE,
+    workspaceGuard: {
+      epoch: 1,
+      getEpoch() { return 1; },
+      trackController() {
+        const controller = new AbortController();
+        return { epoch: 1, controller, release() {} };
+      },
+      isActive() { return true; },
+      invalidateSession() {},
+    },
+    canManageGlobalRoles: true,
+    storage: teamBlockStorage,
+    originOverride: ORIGIN,
+    onClose() {},
+    onCompleted: (res) => completedAfterTeamResolve.push(res),
+    onSessionLost() {},
+  });
+  await run5.flush();
+  respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100"), 200, makeTeamCatalogListEnvelope());
+  respond(findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`), 200, {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    person: makePersonDetail({
+      version: 2,
+      active_account_link: {
+        link_id: LINK_ID,
+        account_ref: ACCOUNT_ID,
+        login_id: "nam.tb",
+        display_name: "Trần Bước Năm",
+        enabled: true,
+        account_version: 3,
+        started_at: AS_OF,
+        source_kind: "ADMIN_MUTATION",
+        evidence_date: null,
+        version: 1,
+      },
+    }),
+  });
+  await run5.flush();
+
+  const countBeforeStep5 = requests.length;
+  findNode(run5, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run5.flush();
+  const req5aTeamBlock = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/catalog/personnel/from-account");
+  assert.ok(req5aTeamBlock);
+  respond(req5aTeamBlock, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await run5.flush();
+
+  const storedTeamBlock = readVerifiedCheckpoint({
+    expectedOrigin: ORIGIN,
+    expectedActorScope: ACTOR_A_SCOPE,
+    storage: teamBlockStorage,
+  });
+  assert.equal(storedTeamBlock.kind, "valid");
+  assert.equal(storedTeamBlock.checkpoint.step1_person.status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step2_account.status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step3_link.status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step4_groups[0].status, "COMMITTED");
+  assert.equal(storedTeamBlock.checkpoint.step5_recruiter.status, "IDLE");
+  assert.equal(storedTeamBlock.checkpoint.step5_recruiter.idempotency_key, null);
+  assert.match(textOf(run5.tree), /Tổ đội|Trưởng nhóm/);
+
+  findButton(run5, "Tải lại dữ liệu tài khoản mới nhất").props.onClick();
+  await run5.flush();
+  const reloadAcc5 = findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}`);
+  assert.ok(reloadAcc5);
+  respond(reloadAcc5, 200, { ok: true, account: makeAccount({ version: 4 }) });
+  await run5.flush();
+
+  findNode(run5, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await run5.flush();
+  const reqsDuringRetry = requests.slice(countBeforeStep5);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url === "/api/admin/organization/persons"), false);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url === "/api/admin/access/accounts"), false);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url.endsWith("/person-link")), false);
+  assert.equal(reqsDuringRetry.some((r) => r.method === "POST" && r.url.endsWith("/groups")), false);
+
+  const req5aRetry = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/catalog/personnel/from-account");
+  assert.equal(JSON.parse(req5aRetry.options.body).expected_account_version, 4);
+  respond(req5aRetry, 201, { ok: true, personnel: { recruiter_id: RECRUITER_ID, personnel_code: "nam.tb", version: 1 } });
+  await run5.flush();
+  const req5bAfterRetry = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/catalog/personnel/${RECRUITER_ID}/team-memberships/${TEAM_ACTIVE_A}`);
+  assert.ok(req5bAfterRetry);
+  respond(req5bAfterRetry, 200, { ok: true, membership: { recruiter_id: RECRUITER_ID, team_id: TEAM_ACTIVE_A } });
+  await run5.flush();
+  assert.equal(completedAfterTeamResolve.length, 1);
+  run5.unmount();
+
+  // (f) WP10-2: PersonDetailManager activate-recruiter 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT shows dedicated guidance & lock
+  const pdBlockedStorage = makeMemoryStorage();
+  const pdBlocked = mount(PersonDetailManager, {
+    personId: PERSON_ID,
+    checkpointActorScope: ACTOR_A_SCOPE,
+    canManageGlobalRoles: true,
+    storage: pdBlockedStorage,
+    originOverride: ORIGIN,
+  });
+  await pdBlocked.flush();
+  respond(findLastRequest((r) => r.url === `/api/admin/organization/persons/${PERSON_ID}`), 200, {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    person: makePersonDetail({
+      recruiter_id: null,
+      version: 2,
+      active_account_link: {
+        link_id: LINK_ID,
+        account_ref: ACCOUNT_ID,
+        login_id: "an.nv",
+        display_name: "Nguyễn Văn An",
+        enabled: true,
+        account_version: 2,
+        started_at: AS_OF,
+        source_kind: "ADMIN_MUTATION",
+        evidence_date: null,
+        version: 1,
+      },
+    }),
+  });
+  await pdBlocked.flush();
+  findButton(pdBlocked, "Kích hoạt nghiệp vụ tuyển dụng").props.onClick();
+  await pdBlocked.flush();
+  findNode(pdBlocked, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await pdBlocked.flush();
+  const activateReq = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/catalog/personnel/from-account");
+  assert.ok(activateReq);
+  respond(activateReq, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await pdBlocked.flush();
+  assert.match(textOf(pdBlocked.tree), /Tổ đội|Trưởng nhóm/);
+  assert.ok(maybeButton(pdBlocked, "Tải bản mới nhất"));
+  pdBlocked.unmount();
 });
 
 test("UX-03/05/06/07 regressions: AccountGroupsSection empty-state honors resource_assignments, AdminSubnav uses single-row mobile scroll & disambiguated Tổ đội labels, and customer copy leaks zero internal jargon", async () => {
@@ -3827,4 +3972,484 @@ test("UX-03/05/06/07 regressions: AccountGroupsSection empty-state honors resour
   assert.match(pdmSrc, /Chưa mở đăng nhập/);
   assert.match(pdmSrc, /Mở quản lý Tổ đội tuyển dụng &amp; Trưởng nhóm/);
   assert.doesNotMatch(pdmSrc, /lưu tạm trong RAM|khóa idempotency|gửi lại Auth/);
+});
+
+test("F-03 [AccountDirectoryDetailManager]: 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT shows dedicated Team/TL guidance & reload (distinct from VERSION_CONFLICT), and preserves network retry", async () => {
+  const makeUnlinkedAccountDetail = (version = 4) => ({
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    entry: {
+      directory_entry_key: `account:${ACCOUNT_ID}`,
+      record_kind: "UNLINKED_ACCOUNT",
+      display_name: "Tài Khoản Cá Nhân Cũ",
+      login_state: "ENABLED",
+      person_id: null,
+      account_ref: ACCOUNT_ID,
+      active_link_id: null,
+      link_conflict: false,
+      identity_mutation_blocked: false,
+      conflict_details: null,
+      person: null,
+      account: {
+        account_ref: ACCOUNT_ID,
+        login_id: "legacy.user",
+        display_name: "Tài Khoản Cá Nhân Cũ",
+        enabled: true,
+        version,
+        auth_user_present: true,
+      },
+      active_link: null,
+      department_history: [],
+      head_assignments: [],
+      link_history: [],
+    },
+  });
+
+  const adm = mount(AccountDirectoryDetailManager, {
+    accountRef: ACCOUNT_ID,
+    canManageGroups: false,
+  });
+  await adm.flush();
+  respond(
+    findLastRequest((r) => r.url === `/api/admin/organization/user-directory/detail?account_ref=${ACCOUNT_ID}`),
+    200,
+    makeUnlinkedAccountDetail(4),
+  );
+  await adm.flush();
+
+  findButton(adm, "Bổ sung thông tin nhân viên").props.onClick();
+  await adm.flush();
+  const linkRadio = findNode(adm, (n) => n.type === "input" && n.props?.type === "radio" && n.props?.value === "link-existing");
+  linkRadio.props.onChange({ target: { checked: true } });
+  await adm.flush();
+
+  const personPicker = await syncChildFromTree(adm, PersonSearchPicker, null);
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons?") && r.url.includes("link_state=unlinked")),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      as_of: AS_OF,
+      search: null,
+      status: "active",
+      department_id: null,
+      link_state: "unlinked",
+      page: 1,
+      page_size: 25,
+      total: 1,
+      has_more: false,
+      persons: [makePersonSummary({ person_id: PERSON_ID, employee_code: "NS-909", full_name: "Nguyễn Chọn Tay", version: 3 })],
+    },
+  );
+  await personPicker.flush();
+
+  findNode(personPicker, (n) => n.props?.role === "option" && textOf(n).includes("NS-909")).props.onClick();
+  await adm.flush();
+  personPicker.unmount();
+
+  const linkForm = () =>
+    collectNodes(adm.tree).find(
+      (n) => n.type === "form" && textOf(n).includes("Xác nhận gắn hồ sơ nhân viên"),
+    );
+
+  // 1) 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT -> dedicated guidance + conflict lock + reload button
+  linkForm().props.onSubmit({ preventDefault() {} });
+  await adm.flush();
+  const linkReq1 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`);
+  const key1 = linkReq1.options.headers["Idempotency-Key"];
+  respond(linkReq1, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await adm.flush();
+
+  const teamAlert = findNode(adm, (n) => n.type?.name === "Alert" && n.props?.role === "alert");
+  assert.equal(teamAlert.props.tone, "warning");
+  assert.match(teamAlert.props.title, /Tổ đội|Trưởng nhóm/);
+  assert.match(textOf(teamAlert), /thu hồi.*Trưởng nhóm|kết thúc.*thành viên Tổ/i);
+  assert.match(textOf(teamAlert), /tải lại/i);
+
+  // Reload closes dialog & refreshes account version to 5
+  findButton(adm, "Tải lại dữ liệu mới nhất").props.onClick();
+  await adm.flush();
+  respond(
+    findLastRequest((r) => r.url === `/api/admin/organization/user-directory/detail?account_ref=${ACCOUNT_ID}`),
+    200,
+    makeUnlinkedAccountDetail(5),
+  );
+  await adm.flush();
+
+  // Reopen, pick refreshed person (v4), test 409 VERSION_CONFLICT vs network retry -> 201
+  findButton(adm, "Bổ sung thông tin nhân viên").props.onClick();
+  await adm.flush();
+  findNode(adm, (n) => n.type === "input" && n.props?.type === "radio" && n.props?.value === "link-existing").props.onChange({ target: { checked: true } });
+  await adm.flush();
+  const personPicker2 = await syncChildFromTree(adm, PersonSearchPicker, null);
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons?") && r.url.includes("link_state=unlinked")),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      as_of: AS_OF,
+      search: null,
+      status: "active",
+      department_id: null,
+      link_state: "unlinked",
+      page: 1,
+      page_size: 25,
+      total: 1,
+      has_more: false,
+      persons: [makePersonSummary({ person_id: PERSON_ID, employee_code: "NS-909", full_name: "Nguyễn Chọn Tay", version: 4 })],
+    },
+  );
+  await personPicker2.flush();
+  findNode(personPicker2, (n) => n.props?.role === "option" && textOf(n).includes("NS-909")).props.onClick();
+  await adm.flush();
+  personPicker2.unmount();
+
+  linkForm().props.onSubmit({ preventDefault() {} });
+  await adm.flush();
+  const linkReq2 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`);
+  const key2 = linkReq2.options.headers["Idempotency-Key"];
+  assert.notEqual(key2, key1, "After 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT & reload, new attempt rotates Idempotency-Key");
+  assert.equal(JSON.parse(linkReq2.options.body).expected_account_version, 5);
+  assert.equal(JSON.parse(linkReq2.options.body).expected_person_version, 4);
+
+  // Inject network failure -> preserves key2 for safe retry -> 201 succeeds
+  rejectNetwork(linkReq2);
+  await adm.flush();
+  const retryForm = collectNodes(adm.tree).find(
+    (n) => n.type === "form" && textOf(n).includes("Thử gửi lại đúng yêu cầu"),
+  );
+  assert.ok(retryForm);
+  retryForm.props.onSubmit({ preventDefault() {} });
+  await adm.flush();
+  const linkReq3 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`);
+  assert.equal(linkReq3.options.headers["Idempotency-Key"], key2, "Network error retry MUST keep exact same Idempotency-Key");
+  respond(linkReq3, 201, makeLinkPersonEnvelope({ account_version: 6, person_version: 5 }));
+  await adm.flush();
+  assert.equal(notifications.success.length, 1);
+
+  // Contrast with 409 VERSION_CONFLICT in AccountDirectoryDetailManager
+  setupFetchMock();
+  const admConflict = mount(AccountDirectoryDetailManager, {
+    accountRef: ACCOUNT_ID,
+    canManageGroups: false,
+  });
+  await admConflict.flush();
+  respond(
+    findLastRequest((r) => r.url === `/api/admin/organization/user-directory/detail?account_ref=${ACCOUNT_ID}`),
+    200,
+    makeUnlinkedAccountDetail(5),
+  );
+  await admConflict.flush();
+  findButton(admConflict, "Bổ sung thông tin nhân viên").props.onClick();
+  await admConflict.flush();
+  findNode(admConflict, (n) => n.type === "input" && n.props?.type === "radio" && n.props?.value === "link-existing").props.onChange({ target: { checked: true } });
+  await admConflict.flush();
+  const pickerConflict = await syncChildFromTree(admConflict, PersonSearchPicker, null);
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/organization/persons?") && r.url.includes("link_state=unlinked")),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      as_of: AS_OF,
+      search: null,
+      status: "active",
+      department_id: null,
+      link_state: "unlinked",
+      page: 1,
+      page_size: 25,
+      total: 1,
+      has_more: false,
+      persons: [makePersonSummary({ person_id: PERSON_ID, employee_code: "NS-909", full_name: "Nguyễn Chọn Tay", version: 4 })],
+    },
+  );
+  await pickerConflict.flush();
+  findNode(pickerConflict, (n) => n.props?.role === "option" && textOf(n).includes("NS-909")).props.onClick();
+  await admConflict.flush();
+  pickerConflict.unmount();
+
+  collectNodes(admConflict.tree)
+    .find((n) => n.type === "form" && textOf(n).includes("Xác nhận gắn hồ sơ nhân viên"))
+    .props.onSubmit({ preventDefault() {} });
+  await admConflict.flush();
+  respond(
+    findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`),
+    409,
+    { ok: false, code: "VERSION_CONFLICT" },
+  );
+  await admConflict.flush();
+  const conflictAlert = findNode(admConflict, (n) => n.type?.name === "Alert" && n.props?.role === "alert");
+  assert.equal(conflictAlert.props.title, "Dữ liệu đã thay đổi");
+  assert.doesNotMatch(textOf(conflictAlert), /Trưởng nhóm|Tổ đội/);
+
+  adm.unmount();
+  admConflict.unmount();
+});
+
+test("F-03 [Wizard Step 3]: 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT keeps Steps 1-2 COMMITTED, allows reload & Step-3-only retry with network-retry preservation, distinct from VERSION_CONFLICT", async () => {
+  const storage = makeMemoryStorage();
+  const completed = [];
+  const pl = mount(PersonListManager, {
+    checkpointActorScope: ACTOR_A_SCOPE,
+    canManageGlobalRoles: true,
+    storage,
+    originOverride: ORIGIN,
+  });
+  await pl.flush();
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/departments")), 200, makeDeptListEnvelope());
+  respond(findLastRequest((r) => r.url.startsWith("/api/admin/organization/user-directory")), 200, makeUserDirectoryListEnvelope());
+  await pl.flush();
+
+  findButton(pl, "+ Thêm người dùng").props.onClick();
+  await pl.flush();
+  const stepper = await syncChildFromTree(pl, AccountProvisionAndLinkStepper, null);
+  respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100"), 200, makeTeamCatalogListEnvelope());
+  await stepper.flush();
+
+  findNode(stepper, (n) => n.props?.id === "create-person-employee-code").props.onChange({ target: { value: "NS-101" } });
+  findNode(stepper, (n) => n.props?.id === "create-person-full-name").props.onChange({ target: { value: "Nguyễn Văn An" } });
+  findNode(stepper, (n) => n.props?.id === "create-person-reason").props.onChange({ target: { value: "Tiếp nhận mới" } });
+  findNode(stepper, (n) => n.props?.id === "provision-want-login-toggle").props.onChange({ target: { checked: true } });
+  await stepper.flush();
+
+  findNode(stepper, (n) => n.props?.id === "provision-login-id").props.onChange({ target: { value: "an.nv" } });
+  findNode(stepper, (n) => n.props?.id === "provision-password").props.onChange({ target: { value: "TempPass!123" } });
+  findNode(stepper, (n) => n.props?.id === "provision-password-confirm").props.onChange({ target: { value: "TempPass!123" } });
+  await stepper.flush();
+
+  findNode(stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await stepper.flush();
+
+  // Step 1 -> 201 COMMITTED
+  respond(
+    findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/organization/persons"),
+    201,
+    { ok: true, replayed: false, person: makePersonDetail({ version: 1 }) },
+  );
+  await stepper.flush();
+
+  // Step 2 -> 200 COMMITTED
+  respond(
+    findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/access/accounts"),
+    200,
+    { ok: true, account: makeFinalizeCreateAccount() },
+  );
+  await stepper.flush();
+
+  const personPostsAfterStep2 = requests.filter(
+    (r) => r.method === "POST" && r.url === "/api/admin/organization/persons",
+  ).length;
+  const accountPostsAfterStep2 = requests.filter(
+    (r) => r.method === "POST" && r.url === "/api/admin/access/accounts",
+  ).length;
+  assert.equal(personPostsAfterStep2, 1);
+  assert.equal(accountPostsAfterStep2, 1);
+
+  // Step 3 -> 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT
+  const linkReq1 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`);
+  assert.ok(linkReq1);
+  const kLink1 = linkReq1.options.headers["Idempotency-Key"];
+  respond(linkReq1, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await stepper.flush();
+
+  // Checkpoint keeps Steps 1 & 2 COMMITTED, resets Step 3 to IDLE with cleared snapshot/key
+  const cpBlocked = readVerifiedCheckpoint({
+    expectedOrigin: ORIGIN,
+    expectedActorScope: ACTOR_A_SCOPE,
+    storage,
+  });
+  assert.equal(cpBlocked.kind, "valid");
+  assert.equal(cpBlocked.checkpoint.step1_person.status, "COMMITTED");
+  assert.equal(cpBlocked.checkpoint.step2_account.status, "COMMITTED");
+  assert.equal(cpBlocked.checkpoint.step3_link.status, "IDLE");
+  assert.equal(cpBlocked.checkpoint.step3_link.idempotency_key, null);
+  assert.equal(cpBlocked.checkpoint.step3_link.payload_snapshot, null);
+
+  // Alert shows dedicated guidance + reload button, closeDisabled is false, primary submit hidden until reload
+  const dlg = findNode(stepper, (n) => n.type?.name === "FormDialog");
+  assert.equal(dlg.props.closeDisabled, false, "Temporary close must remain allowed while blocked for team assignment");
+  const alertNode = findNode(stepper, (n) => n.type?.name === "Alert" && n.props?.role === "alert");
+  assert.equal(alertNode.props.tone, "warning");
+  assert.match(alertNode.props.title, /Tổ đội|Trưởng nhóm/);
+  assert.match(textOf(alertNode), /thu hồi.*Trưởng nhóm|kết thúc.*thành viên Tổ/i);
+  assert.match(textOf(alertNode), /Bước 1–2/);
+  assert.equal(
+    maybeNode(stepper, (n) => n.props?.type === "submit"),
+    null,
+    "Submit button stays hidden until Admin reloads latest versions",
+  );
+
+  // Reload versions (only GET person + GET account; zero POST /persons or POST /accounts!)
+  findButton(stepper, "Tải lại dữ liệu mới nhất từ máy chủ").props.onClick();
+  await stepper.flush();
+  respond(
+    findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      as_of: AS_OF,
+      person: makePersonDetail({ version: 2, active_account_link: null }),
+    },
+  );
+  respond(
+    findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}`),
+    200,
+    { ok: true, account: makeAccount({ version: 2 }) },
+  );
+  await stepper.flush();
+
+  const cpReloaded = readVerifiedCheckpoint({
+    expectedOrigin: ORIGIN,
+    expectedActorScope: ACTOR_A_SCOPE,
+    storage,
+  });
+  assert.equal(cpReloaded.kind, "valid");
+  assert.equal(cpReloaded.checkpoint.step1_person.status, "COMMITTED");
+  assert.equal(cpReloaded.checkpoint.step1_person.committed_person_version, 2);
+  assert.equal(cpReloaded.checkpoint.step2_account.status, "COMMITTED");
+  assert.equal(cpReloaded.checkpoint.step2_account.committed_account_version, 2);
+  assert.equal(cpReloaded.checkpoint.step3_link.status, "IDLE");
+  assert.ok(cpReloaded.checkpoint.step3_link.idempotency_key);
+  assert.notEqual(cpReloaded.checkpoint.step3_link.idempotency_key, kLink1);
+
+  // Retry ONLY Step 3 -> verify 0 Steps 1-2 calls, then inject network error -> same-key retry -> 201!
+  findNode(stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await stepper.flush();
+  assert.equal(
+    requests.filter((r) => r.method === "POST" && r.url === "/api/admin/organization/persons").length,
+    personPostsAfterStep2,
+    "Step 3 retry MUST NOT re-run Step 1",
+  );
+  assert.equal(
+    requests.filter((r) => r.method === "POST" && r.url === "/api/admin/access/accounts").length,
+    accountPostsAfterStep2,
+    "Step 3 retry MUST NOT re-run Step 2",
+  );
+
+  const linkReq2 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`);
+  const kLink2 = linkReq2.options.headers["Idempotency-Key"];
+  assert.notEqual(kLink2, kLink1);
+  assert.equal(JSON.parse(linkReq2.options.body).expected_person_version, 2);
+  assert.equal(JSON.parse(linkReq2.options.body).expected_account_version, 2);
+
+  // Network error during Step 3 retry keeps UNCERTAIN + exact kLink2
+  rejectNetwork(linkReq2);
+  await stepper.flush();
+  const cpUncertain = readVerifiedCheckpoint({
+    expectedOrigin: ORIGIN,
+    expectedActorScope: ACTOR_A_SCOPE,
+    storage,
+  });
+  assert.equal(cpUncertain.kind, "valid");
+  assert.equal(cpUncertain.checkpoint.step3_link.status, "UNCERTAIN");
+  assert.equal(cpUncertain.checkpoint.step3_link.idempotency_key, kLink2);
+
+  findNode(stepper, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await stepper.flush();
+  const linkReq3 = findLastRequest((r) => r.method === "POST" && r.url === `/api/admin/access/accounts/${ACCOUNT_ID}/person-link`);
+  assert.equal(linkReq3.options.headers["Idempotency-Key"], kLink2, "Network retry in Step 3 MUST preserve exact Idempotency-Key");
+  respond(linkReq3, 201, makeLinkPersonEnvelope({ account_version: 3, person_version: 3 }));
+  await stepper.flush();
+  assert.equal(storage.store.has(ACTOR_A_STORAGE_KEY), false);
+
+  // Contrast with 409 VERSION_CONFLICT in Wizard Step 3
+  const conflictStorage = makeMemoryStorage();
+  const cpConflict = {
+    schema_version: 2,
+    client_flow_id: "99000000-0000-4000-8000-000000000701",
+    env_origin: ORIGIN,
+    actor_scope: ACTOR_A_SCOPE,
+    flow_kind: "CREATE_EMPLOYEE_WITH_LOGIN",
+    updated_at: AS_OF,
+    step1_person: {
+      status: "COMMITTED",
+      idempotency_key: "99000000-0000-4000-8000-000000000702",
+      payload_snapshot: {
+        employee_code: "NS-707",
+        full_name: "Trần Xung Đột",
+        joined_on: "2026-01-10",
+        initial_department_ref: null,
+        reason: "Tiếp nhận mới",
+      },
+      committed_person_id: PERSON_ID,
+      committed_person_version: 2,
+      existing_employee_code: "NS-707",
+      existing_full_name: "Trần Xung Đột",
+      existing_recruiter_id: null,
+    },
+    step2_account: {
+      status: "COMMITTED",
+      idempotency_key: "99000000-0000-4000-8000-000000000703",
+      non_secret_snapshot: { login_id: "xungdot.t", display_name: "Trần Xung Đột", reason: "Tiếp nhận mới" },
+      intent_id: "99000000-0000-4000-8000-000000000704",
+      intent_state: "APPLIED",
+      reconcile_idempotency_key: null,
+      committed_account_ref: ACCOUNT_ID,
+      committed_account_version: 1,
+    },
+    step3_link: {
+      status: "IDLE",
+      idempotency_key: "99000000-0000-4000-8000-000000000777",
+      payload_snapshot: null,
+      post_link_account_version: null,
+      post_link_person_version: null,
+    },
+    step4_roles: [],
+    step4_groups: [],
+    step5_recruiter: null,
+  };
+  assert.equal(persistAndVerifyCheckpoint(cpConflict, conflictStorage).ok, true);
+
+  const stepperConflict = mount(AccountProvisionAndLinkStepper, {
+    open: true,
+    mode: { kind: "resume-checkpoint", checkpoint: cpConflict },
+    checkpointActorScope: ACTOR_A_SCOPE,
+    workspaceGuard: {
+      epoch: 1,
+      getEpoch: () => 1,
+      trackController() {
+        const controller = new AbortController();
+        return { epoch: 1, controller, release() {} };
+      },
+      isActive: () => true,
+      invalidateSession() {},
+    },
+    canManageGlobalRoles: true,
+    storage: conflictStorage,
+    originOverride: ORIGIN,
+    onClose() {},
+    onCompleted: (res) => completed.push(res),
+    onSessionLost() {},
+  });
+  await stepperConflict.flush();
+  respond(findLastRequest((r) => r.url === "/api/admin/access/groups?include_inactive=false"), 200, makePermissionGroupsListEnvelope());
+  respond(findLastRequest((r) => r.url === "/api/admin/catalog/teams?include_inactive=false&page=1&page_size=100"), 200, makeTeamCatalogListEnvelope());
+  respond(findLastRequest((r) => r.method === "GET" && r.url === `/api/admin/organization/persons/${PERSON_ID}`), 200, {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    as_of: AS_OF,
+    person: makePersonDetail({ version: 2, active_account_link: null }),
+  });
+  await stepperConflict.flush();
+  findNode(stepperConflict, (n) => n.type === "form").props.onSubmit({ preventDefault() {} });
+  await stepperConflict.flush();
+  respond(
+    findLastRequest((r) => r.method === "POST" && r.url.endsWith("/person-link")),
+    409,
+    { ok: false, code: "VERSION_CONFLICT" },
+  );
+  await stepperConflict.flush();
+  const verAlert = findNode(stepperConflict, (n) => n.type?.name === "Alert" && n.props?.role === "alert");
+  assert.equal(verAlert.props.title, "Dữ liệu vừa thay đổi trong lúc gắn tài khoản");
+  assert.doesNotMatch(textOf(verAlert), /Trưởng nhóm|Tổ đội/);
+  assert.equal(completed.length, 0);
+
+  stepperConflict.unmount();
+  stepper.unmount();
+  pl.unmount();
 });

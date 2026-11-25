@@ -19,13 +19,11 @@ import { checkSameOriginRequest } from "../ai/gateway/http-guards.mjs";
 import { validateClientBusinessPayload } from "../auth/direct-entry-v2.ts";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
 import { readBoundedJson } from "./write-api.ts";
-import { parseIsoDate } from "./direct-entry-date-format.ts";
 import type { TeamMembershipRepository } from "./team-membership-repository.ts";
 import type { MembershipState } from "./team-membership-contract.ts";
 import { hasExactKeysWithOptionalReason, projectOptionalActionReason } from "./action-reason.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const REASON_MAX = 4000;
 const SEARCH_MAX = 256;
 const STATE_MAP: Readonly<Record<string, MembershipState>> = {
@@ -60,16 +58,6 @@ function uuid(value: unknown): string | null {
 }
 function version(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-/**
- * ISO date-only field. The regex is only a shape pre-filter: calendar validity is
- * checked by the shared pure parser (Date.UTC over numeric parts, never
- * new Date("YYYY-MM-DD")), so 2026-02-30, 2026-13-01 and 2026-00-10 are rejected at
- * the request boundary before the session or the repository is touched.
- */
-function day(value: unknown): string | null {
-  if (typeof value !== "string" || !DATE.test(value)) return null;
-  return parseIsoDate(value) === null ? null : value;
 }
 /** Absent query value -> the documented default; anything outside 1..max is rejected. */
 function pageNumber(value: string | null, fallback: number, max: number): number | null {
@@ -197,29 +185,17 @@ export function teamMembershipListQuery(url: URL): Parsed<ListMembershipQuery> {
   return { ok: true, value: { state, recruiter_id, team_id, search, page, page_size } };
 }
 
-function resolveTeamMembershipBusinessTodayVn(todayVn?: string | null): string {
-  if (typeof todayVn === "string" && day(todayVn) !== null) {
-    return todayVn;
-  }
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
 /**
  * The target team is a RESOURCE id taken from the URL path, never from the body:
  * the shared client-authority validator forbids client-supplied team fields, and a
  * server-derived team id keeps that control intact.
+ * WP10-2 Level A: effective date is decided strictly by DB; any non-null valid_from is rejected.
  */
 export type AssignMembershipRequest = {
-  valid_from: string | null; expected_version: number; reason: string | null; idempotency_key: string;
+  valid_from: null; expected_version: number; reason: string | null; idempotency_key: string;
 };
 export function teamMembershipAssignRequest(
   body: unknown,
-  todayVn?: string | null,
 ): Parsed<AssignMembershipRequest> {
   const value = record(body);
   if (!value) {
@@ -232,25 +208,21 @@ export function teamMembershipAssignRequest(
   if (!exact(value, expectedKeys)) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  const businessToday = resolveTeamMembershipBusinessTodayVn(todayVn);
   const omittedOrNull = !hasValidFrom || value.valid_from === null;
-  const parsedValidFrom = omittedOrNull ? null : day(value.valid_from);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if ((!omittedOrNull && (!parsedValidFrom || parsedValidFrom !== businessToday)) ||
-      expected_version === null || expected_version < 1 || !reason.ok || !idempotency_key) {
+  if (!omittedOrNull || expected_version === null || expected_version < 1 || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  return { ok: true, value: { valid_from: parsedValidFrom, expected_version, reason: reason.value, idempotency_key } };
+  return { ok: true, value: { valid_from: null, expected_version, reason: reason.value, idempotency_key } };
 }
 
 export type UnassignMembershipRequest = {
-  valid_to: string | null; expected_version: number; reason: string | null; idempotency_key: string;
+  valid_to: null; expected_version: number; reason: string | null; idempotency_key: string;
 };
 export function teamMembershipUnassignRequest(
   body: unknown,
-  todayVn?: string | null,
 ): Parsed<UnassignMembershipRequest> {
   const value = record(body);
   if (!value) {
@@ -263,17 +235,14 @@ export function teamMembershipUnassignRequest(
   if (!exact(value, expectedKeys)) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  const businessToday = resolveTeamMembershipBusinessTodayVn(todayVn);
   const omittedOrNull = !hasValidTo || value.valid_to === null;
-  const parsedValidTo = omittedOrNull ? null : day(value.valid_to);
   const expected_version = version(value.expected_version);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if ((!omittedOrNull && (!parsedValidTo || parsedValidTo !== businessToday)) ||
-      expected_version === null || expected_version < 1 || !reason.ok || !idempotency_key) {
+  if (!omittedOrNull || expected_version === null || expected_version < 1 || !reason.ok || !idempotency_key) {
     return { ok: false, response: fail("MEMBERSHIP_INVALID", 400) };
   }
-  return { ok: true, value: { valid_to: parsedValidTo, expected_version, reason: reason.value, idempotency_key } };
+  return { ok: true, value: { valid_to: null, expected_version, reason: reason.value, idempotency_key } };
 }
 
 async function runMutation<T>(

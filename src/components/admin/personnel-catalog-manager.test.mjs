@@ -90,5 +90,7 @@ test("Full Admin can link an existing HRP personnel profile to an existing acces
   assert.match(source, /projectRecruiterLinkStatus/);
   assert.match(source, /operation:\s*"personnel_from_account"/);
   assert.match(source, /operation:\s*"link_recruiter_account"/);
+  assert.match(source, /outcome\.kind === "active-team-assignment"/);
+  assert.match(source, /error:\s*outcome\.message/);
   assert.match(source, /Xác nhận liên kết/);
 });

@@ -24,6 +24,7 @@ import {
   buildCreateAccountRequest,
   buildPersonnelFromAccountRequest,
   buildReconcileRequest,
+  classifyAccountOperationResponse,
   newAccountOperationKey,
 } from "@/lib/admin/account-operation-ui-model";
 import {
@@ -210,6 +211,7 @@ export function AccountProvisionAndLinkStepper({
   const [step2AllowNewLoginEdit, setStep2AllowNewLoginEdit] = useState(false);
   const [step2NeedsPasswordReentry, setStep2NeedsPasswordReentry] = useState(false);
   const [step3VersionConflict, setStep3VersionConflict] = useState(false);
+  const [step3TeamAssignmentBlocked, setStep3TeamAssignmentBlocked] = useState(false);
   const [step3HardBlocked, setStep3HardBlocked] = useState(false);
   const [step4PartialFailure, setStep4PartialFailure] = useState<string | null>(null);
   const [step4VersionConflict, setStep4VersionConflict] = useState(false);
@@ -305,6 +307,7 @@ export function AccountProvisionAndLinkStepper({
         setStep2AllowNewLoginEdit(false);
         setStep2NeedsPasswordReentry(false);
         setStep3VersionConflict(false);
+        setStep3TeamAssignmentBlocked(false);
         setStep3HardBlocked(false);
         setStep4PartialFailure(null);
         setStep4VersionConflict(false);
@@ -321,6 +324,7 @@ export function AccountProvisionAndLinkStepper({
       setStep2AllowNewLoginEdit(false);
       setStep2NeedsPasswordReentry(false);
       setStep3VersionConflict(false);
+      setStep3TeamAssignmentBlocked(false);
       setStep3HardBlocked(false);
       setStep4PartialFailure(null);
       setStep4VersionConflict(false);
@@ -743,10 +747,15 @@ export function AccountProvisionAndLinkStepper({
             if (!updated) return;
             currentCp = updated;
           } else {
-            const msg =
-              typeof rawJson === "object" &&
-              rawJson !== null &&
-              typeof (rawJson as Record<string, unknown>).message === "string"
+            const classified5a = classifyAccountOperationResponse(response.status, rawJson, {
+              operation: "personnel_from_account",
+            });
+            const isTeamAssignmentConflict5a = classified5a.kind === "active-team-assignment";
+            const msg = isTeamAssignmentConflict5a
+              ? classified5a.message
+              : typeof rawJson === "object" &&
+                  rawJson !== null &&
+                  typeof (rawJson as Record<string, unknown>).message === "string"
                 ? String((rawJson as Record<string, unknown>).message)
                 : "Chưa kích hoạt được hồ sơ tuyển dụng lúc này.";
             const isUncertain5a = response.status >= 500;
@@ -780,12 +789,16 @@ export function AccountProvisionAndLinkStepper({
               setStep5PartialFailure(msg);
               setFeedback({
                 tone: "warning",
-                title: isVersionConflict5a
-                  ? "Dữ liệu tài khoản vừa thay đổi trước khi kích hoạt tuyển dụng"
-                  : "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
-                message: isVersionConflict5a
-                  ? "Hãy bấm \"Tải lại dữ liệu tài khoản\" rồi thử lại, hoặc bấm \"Đóng & Mở hồ sơ\" để thiết lập tuyển dụng sau."
-                  : `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
+                title: isTeamAssignmentConflict5a
+                  ? "Nhân sự đang có phân công Tổ đội hoặc Trưởng nhóm tuyển dụng"
+                  : isVersionConflict5a
+                    ? "Dữ liệu tài khoản vừa thay đổi trước khi kích hoạt tuyển dụng"
+                    : "Đã tạo người dùng và nhóm quyền — chưa hoàn tất bước tuyển dụng",
+                message: isTeamAssignmentConflict5a
+                  ? `${msg} Sau khi thu hồi hoặc đóng phân công ở Danh mục Tổ đội/Nhóm trưởng, hãy bấm "Tải lại dữ liệu tài khoản mới nhất" rồi bấm "Tiếp tục thiết lập tuyển dụng" (các bước 1–4 đã lưu được giữ nguyên), hoặc bấm "Đóng & Mở hồ sơ".`
+                  : isVersionConflict5a
+                    ? "Hãy bấm \"Tải lại dữ liệu tài khoản\" rồi thử lại, hoặc bấm \"Đóng & Mở hồ sơ\" để thiết lập tuyển dụng sau."
+                    : `${msg} Bạn có thể thử lại hoặc bấm "Đóng & Mở hồ sơ" để thiết lập tuyển dụng sau.`,
               });
             }
             return;
@@ -1587,6 +1600,27 @@ export function AccountProvisionAndLinkStepper({
           return;
         }
 
+        if (outcome.kind === "active-team-assignment") {
+          persistCpOrReport({
+            ...persisted,
+            updated_at: nowIso(),
+            step3_link: {
+              ...persisted.step3_link,
+              status: "IDLE",
+              idempotency_key: null,
+              payload_snapshot: null,
+            },
+          });
+          setStep3TeamAssignmentBlocked(true);
+          setStep3VersionConflict(false);
+          setFeedback({
+            tone: "warning",
+            title: "Nhân sự hoặc tài khoản đang giữ phân công Tổ đội / Trưởng nhóm",
+            message: `${outcome.message} Hồ sơ nhân viên và tài khoản đã lưu (Bước 1–2) vẫn được giữ nguyên. Sau khi thu hồi phân công Trưởng nhóm hoặc kết thúc thành viên Tổ, hãy bấm "Tải lại dữ liệu mới nhất từ máy chủ" rồi thử lại riêng Bước 3.`,
+          });
+          return;
+        }
+
         if (outcome.kind === "conflict") {
           persistCpOrReport({
             ...persisted,
@@ -1596,6 +1630,7 @@ export function AccountProvisionAndLinkStepper({
               status: "IDLE",
             },
           });
+          setStep3TeamAssignmentBlocked(false);
           setStep3VersionConflict(true);
           setFeedback({
             tone: "warning",
@@ -2650,7 +2685,11 @@ export function AccountProvisionAndLinkStepper({
           await runStep3Link(checkpoint, callerEpoch, confirmedRecruiter.recruiter_id, true);
           return;
         }
-        await runStep3Link(checkpoint, callerEpoch);
+        await runStep3Link(
+          checkpoint,
+          callerEpoch,
+          confirmedRecruiter?.recruiter_id ?? undefined,
+        );
         return;
       }
 
@@ -2752,6 +2791,7 @@ export function AccountProvisionAndLinkStepper({
           },
         });
         setStep3VersionConflict(false);
+        setStep3TeamAssignmentBlocked(false);
         const hasPendingRoles = Boolean(
           syncedCp?.step4_roles.some((r) => r.status !== "COMMITTED"),
         );
@@ -2802,12 +2842,21 @@ export function AccountProvisionAndLinkStepper({
       });
       if (refreshedCp) {
         setStep3VersionConflict(false);
+        setStep3TeamAssignmentBlocked(false);
         setFeedback({
           tone: "info",
           title: "Đã cập nhật phiên bản mới nhất từ máy chủ",
           message: "Hãy bấm xác nhận để thực hiện bước liên kết với phiên bản hiện hành.",
         });
       }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (!mountedRef.current || !workspaceGuard.isActive(callerEpoch)) return;
+      setFeedback({
+        tone: "warning",
+        title: "Mất kết nối khi tải phiên bản mới nhất",
+        message: "Vui lòng thử tải lại hoặc đóng tạm để kiểm tra lại sau.",
+      });
     } finally {
       tracked.release();
       inFlightRef.current = false;
@@ -2987,6 +3036,7 @@ export function AccountProvisionAndLinkStepper({
       !needsPasswordReentryForFrozenStep2 &&
       !step3HardBlocked &&
       !step3VersionConflict &&
+      !step3TeamAssignmentBlocked &&
       !mismatchConfirmRequired &&
       !resumeServerError);
 
@@ -3109,7 +3159,7 @@ export function AccountProvisionAndLinkStepper({
         title={feedback.title}
       >
         <p>{feedback.message}</p>
-        {step3VersionConflict ? (
+        {step3VersionConflict || step3TeamAssignmentBlocked ? (
           <div className="mt-2">
             <Button
               type="button"
@@ -3144,6 +3194,7 @@ export function AccountProvisionAndLinkStepper({
         step4PartialFailure ||
         step5PartialFailure ||
         step3VersionConflict ||
+        step3TeamAssignmentBlocked ||
         step4VersionConflict ||
         resumeServerError ||
         mismatchConfirmRequired),
@@ -3640,7 +3691,11 @@ export function AccountProvisionAndLinkStepper({
                 {checkpoint ? "Đóng tạm" : "Hủy"}
               </Button>
             )}
-            {!resumeServerError && !step3HardBlocked && !step3VersionConflict && !step4VersionConflict ? (
+            {!resumeServerError &&
+            !step3HardBlocked &&
+            !step3VersionConflict &&
+            !step3TeamAssignmentBlocked &&
+            !step4VersionConflict ? (
               <Button
                 type="submit"
                 variant="primary"

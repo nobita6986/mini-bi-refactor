@@ -1607,3 +1607,213 @@ test("Hotfix retry R1 [PersonnelCatalogManager]: create-from-account rejects mal
   assert.equal(notifications.success.length, 1);
 });
 
+test("F-02 [DepartmentDetailManager Accounting]: 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT shows dedicated Team/TL guidance + reload, distinct from VERSION_CONFLICT and 503 same-key retry", async () => {
+  const DEPT_ACC_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const accountingDept = makeDept({
+    department_id: DEPT_ACC_ID,
+    system_key: "ACCOUNTING",
+    code: "ACCOUNTING",
+    name: "Phòng Kế toán",
+    membership_mode: "MANAGED_MEMBERSHIP",
+    default_policy_code: "VENDOR_FINANCE_VIEW_AND_RECORD",
+    active_member_count: 0,
+  });
+
+  const dd = mount(DepartmentDetailManager, { departmentId: DEPT_ACC_ID });
+  await dd.flush();
+  respond(
+    findLastRequest((r) => r.method === "GET" && r.url.endsWith(`/departments/${DEPT_ACC_ID}`)),
+    200,
+    makeDeptDetailEnvelope(accountingDept),
+  );
+  await dd.flush();
+
+  const acctSection = await syncChildFromTree(dd, "AccountingDepartmentMembershipsSection", null);
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/departments/accounting/memberships?")),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      department_id: DEPT_ACC_ID,
+      include_history: false,
+      search: null,
+      page: 1,
+      page_size: 25,
+      total: 0,
+      has_more: false,
+      memberships: [],
+    },
+  );
+  await acctSection.flush();
+
+  findButton(acctSection, "Gán thành viên").props.onClick();
+  await acctSection.flush();
+
+  const candReq1 = findLastRequest((r) => r.url.startsWith("/api/admin/departments/accounting/candidates?"));
+  assert.ok(candReq1);
+  respond(candReq1, 200, {
+    ok: true,
+    authorization_date: AUTH_DATE,
+    department_id: DEPT_ACC_ID,
+    search: null,
+    page: 1,
+    page_size: 25,
+    total: 1,
+    has_more: false,
+    candidates: [
+      {
+        account_ref: ACCOUNT_A_REF,
+        display_name: "Nguyễn Văn An",
+        login_id: "annv",
+        personnel_code: "NS-001",
+        account_enabled: true,
+        has_active_membership: false,
+        open_membership_id: null,
+        pair_version: 1,
+      },
+    ],
+  });
+  await acctSection.flush();
+
+  const radio1 = findNode(acctSection, (n) => n.type === "input" && n.props?.name === "accounting-candidate");
+  radio1.props.onChange();
+  const reasonBox = findNode(
+    acctSection,
+    (n) => n.type === "textarea" && n.props?.placeholder?.includes("kế toán Vendor"),
+  );
+  reasonBox.props.onChange({ target: { value: "Phân công đối soát Vendor" } });
+  await acctSection.flush();
+
+  const assignDialogForm = () => {
+    const dlg = findNode(acctSection, (n) => n.props?.dataTestId === "assign-accounting-member-dialog");
+    return collectNodes(dlg).find((n) => n.type === "form");
+  };
+
+  // 1) 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT -> dedicated guidance, reload button, rotates key on retry
+  assignDialogForm().props.onSubmit({ preventDefault() {} });
+  await acctSection.flush();
+  const postTeamBlock = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/departments/accounting/memberships");
+  assert.ok(postTeamBlock);
+  const keyTeamBlock = postTeamBlock.options.headers["Idempotency-Key"];
+  respond(postTeamBlock, 409, { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" });
+  await acctSection.flush();
+
+  const alertAfterTeamBlock = findNode(
+    acctSection,
+    (n) => n.type?.name === "Alert" && n.props?.role === "alert",
+  );
+  assert.equal(alertAfterTeamBlock.props.tone, "warning");
+  assert.match(alertAfterTeamBlock.props.title, /Tổ đội|Trưởng nhóm/);
+  assert.match(textOf(alertAfterTeamBlock), /thu hồi.*Trưởng nhóm|kết thúc.*thành viên Tổ/i);
+  assert.match(textOf(alertAfterTeamBlock), /tải lại/i);
+
+  // Reload candidates refreshes pair_version to 2
+  findButton(acctSection, "Tải lại danh sách ứng viên").props.onClick();
+  await acctSection.flush();
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/departments/accounting/candidates?")),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      department_id: DEPT_ACC_ID,
+      search: null,
+      page: 1,
+      page_size: 25,
+      total: 1,
+      has_more: false,
+      candidates: [
+        {
+          account_ref: ACCOUNT_A_REF,
+          display_name: "Nguyễn Văn An",
+          login_id: "annv",
+          personnel_code: "NS-001",
+          account_enabled: true,
+          has_active_membership: false,
+          open_membership_id: null,
+          pair_version: 2,
+        },
+      ],
+    },
+  );
+  respond(
+    findLastRequest((r) => r.url.startsWith("/api/admin/departments/accounting/memberships?")),
+    200,
+    {
+      ok: true,
+      authorization_date: AUTH_DATE,
+      department_id: DEPT_ACC_ID,
+      include_history: false,
+      search: null,
+      page: 1,
+      page_size: 25,
+      total: 0,
+      has_more: false,
+      memberships: [],
+    },
+  );
+  await acctSection.flush();
+
+  // 2) Contrast with 409 DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT
+  assignDialogForm().props.onSubmit({ preventDefault() {} });
+  await acctSection.flush();
+  const postVerConflict = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/departments/accounting/memberships");
+  const keyVerConflict = postVerConflict.options.headers["Idempotency-Key"];
+  assert.notEqual(keyVerConflict, keyTeamBlock, "409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT must rotate Idempotency-Key");
+  assert.equal(JSON.parse(postVerConflict.options.body).expected_pair_version, 2);
+  respond(postVerConflict, 409, { ok: false, code: "DEPARTMENT_MEMBERSHIP_VERSION_CONFLICT" });
+  await acctSection.flush();
+
+  const alertAfterVer = findNode(
+    acctSection,
+    (n) => n.type?.name === "Alert" && n.props?.role === "alert",
+  );
+  assert.equal(alertAfterVer.props.title, "Cần đồng bộ lại dữ liệu");
+  assert.match(textOf(alertAfterVer), /Dữ liệu thành viên đã thay đổi/);
+  assert.doesNotMatch(textOf(alertAfterVer), /Trưởng nhóm|Tổ đội/);
+
+  // 3) 503 preserves exact Idempotency-Key on retry -> 201 succeeds
+  assignDialogForm().props.onSubmit({ preventDefault() {} });
+  await acctSection.flush();
+  const post503 = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/departments/accounting/memberships");
+  const key503 = post503.options.headers["Idempotency-Key"];
+  assert.notEqual(key503, keyVerConflict);
+  respond(post503, 503, { ok: false, code: "DEPARTMENT_UNAVAILABLE" });
+  await acctSection.flush();
+
+  assignDialogForm().props.onSubmit({ preventDefault() {} });
+  await acctSection.flush();
+  const postRetry = findLastRequest((r) => r.method === "POST" && r.url === "/api/admin/departments/accounting/memberships");
+  assert.equal(postRetry.options.headers["Idempotency-Key"], key503, "503 must preserve Idempotency-Key");
+  respond(postRetry, 201, {
+    ok: true,
+    replayed: false,
+    membership: {
+      membership_id: MEMBERSHIP_A_ID,
+      department_id: DEPT_ACC_ID,
+      account_ref: ACCOUNT_A_REF,
+      display_name: "Nguyễn Văn An",
+      login_id: "annv",
+      personnel_code: "NS-001",
+      account_enabled: true,
+      valid_from: AUTH_DATE,
+      valid_to: null,
+      state: "CURRENT",
+      effective: true,
+      version: 1,
+      pair_version: 2,
+      granted_by_display_name: "Admin",
+      revoked_by_display_name: null,
+      revoked_at: null,
+      created_at: AS_OF,
+      updated_at: AS_OF,
+    },
+  });
+  await acctSection.flush();
+  assert.equal(notifications.success.length, 1);
+
+  acctSection.unmount();
+  dd.unmount();
+});
+

@@ -237,7 +237,49 @@ test("WP4 person link/unlink builders and recruiter conflict classification", as
   assert.equal(uncertain.kind, "uncertain");
   assert.equal(uncertain.preserveIdempotencyKey, true);
   assert.equal(
+    model.classifyAccountOrgMutation(503, null, "unlink").preserveIdempotencyKey,
+    true,
+  );
+  assert.equal(
     model.classifyAccountOrgMutation(401, { ok: false, code: "UNAUTHENTICATED" }, "unlink").kind,
     "session-lost",
   );
+
+  // F-03: 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT is distinguished from VERSION_CONFLICT for BOTH link and unlink
+  for (const op of ["link", "unlink"]) {
+    const teamBlocked = model.classifyAccountOrgMutation(
+      409,
+      { ok: false, code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT" },
+      op,
+    );
+    assert.equal(teamBlocked.kind, "active-team-assignment");
+    if (teamBlocked.kind === "active-team-assignment") {
+      assert.equal(teamBlocked.code, "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT");
+      assert.equal(teamBlocked.preserveIdempotencyKey, false);
+      assert.equal(teamBlocked.needsReload, true);
+      assert.match(teamBlocked.message, /Tổ đội|Trưởng nhóm/);
+      assert.match(teamBlocked.message, /thu hồi|kết thúc/i);
+      assert.match(teamBlocked.message, /tải lại/i);
+      assert.doesNotMatch(teamBlocked.message, /PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT/);
+      if (op === "unlink") {
+        assert.match(teamBlocked.message, /ngắt liên kết/);
+      } else {
+        assert.match(teamBlocked.message, /gắn liên kết/);
+      }
+    }
+
+    const versionConflict = model.classifyAccountOrgMutation(
+      409,
+      { ok: false, code: "VERSION_CONFLICT" },
+      op,
+    );
+    assert.equal(versionConflict.kind, "conflict");
+    if (versionConflict.kind === "conflict") {
+      assert.equal(versionConflict.code, "VERSION_CONFLICT");
+      assert.equal(versionConflict.preserveIdempotencyKey, false);
+      assert.equal(versionConflict.needsReload, true);
+      assert.match(versionConflict.message, /Dữ liệu tài khoản hoặc nhân sự đã thay đổi/);
+      assert.doesNotMatch(versionConflict.message, /Trưởng nhóm|Tổ đội/);
+    }
+  }
 });

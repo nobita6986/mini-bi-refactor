@@ -95,6 +95,12 @@ function forbidAuthority(body: unknown): Response | null {
   return null;
 }
 
+function idempotencyMismatch(request: Request, key: string): Response | null {
+  const header = request.headers.get("idempotency-key");
+  if (header !== null && header !== key) return fail("IDEMPOTENCY_KEY_MISMATCH", 400);
+  return null;
+}
+
 async function resolveActor(deps: AccountOperationDependencies): Promise<Parsed<TrustedActor>> {
   try {
     const session = await deps.resolveSession();
@@ -121,6 +127,7 @@ async function resolveActor(deps: AccountOperationDependencies): Promise<Parsed<
 function errorResponse(kind: string): Response {
   if (kind === "denied") return fail("ACCOUNT_OPERATION_DENIED", 403);
   if (kind === "not-found") return fail("ACCOUNT_OPERATION_NOT_FOUND", 404);
+  if (kind === "active-team-assignment") return fail("PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT", 409);
   if (kind === "conflict") return fail("ACCOUNT_OPERATION_CONFLICT", 409);
   if (kind === "blocked") return fail("ACCOUNT_OPERATION_BLOCKED", 409);
   if (kind === "invalid") return fail("ACCOUNT_OPERATION_INVALID", 400);
@@ -537,6 +544,8 @@ export async function createPersonnelFromAccount(
   if (authority) return authority;
   const parsed = parseCreatePersonnelFromAccount(body.value);
   if (!parsed.ok) return fail(parsed.code, 400);
+  const mismatch = idempotencyMismatch(request, parsed.value.idempotency_key);
+  if (mismatch) return mismatch;
   return runCreatePersonnelFromAccount(parsed.value, deps);
 }
 
@@ -641,6 +650,8 @@ export async function linkRecruiterToAccount(
   if (authority) return authority;
   const parsed = parseLinkRecruiterToAccount(body.value);
   if (!parsed.ok) return fail(parsed.code, 400);
+  const mismatch = idempotencyMismatch(request, parsed.value.idempotency_key);
+  if (mismatch) return mismatch;
   return runLinkRecruiterToAccount(recruiterId, parsed.value, deps);
 }
 

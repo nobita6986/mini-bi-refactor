@@ -11,7 +11,6 @@ import {
   type AdminTeam,
   type AdminTeamList,
 } from "../direct-entry/team-catalog-contract.ts";
-import { parseIsoDate } from "../direct-entry/direct-entry-date-format.ts";
 import type { AdminPersonnel } from "../direct-entry/personnel-catalog-contract.ts";
 import {
   newIdempotencyKey,
@@ -105,18 +104,6 @@ function mutationPath(recruiterId: string, teamId?: string, move = false): strin
   }`;
 }
 
-function resolveTeamMembershipUiToday(todayVn?: string | null): string {
-  if (typeof todayVn === "string" && parseIsoDate(todayVn) !== null) {
-    return todayVn;
-  }
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
 export function buildAssignMembershipRequest(input: {
   recruiterId: string;
   teamId: string;
@@ -129,18 +116,10 @@ export function buildAssignMembershipRequest(input: {
 }): { ok: true; request: MembershipMutationRequest } | { ok: false; message: string } {
   const url = mutationPath(input.recruiterId, input.teamId, input.move === true);
   if (url === null) return { ok: false, message: "Hồ sơ hoặc nhóm không hợp lệ." };
-  const businessToday = resolveTeamMembershipUiToday(input.todayVn);
-  const rawValidFrom = typeof input.validFrom === "string" ? input.validFrom.trim() : "";
-  const effectiveValidFrom = rawValidFrom.length === 0 ? null : rawValidFrom;
-  const dateFailure = effectiveValidFrom === null
-    ? null
-    : !parseIsoDate(effectiveValidFrom)
-      ? "Ngày hiệu lực không hợp lệ."
-      : effectiveValidFrom > businessToday
-        ? "Ngày hiệu lực không được ở tương lai."
-        : effectiveValidFrom < businessToday
-          ? "Ngày hiệu lực không được ở quá khứ."
-          : null;
+  const dateFailure =
+    input.validFrom !== undefined && input.validFrom !== null && input.validFrom !== ""
+      ? "Ngày hiệu lực do máy chủ quyết định khi lưu; không gửi ngày hiệu lực từ trình duyệt."
+      : null;
   const failure = dateFailure
     ?? validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu hồ sơ chưa hợp lệ. Vui lòng tải lại."
@@ -153,7 +132,7 @@ export function buildAssignMembershipRequest(input: {
     request: {
       url,
       body: {
-        valid_from: effectiveValidFrom,
+        valid_from: null,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,
@@ -173,18 +152,10 @@ export function buildUnassignMembershipRequest(input: {
 }): { ok: true; request: MembershipMutationRequest } | { ok: false; message: string } {
   const url = mutationPath(input.recruiterId);
   if (url === null) return { ok: false, message: "Hồ sơ không hợp lệ." };
-  const businessToday = resolveTeamMembershipUiToday(input.todayVn);
-  const rawValidTo = typeof input.validTo === "string" ? input.validTo.trim() : "";
-  const effectiveValidTo = rawValidTo.length === 0 ? null : rawValidTo;
-  const dateFailure = effectiveValidTo === null
-    ? null
-    : !parseIsoDate(effectiveValidTo)
-      ? "Ngày kết thúc không hợp lệ."
-      : effectiveValidTo > businessToday
-        ? "Ngày kết thúc không được ở tương lai."
-        : effectiveValidTo < businessToday
-          ? "Ngày kết thúc không được ở quá khứ."
-          : null;
+  const dateFailure =
+    input.validTo !== undefined && input.validTo !== null && input.validTo !== ""
+      ? "Ngày kết thúc do máy chủ quyết định khi lưu; không gửi ngày kết thúc từ trình duyệt."
+      : null;
   const failure = dateFailure
     ?? validateVersion(input.expectedVersion) ?? (input.expectedVersion < 1
       ? "Dữ liệu hồ sơ chưa hợp lệ. Vui lòng tải lại."
@@ -197,7 +168,7 @@ export function buildUnassignMembershipRequest(input: {
     request: {
       url,
       body: {
-        valid_to: effectiveValidTo,
+        valid_to: null,
         expected_version: input.expectedVersion,
         reason: normalizeOptionalActionReason(input.reason),
         idempotency_key: input.idempotencyKey,

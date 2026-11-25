@@ -70,7 +70,14 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
 }
 
 function errorCode(payload: unknown): string | null {
-  return isRecord(payload) && typeof payload.code === "string" ? payload.code : null;
+  if (!isRecord(payload)) return null;
+  if (typeof payload.code === "string" && payload.code.trim() !== "") {
+    return payload.code.trim();
+  }
+  if (isRecord(payload.error) && typeof payload.error.code === "string" && payload.error.code.trim() !== "") {
+    return payload.error.code.trim();
+  }
+  return null;
 }
 
 export function projectAccountListForQuery(
@@ -288,6 +295,13 @@ export type AccountOrgMutationOutcome<T> =
   | { kind: "session-lost"; message: string; preserveIdempotencyKey: false }
   | { kind: "recruiter-mismatch"; message: string; preserveIdempotencyKey: false }
   | { kind: "hard-conflict"; code: string; message: string; preserveIdempotencyKey: false }
+  | {
+      kind: "active-team-assignment";
+      code: "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT";
+      message: string;
+      preserveIdempotencyKey: false;
+      needsReload: true;
+    }
   | { kind: "personal-assignments-block"; message: string; preserveIdempotencyKey: false }
   | { kind: "link-forbidden"; message: string; preserveIdempotencyKey: false }
   | { kind: "conflict"; code: string | null; message: string; preserveIdempotencyKey: false; needsReload: true }
@@ -385,6 +399,19 @@ export function classifyAccountOrgMutation(
       message:
         "Chưa nhận được kết quả xác nhận từ máy chủ. Dữ liệu và khóa gửi trùng được giữ nguyên để thử gửi lại đúng yêu cầu hoặc tải lại đối chiếu.",
       preserveIdempotencyKey: true,
+    };
+  }
+
+  if (code === "PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT") {
+    return {
+      kind: "active-team-assignment",
+      code,
+      message:
+        operation === "unlink"
+          ? "Nhân sự hoặc tài khoản này đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục) nên chưa thể ngắt liên kết. Vui lòng thu hồi phân công Trưởng nhóm hoặc kết thúc tư cách thành viên Tổ trước, rồi tải lại dữ liệu mới nhất trước khi thử lại."
+          : "Nhân sự hoặc tài khoản này đang giữ phân công Tổ đội hoặc Trưởng nhóm tuyển dụng hiệu lực (hoặc đang tạm treo chờ khôi phục) nên chưa thể gắn liên kết với hồ sơ hiện tại. Vui lòng thu hồi phân công Trưởng nhóm hoặc kết thúc tư cách thành viên Tổ trước, rồi tải lại dữ liệu mới nhất trước khi thử lại.",
+      preserveIdempotencyKey: false,
+      needsReload: true,
     };
   }
 
