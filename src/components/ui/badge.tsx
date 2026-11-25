@@ -45,7 +45,7 @@ export function StatusBadge({
     <span
       data-testid={dataTestId}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap shrink-0 transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
+        "inline-flex items-center justify-center gap-1.5 rounded-full border px-2.5 py-0.5 text-center text-xs font-medium whitespace-nowrap shrink-0 transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
         BADGE_TONE_CLASSES[tone],
         className,
       )}

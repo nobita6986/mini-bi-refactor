@@ -28,7 +28,7 @@ export function RecruitmentPostCard({
   const allowRepost = Boolean(canRepost) && isWithdrawn;
 
   return (
-    <Card className="flex h-full flex-col gap-4 rounded-xl border-border/90 p-4 sm:p-5 transition-[border-color,box-shadow] duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] hover:border-primary/30 hover:shadow-md motion-reduce:transition-none">
+    <Card className="flex h-full flex-col gap-4 rounded-[10px] border-border bg-surface p-4 sm:p-5 shadow-[var(--shadow-card)] transition-[border-color,box-shadow] duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] hover:border-[var(--line-strong)] hover:shadow-[var(--shadow-card-hover)] motion-reduce:transition-none">
       <div
         data-testid={`recruitment-post-card-${card.briefId}`}
         className="flex h-full flex-col justify-between gap-4"
@@ -38,14 +38,14 @@ export function RecruitmentPostCard({
             data-testid="recruitment-post-card-header"
             data-status={card.status}
             className={cn(
-              "rounded-lg border border-l-4 p-3.5 space-y-2.5",
+              "border-l-4 pl-3.5 py-0.5 space-y-2",
               isWithdrawn
-                ? "border-border/80 border-l-muted/60 bg-surface-muted/70"
-                : "border-primary/20 border-l-primary bg-gradient-to-br from-primary/8 via-surface-muted/80 to-surface",
+                ? "border-l-muted/60"
+                : "border-l-primary",
             )}
           >
             <div className="flex flex-wrap items-start justify-between gap-2">
-              <h2 className="min-w-0 flex-1 text-base font-bold tracking-tight text-foreground sm:text-lg leading-snug break-words">
+              <h2 className="min-w-0 flex-1 text-base font-semibold tracking-tight text-[var(--navy)] sm:text-lg leading-snug break-words">
                 {card.projectName}
               </h2>
               {showStatusBadge ? (
@@ -65,7 +65,7 @@ export function RecruitmentPostCard({
               </p>
               <p className="flex items-start gap-1.5 text-xs sm:text-sm text-muted break-words">
                 <MapPin
-                  className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary/75"
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary"
                   aria-hidden="true"
                 />
                 <span className="min-w-0 flex-1 break-words">
@@ -78,13 +78,12 @@ export function RecruitmentPostCard({
 
           <div
             data-testid="recruitment-post-card-actions"
-            className="flex flex-wrap items-center gap-2 border-b border-border pb-3"
+            className="flex flex-wrap items-center gap-2 border-y border-border py-2.5"
           >
             <Button
               type="button"
               variant="soft"
               size="sm"
-              className="font-semibold"
               data-testid={`recruitment-post-view-detail-${card.briefId}`}
               onClick={() => onViewDetail(card.briefId)}
             >
@@ -134,10 +133,10 @@ export function RecruitmentPostCard({
 
           <div
             data-testid="recruitment-post-card-job"
-            className="rounded-lg border border-border/80 bg-surface-muted/65 p-3 space-y-1"
+            className="px-0.5 space-y-1"
           >
-            <p className="text-xs font-normal text-muted">Công việc</p>
-            <p className="text-sm font-semibold leading-relaxed text-foreground whitespace-pre-line break-words line-clamp-3">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-muted">Công việc</p>
+            <p className="text-sm font-normal leading-relaxed text-foreground whitespace-pre-line break-words line-clamp-3">
               {card.jobDescriptionDisplay}
             </p>
           </div>
@@ -145,59 +144,59 @@ export function RecruitmentPostCard({
           <dl className="grid grid-cols-2 gap-2.5 text-sm">
             <div
               data-testid="recruitment-post-card-labor-types"
-              className="min-w-0 rounded-lg border border-border/75 bg-surface-muted/45 px-3 py-2.5 space-y-0.5"
+              className="min-w-0 rounded-lg bg-surface-muted px-3 py-2.5 space-y-0.5"
             >
-              <dt className="text-xs font-normal text-muted">Hình thức tuyển</dt>
-              <dd className="text-sm font-semibold text-foreground break-words">
+              <dt className="text-[11px] font-normal uppercase tracking-wider text-muted">Hình thức tuyển</dt>
+              <dd className="text-sm font-medium text-[var(--navy)] break-words">
                 {card.laborTypesDisplay}
               </dd>
             </div>
 
             <div
               data-testid="recruitment-post-card-headcount"
-              className="min-w-0 rounded-lg border border-border/75 bg-surface-muted/45 px-3 py-2.5 space-y-0.5"
+              className="min-w-0 rounded-lg bg-surface-muted px-3 py-2.5 space-y-0.5"
             >
-              <dt className="text-xs font-normal text-muted">
+              <dt className="text-[11px] font-normal uppercase tracking-wider text-muted">
                 Số lượng dự kiến
               </dt>
-              <dd className="font-mono text-sm font-semibold tabular-nums text-foreground break-words">
+              <dd className="font-mono text-sm font-semibold tabular-nums text-[var(--navy)] break-words">
                 {card.expectedHeadcountDisplay}
               </dd>
             </div>
 
             <div
               data-testid="recruitment-post-card-candidate"
-              className="col-span-2 min-w-0 rounded-lg border border-border/60 bg-surface px-3 py-2 space-y-0.5"
+              className="col-span-2 sm:col-span-1 min-w-0 sm:border-r sm:border-border sm:pr-3 py-1 space-y-0.5"
             >
-              <dt className="text-xs font-normal text-muted">
+              <dt className="text-[11px] font-normal uppercase tracking-wider text-muted">
                 Giới tính &amp; độ tuổi
               </dt>
-              <dd className="text-sm font-medium text-foreground break-words">
+              <dd className="text-sm font-normal text-foreground break-words">
                 {card.genderAndAgeDisplay}
               </dd>
             </div>
 
             <div
-              data-testid="recruitment-post-card-compensation"
-              className="col-span-2 min-w-0 rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-3 py-2.5 space-y-1 dark:border-emerald-400/25 dark:bg-emerald-500/12"
+              data-testid="recruitment-post-card-contact"
+              className="col-span-2 sm:col-span-1 min-w-0 sm:pl-1 py-1 space-y-0.5"
             >
-              <dt className="text-xs font-medium text-emerald-800/85 dark:text-emerald-200/85">
-                Lương cơ bản &amp; thu nhập dự kiến
+              <dt className="text-[11px] font-normal uppercase tracking-wider text-muted">
+                Người phụ trách &amp; điện thoại
               </dt>
-              <dd className="font-mono text-sm font-semibold tabular-nums text-emerald-950 dark:text-emerald-100 break-words">
-                {card.baseSalaryAndIncomeDisplay}
+              <dd className="text-sm font-medium tabular-nums text-foreground break-words">
+                {card.managerContactDisplay}
               </dd>
             </div>
 
             <div
-              data-testid="recruitment-post-card-contact"
-              className="col-span-2 min-w-0 rounded-lg border border-border/80 bg-surface-muted/55 px-3 py-2.5 space-y-0.5"
+              data-testid="recruitment-post-card-compensation"
+              className="col-span-2 min-w-0 rounded-lg border border-primary/20 bg-[var(--selected-bg)] px-3.5 py-2.5 space-y-1"
             >
-              <dt className="text-xs font-normal text-muted">
-                Người phụ trách &amp; điện thoại
+              <dt className="text-[11px] font-medium uppercase tracking-wider text-primary">
+                Lương cơ bản &amp; thu nhập dự kiến
               </dt>
-              <dd className="text-sm font-semibold tabular-nums text-foreground break-words">
-                {card.managerContactDisplay}
+              <dd className="font-mono text-sm sm:text-base font-semibold tabular-nums text-primary break-words">
+                {card.baseSalaryAndIncomeDisplay}
               </dd>
             </div>
           </dl>

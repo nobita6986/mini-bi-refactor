@@ -738,14 +738,6 @@ export function WorkerOperations({
                 : `${workerPage?.items.length ?? 0} hồ sơ`}
           </StatusBadge>
         }
-        description={
-          <>
-            Tra cứu theo đúng quan hệ của bạn. Quyền sửa và đề xuất thay đổi do hệ thống quyết định.{" "}
-            <span className="hidden sm:inline">
-              Các tab là những quan hệ có thể chồng lấp; cùng một NLĐ xuất hiện ở nhiều tab không phải hồ sơ trùng.
-            </span>
-          </>
-        }
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {canExportThisTab && exportScope !== null ? (
@@ -807,7 +799,7 @@ export function WorkerOperations({
         className="flex flex-col gap-3.5"
         aria-busy={activePage.state === "loading"}
       >
-        <p className="text-xs sm:text-sm text-muted">{WORKER_OPERATIONS_TAB_HINTS[tab]}</p>
+        <p className="sr-only">{WORKER_OPERATIONS_TAB_HINTS[tab]}</p>
 
         {tab === "uploader" ? null : (
           <>
@@ -824,36 +816,73 @@ export function WorkerOperations({
                 </button>
               }
               summary={
-                <p role="status" aria-live="polite" data-testid="worker-filter-summary"
-                  className="text-sm sm:text-base font-bold text-foreground">
-                  {workerSummary === null ? "Đang tính tổng theo bộ lọc…" : (
-                    <>
-                      Tổng số NLĐ:{" "}
-                      <span className="text-red-600 dark:text-red-400">
-                        {workerSummary.total_workers.toLocaleString("vi-VN")}
-                      </span>{" "}
-                      — trong{" "}
-                      <span className="text-red-600 dark:text-red-400">
-                        {workerSummary.project_count.toLocaleString("vi-VN")}
-                      </span>{" "}
-                      dự án và{" "}
-                      <span className="text-red-600 dark:text-red-400">
-                        {workerSummary.recruiter_count.toLocaleString("vi-VN")}
-                      </span>{" "}
-                      người tuyển; trạng thái làm việc:{" "}
-                      {filters.status === "" ? "Tất cả" : workerStatusLabel(filters.status)}; nguồn tuyển:{" "}
-                      {workerProviderTypeLabel(filters.providerType)}.
-                      {(filters.firstWorkDateFrom ?? "") !== "" || (filters.firstWorkDateTo ?? "") !== "" ? (
+                <>
+                  <p role="status" aria-live="polite" data-testid="worker-filter-summary"
+                    className="text-sm sm:text-base font-bold text-foreground">
+                    {workerSummary === null ? "Đang tính tổng theo bộ lọc…" : (
+                      <>
+                        Tổng số NLĐ:{" "}
+                        <span className="text-red-600 dark:text-red-400">
+                          {workerSummary.total_workers.toLocaleString("vi-VN")}
+                        </span>{" "}
+                        — trong{" "}
+                        <span className="text-red-600 dark:text-red-400">
+                          {workerSummary.project_count.toLocaleString("vi-VN")}
+                        </span>{" "}
+                        dự án và{" "}
+                        <span className="text-red-600 dark:text-red-400">
+                          {workerSummary.recruiter_count.toLocaleString("vi-VN")}
+                        </span>{" "}
+                        người tuyển; trạng thái làm việc:{" "}
+                        {filters.status === "" ? "Tất cả" : workerStatusLabel(filters.status)}; nguồn tuyển:{" "}
+                        {workerProviderTypeLabel(filters.providerType)}.
+                        {(filters.firstWorkDateFrom ?? "") !== "" || (filters.firstWorkDateTo ?? "") !== "" ? (
+                          <>
+                            {" "}Ngày vào làm:{" "}
+                            {(filters.firstWorkDateFrom ?? "") !== "" ? filters.firstWorkDateFrom : "…"} →{" "}
+                            {(filters.firstWorkDateTo ?? "") !== "" ? filters.firstWorkDateTo : "…"}.
+                          </>
+                        ) : null}
+                        {filters.search.trim() === "" ? null : <> Từ khóa: “{filters.search.trim()}”.</>}
+                      </>
+                    )}
+                  </p>
+                  {workerPage !== null && workerPage.state === "ready" ? (
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-2 shrink-0">
+                      {quickOffboardingMode ? (
                         <>
-                          {" "}Ngày vào làm:{" "}
-                          {(filters.firstWorkDateFrom ?? "") !== "" ? filters.firstWorkDateFrom : "…"} →{" "}
-                          {(filters.firstWorkDateTo ?? "") !== "" ? filters.firstWorkDateTo : "…"}.
+                          <span role="status" className="text-sm text-muted">
+                            Đã chọn {quickOffboardingIds.size} NLĐ; lựa chọn được giữ khi tải thêm.
+                          </span>
+                          <button type="button" className={buttonClass}
+                            disabled={quickOffboardingBusy} onClick={cancelQuickOffboarding}>
+                            Hủy chọn
+                          </button>
+                          <button type="button" className={primaryClass}
+                            data-testid="worker-quick-offboarding-submit"
+                            disabled={quickOffboardingIds.size === 0 || quickOffboardingBusy}
+                            onClick={(event) => {
+                              quickOffboardingOpenerRef.current = event.currentTarget;
+                              setQuickOffboardingReason("");
+                              setQuickOffboardingOpen(true);
+                            }}>
+                            Cho nghỉ
+                          </button>
                         </>
-                      ) : null}
-                      {filters.search.trim() === "" ? null : <> Từ khóa: “{filters.search.trim()}”.</>}
-                    </>
-                  )}
-                </p>
+                      ) : (
+                        <button type="button" className={buttonClass}
+                          data-testid="worker-quick-offboarding-start"
+                          onClick={(event) => {
+                            quickOffboardingOpenerRef.current = event.currentTarget;
+                            setQuickOffboardingIds(new Set());
+                            setQuickOffboardingMode(true);
+                          }}>
+                          Cho nghỉ nhanh
+                        </button>
+                      )}
+                    </div>
+                  ) : null}
+                </>
               }
             >
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-12 lg:items-end">
@@ -1034,39 +1063,6 @@ export function WorkerOperations({
         ) : null}
         {workerPage !== null && workerPage.state === "ready" ? (
           <>
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              {quickOffboardingMode ? (
-                <>
-                  <span role="status" className="mr-auto text-sm text-muted">
-                    Đã chọn {quickOffboardingIds.size} NLĐ; lựa chọn được giữ khi tải thêm.
-                  </span>
-                  <button type="button" className={buttonClass}
-                    disabled={quickOffboardingBusy} onClick={cancelQuickOffboarding}>
-                    Hủy chọn
-                  </button>
-                  <button type="button" className={primaryClass}
-                    data-testid="worker-quick-offboarding-submit"
-                    disabled={quickOffboardingIds.size === 0 || quickOffboardingBusy}
-                    onClick={(event) => {
-                      quickOffboardingOpenerRef.current = event.currentTarget;
-                      setQuickOffboardingReason("");
-                      setQuickOffboardingOpen(true);
-                    }}>
-                    Cho nghỉ
-                  </button>
-                </>
-              ) : (
-                <button type="button" className={buttonClass}
-                  data-testid="worker-quick-offboarding-start"
-                  onClick={(event) => {
-                    quickOffboardingOpenerRef.current = event.currentTarget;
-                    setQuickOffboardingIds(new Set());
-                    setQuickOffboardingMode(true);
-                  }}>
-                  Cho nghỉ nhanh
-                </button>
-              )}
-            </div>
             <WorkerTable rows={workerPage.items}
               quickOffboardingMode={quickOffboardingMode}
               selectedQuickOffboardingIds={quickOffboardingIds}
@@ -1151,7 +1147,7 @@ export function WorkerOperations({
       <Dialog.Root open={quickOffboardingOpen}
         onOpenChange={(open) => { if (!open && !quickOffboardingBusy) setQuickOffboardingOpen(false); }}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" data-ui-overlay-motion="true" />
+          <Dialog.Overlay className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]" data-ui-overlay-motion="true" />
           <Dialog.Content
             data-ui-dialog-motion="true"
             onCloseAutoFocus={(event) => {
@@ -1163,14 +1159,14 @@ export function WorkerOperations({
             }}
             className="fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)]
               w-[calc(100vw-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2
-              overflow-hidden rounded-2xl border border-border bg-surface text-foreground shadow-2xl outline-none"
+              overflow-hidden rounded-2xl border border-border bg-surface border-t-2 border-t-primary text-foreground shadow-[var(--shadow-dialog)] outline-none"
           >
             <form className="flex min-h-0 w-full flex-col"
               onSubmit={(event) => { event.preventDefault(); void submitQuickOffboarding(); }}>
-              <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border
+              <header className="flex shrink-0 items-start justify-between gap-4 border-b-2 border-border
                 bg-surface px-4 py-4 sm:px-5">
                 <div>
-                  <Dialog.Title className="text-xl font-semibold">Cho nghỉ {quickOffboardingIds.size} NLĐ</Dialog.Title>
+                  <Dialog.Title className="text-xl font-semibold text-navy">Cho nghỉ {quickOffboardingIds.size} NLĐ</Dialog.Title>
                   <Dialog.Description className="mt-1 text-sm text-muted">
                     Trạng thái có hiệu lực từ hôm nay ({today}). Nếu một hồ sơ cập nhật lỗi, hệ thống dừng
                     tại hồ sơ đó và báo số hồ sơ đã xử lý.
@@ -1183,9 +1179,9 @@ export function WorkerOperations({
                     focus-visible:ring-ring/40 disabled:opacity-50"
                   onClick={() => setQuickOffboardingOpen(false)}>×</button>
               </header>
-              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-5">
-                <div className="flex flex-col gap-1.5">
-                  <label htmlFor="worker-quick-offboarding-reason" className="text-sm font-medium">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-surface-muted px-4 py-4 sm:px-5">
+                <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                  <label htmlFor="worker-quick-offboarding-reason" className="text-sm font-medium text-navy">
                     Lý do nghỉ
                   </label>
                   <textarea id="worker-quick-offboarding-reason" required maxLength={4000}
@@ -1290,12 +1286,13 @@ function WorkerTable({
   onPropose: (row: WorkerDirectoryRow, opener: HTMLElement | null) => void;
   onCorrect: (row: WorkerDirectoryRow, opener: HTMLElement | null) => void;
 }) {
-  const rowSecondaryBtn = buttonClasses({ variant: "secondary", size: "sm" });
-  const rowPrimaryBtn = buttonClasses({ variant: "primary", size: "sm" });
-  const rowSoftBtn = buttonClasses({ variant: "soft", size: "sm" });
+  const compactActionClass = " md:!h-7 md:!min-h-7 md:!px-2.5 md:!py-0.5 md:!text-xs justify-center";
+  const rowSecondaryBtn = buttonClasses({ variant: "secondary", size: "sm" }) + compactActionClass;
+  const rowPrimaryBtn = buttonClasses({ variant: "soft", size: "sm" }) + compactActionClass;
+  const rowSoftBtn = buttonClasses({ variant: "soft", size: "sm" }) + compactActionClass;
   return (
     <DataTableContainer scrollClassName="overflow-x-auto">
-      <table className={DATA_TABLE_CLASS + " min-w-[900px]"}>
+      <table className={DATA_TABLE_CLASS}>
         <caption className="sr-only">Danh sách người lao động theo quan hệ đã chọn</caption>
         <thead className={DATA_TABLE_HEAD_CLASS}>
           <tr>
@@ -1322,7 +1319,7 @@ function WorkerTable({
                 : "neutral";
             return (
               <tr key={row.entry_id} className={DATA_TABLE_ROW_CLASS}>
-                <td className={DATA_TABLE_TD_CLASS + " font-semibold"} data-card-header="true">
+                <td className={DATA_TABLE_TD_CLASS + " font-semibold text-[var(--navy)]"} data-card-header="true">
                   <span className="flex items-center gap-2">
                     {quickOffboardingMode ? (
                       <input type="checkbox" className="size-4 shrink-0 accent-primary"
@@ -1337,19 +1334,21 @@ function WorkerTable({
                     <span>{row.display_name}</span>
                   </span>
                 </td>
-                <td className={DATA_TABLE_TD_CLASS + " font-mono text-xs whitespace-nowrap text-muted"} data-label="Mã NLĐ">
-                  {row.employee_code}
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Mã NLĐ">
+                  <span className="inline-flex items-center rounded-md border border-border/80 bg-surface-muted/75 px-2 py-0.5 font-mono text-xs font-medium text-[var(--navy)]">
+                    {row.employee_code}
+                  </span>
                 </td>
-                <td className={DATA_TABLE_TD_CLASS} data-label="Dự án">
+                <td className={DATA_TABLE_TD_CLASS + " max-w-[18rem] font-medium text-foreground"} data-label="Dự án">
                   {row.project_display}
                 </td>
-                <td className={DATA_TABLE_TD_CLASS + " font-mono text-xs tabular-nums whitespace-nowrap"} data-label="Ngày đầu tiên">
+                <td className={DATA_TABLE_TD_CLASS + " font-mono text-xs tabular-nums whitespace-nowrap text-muted"} data-label="Ngày đầu tiên">
                   {row.first_work_date}
                 </td>
-                <td className={DATA_TABLE_TD_CLASS} data-label="Người tuyển">
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap font-medium"} data-label="Người tuyển">
                   {row.recruiter_display}
                 </td>
-                <td className={DATA_TABLE_TD_CLASS} data-label="Trạng thái">
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Trạng thái">
                   <StatusBadge tone={statusTone} dot>
                     {workerStatusLabel(row.employment_status)}
                   </StatusBadge>
@@ -1364,7 +1363,7 @@ function WorkerTable({
                 <td className={DATA_TABLE_TD_CLASS} data-label="Loại hình">
                   {row.labor_type_display}
                 </td>
-                <td className={DATA_TABLE_TD_CLASS + " text-right"} data-card-actions="true">
+                <td className={DATA_TABLE_TD_CLASS + " text-right whitespace-nowrap"} data-card-actions="true">
                   <RowActionCluster>
                     <button type="button" className={rowSecondaryBtn}
                       onClick={(event) => onViewDetail(row, event.currentTarget)}>
@@ -1379,7 +1378,7 @@ function WorkerTable({
                     {canDirectEdit ? (
                       <button type="button" className={rowPrimaryBtn}
                         onClick={(event) => onCorrect(row, event.currentTarget)}>
-                        Sửa trực tiếp
+                        Sửa thông tin
                       </button>
                     ) : null}
                   </RowActionCluster>
@@ -1973,7 +1972,7 @@ function ProposeDrawer({
   return (
     <Dialog.Root open={row !== null} onOpenChange={(open) => { if (!open && !busy) onOpenChange(false); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" data-ui-overlay-motion="true" />
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]" data-ui-overlay-motion="true" />
         <Dialog.Content
           data-ui-dialog-motion="true"
           onCloseAutoFocus={(event) => {
@@ -1984,16 +1983,16 @@ function ProposeDrawer({
             }
           }}
           className="fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)]
-            w-[calc(100vw-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2
-            overflow-hidden rounded-2xl border border-border bg-surface text-foreground shadow-2xl
+            w-[calc(100vw-2rem)] max-w-3xl -translate-x-1/2 -translate-y-1/2
+            overflow-hidden rounded-2xl border border-border bg-surface border-t-2 border-t-primary text-foreground shadow-[var(--shadow-dialog)]
             outline-none"
         >
           <form className="flex min-h-0 w-full flex-col"
             onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border
-              bg-surface px-4 py-4 sm:px-5">
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b-2 border-border
+              bg-surface px-4 py-4 sm:px-6">
               <div>
-                <Dialog.Title className="text-xl font-semibold">
+                <Dialog.Title className="text-xl font-semibold text-navy">
                   {mode === "correction" ? "Sửa trực tiếp hồ sơ" : "Đề xuất thay đổi"}
                 </Dialog.Title>
                 <Dialog.Description className="mt-1 text-sm text-muted">
@@ -2010,12 +2009,12 @@ function ProposeDrawer({
                 onClick={() => onOpenChange(false)}>×</button>
             </header>
 
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-surface-muted px-4 py-4 sm:px-6">
               {row !== null ? (
                 <section aria-labelledby="proposal-current-profile"
-                  className="rounded-xl border border-border bg-muted/10 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 id="proposal-current-profile" className="font-semibold">Hồ sơ hiện tại</h3>
+                  className="rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary/15 pb-2">
+                    <h3 id="proposal-current-profile" className="text-[15px] font-semibold text-navy">Hồ sơ hiện tại</h3>
                   </div>
                   <dl className="mt-3 grid gap-x-5 gap-y-3 text-sm sm:grid-cols-2">
                     {[
@@ -2037,8 +2036,7 @@ function ProposeDrawer({
                   </dl>
                 </section>
       ) : null}
-              <p className="rounded-md border border-blue-500/30 bg-blue-50 p-3 text-sm text-blue-700
-                dark:bg-blue-950/40 dark:text-blue-300">
+              <p className="rounded-lg border border-primary/25 bg-surface p-3 text-sm text-navy shadow-[var(--shadow-card)]">
                 Các giá trị hiện tại được nạp sẵn. Chỉ nội dung đã thay đổi mới được gửi; dữ liệu khác
                 giữ nguyên theo hồ sơ đang lưu.
               </p>
@@ -2048,8 +2046,8 @@ function ProposeDrawer({
                 </p>
               ) : null}
               {loading ? (
-                <p role="status" className="rounded-md border border-blue-500/30 bg-blue-50 p-3 text-sm
-                  text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+                <p role="status" className="rounded-lg border border-primary/25 bg-surface p-3 text-sm
+                  text-navy shadow-[var(--shadow-card)]">
                   Đang tải dữ liệu…
                 </p>
               ) : null}
@@ -2060,8 +2058,8 @@ function ProposeDrawer({
               ) : null}
 
               {mode === "proposal" ? (
-                <div className="flex flex-col gap-1.5">
-                  <label htmlFor="propose-target" className="text-sm font-medium">Nội dung đề xuất</label>
+                <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                  <label htmlFor="propose-target" className="text-sm font-medium text-navy">Nội dung đề xuất</label>
                   <select id="propose-target" className={inputClass} value={target}
                     disabled={loading || baseline === null}
                     onChange={(event) => { setTarget(event.target.value as WorkerProposeTarget); setMessage(null); }}>
@@ -2075,9 +2073,9 @@ function ProposeDrawer({
               {workerFieldMode ? (
                 entryForm !== null && nameAvailability.available ? (
                 <section aria-labelledby="worker-profile-fields" className="space-y-4 rounded-xl
-                  border border-border p-4">
-                  <div>
-                    <h3 id="worker-profile-fields" className="font-semibold">Thông tin người lao động</h3>
+                  border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                  <div className="border-b border-primary/15 pb-2">
+                    <h3 id="worker-profile-fields" className="text-[15px] font-semibold text-navy">Thông tin người lao động</h3>
                     <p className="mt-1 text-xs text-muted">Chỉnh trên giá trị hiện tại.</p>
                   </div>
                   <div className="flex flex-col gap-1.5">
@@ -2288,9 +2286,9 @@ function ProposeDrawer({
 
               {(mode === "correction" || (mode === "proposal" && target === "PAYMENT")) ? (
                 <section aria-labelledby="worker-bank-fields" className="space-y-4 rounded-xl
-                  border border-border p-4">
-                  <div>
-                    <h3 id="worker-bank-fields" className="font-semibold">{BANK_ACCOUNT_SECTION_LABEL}</h3>
+                  border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                  <div className="border-b border-primary/15 pb-2">
+                    <h3 id="worker-bank-fields" className="text-[15px] font-semibold text-navy">{BANK_ACCOUNT_SECTION_LABEL}</h3>
                     <p className="mt-1 text-xs text-muted">
                       Cập nhật tên chủ tài khoản, số tài khoản và ngân hàng.
                     </p>
@@ -2371,12 +2369,18 @@ function ProposeDrawer({
               ) : null}
 
               {(mode === "correction" || target === "WORK_STATUS") ? (
-                <>
-                  <p className="text-sm text-muted">
-                    Trạng thái hiện tại: <strong className="text-foreground">
-                      {workerStatusLabel(baseline?.status ?? row?.employment_status ?? null)}
-                    </strong>
-                  </p>
+                <section aria-labelledby="worker-status-heading"
+                  className="space-y-3 rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary/15 pb-2">
+                    <h3 id="worker-status-heading" className="text-[15px] font-semibold text-navy">
+                      Trạng thái làm việc
+                    </h3>
+                    <p className="text-sm text-muted">
+                      Trạng thái hiện tại: <strong className="text-foreground">
+                        {workerStatusLabel(baseline?.status ?? row?.employment_status ?? null)}
+                      </strong>
+                    </p>
+                  </div>
                   <div className="flex flex-col gap-1.5">
                     <label htmlFor="worker-target-status" className="text-sm font-medium">
                       Trạng thái làm việc mới
@@ -2408,7 +2412,7 @@ function ProposeDrawer({
                         onChange={(event) => setLeaveReason(event.target.value)} />
                     </div>
                   ) : null}
-                </>
+                </section>
               ) : null}
 
               {mode === "correction" ? (
@@ -2465,20 +2469,20 @@ function ProposeDrawer({
                 />
               ) : null}
 
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor={reasonId} className="text-sm font-medium">
+              <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                <label htmlFor={reasonId} className="text-sm font-medium text-navy">
                   {mode === "correction" ? "Lý do chỉnh sửa (không bắt buộc)" : "Lý do đề xuất (không bắt buộc)"}
                 </label>
                 <textarea id={reasonId}
                   maxLength={mode === "correction" ? 1000 : 4000}
-                  className="min-h-24 w-full rounded-md border border-border bg-surface p-3 text-sm
-                    text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  className="min-h-24 w-full rounded-md border border-border bg-surface-muted p-3 text-sm
+                    text-foreground outline-none focus:bg-surface focus-visible:ring-2 focus-visible:ring-ring/40"
                   value={reason} onChange={(event) => setReason(event.target.value)} />
               </div>
               {message ? <p role="alert" className={errorClass}>{message}</p> : null}
             </div>
 
-            <footer className="flex shrink-0 justify-end gap-2 border-t border-border bg-surface px-4 py-3 sm:px-5">
+            <footer className="flex shrink-0 justify-end gap-2 border-t border-border bg-surface px-4 py-3 sm:px-6">
               <button type="button" className={buttonClass} disabled={busy}
                 onClick={() => onOpenChange(false)}>Huỷ</button>
               <button type="submit" className={primaryClass}
@@ -2575,20 +2579,20 @@ function WorkerExportDialog({
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next && !busy) onOpenChange(false); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" data-ui-overlay-motion="true" />
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]" data-ui-overlay-motion="true" />
         <Dialog.Content
           data-ui-dialog-motion="true"
           className="fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)]
             w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2
-            overflow-hidden rounded-2xl border border-border bg-surface text-foreground shadow-2xl
+            overflow-hidden rounded-2xl border border-border bg-surface border-t-2 border-t-primary text-foreground shadow-[var(--shadow-dialog)]
             outline-none"
         >
           <form className="flex min-h-0 w-full flex-col"
             onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b-2 border-border
               bg-surface px-4 py-4 sm:px-5">
               <div>
-                <Dialog.Title className="text-xl font-semibold">Xuất Excel</Dialog.Title>
+                <Dialog.Title className="text-xl font-semibold text-navy">Xuất Excel</Dialog.Title>
                 <Dialog.Description className="mt-1 text-sm text-muted">
                   Xuất danh sách người lao động theo đúng quan hệ và bộ lọc đang chọn. Lý do không
                   bắt buộc; thao tác vẫn được ghi nhận vào nhật ký.
@@ -2602,20 +2606,20 @@ function WorkerExportDialog({
                 onClick={() => onOpenChange(false)}>×</button>
             </header>
 
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-surface-muted px-4 py-4 sm:px-5">
               <p className={infoClass}>
                 File có thể chứa đầy đủ CCCD, ngày sinh, số điện thoại, địa chỉ và thông tin tài
                 khoản ngân hàng. Chỉ lưu hoặc chia sẻ với người có thẩm quyền.
               </p>
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor={reasonId} className="text-sm font-medium">
+              <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]">
+                <label htmlFor={reasonId} className="text-sm font-medium text-navy">
                   Lý do xuất (không bắt buộc)
                 </label>
                 <textarea id={reasonId}
                   maxLength={WORKER_EXPORT_REASON_MAX}
                   disabled={busy}
-                  className="min-h-24 w-full rounded-md border border-border bg-surface p-3 text-sm
-                    text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                  className="min-h-24 w-full rounded-md border border-border bg-surface-muted p-3 text-sm
+                    text-foreground outline-none focus:bg-surface focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                   value={reason} onChange={(event) => setReason(event.target.value)} />
               </div>
               {busy ? (
@@ -2664,10 +2668,10 @@ function DirectEditFilesSection({
     <section
       aria-labelledby="worker-files-heading"
       data-testid="direct-edit-documents-section"
-      className="space-y-4 rounded-xl border border-border p-4"
+      className="space-y-4 rounded-xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]"
     >
-      <div>
-        <h3 id="worker-files-heading" className="font-semibold">Tài liệu hồ sơ</h3>
+      <div className="border-b border-primary/15 pb-2">
+        <h3 id="worker-files-heading" className="text-[15px] font-semibold text-navy">Tài liệu hồ sơ</h3>
         <p className="mt-1 text-xs text-muted">
           Tải mới hoặc thay thế ảnh NLĐ, CCCD mặt trước, CCCD mặt sau và hợp đồng lao động. Mỗi tệp
           được tải lên kho lưu trữ riêng tư và xác thực độc lập.
@@ -2679,7 +2683,7 @@ function DirectEditFilesSection({
           thể lưu thông tin cá nhân, công việc và tài khoản ngân hàng.
         </p>
       ) : null}
-      <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
         {DIRECT_EDIT_DOCUMENT_TYPES.map((kind) => {
           const currentVersion = fileVersions[kind] ?? 0;
           const selectedFile = selectedFiles[kind];
@@ -2689,10 +2693,10 @@ function DirectEditFilesSection({
             <div
               key={kind}
               data-testid={"direct-edit-doc-row-" + kind}
-              className="rounded-lg border border-border bg-muted/5 p-3 space-y-2"
+              className="rounded-lg border border-border bg-surface-muted p-3 space-y-2"
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <label htmlFor={inputId} className="text-sm font-medium text-foreground">
+                <label htmlFor={inputId} className="text-sm font-medium text-navy">
                   {DIRECT_EDIT_DOCUMENT_LABELS[kind]}
                 </label>
                 <StatusBadge tone={currentVersion > 0 ? "success" : "neutral"}>
@@ -2708,7 +2712,10 @@ function DirectEditFilesSection({
                   type="file"
                   accept={DIRECT_EDIT_DOCUMENT_ACCEPT[kind]}
                   disabled={disabled || !canUpload || status?.state === "uploading"}
-                  className={inputClass}
+                  className={
+                    inputClass +
+                    " py-1.5 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-primary/10 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary hover:file:bg-primary/15"
+                  }
                   onChange={(event) => {
                     const nextFile = event.currentTarget.files?.[0] ?? null;
                     onSelectFile(kind, nextFile);

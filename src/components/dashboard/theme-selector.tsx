@@ -17,13 +17,14 @@ function Swatches({ theme }: { theme: ThemeDef }) {
   );
 }
 
-// Trigger swatch dùng CSS var (SSR/client giống nhau — không hydration mismatch).
+// Trigger swatch dùng CSS var (SSR/client giống nhau — không hydration mismatch): 1 ô tròn màu chủ đạo (--primary).
 function CurrentSwatches() {
   return (
-    <span className="flex items-center gap-0.5" aria-hidden>
-      {["var(--primary)", "var(--secondary)", "var(--accent)"].map((c, i) => (
-        <span key={i} className="h-3 w-3 rounded-full border border-black/10" style={{ background: c }} />
-      ))}
+    <span className="flex items-center justify-center" aria-hidden>
+      <span
+        className="h-4 w-4 rounded-full border border-black/10 shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_18%,transparent)]"
+        style={{ background: "var(--primary)" }}
+      />
     </span>
   );
 }
@@ -128,8 +129,8 @@ export function ThemeSelector({
         }}
         className={
           compact
-            ? "inline-flex h-11 w-11 items-center justify-center rounded-lg border border-border bg-surface p-0 text-foreground hover:bg-muted/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-            : "inline-flex h-11 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-medium text-foreground hover:bg-muted/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            ? "inline-flex h-11 w-11 items-center justify-center rounded-full border border-border/80 bg-surface p-0 text-foreground shadow-[var(--shadow-card)] hover:bg-surface-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            : "inline-flex h-11 w-11 items-center justify-center rounded-full border border-border/80 bg-surface p-0 text-sm font-medium text-foreground shadow-[var(--shadow-card)] hover:bg-surface-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         }
       >
         <CurrentSwatches />
@@ -144,7 +145,7 @@ export function ThemeSelector({
           onKeyDown={onListKeyDown}
           style={{ top: menuPosition.top, left: menuPosition.left }}
           className={
-            "fixed max-h-[calc(100dvh-1rem)] w-64 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-border bg-surface p-1.5 shadow-lg " +
+            "fixed max-h-[calc(100dvh-1rem)] w-64 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-[20px] border border-border/80 bg-surface p-1.5 shadow-[var(--shadow-card-hover)] " +
             (compact ? "z-[50]" : "z-[100]")
           }
         >
@@ -156,10 +157,59 @@ export function ThemeSelector({
                 type="button"
                 role="radio"
                 aria-checked={selected}
-                onClick={() => {
-                  setTheme(t.id);
-                  changeOpen(false);
-                  btnRef.current?.focus();
+                onClick={(event) => {
+                  const anchorRect =
+                    event.currentTarget.getBoundingClientRect() ??
+                    btnRef.current?.getBoundingClientRect();
+                  const applySelection = () => {
+                    setTheme(t.id);
+                    changeOpen(false);
+                    btnRef.current?.focus();
+                  };
+                  const docWithVt = document as Document & {
+                    startViewTransition?: (cb: () => void) => { ready: Promise<void> };
+                  };
+                  const reducedMotion =
+                    typeof window !== "undefined" &&
+                    typeof window.matchMedia === "function" &&
+                    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+                  if (
+                    t.id !== themeId &&
+                    typeof docWithVt.startViewTransition === "function" &&
+                    !reducedMotion &&
+                    anchorRect
+                  ) {
+                    const cx = anchorRect.left + anchorRect.width / 2;
+                    const cy = anchorRect.top + anchorRect.height / 2;
+                    const maxR = Math.hypot(
+                      Math.max(cx, window.innerWidth - cx),
+                      Math.max(cy, window.innerHeight - cy),
+                    );
+                    try {
+                      docWithVt
+                        .startViewTransition(applySelection)
+                        .ready.then(() => {
+                          document.documentElement.animate(
+                            {
+                              clipPath: [
+                                `circle(0px at ${cx}px ${cy}px)`,
+                                `circle(${maxR}px at ${cx}px ${cy}px)`,
+                              ],
+                            },
+                            {
+                              duration: 450,
+                              easing: "cubic-bezier(0.65, 0, 0.35, 1)",
+                              pseudoElement: "::view-transition-new(root)",
+                            },
+                          );
+                        })
+                        .catch(() => {});
+                      return;
+                    } catch {
+                      // Fallback to immediate theme switch
+                    }
+                  }
+                  applySelection();
                 }}
                 className={
                   "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 " +

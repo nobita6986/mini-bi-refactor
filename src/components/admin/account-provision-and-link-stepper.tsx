@@ -3228,37 +3228,37 @@ export function AccountProvisionAndLinkStepper({
         <ol
           aria-label="Tiến trình thực hiện"
           data-testid="provision-stepper-progress"
-          className={`grid grid-cols-2 gap-2 rounded-lg border border-border bg-surface-muted/40 p-3 text-xs ${
+          className={`grid grid-cols-2 gap-2 rounded-2xl border border-border/80 bg-surface-muted/45 p-3 text-xs ${
             showStep5Progress ? "sm:grid-cols-5" : "sm:grid-cols-4"
           }`}
         >
-          <li className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2">
-            <span className="font-medium text-foreground">1. Hồ sơ</span>
+          <li className="flex flex-col items-start gap-1.5 rounded-xl border border-border/75 bg-surface px-3 py-2 shadow-2xs">
+            <span className="font-semibold text-[var(--navy)]">1. Hồ sơ</span>
             <StatusBadge
               tone={stepBadge(checkpoint?.step1_person.status ?? (mode?.kind === "open-login-existing" ? "SKIPPED_EXISTING" : "IDLE")).tone}
             >
               {stepBadge(checkpoint?.step1_person.status ?? (mode?.kind === "open-login-existing" ? "SKIPPED_EXISTING" : "IDLE")).label}
             </StatusBadge>
           </li>
-          <li className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2">
-            <span className="font-medium text-foreground">2. Đăng nhập</span>
+          <li className="flex flex-col items-start gap-1.5 rounded-xl border border-border/75 bg-surface px-3 py-2 shadow-2xs">
+            <span className="font-semibold text-[var(--navy)]">2. Đăng nhập</span>
             <StatusBadge tone={stepBadge(checkpoint?.step2_account.status ?? (wantLogin ? "IDLE" : "SKIPPED")).tone}>
               {stepBadge(checkpoint?.step2_account.status ?? (wantLogin ? "IDLE" : "SKIPPED")).label}
             </StatusBadge>
           </li>
-          <li className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2">
-            <span className="font-medium text-foreground">3. Gắn hồ sơ</span>
+          <li className="flex flex-col items-start gap-1.5 rounded-xl border border-border/75 bg-surface px-3 py-2 shadow-2xs">
+            <span className="font-semibold text-[var(--navy)]">3. Gắn hồ sơ</span>
             <StatusBadge tone={stepBadge(checkpoint?.step3_link.status ?? (wantLogin ? "IDLE" : "SKIPPED")).tone}>
               {stepBadge(checkpoint?.step3_link.status ?? (wantLogin ? "IDLE" : "SKIPPED")).label}
             </StatusBadge>
           </li>
-          <li className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2">
-            <span className="font-medium text-foreground">4. Nhóm quyền</span>
+          <li className="flex flex-col items-start gap-1.5 rounded-xl border border-border/75 bg-surface px-3 py-2 shadow-2xs">
+            <span className="font-semibold text-[var(--navy)]">4. Nhóm quyền</span>
             <StatusBadge tone={step4Badge.tone}>{step4Badge.label}</StatusBadge>
           </li>
           {showStep5Progress ? (
             <li
-              className="flex flex-col items-start gap-1.5 rounded-md border border-border/60 bg-surface px-2.5 py-2"
+              className="flex flex-col items-start gap-1.5 rounded-xl border border-border/75 bg-surface px-3 py-2 shadow-2xs"
               aria-current={
                 checkpoint?.step5_recruiter?.status === "IN_FLIGHT" ||
                 checkpoint?.step5_recruiter?.status === "UNCERTAIN"
@@ -3266,7 +3266,7 @@ export function AccountProvisionAndLinkStepper({
                   : undefined
               }
             >
-              <span className="font-medium text-foreground">5. Tuyển dụng</span>
+              <span className="font-semibold text-[var(--navy)]">5. Tuyển dụng</span>
               <StatusBadge tone={stepBadge(checkpoint?.step5_recruiter?.status ?? "IDLE").tone}>
                 {stepBadge(checkpoint?.step5_recruiter?.status ?? "IDLE").label}
               </StatusBadge>
@@ -3305,8 +3305,8 @@ export function AccountProvisionAndLinkStepper({
 
         {/* Part A: Step 1 Person Fields */}
         {effectiveFreshMode?.kind === "create-person" ? (
-          <fieldset className="space-y-3 rounded-lg border border-border p-3.5">
-            <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-muted">
+          <fieldset className="space-y-3 rounded-2xl border border-border/80 bg-surface-muted/20 p-4">
+            <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-[var(--navy)]">
               Phần 1 — Thông tin nhân viên
             </legend>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -3321,7 +3321,7 @@ export function AccountProvisionAndLinkStepper({
                   disabled={step1Locked}
                   placeholder="Nhập mã nhân sự nội bộ (2–64 ký tự)"
                   onChange={(e) => setEmployeeCode(e.target.value)}
-                  className="min-h-11 sm:min-h-10 rounded-md border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                  className="min-h-11 sm:min-h-10 rounded-xl border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                 />
               </div>
               <div className="flex flex-col gap-1 text-sm font-medium text-foreground">
@@ -3335,7 +3335,7 @@ export function AccountProvisionAndLinkStepper({
                   disabled={step1Locked}
                   placeholder="Nhập họ tên đầy đủ"
                   onChange={(e) => setFullName(e.target.value)}
-                  className="min-h-11 sm:min-h-10 rounded-md border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                  className="min-h-11 sm:min-h-10 rounded-xl border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                 />
               </div>
               <div className="flex flex-col gap-1 text-sm font-medium text-foreground">
@@ -3346,7 +3346,7 @@ export function AccountProvisionAndLinkStepper({
                   value={joinedOn}
                   disabled={step1Locked}
                   onChange={(e) => setJoinedOn(e.target.value)}
-                  className="min-h-11 sm:min-h-10 rounded-md border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                  className="min-h-11 sm:min-h-10 rounded-xl border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                 />
               </div>
               <DepartmentSelectPicker
@@ -3373,7 +3373,7 @@ export function AccountProvisionAndLinkStepper({
                 disabled={step1Locked}
                 placeholder="Ví dụ: Tiếp nhận nhân viên mới vào phòng ban…"
                 onChange={(e) => setReason(e.target.value)}
-                className="rounded-md border border-border bg-surface px-3 py-2 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                className="rounded-xl border border-border bg-surface px-3 py-2 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
               />
             </div>
           </fieldset>
@@ -3388,14 +3388,14 @@ export function AccountProvisionAndLinkStepper({
               maxLength={REASON_MAX_LENGTH}
               disabled={step2NonSecretLocked}
               onChange={(e) => setReason(e.target.value)}
-              className="rounded-md border border-border bg-surface px-3 py-2 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+              className="rounded-xl border border-border bg-surface px-3 py-2 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
             />
           </div>
         )}
 
         {/* Toggle: open login now (only in fresh create-person mode) */}
         {effectiveFreshMode?.kind === "create-person" && !checkpoint ? (
-          <label className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-lg border border-border bg-surface-muted/30 px-3 py-2 text-sm font-medium text-foreground">
+          <label className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-2xl border border-border/80 bg-surface-muted/35 px-3.5 py-2.5 text-sm font-medium text-[var(--navy)] transition-colors hover:border-primary/40">
             <input
               id="provision-want-login-toggle"
               type="checkbox"
@@ -3420,9 +3420,9 @@ export function AccountProvisionAndLinkStepper({
         {wantLogin ? (
           <fieldset
             data-testid="provision-login-fieldset"
-            className="space-y-3 rounded-lg border border-border p-3.5"
+            className="space-y-3 rounded-2xl border border-border/80 bg-surface-muted/20 p-4"
           >
-            <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-muted">
+            <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-[var(--navy)]">
               Phần 2 — Tài khoản đăng nhập &amp; Nhóm quyền
             </legend>
 
@@ -3453,7 +3453,7 @@ export function AccountProvisionAndLinkStepper({
                   disabled={step2NonSecretLocked}
                   placeholder="Ví dụ: an.nv (chữ thường, số, ., _, -)"
                   onChange={(e) => setLoginId(e.target.value)}
-                  className="min-h-11 sm:min-h-10 rounded-md border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                  className="min-h-11 sm:min-h-10 rounded-xl border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                 />
               </div>
 
@@ -3473,7 +3473,7 @@ export function AccountProvisionAndLinkStepper({
                       value={password}
                       disabled={busy || (checkpoint !== null && !step2AllowNewLoginEdit && !needsPasswordReentryForFrozenStep2 && !(step1Settled && checkpoint.step2_account.status === "IDLE"))}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="min-h-11 sm:min-h-10 rounded-md border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                      className="min-h-11 sm:min-h-10 rounded-xl border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                     />
                   </div>
                   <div className="flex flex-col gap-1 text-sm font-medium text-foreground">
@@ -3486,7 +3486,7 @@ export function AccountProvisionAndLinkStepper({
                       value={passwordConfirm}
                       disabled={busy || (checkpoint !== null && !step2AllowNewLoginEdit && !needsPasswordReentryForFrozenStep2 && !(step1Settled && checkpoint.step2_account.status === "IDLE"))}
                       onChange={(e) => setPasswordConfirm(e.target.value)}
-                      className="min-h-11 sm:min-h-10 rounded-md border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+                      className="min-h-11 sm:min-h-10 rounded-xl border border-border bg-surface px-3 text-base sm:text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
                     />
                   </div>
                 </>
@@ -3511,7 +3511,11 @@ export function AccountProvisionAndLinkStepper({
                       return (
                         <label
                           key={grp.group_id}
-                          className="flex min-h-11 cursor-pointer items-start gap-2 rounded-md border border-border bg-surface px-2.5 py-2 text-xs"
+                          className={`flex min-h-11 cursor-pointer items-start gap-2 rounded-xl border px-3 py-2 text-xs transition-colors ${
+                            checked
+                              ? "border-primary bg-[var(--selected-bg)]"
+                              : "border-border/80 bg-surface hover:border-primary/40"
+                          }`}
                         >
                           <input
                             type="checkbox"
@@ -3532,7 +3536,7 @@ export function AccountProvisionAndLinkStepper({
                             className="mt-0.5 h-4 w-4 rounded border-border accent-primary"
                           />
                           <span className="min-w-0 space-y-0.5">
-                            <span className="block font-medium text-foreground">
+                            <span className="block font-semibold text-[var(--navy)]">
                               {grp.name}
                             </span>
                             <span className="block text-[11px] text-primary">
@@ -3630,7 +3634,7 @@ export function AccountProvisionAndLinkStepper({
 
         {!showFeedbackAtTop ? renderFeedbackAlert() : null}
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4">
           <div>
             {checkpoint &&
             (needsPasswordReentryForFrozenStep2 ||

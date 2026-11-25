@@ -4,24 +4,24 @@
    Script trong <head> ghi đè các biến này trước paint (không flash, không hydration mismatch). */
 :root {
   color-scheme: light;
-  --background: #f7f9ff;
+  --background: #fff5ec;
   --foreground: #0f172a;
   --surface: #ffffff;
-  --muted: #64748b;
+  --muted: #475569;
   --border: #e2e8f0;
-  --primary: #333f99;
-  --secondary: #0284c7;
-  --accent: #c2410c;
-  --ring: #333f99;
+  --primary: #c2410c;
+  --secondary: #7c2d12;
+  --accent: #ea580c;
+  --ring: #c2410c;
   --tooltip: #ffffff;
   --on-primary: #ffffff;
-  --chart-1: #3745a5;
-  --chart-2: #0284c7;
-  --chart-3: #ea580c;
-  --chart-4: #e11d48;
+  --chart-1: #c2410c;
+  --chart-2: #ea580c;
+  --chart-3: #d97706;
+  --chart-4: #9a3412;
   --chart-5: #059669;
-  --chart-6: #7c3aed;
-  --chart-7: #ca8a04;
+  --chart-6: #0369a1;
+  --chart-7: #7c3aed;
   --chart-8: #475569;
   --semantic-success: #047857;
   --semantic-warning: #b45309;
@@ -29,14 +29,26 @@
   --semantic-running: #0369a1;
   --semantic-slate: #64748b;
 
-  /* R2.2 Modern Soft Enterprise — Theme-derived surface & elevation tokens.
+  /* R2.2 Modern Soft Enterprise & Editorial Royal Navy — Theme-derived surface & elevation tokens.
      Tự động thích ứng với cả 5 theme (hr-partner, ocean-trust, emerald-growth,
      violet-future, executive-gold) mà không ghi đè inline vars của ThemeProvider. */
-  --surface-muted: color-mix(in srgb, var(--surface) 62%, var(--background) 38%);
+  --surface-muted: color-mix(in srgb, var(--surface) 52%, var(--background) 48%);
   --surface-elevated: color-mix(in srgb, var(--surface) 94%, #ffffff 6%);
-  --surface-hover: color-mix(in srgb, var(--primary) 5%, var(--surface) 95%);
-  --primary-soft: color-mix(in srgb, var(--primary) 10%, transparent);
-  --primary-soft-border: color-mix(in srgb, var(--primary) 24%, transparent);
+  --surface-hover: color-mix(in srgb, var(--primary) 7%, var(--surface) 93%);
+  --primary-soft: color-mix(in srgb, var(--primary) 11%, transparent);
+  --primary-soft-border: color-mix(in srgb, var(--primary) 26%, transparent);
+
+  /* Editorial Royal Navy + Halvi Soft-Tactile Squircle & Capsule Pill tokens */
+  --navy: color-mix(in srgb, var(--secondary) 55%, var(--foreground) 45%);
+  --heading-ink: var(--navy);
+  --primary-hover: color-mix(in srgb, var(--primary) 72%, #020617 28%);
+  --selected-bg: color-mix(in srgb, var(--primary) 9%, var(--surface) 91%);
+  --line-strong: color-mix(in srgb, var(--border) 62%, var(--primary) 38%);
+  --shadow-header: 0 1px 2px rgba(20, 20, 24, 0.03), 0 10px 24px -16px color-mix(in srgb, var(--primary) 16%, rgba(15, 23, 42, 0.14));
+  --shadow-card: 0 1px 2px rgba(20, 20, 24, 0.04), 0 16px 32px -24px color-mix(in srgb, var(--primary) 18%, rgba(20, 20, 24, 0.28));
+  --shadow-card-hover: 0 2px 6px rgba(20, 20, 24, 0.07), 0 24px 48px -22px color-mix(in srgb, var(--primary) 24%, rgba(20, 20, 24, 0.34));
+  --shadow-dialog: 0 2px 8px rgba(20, 20, 24, 0.12), 0 34px 70px -26px color-mix(in srgb, var(--primary) 28%, rgba(4, 18, 66, 0.42));
+  --backdrop: color-mix(in srgb, var(--navy) 62%, rgba(2, 6, 23, 0.48));
 
   /* UIUX Chặng 1 & 2 — Motion tokens */
   --ui-motion-fast: 120ms;
@@ -58,6 +70,10 @@
     --surface-hover: color-mix(in srgb, var(--primary) 8%, var(--surface) 92%);
     --primary-soft: color-mix(in srgb, var(--primary) 15%, transparent);
     --primary-soft-border: color-mix(in srgb, var(--primary) 32%, transparent);
+    --navy: var(--foreground);
+    --heading-ink: var(--foreground);
+    --primary-hover: color-mix(in srgb, var(--primary) 88%, #ffffff 12%);
+    --selected-bg: color-mix(in srgb, var(--primary) 16%, var(--surface) 84%);
   }
 }
 
@@ -79,14 +95,28 @@
   --color-tooltip: var(--tooltip);
   --color-on-primary: var(--on-primary);
   --color-primary-foreground: var(--on-primary);
+  --color-navy: var(--navy);
+  --color-selected: var(--selected-bg);
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+html {
+  scrollbar-gutter: stable;
+  overflow-x: clip;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow-x: clip;
+}
+
+/* Giữ cố định lề scrollbar khi Radix Dialog/Dropdown bật data-scroll-locked để giao diện không bao giờ bị giật ngang */
+body[data-scroll-locked] {
+  margin-right: 0 !important;
+  padding-right: 0 !important;
 }
 
 /* ============================================================================
@@ -253,6 +283,17 @@ table.r22-report-table thead th:first-child {
   }
 }
 
+@keyframes halvi-menu-spring {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -6px, 0) scale(0.93);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
 [data-ui-panel-motion="true"]:not([hidden]) {
   animation: ui-panel-enter var(--ui-motion-tab, 200ms) var(--ui-motion-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
 }
@@ -267,6 +308,11 @@ table.r22-report-table thead th:first-child {
 
 [data-ui-popover-motion="true"] {
   animation: ui-popover-enter var(--ui-motion-reveal, 200ms) var(--ui-motion-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+[role="menu"],
+[role="radiogroup"] {
+  animation: halvi-menu-spring 320ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 [data-ui-drawer-motion="left"] {
@@ -309,4 +355,269 @@ details[data-ui-disclosure="true"][open] > [data-ui-disclosure-body="true"] {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ============================================================================
+   Editorial Royal Navy (An Cư) — Zero-Shift Cross-Fade Page Transitions
+   (Chỉ chuyển mượt bằng opacity + thanh tiến trình cố định, tuyệt đối không dịch chuyển toạ độ Y hay làm nháy scrollbar)
+   ============================================================================ */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+
+  ::view-transition-group(root) {
+    animation-duration: 180ms;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  ::view-transition-old(root) {
+    animation: 140ms ease-out both ui-vt-fade-out;
+  }
+
+  ::view-transition-new(root) {
+    animation: 180ms ease-out both ui-vt-fade-in;
+  }
+}
+
+@keyframes ui-vt-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ui-vt-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ui-route-progress-crawl {
+  0% {
+    transform: scaleX(0.08);
+  }
+  40% {
+    transform: scaleX(0.5);
+  }
+  75% {
+    transform: scaleX(0.76);
+  }
+  100% {
+    transform: scaleX(0.88);
+  }
+}
+
+.bi-route-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 9999;
+  pointer-events: none;
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  opacity: 0;
+  background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 55%, var(--primary) 100%);
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--primary) 45%, transparent);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
+}
+
+.bi-route-progress[data-route-progress="loading"] {
+  opacity: 1;
+  animation: ui-route-progress-crawl 1.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.bi-route-progress[data-route-progress="completing"] {
+  opacity: 0;
+  transform: scaleX(1);
+  transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease 40ms;
+}
+
+html[data-route-state="loading"] main {
+  opacity: 0.72;
+  transition: opacity 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+
+  .bi-route-progress {
+    display: none;
+  }
+
+  html[data-route-state="loading"] main {
+    opacity: 1;
+  }
+}
+
+/* ============================================================================
+   Editorial Royal Navy (An Cư) — Global Structural Typography, Tabs, Tables & Inputs
+   Tuyệt đối KHÔNG tác động tới /direct-entry Spreadsheet Grid (.rdg / .grid).
+   ============================================================================ */
+h1,
+h2,
+h3,
+h4 {
+  color: var(--navy);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+/* Halvi Floating Capsule Pill Tab Track across all modules */
+div:has(> [role="tablist"]) {
+  border-bottom: 0 !important;
+}
+
+[role="tablist"] {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 1.5rem;
+  background-color: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+@media (max-width: 767.98px) {
+  [role="tablist"] {
+    border-radius: 1.25rem;
+  }
+}
+
+[role="tab"] {
+  border-radius: 9999px;
+  border: 0 !important;
+  margin-bottom: 0 !important;
+  padding-inline: 0.95rem;
+  font-weight: 500;
+  color: var(--muted);
+  background-color: transparent;
+  transition:
+    color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[role="tab"]::before,
+[role="tab"]::after {
+  content: none !important;
+  display: none !important;
+}
+
+[role="tab"]:hover:not([aria-selected="true"]):not(:disabled) {
+  color: var(--navy);
+  background-color: var(--surface-muted);
+}
+
+[role="tab"][aria-selected="true"] {
+  color: var(--on-primary);
+  font-weight: 600;
+  background-color: var(--primary);
+  border-color: transparent;
+  margin-bottom: 0;
+  border-radius: 9999px;
+  box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--primary) 58%, transparent);
+}
+
+/* Halvi Layout Alignment: unify top header container & prevent nested PageShell double-padding inside Admin layout */
+header > div.max-w-6xl {
+  max-width: var(--container-7xl, 80rem);
+}
+
+[data-admin-subnav="true"] ~ [data-ui-page-shell="true"],
+[data-admin-subnav="true"] ~ * [data-ui-page-shell="true"] {
+  max-width: none !important;
+  padding-inline: 0 !important;
+  padding-top: 0 !important;
+}
+
+/* Halvi Structured Ledger Operational Tables (strictly scoped to .r22-card-table & .r22-report-table) */
+table.r22-card-table > thead > tr > th,
+table.r22-report-table > thead > tr > th {
+  background-color: color-mix(in srgb, var(--primary) 6%, var(--surface-muted));
+  color: var(--navy);
+  font-weight: 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.025em;
+  border-bottom: 1.5px solid color-mix(in srgb, var(--border) 72%, var(--primary) 28%);
+}
+
+table.r22-card-table > tbody > tr,
+table.r22-report-table > tbody > tr {
+  transition: background-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (min-width: 768px) {
+  table.r22-card-table > tbody > tr:nth-child(even),
+  table.r22-report-table > tbody > tr:nth-child(even) {
+    background-color: color-mix(in srgb, var(--surface-muted) 26%, var(--surface));
+  }
+}
+
+table.r22-card-table > tbody > tr:hover,
+table.r22-report-table > tbody > tr:hover {
+  background-color: var(--selected-bg);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+/* Native Dialog Scroll Containment & Input Focus Inversion */
+html:has(dialog:modal) {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(7px);
+  touch-action: none;
+}
+
+:where(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
+    select,
+    textarea
+  ) {
+  background-color: var(--surface);
+  border-color: var(--border);
+  border-radius: 0.875rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+:where(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
+    select,
+    textarea
+  ):hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+:where(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
+    select,
+    textarea
+  ):focus-visible {
+  background-color: var(--surface);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 16%, transparent);
 }

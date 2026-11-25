@@ -11,11 +11,17 @@ export function PageShell({
   className?: string;
   dataTestId?: string;
 }) {
+  const hasCustomPadding = Boolean(className && /\bpx-0\b/.test(className));
+  const hasCustomMaxWidth = Boolean(className && /\bmax-w-/.test(className));
   return (
     <div
       data-testid={dataTestId}
+      data-ui-page-shell="true"
+      data-ui-panel-motion="true"
       className={cn(
-        "mx-auto flex w-full max-w-7xl flex-col gap-4 px-3.5 py-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:gap-5 sm:px-6 sm:py-6 lg:px-8 overflow-x-clip",
+        "mx-auto flex w-full flex-col gap-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:gap-5 overflow-x-clip",
+        !hasCustomMaxWidth && "max-w-7xl",
+        !hasCustomPadding && "px-4 py-4 sm:px-6 sm:py-6",
         className,
       )}
     >
@@ -48,12 +54,12 @@ export function PageHeader({
     >
       <div className="min-w-0 flex-1 space-y-1">
         {eyebrow ? (
-          <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+          <p className="text-xs font-medium uppercase tracking-wider text-primary">
             {eyebrow}
           </p>
         ) : null}
         <div className="flex flex-wrap items-center gap-2.5">
-          <h1 className="text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
+          <h1 className="text-xl font-semibold tracking-tight text-[var(--navy)] sm:text-2xl">
             {title}
           </h1>
           {badge}

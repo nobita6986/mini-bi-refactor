@@ -136,14 +136,14 @@ export function TeamReportView({
 
   return (
     <>
-      <header className="rounded-2xl border border-border bg-gradient-to-r from-primary/10 via-surface to-secondary/10 px-5 py-4">
+      <header className="rounded-[10px] border border-border border-l-4 border-l-primary bg-surface px-5 py-4 shadow-[var(--shadow-card)]">
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium uppercase tracking-wide text-primary">{view.eyebrow}</p>
-          <h1 className="mt-0.5 text-xl font-semibold tracking-tight text-foreground">{view.title}</h1>
-          <p className="mt-0.5 max-w-2xl text-sm text-muted">{view.description}</p>
+          <p className="inline-flex items-center rounded-md bg-[var(--selected-bg)] px-2.5 py-0.5 text-xs font-medium uppercase tracking-wider text-primary">{view.eyebrow}</p>
+          <h1 className="mt-1.5 text-xl font-semibold tracking-tight text-[var(--navy)] sm:text-2xl">{view.title}</h1>
+          <p className="mt-1 max-w-2xl text-sm text-muted">{view.description}</p>
           {generatedAt ? (
-            <p className="mt-1 text-xs text-muted">
-              Báo cáo tạo lúc: <time>{formatTimestamp(generatedAt)}</time>
+            <p className="mt-1.5 text-xs text-muted">
+              Báo cáo tạo lúc: <time className="font-mono text-[var(--navy)]">{formatTimestamp(generatedAt)}</time>
             </p>
           ) : null}
         </div>

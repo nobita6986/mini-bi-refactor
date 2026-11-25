@@ -163,9 +163,7 @@ export function WorkerDetailDialog({
               </Dialog.Close>
             </div>
             <Dialog.Description id="worker-detail-description" className={styles.drawerDescription}>
-              Mã do máy chủ cấp: <strong>{row.employee_code}</strong>. Mọi nhóm dữ liệu bên dưới
-              {" "}chỉ hiển thị theo quyền và phạm vi máy chủ xác nhận; khóa lưu trữ và liên kết
-              {" "}ký dài hạn không bao giờ hiển thị trên UI hay log.
+              Mã người lao động: <strong>{row.employee_code}</strong>
             </Dialog.Description>
             <WorkerDetailBody key={row.entry_id} row={row} />
             <div className={styles.drawerActions}>
@@ -220,143 +218,147 @@ function WorkerDetailBody({
 
   const bank = bankAccountSummary(row.payment);
   return (
-    <div className={styles.drawerFields}>
-      <section className={styles.documentSection} aria-labelledby="worker-detail-person">
-        <h3 className={styles.documentTitle} id="worker-detail-person">Thông tin người lao động</h3>
-        <dl className={styles.profileFieldList}>
-          <dt>Họ tên</dt>
-          <dd>{detail.worker.display_name}</dd>
-          <dt>Giới tính</dt>
-          <dd>{genderUiLabel(detail.worker.gender) || "Chưa khai báo"}</dd>
-          <dt>Ngày sinh</dt>
-          <dd>{fieldValue(detail.worker.date_of_birth)}</dd>
-          <dt>CCCD</dt>
-          <dd>{fieldValue(detail.worker.national_id)}</dd>
-          <dt>Ngày cấp</dt>
-          <dd>{fieldValue(detail.worker.national_id_issued_at)}</dd>
-          <dt>Nơi cấp</dt>
-          <dd>{fieldValue(detail.worker.national_id_issued_place)}</dd>
-          <dt>Địa chỉ</dt>
-          <dd>{fieldValue(detail.worker.address)}</dd>
-          <dt>Số điện thoại</dt>
-          <dd>{fieldValue(detail.worker.phone)}</dd>
-        </dl>
-      </section>
+    <div className={styles.workerDetailGrid}>
+      <div className={styles.workerDetailSidebar}>
+        <WorkerPortraitPanel
+          entryId={detail.entryId}
+          entryVersion={detail.entryVersion}
+          portrait={detail.portrait}
+          canUpload={false}
+          onEntryVersionChange={() => undefined}
+          onPortraitChanged={() => undefined}
+        />
 
-      <section className={styles.documentSection} aria-labelledby="worker-detail-job">
-        <h3 className={styles.documentTitle} id="worker-detail-job">Công việc và dự án</h3>
-        <dl className={styles.profileFieldList}>
-          <dt>Dự án</dt>
-          <dd>{row.project_display}</dd>
-          <dt>Ngày bắt đầu làm việc</dt>
-          <dd>{row.first_work_date}</dd>
-          <dt>Loại hình lao động</dt>
-          <dd>{row.labor_type_display}</dd>
-          <dt>Người tuyển / nhà cung cấp</dt>
-          <dd>{row.recruiter_display + " · " + detail.providerLabel}</dd>
-          <dt>Trạng thái làm việc</dt>
-          <dd>{workerStatusLabel(detail.employment.status) +
-            " (hiệu lực " + detail.employment.effective_date + ")"}</dd>
-          <dt>Thời gian nhập liệu</dt>
-          <dd>{formatHcmDateTime(detail.createdAt)}</dd>
-          <dt>Người nhập liệu</dt>
-          <dd>{detail.createdBy.displayName ?? detail.createdBy.loginId ?? "Không xác định"}
-            {detail.createdBy.displayName && detail.createdBy.loginId &&
-              detail.createdBy.displayName !== detail.createdBy.loginId
-              ? ` · ${detail.createdBy.loginId}`
-              : ""}
-          </dd>
-        </dl>
-      </section>
-
-      <section className={styles.documentSection} aria-labelledby="worker-detail-payment">
-        <h3 className={styles.documentTitle} id="worker-detail-payment">Thanh toán</h3>
-        {bank === null ? (
-          <p className={styles.documentStatus} role="status">
-            Không có thông tin thanh toán trong phạm vi được xem.
-          </p>
-        ) : (
+        <section className={styles.documentSection} aria-labelledby="worker-detail-person">
+          <h3 className={styles.documentTitle} id="worker-detail-person">Thông tin người lao động</h3>
           <dl className={styles.profileFieldList}>
-            <dt>Trạng thái</dt>
-            <dd>{paymentStateLabel(bank.state)}</dd>
-            <dt>Số tài khoản</dt>
-            <dd>{fieldValue(bank.accountNumber)}</dd>
-            <dt>Ngân hàng</dt>
-            <dd>{fieldValue(detail.paymentBankName ?? bank.bankId)}</dd>
-            <dt>Chủ tài khoản</dt>
-            <dd>{fieldValue(bank.accountHolder)}</dd>
+            <dt>Họ tên</dt>
+            <dd>{detail.worker.display_name}</dd>
+            <dt>Giới tính</dt>
+            <dd>{genderUiLabel(detail.worker.gender) || "Chưa khai báo"}</dd>
+            <dt>Ngày sinh</dt>
+            <dd>{fieldValue(detail.worker.date_of_birth)}</dd>
+            <dt>CCCD</dt>
+            <dd>{fieldValue(detail.worker.national_id)}</dd>
+            <dt>Ngày cấp</dt>
+            <dd>{fieldValue(detail.worker.national_id_issued_at)}</dd>
+            <dt>Nơi cấp</dt>
+            <dd>{fieldValue(detail.worker.national_id_issued_place)}</dd>
+            <dt>Địa chỉ</dt>
+            <dd>{fieldValue(detail.worker.address)}</dd>
+            <dt>Số điện thoại</dt>
+            <dd>{fieldValue(detail.worker.phone)}</dd>
           </dl>
-        )}
-      </section>
+        </section>
+      </div>
 
-      <section className={styles.documentSection} aria-labelledby="worker-detail-changes">
-        <h3 className={styles.documentTitle} id="worker-detail-changes">Thay đổi gần nhất</h3>
-        {pendingRequestLabel(row) === null && lastDecisionLabel(row) === null ? (
-          <p className={styles.documentStatus} role="status">
-            Không có yêu cầu thay đổi đang chờ và chưa có quyết định nào.
-          </p>
-        ) : (
+      <div className={styles.workerDetailMain}>
+        <section className={styles.documentSection} aria-labelledby="worker-detail-job">
+          <h3 className={styles.documentTitle} id="worker-detail-job">Công việc và dự án</h3>
           <dl className={styles.profileFieldList}>
-            <dt>Yêu cầu đang chờ</dt>
-            <dd>{pendingRequestLabel(row) ?? "Không có"}</dd>
-            <dt>Quyết định gần nhất</dt>
-            <dd>{lastDecisionLabel(row) ?? "Chưa có"}</dd>
+            <dt>Dự án</dt>
+            <dd>{row.project_display}</dd>
+            <dt>Ngày bắt đầu làm việc</dt>
+            <dd>{row.first_work_date}</dd>
+            <dt>Loại hình lao động</dt>
+            <dd>{row.labor_type_display}</dd>
+            <dt>Người tuyển / nhà cung cấp</dt>
+            <dd>{row.recruiter_display + " · " + detail.providerLabel}</dd>
+            <dt>Trạng thái làm việc</dt>
+            <dd>{workerStatusLabel(detail.employment.status) +
+              " (hiệu lực " + detail.employment.effective_date + ")"}</dd>
+            <dt>Thời gian nhập liệu</dt>
+            <dd>{formatHcmDateTime(detail.createdAt)}</dd>
+            <dt>Người nhập liệu</dt>
+            <dd>{detail.createdBy.displayName ?? detail.createdBy.loginId ?? "Không xác định"}
+              {detail.createdBy.displayName && detail.createdBy.loginId &&
+                detail.createdBy.displayName !== detail.createdBy.loginId
+                ? ` · ${detail.createdBy.loginId}`
+                : ""}
+            </dd>
           </dl>
-        )}
-      </section>
+        </section>
 
-      <WorkerPortraitPanel
-        entryId={detail.entryId}
-        entryVersion={detail.entryVersion}
-        portrait={detail.portrait}
-        canUpload={false}
-        onEntryVersionChange={() => undefined}
-        onPortraitChanged={() => undefined}
-      />
+        <section className={styles.documentSection} aria-labelledby="worker-detail-payment">
+          <h3 className={styles.documentTitle} id="worker-detail-payment">Thanh toán</h3>
+          {bank === null ? (
+            <p className={styles.documentStatus} role="status">
+              Không có thông tin thanh toán trong phạm vi được xem.
+            </p>
+          ) : (
+            <dl className={styles.profileFieldList}>
+              <dt>Trạng thái</dt>
+              <dd>{paymentStateLabel(bank.state)}</dd>
+              <dt>Số tài khoản</dt>
+              <dd>{fieldValue(bank.accountNumber)}</dd>
+              <dt>Ngân hàng</dt>
+              <dd>{fieldValue(detail.paymentBankName ?? bank.bankId)}</dd>
+              <dt>Chủ tài khoản</dt>
+              <dd>{fieldValue(bank.accountHolder)}</dd>
+            </dl>
+          )}
+        </section>
 
-      <section className={styles.documentSection} aria-labelledby="worker-detail-documents">
-        <h3 className={styles.documentTitle} id="worker-detail-documents">
-          Tình trạng từng loại hồ sơ
-        </h3>
-        <ul className={styles.profileRowList} data-testid="worker-detail-documents">
-          {DOCUMENT_ORDER.map((type) => {
-            const document = latestByType(detail.documents, type);
-            return (
-              <li key={type} className={styles.profileSection}>
-                <p className={styles.documentStatus}>
-                  <strong>{DOCUMENT_TYPE_LABELS[type]}</strong>
-                  {" · "}
-                  {document === null
-                    ? "Chưa có hồ sơ"
-                    : (workerDocumentReady(document) ? "Đã có · " : "Chưa sẵn sàng · ") +
-                      workerDocumentStatusLabel(document.upload_status) +
-                      " · v" + document.version}
-                </p>
-                {document !== null && type !== "EMPLOYMENT_CONTRACT" &&
-                 workerCccdPreviewable(document) ? (
-                  <CccdPreview
-                    entryId={detail.entryId}
-                    documentId={document.document_id}
-                    label={DOCUMENT_TYPE_LABELS[type]}
-                  />
-                ) : null}
-                {document !== null && type === "EMPLOYMENT_CONTRACT" &&
-                 workerDocumentReady(document) ? (
-                  <a
-                    className={styles.secondaryButton}
-                    data-testid={"worker-detail-document-download-" + document.document_id}
-                    href={`/api/direct-entry/entries/${encodeURIComponent(detail.entryId)}` +
-                      `/documents/${encodeURIComponent(document.document_id)}/download`}
-                  >
-                    Mở/tải hợp đồng lao động
-                  </a>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-        <p className={styles.profileNote}>{WORKER_DETAIL_PREVIEW_PENDING_NOTE}</p>
-      </section>
+        <section className={styles.documentSection} aria-labelledby="worker-detail-changes">
+          <h3 className={styles.documentTitle} id="worker-detail-changes">Thay đổi gần nhất</h3>
+          {pendingRequestLabel(row) === null && lastDecisionLabel(row) === null ? (
+            <p className={styles.documentStatus} role="status">
+              Không có yêu cầu thay đổi đang chờ và chưa có quyết định nào.
+            </p>
+          ) : (
+            <dl className={styles.profileFieldList}>
+              <dt>Yêu cầu đang chờ</dt>
+              <dd>{pendingRequestLabel(row) ?? "Không có"}</dd>
+              <dt>Quyết định gần nhất</dt>
+              <dd>{lastDecisionLabel(row) ?? "Chưa có"}</dd>
+            </dl>
+          )}
+        </section>
+
+        <section className={styles.documentSection} aria-labelledby="worker-detail-documents">
+          <h3 className={styles.documentTitle} id="worker-detail-documents">
+            Tình trạng từng loại hồ sơ
+          </h3>
+          <ul className={styles.profileRowList} data-testid="worker-detail-documents">
+            {DOCUMENT_ORDER.map((type) => {
+              const document = latestByType(detail.documents, type);
+              return (
+                <li key={type} className={styles.profileSection}>
+                  <p className={styles.documentStatus}>
+                    <strong>{DOCUMENT_TYPE_LABELS[type]}</strong>
+                    {" · "}
+                    {document === null
+                      ? "Chưa có hồ sơ"
+                      : (workerDocumentReady(document) ? "Đã có · " : "Chưa sẵn sàng · ") +
+                        workerDocumentStatusLabel(document.upload_status) +
+                        " · v" + document.version}
+                  </p>
+                  {document !== null && type !== "EMPLOYMENT_CONTRACT" &&
+                   workerCccdPreviewable(document) ? (
+                    <CccdPreview
+                      entryId={detail.entryId}
+                      documentId={document.document_id}
+                      label={DOCUMENT_TYPE_LABELS[type]}
+                    />
+                  ) : null}
+                  {document !== null && type === "EMPLOYMENT_CONTRACT" &&
+                   workerDocumentReady(document) ? (
+                    <a
+                      className={styles.secondaryButton}
+                      data-testid={"worker-detail-document-download-" + document.document_id}
+                      href={`/api/direct-entry/entries/${encodeURIComponent(detail.entryId)}` +
+                        `/documents/${encodeURIComponent(document.document_id)}/download`}
+                    >
+                      Mở/tải hợp đồng lao động
+                    </a>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+          <p className={styles.profileNote}>{WORKER_DETAIL_PREVIEW_PENDING_NOTE}</p>
+        </section>
+      </div>
     </div>
   );
 }
