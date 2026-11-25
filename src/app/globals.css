@@ -474,6 +474,13 @@ h4 {
   letter-spacing: -0.015em;
 }
 
+/* Suppress default browser focus box on programmatic route heading focus routing & pointer-focused tabpanels */
+h1[tabindex="-1"]:focus,
+h1[tabindex="-1"]:focus-visible,
+[role="tabpanel"]:focus:not(:focus-visible) {
+  outline: none;
+}
+
 /* Halvi Floating Capsule Pill Tab Track across all modules */
 div:has(> [role="tablist"]) {
   border-bottom: 0 !important;
