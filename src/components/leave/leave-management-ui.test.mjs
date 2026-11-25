@@ -107,6 +107,12 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
   assert.ok(workspaceSource.includes('data-testid="leave-org-department-heads-card"'));
   assert.ok(workspaceSource.includes('href="/admin/departments"'));
   assert.ok(workspaceSource.includes("Quản lý tại Phòng ban"));
+  assert.ok(
+    workspaceSource.includes(
+      "Khi phòng ban chưa có Trưởng phòng đủ điều kiện duyệt, đơn chuyển về Ban Giám đốc/Admin.",
+    ),
+  );
+  assert.equal(workspaceSource.includes("IT/Kế toán hoặc"), false);
   assert.ok(workspaceSource.includes("da.department_name ?? leaveUnitKindLabel(da.unit_kind)"));
   assert.ok(workspaceSource.includes("formatLeaveOrgDepartmentDisplay"));
   assert.ok(workspaceSource.includes('data-testid="leave-summary-org-department"'));

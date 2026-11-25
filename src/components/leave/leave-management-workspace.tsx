@@ -2550,7 +2550,7 @@ export function LeaveManagementWorkspace({
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <CardHeader
                         title="Trưởng phòng duyệt phép theo Tổ chức"
-                        description="Khối Tuyển dụng định tuyến theo Team Leader hiện có. Các phòng ban hoạt động khác (ngoài Ban Giám đốc) định tuyến theo Trưởng phòng được bổ nhiệm tại Quản trị -> Phòng ban (cũng áp dụng cho Giải trình chấm công); IT/Kế toán hoặc phòng chưa có Trưởng phòng sẽ chuyển về Ban Giám đốc/Admin dự phòng."
+                        description="Khối Tuyển dụng định tuyến theo Team Leader hiện có. Các phòng ban hoạt động khác (ngoài Ban Giám đốc) định tuyến theo Trưởng phòng được bổ nhiệm tại Quản trị → Phòng ban (cũng áp dụng cho Giải trình chấm công). Khi phòng ban chưa có Trưởng phòng đủ điều kiện duyệt, đơn chuyển về Ban Giám đốc/Admin."
                       />
                       {authority.is_full_admin ? (
                         <Link
@@ -2564,7 +2564,7 @@ export function LeaveManagementWorkspace({
                     <div className="space-y-2">
                       {adminData.department_approvers.length === 0 ? (
                         <p className="text-xs text-muted">
-                          Chưa có Trưởng phòng hoạt động nào được bổ nhiệm (đơn của các phòng ban ngoài Tuyển dụng sẽ chuyển về hàng đợi Ban Giám đốc/Admin dự phòng).
+                          Chưa có Trưởng phòng hoạt động nào được bổ nhiệm. Khi phòng ban chưa có Trưởng phòng đủ điều kiện duyệt, đơn chuyển về Ban Giám đốc/Admin.
                         </p>
                       ) : (
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
