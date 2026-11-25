@@ -489,3 +489,60 @@ test("WP8C-2: auth session and login responses project paired effective_grants w
     ]);
   }
 });
+
+test("WP10-5: createAuthSessionResponse preserves team/all scope query-date metadata (valid_from/valid_to) and keeps own at 0001-01-01/null", async () => {
+  const authSubject = "11111111-1111-4111-8111-111111111111";
+  const appUserId = "22222222-2222-4222-8222-222222222222";
+  const teamId = "33333333-3333-4333-8333-333333333333";
+  const queryDate = "2026-11-25";
+
+  const resolution = await resolveActor({
+    session: {
+      auth_subject: authSubject,
+      provider: "supabase",
+      authenticated_at: null,
+    },
+    repository: {
+      async loadByAuthSubject() {
+        return {
+          auth_subject: authSubject,
+          app_user_id: appUserId,
+          display_name: "WP10-5 Metadata Actor",
+          enabled: true,
+          capabilities: ["entry_admin", "entry_team"],
+          recruiter_links: [],
+          teams: [{ team_id: teamId, code: "T01", display: "Team 01", active: true }],
+          team_scope_grants: [{ team_id: teamId, valid_from: queryDate, valid_to: null }],
+          all_scope_grants: [{ valid_from: queryDate, valid_to: null }],
+          effective_grants: [
+            {
+              capability: "entry_admin",
+              scope_kind: "ALL",
+              scope_id: null,
+              source_type: "ROLE_BUNDLE",
+              source_id: "44444444-4444-4444-8444-444444444444",
+            },
+            {
+              capability: "entry_team",
+              scope_kind: "CONTEXT_TEAM",
+              scope_id: teamId,
+              source_type: "ROLE_BUNDLE",
+              source_id: "55555555-5555-4555-8555-555555555555",
+            },
+          ],
+        };
+      },
+    },
+    at: "2026-11-25T15:00:00.000Z",
+  });
+
+  assert.equal(resolution.ok, true);
+  const response = await createAuthSessionResponse(async () => ({ actor: resolution }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.actor.scopes, [
+    { kind: "own", reference: appUserId, valid_from: "0001-01-01", valid_to: null },
+    { kind: "team", reference: teamId, valid_from: queryDate, valid_to: null },
+    { kind: "all", reference: "all", valid_from: queryDate, valid_to: null },
+  ]);
+});

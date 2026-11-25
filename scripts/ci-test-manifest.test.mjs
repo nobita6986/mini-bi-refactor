@@ -69,6 +69,7 @@ test("R2.1 Zero-Orphan Test Manifest: every *.test.mjs file in src/ and scripts/
     "scripts/wp10-cross-department-recruitment-db.test.mjs",
     "scripts/wp10-3-leave-org-cutover-db.test.mjs",
     "scripts/wp10-4-org-department-heads-cutover-db.test.mjs",
+    "scripts/wp10-5-actor-session-cutover-db.test.mjs",
   ]);
 
   const summary = assertZeroOrphanTests({
