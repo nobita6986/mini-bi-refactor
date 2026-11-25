@@ -52,6 +52,7 @@ import { createWorkReportAssignment } from "../src/lib/work-reports/assignment-a
 import { createAssignmentRepository } from "../src/lib/work-reports/assignment-repository.ts";
 import { RECRUITMENT_DAILY_TEMPLATE_SCHEMA } from "../src/lib/work-reports/contracts.ts";
 import { buildWorkReportMetricContract } from "../src/lib/work-reports/metric-contract.ts";
+import { resolveAssignmentCreateAttempt } from "../src/lib/work-reports/assignment-create-idempotency.ts";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
@@ -1324,6 +1325,86 @@ async function runWp106DualEngineMatrix(engine) {
       [tplMidDlUset.template_id],
     );
     assert.equal(usetRowsAfterReject.length, 1, "Still exact 1 USER_SET assignment after rejected mismatched retry");
+  }
+
+  // F1b. USER_SET persisted with lost response -> edit deadline -> revert to old deadline -> re-confirm
+  //      Reuses exact same key + payload, replays original assignment (exact 1 row in DB); real payload edit creates 2nd with new key
+  {
+    const tplUsetRevert = await createPublishedTemplate(engine, "WP106_USET_REVERT", "USER_SET Edit Revert Replay");
+    let seq = 0;
+    const nextUiKey = () => `uset-revert-${++seq}`;
+    let pending = null;
+
+    const baseUiInput = {
+      template_id: tplUsetRevert.template_id,
+      target_kind: "USER_SET",
+      target_user_id: null,
+      target_team_id: null,
+      target_group_id: null,
+      target_user_ids: [EMP_1.app, EMP_2.app],
+      frequency: "DAILY",
+      is_mandatory: true,
+      due_day_offset: 0,
+      due_time_local: "18:00:00",
+      exclude_sundays: false,
+    };
+
+    // 1. User confirms and submits -> DB commits assignment, simulate lost HTTP response (pending NOT cleared)
+    pending = resolveAssignmentCreateAttempt(pending, baseUiInput, nextUiKey);
+    const firstSubmit = await callCreateAssignmentHttp(engine, OWNER, pending.payload);
+    assert.equal(firstSubmit.status, 200);
+    assert.equal(seq, 1);
+
+    // 2. User edits deadline (due_day_offset: 2, due_time_local: "20:00:00") without submitting -> pending remains intact,
+    //    then returns deadline to original (due_day_offset: 0, due_time_local: "18:00:00") and re-confirms
+    const revertedAttempt = resolveAssignmentCreateAttempt(
+      pending,
+      { ...baseUiInput, due_day_offset: 0, due_time_local: "18:00:00" },
+      nextUiKey,
+    );
+    assert.equal(revertedAttempt.idempotency_key, pending.idempotency_key, "Reverted deadline reuses exact pending idempotency key");
+    assert.deepEqual(revertedAttempt.payload, pending.payload, "Reverted deadline reuses exact pending payload");
+    assert.equal(seq, 1, "Re-confirming reverted values does not generate a new key");
+
+    const replaySubmit = await callCreateAssignmentHttp(engine, OWNER, revertedAttempt.payload);
+    assert.equal(replaySubmit.status, 200);
+    assert.deepEqual(replaySubmit.body, firstSubmit.body, "Lost-response retry after edit+revert returns original assignment");
+
+    const { rows: rowsAfterRevert } = await engine.query(
+      "select assignment_id::text from public.work_report_assignments where template_id = $1::uuid",
+      [tplUsetRevert.template_id],
+    );
+    assert.equal(rowsAfterRevert.length, 1, "Exact 1 USER_SET assignment exists after lost-response -> edit -> revert -> re-confirm");
+
+    // 3. Real deadline change (user submits edited deadline for EMP_2 only so unique active target constraint is not violated) ->
+    //    rotates to a new idempotency key and persists distinct assignment
+    const realChangeAttempt = resolveAssignmentCreateAttempt(
+      pending,
+      {
+        ...baseUiInput,
+        target_user_ids: [EMP_2.app],
+        due_day_offset: 1,
+        due_time_local: "19:30:00",
+      },
+      nextUiKey,
+    );
+    assert.notEqual(realChangeAttempt.idempotency_key, pending.idempotency_key, "Changed payload generates new idempotency key");
+    assert.equal(seq, 2);
+    const secondSubmit = await callCreateAssignmentHttp(engine, OWNER, realChangeAttempt.payload);
+    assert.equal(secondSubmit.status, 200);
+    assert.notEqual(secondSubmit.body.assignment_id, firstSubmit.body.assignment_id);
+
+    const { rows: rowsAfterRealEdit } = await engine.query(
+      `select assignment_id::text, due_day_offset, due_time_local::text
+         from public.work_report_assignments
+        where template_id = $1::uuid
+        order by created_at asc, assignment_id asc`,
+      [tplUsetRevert.template_id],
+    );
+    assert.equal(rowsAfterRealEdit.length, 2);
+    const secondRow = rowsAfterRealEdit.find((r) => r.assignment_id === secondSubmit.body.assignment_id);
+    assert.equal(secondRow?.due_day_offset, 1);
+    assert.equal(secondRow?.due_time_local, "19:30:00");
   }
 
   // F2. Date-less GROUP midnight retry (D0 -> D1)

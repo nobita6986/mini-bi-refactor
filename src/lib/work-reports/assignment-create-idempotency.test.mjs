@@ -58,7 +58,50 @@ test("assignment create retry helper omits dates and reuses exact key and payloa
   assert.equal(afterSuccessAttempt.idempotency_key, "key-3");
 });
 
-test("assignment manager UI removes effective_from input, displays server-date summary, and wires idempotency retry ref", async () => {
+test("USER_SET retry preserves pending attempt across deadline edit-then-revert and rotates only on real change or success", () => {
+  let seq = 0;
+  const nextKey = () => `key-${++seq}`;
+  const originalInput = baseFormInput({ due_day_offset: 0, due_time_local: "18:00:00" });
+
+  // 1. Initial submit (lost response leaves pending = attempt1)
+  let pending = resolveAssignmentCreateAttempt(null, originalInput, nextKey);
+  assert.equal(pending.idempotency_key, "key-1");
+
+  // 2. Form edit to another deadline without submitting keeps pending intact -> reverting reuses exact key & payload
+  const revertedAttempt = resolveAssignmentCreateAttempt(
+    pending,
+    baseFormInput({ due_day_offset: 0, due_time_local: "18:00:00" }),
+    nextKey,
+  );
+  assert.equal(revertedAttempt, pending);
+  assert.equal(revertedAttempt.idempotency_key, "key-1");
+  assert.deepEqual(revertedAttempt.payload, pending.payload);
+  assert.equal("effective_from" in revertedAttempt.payload, false);
+  assert.equal(seq, 1);
+
+  // 3. Real deadline change on submit rotates to a fresh key + payload
+  pending = resolveAssignmentCreateAttempt(
+    pending,
+    baseFormInput({ due_day_offset: 1, due_time_local: "19:30:00" }),
+    nextKey,
+  );
+  assert.equal(pending.idempotency_key, "key-2");
+  assert.equal(pending.payload.due_day_offset, 1);
+  assert.equal(pending.payload.due_time_local, "19:30:00");
+  assert.equal(seq, 2);
+
+  // 4. Clearing pending only on confirmed success rotates key even for identical next submit
+  pending = null;
+  const nextSubmit = resolveAssignmentCreateAttempt(
+    pending,
+    baseFormInput({ due_day_offset: 1, due_time_local: "19:30:00" }),
+    nextKey,
+  );
+  assert.equal(nextSubmit.idempotency_key, "key-3");
+  assert.equal(seq, 3);
+});
+
+test("assignment manager UI removes effective_from input, preserves pending attempt across edits, and locks form during POST", async () => {
   const source = await readFile(
     new URL("../../components/work-reports/renderer/assignment-manager.tsx", import.meta.url),
     "utf8",
@@ -70,6 +113,15 @@ test("assignment manager UI removes effective_from input, displays server-date s
   assert.match(source, /Hiệu lực ngay khi lưu \(ngày VN trên máy chủ\)/);
   assert.match(source, /assignment\.effective_from/);
   assert.match(source, /pendingCreateAttemptRef/);
+  assert.match(source, /createInFlightRef/);
   assert.match(source, /resolveAssignmentCreateAttempt/);
   assert.match(source, /WORK_REPORT_ASSIGNMENT_INVALID/);
+
+  // pendingCreateAttemptRef.current = null must occur ONLY once (in the confirmed POST success branch)
+  const clears = source.match(/pendingCreateAttemptRef\.current\s*=\s*null/g) ?? [];
+  assert.equal(clears.length, 1, "pendingCreateAttemptRef must only clear on confirmed POST success");
+
+  // Form controls must be locked while busy === true
+  assert.match(source, /<fieldset disabled=\{busy\}/);
+  assert.match(source, /if \(busy \|\| createInFlightRef\.current\) return;/);
 });
