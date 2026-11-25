@@ -24,8 +24,9 @@
  *  11) Disabled -> revoked while disabled -> re-enabled -> revoked rights NEVER resurrect
  *  12) Mirror-independence proof: deleting & poisoning `direct_entry_capability_grants` and
  *      `direct_entry_scope_grants` on `authz_managed = true` produces ZERO change / ZERO leak
- *  13) Rollback mirror parity check: `direct_entry_authz__internal_sync_legacy_grants` +
- *      `authz_managed = false` preserves rollback parity via legacy mirror tables
+ *  13) RPC-only rollback rehearsal: restoring ONLY pre-243 `direct_entry_resolve_actor_context(uuid)`
+ *      (definition + owner + ACL) reverts all personas to exact pre-243 snapshots with zero table/grant edits,
+ *      then re-applies migration #243 cleanly before mutation & mirror-poison tests
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -388,6 +389,92 @@ async function setAccountEnabled(engine, targetAppUserId, enable, reason) {
     [OWNER.auth, OWNER.app, targetAppUserId, ver, reason, `status-${nextUuid()}`],
     ["uuid", "uuid", "uuid", "integer", "text", "text"],
   );
+}
+
+async function inspectActorRpcMeta(engine) {
+  const { rows: [meta] } = await engine.query(`
+    select
+      pg_catalog.pg_get_functiondef(p.oid) as fn_def,
+      p.proowner::oid::text as proowner_oid,
+      pg_catalog.pg_get_userbyid(p.proowner)::text as proowner_name,
+      p.prosecdef,
+      p.provolatile::text as provolatile,
+      coalesce(p.proconfig, array[]::text[]) as proconfig,
+      pg_catalog.has_function_privilege('service_role', p.oid, 'EXECUTE') as acl_service_role,
+      pg_catalog.has_function_privilege('public', p.oid, 'EXECUTE') as acl_public,
+      pg_catalog.has_function_privilege('anon', p.oid, 'EXECUTE') as acl_anon,
+      pg_catalog.has_function_privilege('authenticated', p.oid, 'EXECUTE') as acl_authenticated
+    from pg_catalog.pg_proc p
+    where p.oid = 'public.direct_entry_resolve_actor_context(uuid)'::regprocedure
+  `);
+  return meta;
+}
+
+async function snapshotRollbackProtectedTables(engine) {
+  const [appUsers, groupMembers, tlAssignments, paAssignments, pmAssignments, deptHeads] = await Promise.all([
+    engine.query("select app_user_id::text, enabled, authz_managed from public.direct_entry_app_users order by app_user_id"),
+    engine.query("select membership_id::text, app_user_id::text, group_id::text, ended_at from public.authz_user_group_members order by membership_id"),
+    engine.query("select assignment_id::text, team_id::text, leader_app_user_id::text, is_current, valid_to from public.direct_entry_team_leader_assignments order by assignment_id"),
+    engine.query("select assignment_id::text, project_id, accountant_user_id::text, ended_at, valid_to from public.vendor_finance_project_accountants order by assignment_id"),
+    engine.query("select assignment_id::text, project_id, manager_recruiter_id::text, is_current, revoked_at from public.direct_entry_project_manager_assignments order by assignment_id"),
+    engine.query("select head_assignment_id::text, department_id::text, person_id::text, ended_at from public.organization_department_heads order by head_assignment_id"),
+  ]);
+  return {
+    appUsers: appUsers.rows,
+    groupMembers: groupMembers.rows,
+    tlAssignments: tlAssignments.rows,
+    paAssignments: paAssignments.rows,
+    pmAssignments: pmAssignments.rows,
+    deptHeads: deptHeads.rows,
+  };
+}
+
+async function assertSessionScopeMetadata(label, res, { expectedTeamIds = [], expectedTeamValidFrom = null, expectedAllValidFrom = null }) {
+  assert.equal(res.ok, true, `${label}: TS resolveActor ok`);
+  const authRes = await createAuthSessionResponse(async () => ({ actor: res }));
+  assert.equal(authRes.status, 200, `${label}: /api/auth/session status 200`);
+  const authBody = await authRes.json();
+  assert.equal(authBody.ok, true);
+
+  const deRes = await createDirectEntrySessionResponse("true", async () => ({
+    actor: res,
+    response_headers: {},
+  }));
+  assert.equal(deRes.status, 200, `${label}: /api/direct-entry/session status 200`);
+  const deBody = await deRes.json();
+  assert.equal(deBody.ok, true);
+
+  for (const [surface, actorObj] of [
+    ["/api/auth/session", authBody.actor],
+    ["/api/direct-entry/session", deBody.actor],
+  ]) {
+    const scopes = actorObj.scopes;
+    assert.ok(Array.isArray(scopes), `${label} (${surface}): scopes array`);
+    const ownScopes = scopes.filter((s) => s.kind === "own");
+    assert.equal(ownScopes.length, 1, `${label} (${surface}): exactly 1 own scope`);
+    assert.equal(ownScopes[0].valid_from, "0001-01-01", `${label} (${surface}): own valid_from === 0001-01-01`);
+    assert.equal(ownScopes[0].valid_to, null, `${label} (${surface}): own valid_to === null`);
+
+    const teamScopes = scopes.filter((s) => s.kind === "team");
+    assert.deepEqual(
+      teamScopes.map((s) => s.reference).sort(),
+      [...expectedTeamIds].sort(),
+      `${label} (${surface}): team scope refs`,
+    );
+    for (const ts of teamScopes) {
+      assert.equal(ts.valid_from, expectedTeamValidFrom, `${label} (${surface}): team valid_from`);
+      assert.equal(ts.valid_to, null, `${label} (${surface}): team valid_to === null`);
+    }
+
+    const allScopes = scopes.filter((s) => s.kind === "all");
+    if (expectedAllValidFrom !== null) {
+      assert.equal(allScopes.length, 1, `${label} (${surface}): exactly 1 all scope`);
+      assert.equal(allScopes[0].valid_from, expectedAllValidFrom, `${label} (${surface}): all valid_from`);
+      assert.equal(allScopes[0].valid_to, null, `${label} (${surface}): all valid_to === null`);
+    } else {
+      assert.equal(allScopes.length, 0, `${label} (${surface}): 0 all scopes`);
+    }
+  }
 }
 
 function normalizeScopeRefs(scopes) {
@@ -801,12 +888,13 @@ async function runWp105CutoverMatrix(engine) {
   const disCatAssign = await assignGroup(engine, DISABLE_REVOKE.app, CATALOG_GROUP_ID, "DisRev: Catalog");
   await assignGroup(engine, DISABLE_REVOKE.app, groupByCode.HR_CATALOG_OPERATOR, "DisRev: HR Op");
 
-  // 13) Rollback mirror parity account
-  const ROLLBACK_USER = await seedAccount(engine, "wp105.rollback", "Rollback Parity Account");
-  await assignGroup(engine, ROLLBACK_USER.app, groupByCode.HR_CATALOG_OPERATOR, "Rollback: HR Op");
-  await assignGroup(engine, ROLLBACK_USER.app, groupByCode.RECRUITER_OPERATIONS, "Rollback: Recruiter Ops");
+  // Capture BEFORE snapshots for all personas + pre-243 RPC metadata
+  const pre243Meta = await inspectActorRpcMeta(engine);
+  assert.equal(pre243Meta.acl_service_role, true);
+  assert.equal(pre243Meta.acl_public, false);
+  assert.equal(pre243Meta.acl_anon, false);
+  assert.equal(pre243Meta.acl_authenticated, false);
 
-  // Capture BEFORE snapshots for parity personas
   const parityPersonas = [
     ["OWNER", OWNER],
     ["CATALOG_ONLY", CATALOG_ONLY],
@@ -821,22 +909,54 @@ async function runWp105CutoverMatrix(engine) {
     ["UNMIGRATED_LEGACY", UNMIGRATED_LEGACY],
     ["MULTI_GROUP", MULTI_GROUP],
     ["DISABLE_REVOKE", DISABLE_REVOKE],
-    ["ROLLBACK_USER", ROLLBACK_USER],
   ];
+  const allRollbackPersonas = [...parityPersonas, ["SCOPE_ONLY", SCOPE_ONLY]];
 
   const beforeSnapshots = new Map();
-  for (const [label, user] of parityPersonas) {
-    beforeSnapshots.set(label, await resolveTsActor(engine, user, atIso));
+  for (const [label, user] of allRollbackPersonas) {
+    const snap = await resolveTsActor(engine, user, atIso);
+    const authRes = await createAuthSessionResponse(async () => ({ actor: snap.res }));
+    const deRes = await createDirectEntrySessionResponse("true", async () => ({
+      actor: snap.res,
+      response_headers: {},
+    }));
+    beforeSnapshots.set(label, {
+      ...snap,
+      authSession: await authRes.json(),
+      directEntrySession: await deRes.json(),
+    });
+  }
+
+  // Verify pre-243 TL_USER already carries report_review @ CONTEXT_TEAM & effective_report_review_scopes
+  {
+    const preTl = beforeSnapshots.get("TL_USER").raw;
+    assert.ok(
+      Array.isArray(preTl.effective_report_review_scopes) && preTl.effective_report_review_scopes.length > 0,
+      "PRE-243 TL_USER must carry non-empty effective_report_review_scopes",
+    );
+    assert.equal(
+      preTl.effective_report_review_scopes.some((s) => s.kind === "team" && s.team_id === TEAM_1),
+      true,
+      "PRE-243 TL_USER effective_report_review_scopes includes TEAM_1",
+    );
+    assert.equal(
+      preTl.effective_grants.some(
+        (g) => g.capability === "report_review" && g.scope_kind === "CONTEXT_TEAM" && g.scope_id === TEAM_1,
+      ),
+      true,
+      "PRE-243 TL_USER effective_grants includes report_review @ CONTEXT_TEAM",
+    );
   }
 
   // Also verify SCOPE_ONLY pre-cutover leaked `all_scope_grants` from legacy mirror (demonstrating what WP10-5 fixes!)
-  const beforeScopeOnly = await resolveActorContext(engine, SCOPE_ONLY);
-  assert.equal(beforeScopeOnly.all_scope_grants.length, 1, "BEFORE 243: legacy reader exposed scope-only row");
+  assert.equal(beforeSnapshots.get("SCOPE_ONLY").raw.all_scope_grants.length, 1, "BEFORE 243: legacy reader exposed scope-only row");
 
   // ---------------------------------------------------------------------------
   // Phase 1: Apply 243 (`20261125220000_wp10_5_actor_context_group_authz_cutover.sql`)
   // ---------------------------------------------------------------------------
-  await engine.exec(await readFile(path.join(MIGRATION_DIR, files[wp105Idx]), "utf8"));
+  const wp105Sql = await readFile(path.join(MIGRATION_DIR, files[wp105Idx]), "utf8");
+  await engine.exec(wp105Sql);
+  const post243Meta = await inspectActorRpcMeta(engine);
 
   // Check 1..9 Before vs After parity
   for (const [label, user] of parityPersonas) {
@@ -902,6 +1022,20 @@ async function runWp105CutoverMatrix(engine) {
     assert.deepEqual(raw.team_scope_grants.map((g) => g.team_id), [TEAM_1]);
     assert.deepEqual(raw.all_scope_grants, []);
     assert.ok(raw.capabilities.includes("team_manager_assign"));
+    assert.ok(
+      Array.isArray(raw.effective_report_review_scopes) && raw.effective_report_review_scopes.length > 0,
+      "TL_USER must retain non-empty effective_report_review_scopes post-243",
+    );
+    assert.equal(
+      raw.effective_report_review_scopes.some((s) => s.kind === "team" && s.team_id === TEAM_1),
+      true,
+    );
+    assert.equal(
+      raw.effective_grants.some(
+        (g) => g.capability === "report_review" && g.scope_kind === "CONTEXT_TEAM" && g.scope_id === TEAM_1,
+      ),
+      true,
+    );
     assert.ok(raw.allowed_worker_tabs.includes("team"));
     assert.equal(raw.allowed_worker_tabs.includes("all"), false);
     assert.equal(raw.assigned_roles.some((r) => r.role_code === "TEAM_LEADER" && r.scope_id === TEAM_1), true);
@@ -1054,6 +1188,79 @@ async function runWp105CutoverMatrix(engine) {
     assert.equal(raw.all_scope_grants.length, 1);
     assert.equal(catalogOperatorNavPredicate(res.actor), true);
     assert.equal(directEntryNavPredicate(res.actor), true);
+  }
+
+  // Session-response `valid_from`/`valid_to` metadata assertions (post-243)
+  {
+    const { rows: [authDateRow] } = await engine.query(
+      "select public.direct_entry_authorization_date()::text as auth_date",
+    );
+    const authDate = authDateRow.auth_date;
+    assert.equal(authDate, todayStr);
+
+    await assertSessionScopeMetadata("TL_USER", (await resolveTsActor(engine, TL_USER, atIso)).res, {
+      expectedTeamIds: [TEAM_1],
+      expectedTeamValidFrom: authDate,
+      expectedAllValidFrom: null,
+    });
+    for (const [label, user] of [
+      ["OWNER", OWNER],
+      ["CATALOG_ONLY", CATALOG_ONLY],
+      ["HR_OP", HR_OP],
+      ["PA_WITH_ALL_GRP", PA_WITH_ALL_GRP],
+    ]) {
+      await assertSessionScopeMetadata(label, (await resolveTsActor(engine, user, atIso)).res, {
+        expectedTeamIds: [],
+        expectedAllValidFrom: authDate,
+      });
+    }
+    await assertSessionScopeMetadata("UNMIGRATED_LEGACY", (await resolveTsActor(engine, UNMIGRATED_LEGACY, atIso)).res, {
+      expectedTeamIds: [],
+      expectedAllValidFrom: "2026-01-01",
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1b: Isolated RPC-Only Rollback Rehearsal (BEFORE Personas 10/11/12)
+  // Restores ONLY pre-243 `direct_entry_resolve_actor_context(uuid)` + owner + ACL,
+  // verifies exact pre-243 behavior & zero table/grant edits, then re-applies #243.
+  // ---------------------------------------------------------------------------
+  {
+    const preRollbackTables = await snapshotRollbackProtectedTables(engine);
+    const ownerIdent = `"${pre243Meta.proowner_name.replaceAll('"', '""')}"`;
+
+    await engine.exec(`
+      begin;
+      ${pre243Meta.fn_def};
+      alter function public.direct_entry_resolve_actor_context(uuid) owner to ${ownerIdent};
+      revoke all on function public.direct_entry_resolve_actor_context(uuid) from public, anon, authenticated, service_role;
+      grant execute on function public.direct_entry_resolve_actor_context(uuid) to service_role;
+      commit;
+    `);
+
+    const restoredMeta = await inspectActorRpcMeta(engine);
+    assert.deepEqual(restoredMeta, pre243Meta, "RPC-only rollback restores exact function def, owner, security, volatility, search_path, and ACL");
+
+    for (const [label, user] of allRollbackPersonas) {
+      const rolledBackCtx = await resolveActorContext(engine, user);
+      assert.deepEqual(
+        rolledBackCtx,
+        beforeSnapshots.get(label).raw,
+        `RPC-only rollback (${label}): direct_entry_resolve_actor_context matches pre-243 baseline`,
+      );
+    }
+
+    const postRollbackTables = await snapshotRollbackProtectedTables(engine);
+    assert.deepEqual(
+      postRollbackTables,
+      preRollbackTables,
+      "RPC-only rollback must leave 0 row changes across app_users, group_members, TL, PA, PM, and dept_heads",
+    );
+
+    // Re-apply migration #243 cleanly before running Personas 10, 11, and 12
+    await engine.exec(wp105Sql);
+    const reappliedMeta = await inspectActorRpcMeta(engine);
+    assert.deepEqual(reappliedMeta, post243Meta, "Re-applying migration #243 restores exact post-243 RPC metadata");
   }
 
   // Verify Persona 10 (Multi-group: grant 2 groups, revoke 1 -> revoked rights gone, remaining intact)
@@ -1217,26 +1424,8 @@ async function runWp105CutoverMatrix(engine) {
         `Mirror-independence (POISON): ${u.name} MUST ignore bogus legacy mirror rows`,
       );
     }
-  }
 
-  // Verify Persona 13 (Rollback mirror parity check: sync_legacy_grants + authz_managed = false)
-  {
-    const managedCtx = await resolveActorContext(engine, ROLLBACK_USER);
-    await engine.query("select public.direct_entry_authz__internal_sync_legacy_grants($1::uuid)", [
-      ROLLBACK_USER.app,
-    ]);
-    await engine.query("update public.direct_entry_app_users set authz_managed = false where app_user_id = $1::uuid", [
-      ROLLBACK_USER.app,
-    ]);
-    const rollbackCtx = await resolveActorContext(engine, ROLLBACK_USER);
-
-    assert.deepEqual(rollbackCtx.capabilities, managedCtx.capabilities, "Rollback: capabilities parity preserved");
-    assert.equal(rollbackCtx.all_scope_grants.length, managedCtx.all_scope_grants.length, "Rollback: all_scope_grants parity preserved");
-    assert.deepEqual(rollbackCtx.teams, managedCtx.teams, "Rollback: teams parity preserved");
-    assert.deepEqual(rollbackCtx.allowed_worker_tabs, managedCtx.allowed_worker_tabs, "Rollback: allowed_worker_tabs parity preserved");
-    assert.deepEqual(rollbackCtx.assigned_roles, managedCtx.assigned_roles, "Rollback: assigned_roles parity preserved");
-
-    // Verify legacy tables remain intact for rollback
+    // Verify legacy tables remain intact on schema
     const { rows: [tbls] } = await engine.query(`
       select to_regclass('public.direct_entry_capability_grants')::text as cg,
              to_regclass('public.direct_entry_scope_grants')::text as sg
