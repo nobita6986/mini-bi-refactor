@@ -265,10 +265,17 @@ export async function buildLeaveMonthlyReportXlsx(
     const approvedLeaveDays = extractLeaveDayEntries(row.leave_days);
     const pendingLeaveDays = extractLeaveDayEntries(row.pending_leave_days);
 
+    const orgDept =
+      row.org_department && typeof row.org_department === "object"
+        ? (row.org_department as Record<string, unknown>)
+        : null;
     const personnelCode = safeText(account.personnel_code);
     const displayName = safeText(account.display_name);
     const loginId = safeText(account.login_id);
-    const unitKind = safeText(row.unit_kind);
+    const unitKind =
+      safeText(orgDept?.department_name).trim() ||
+      safeText(orgDept?.department_code).trim() ||
+      safeText(row.unit_kind);
     const teamName = safeText(routing.team_name ?? routing.team_code);
 
     const values = [

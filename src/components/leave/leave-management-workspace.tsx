@@ -46,6 +46,7 @@ import {
   formatHalfDayUnits,
   formatIsoDateVi,
   formatLeaveAdminAccountOptionLabel,
+  formatLeaveOrgDepartmentDisplay,
   formatSignedHalfDayUnits,
   halfDayUnitsToDays,
   leaveDecisionActionLabel,
@@ -305,7 +306,6 @@ export function LeaveManagementWorkspace({
   const [editingEmployee, setEditingEmployee] =
     useState<LeaveAdminEmployeeItemProjection | null>(null);
   const [profileStatus, setProfileStatus] = useState<LeaveEmploymentStatus>("OFFICIAL");
-  const [profileUnitKind, setProfileUnitKind] = useState<LeaveUnitKind>("RECRUITMENT");
   const [profileWorkStartDate, setProfileWorkStartDate] = useState<string>("");
   const [profileOfficialDate, setProfileOfficialDate] = useState<string>("");
   const [profileSeniorityDate, setProfileSeniorityDate] = useState<string>("");
@@ -1121,7 +1121,6 @@ export function LeaveManagementWorkspace({
   const openEditProfileDialog = (emp: LeaveAdminEmployeeItemProjection) => {
     setEditingEmployee(emp);
     setProfileStatus(emp.profile.employment_status);
-    setProfileUnitKind(emp.profile.unit_kind);
     setProfileWorkStartDate(emp.profile.work_start_date ?? "");
     setProfileOfficialDate(emp.profile.official_effective_date ?? "");
     setProfileSeniorityDate(emp.profile.next_seniority_effective_date ?? "");
@@ -1156,7 +1155,6 @@ export function LeaveManagementWorkspace({
           operation: "UPSERT_EMPLOYEE_PROFILE",
           target_app_user_id: editingEmployee.account.app_user_id,
           employment_status: profileStatus,
-          unit_kind: profileUnitKind,
           work_start_date: profileWorkStartDate.trim() || null,
           official_effective_date:
             profileStatus !== "OFFICIAL" ? null : profileOfficialDate.trim() || null,
@@ -1665,8 +1663,14 @@ export function LeaveManagementWorkspace({
                     </div>
                     <div className="rounded-lg border border-border/80 bg-surface-muted/40 p-2.5">
                       <dt className="text-xs text-muted">Bộ phận / Team</dt>
-                      <dd className="mt-0.5 font-medium text-foreground">
-                        {leaveUnitKindLabel(summary.balance.unit_kind)}
+                      <dd
+                        className="mt-0.5 font-medium text-foreground"
+                        data-testid="leave-summary-org-department"
+                      >
+                        {formatLeaveOrgDepartmentDisplay(
+                          summary.org_department,
+                          summary.balance.unit_kind,
+                        )}
                         {summary.routing.team_name ? ` · ${summary.routing.team_name}` : ""}
                       </dd>
                     </div>
@@ -2593,7 +2597,12 @@ export function LeaveManagementWorkspace({
                                 </StatusBadge>
                               </td>
                               <td className={DATA_TABLE_TD_CLASS} data-label="Bộ phận / Team">
-                                <div>{leaveUnitKindLabel(emp.profile.unit_kind)}</div>
+                                <div>
+                                  {formatLeaveOrgDepartmentDisplay(
+                                    emp.org_department,
+                                    emp.profile.unit_kind,
+                                  )}
+                                </div>
                                 {emp.routing.team_name ? (
                                   <div className="text-xs text-muted">{emp.routing.team_name}</div>
                                 ) : null}
@@ -3579,7 +3588,12 @@ export function LeaveManagementWorkspace({
                           </div>
                         </td>
                         <td className={DATA_TABLE_TD_CLASS} data-label="Bộ phận / Team">
-                          <div>{leaveUnitKindLabel(row.unit_kind)}</div>
+                          <div>
+                            {formatLeaveOrgDepartmentDisplay(
+                              row.org_department,
+                              row.unit_kind,
+                            )}
+                          </div>
                           {row.routing?.team_name ? (
                             <div className="text-xs text-muted">{row.routing.team_name}</div>
                           ) : null}
@@ -3883,7 +3897,7 @@ export function LeaveManagementWorkspace({
           if (!open && !savingProfile) setEditingEmployee(null);
         }}
         title="Cấu hình hồ sơ nghỉ phép nhân sự"
-        description="Thiết lập phân loại bộ phận nghỉ phép, trạng thái Thử việc / Chính thức, ngày bắt đầu làm việc và mốc tăng phép thâm niên tiếp theo."
+        description="Thiết lập trạng thái Thử việc / Chính thức, ngày bắt đầu làm việc và mốc tăng phép thâm niên tiếp theo. Phòng ban được lấy từ Quản trị Tổ chức."
         closeDisabled={savingProfile}
         dataTestId="leave-profile-dialog"
       >
@@ -3924,20 +3938,20 @@ export function LeaveManagementWorkspace({
 
                   <div>
                     <label className="block text-xs font-medium text-muted mb-1">
-                      Bộ phận / Đơn vị duyệt phép
+                      Phòng ban (Quản trị Tổ chức)
                     </label>
-                    <select
-                      value={profileUnitKind}
-                      onChange={(e) => setProfileUnitKind(e.target.value as LeaveUnitKind)}
-                      data-testid="leave-profile-unit-select"
-                      className="w-full min-h-10 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-foreground"
+                    <div
+                      data-testid="leave-profile-org-department-readonly"
+                      className="min-h-10 rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-sm text-foreground"
                     >
-                      {LEAVE_UNIT_KINDS.map((uk) => (
-                        <option key={uk} value={uk}>
-                          {leaveUnitKindLabel(uk)}
-                        </option>
-                      ))}
-                    </select>
+                      {formatLeaveOrgDepartmentDisplay(
+                        editingEmployee.org_department,
+                        editingEmployee.profile.unit_kind,
+                      )}
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted">
+                      Phòng ban do Quản trị Tổ chức / Phòng ban quản lý. Để thay đổi, vui lòng cập nhật tại Quản trị Tổ chức / Phòng ban.
+                    </p>
                   </div>
 
                   <div>

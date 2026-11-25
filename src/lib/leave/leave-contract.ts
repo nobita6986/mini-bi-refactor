@@ -305,7 +305,6 @@ export type PatchAdminConfigInput =
       operation: "UPSERT_EMPLOYEE_PROFILE";
       target_app_user_id: string;
       employment_status: LeaveEmploymentStatus;
-      unit_kind: LeaveUnitKind;
       work_start_date: string | null;
       official_effective_date: string | null;
       next_seniority_effective_date: string | null;
@@ -923,15 +922,20 @@ export function parsePatchAdminConfigBody(
       typeof body.employment_status === "string"
         ? body.employment_status.trim().toUpperCase()
         : "UNCONFIGURED";
-    const unitKind =
-      typeof body.unit_kind === "string"
-        ? body.unit_kind.trim().toUpperCase()
-        : "UNCLASSIFIED";
-    if (
-      !LEAVE_EMPLOYMENT_STATUSES.includes(empStatus as LeaveEmploymentStatus) ||
-      !LEAVE_UNIT_KINDS.includes(unitKind as LeaveUnitKind)
-    ) {
+    if (!LEAVE_EMPLOYMENT_STATUSES.includes(empStatus as LeaveEmploymentStatus)) {
       return { ok: false, code: "LEAVE_PROFILE_INVALID" };
+    }
+    if (body.unit_kind !== undefined && body.unit_kind !== null) {
+      if (typeof body.unit_kind !== "string") {
+        return { ok: false, code: "LEAVE_PROFILE_INVALID" };
+      }
+      const rawUnitKind = body.unit_kind.trim().toUpperCase();
+      if (
+        rawUnitKind.length > 0 &&
+        !LEAVE_UNIT_KINDS.includes(rawUnitKind as LeaveUnitKind)
+      ) {
+        return { ok: false, code: "LEAVE_PROFILE_INVALID" };
+      }
     }
 
     const workStartDate =
@@ -976,7 +980,6 @@ export function parsePatchAdminConfigBody(
       op: "UPSERT_EMPLOYEE_PROFILE",
       target_app_user_id: targetAppUserId,
       employment_status: empStatus,
-      unit_kind: unitKind,
       work_start_date: workStartDate,
       official_effective_date: officialEffectiveDate,
       next_seniority_effective_date: nextSeniorityDate,
@@ -991,7 +994,6 @@ export function parsePatchAdminConfigBody(
         operation: "UPSERT_EMPLOYEE_PROFILE",
         target_app_user_id: targetAppUserId,
         employment_status: empStatus as LeaveEmploymentStatus,
-        unit_kind: unitKind as LeaveUnitKind,
         work_start_date: workStartDate,
         official_effective_date: officialEffectiveDate,
         next_seniority_effective_date: nextSeniorityDate,
