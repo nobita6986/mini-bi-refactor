@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import {
@@ -351,6 +352,122 @@ test("leave-contract parsers validate inputs and build deterministic fingerprint
     idempotency_key: "idem-grant-1",
   });
   assert.equal(patchGrant.ok, false);
+
+  // WP10-3: UPSERT_EMPLOYEE_PROFILE omits unit_kind from canonical payload, while
+  // preserving exact baseline (ddbf84c7) unit_kind fingerprint hashing for replay parity.
+  const expectedBaselineHash = (unitKindValue, workStartDate = null, reason = null) =>
+    createHash("sha256")
+      .update(
+        JSON.stringify({
+          op: "UPSERT_EMPLOYEE_PROFILE",
+          target_app_user_id: TARGET_APP,
+          employment_status: "UNCONFIGURED",
+          unit_kind: unitKindValue,
+          work_start_date: workStartDate,
+          official_effective_date: null,
+          next_seniority_effective_date: null,
+          next_seniority_units: 0,
+          expected_row_version: 0,
+          reason,
+        }),
+        "utf8",
+      )
+      .digest("hex");
+
+  const profileWithoutUnit = parsePatchAdminConfigBody({
+    operation: "UPSERT_EMPLOYEE_PROFILE",
+    target_app_user_id: TARGET_APP,
+    employment_status: "UNCONFIGURED",
+    work_start_date: null,
+    official_effective_date: null,
+    next_seniority_effective_date: null,
+    next_seniority_units: 0,
+    expected_row_version: 0,
+    idempotency_key: "idem-prof-unconf",
+  });
+  assert.equal(profileWithoutUnit.ok, true);
+  assert.equal("unit_kind" in profileWithoutUnit.data, false);
+  assert.equal(profileWithoutUnit.data.employment_status, "UNCONFIGURED");
+  assert.equal(profileWithoutUnit.data.request_fingerprint, expectedBaselineHash("UNCLASSIFIED"));
+
+  const profileWithLegacyUnit = parsePatchAdminConfigBody({
+    operation: "UPSERT_EMPLOYEE_PROFILE",
+    target_app_user_id: TARGET_APP,
+    employment_status: "UNCONFIGURED",
+    unit_kind: "  marketing ",
+    work_start_date: null,
+    official_effective_date: null,
+    next_seniority_effective_date: null,
+    next_seniority_units: 0,
+    expected_row_version: 0,
+    idempotency_key: "idem-prof-legacy",
+  });
+  assert.equal(profileWithLegacyUnit.ok, true);
+  assert.equal("unit_kind" in profileWithLegacyUnit.data, false);
+  assert.equal(
+    profileWithLegacyUnit.data.request_fingerprint,
+    expectedBaselineHash("MARKETING"),
+  );
+  assert.notEqual(
+    profileWithLegacyUnit.data.request_fingerprint,
+    profileWithoutUnit.data.request_fingerprint,
+  );
+
+  const profileWithChangedField = parsePatchAdminConfigBody({
+    operation: "UPSERT_EMPLOYEE_PROFILE",
+    target_app_user_id: TARGET_APP,
+    employment_status: "UNCONFIGURED",
+    unit_kind: "marketing",
+    work_start_date: "2026-02-01",
+    official_effective_date: null,
+    next_seniority_effective_date: null,
+    next_seniority_units: 0,
+    expected_row_version: 0,
+    reason: "Thay đổi ngày",
+    idempotency_key: "idem-prof-legacy",
+  });
+  assert.equal(profileWithChangedField.ok, true);
+  assert.notEqual(
+    profileWithChangedField.data.request_fingerprint,
+    profileWithLegacyUnit.data.request_fingerprint,
+  );
+
+  const profileWithBlankUnit = parsePatchAdminConfigBody({
+    operation: "UPSERT_EMPLOYEE_PROFILE",
+    target_app_user_id: TARGET_APP,
+    employment_status: "UNCONFIGURED",
+    unit_kind: "   ",
+    work_start_date: null,
+    official_effective_date: null,
+    next_seniority_effective_date: null,
+    next_seniority_units: 0,
+    expected_row_version: 0,
+    idempotency_key: "idem-prof-blank",
+  });
+  assert.equal(profileWithBlankUnit.ok, true);
+  assert.equal(
+    profileWithBlankUnit.data.request_fingerprint,
+    profileWithoutUnit.data.request_fingerprint,
+  );
+
+  for (const invalidUnit of ["OPERATIONS", "BOGUS", 123, {}]) {
+    const badProfileUnit = parsePatchAdminConfigBody({
+      operation: "UPSERT_EMPLOYEE_PROFILE",
+      target_app_user_id: TARGET_APP,
+      employment_status: "OFFICIAL",
+      unit_kind: invalidUnit,
+      work_start_date: "2026-01-01",
+      official_effective_date: "2026-03-01",
+      next_seniority_effective_date: null,
+      next_seniority_units: 0,
+      expected_row_version: 1,
+      idempotency_key: "idem-prof-bad",
+    });
+    assert.deepEqual(badProfileUnit, {
+      ok: false,
+      code: "LEAVE_PROFILE_INVALID",
+    });
+  }
 
   const applyBatch = parseApplyOpeningBatchBody({
     leave_year: 2026,
@@ -1006,4 +1123,74 @@ test("WP7B R7 / PR #28: leave repository getActorAccess calls leave_management_g
     }),
     { ok: false, code: "ACTOR_NOT_AVAILABLE" },
   );
+});
+
+test("WP10-3: repository patchAdminConfig UPSERT_EMPLOYEE_PROFILE passes p_unit_kind: null in exact 13-arg RPC call and export shows org_department.department_name", async () => {
+  let capturedRpc = null;
+  const repo = createLeaveRepository(async (fn, args) => {
+    capturedRpc = { fn, args };
+    return { data: { replayed: false }, error: null };
+  });
+
+  const parsed = parsePatchAdminConfigBody({
+    operation: "UPSERT_EMPLOYEE_PROFILE",
+    target_app_user_id: TARGET_APP,
+    employment_status: "PROBATION",
+    unit_kind: "IT",
+    work_start_date: "2026-10-01",
+    official_effective_date: null,
+    next_seniority_effective_date: null,
+    next_seniority_units: 0,
+    expected_row_version: 0,
+    reason: "Cập nhật thử việc",
+    idempotency_key: "idem-wp10-3-repo",
+  });
+  assert.equal(parsed.ok, true);
+
+  const outcome = await repo.patchAdminConfig({
+    auth_subject: ACTOR_AUTH,
+    app_user_id: ACTOR_APP,
+    ...parsed.data,
+  });
+  assert.equal(outcome.ok, true);
+  assert.equal(capturedRpc.fn, "leave_management_upsert_employee_profile_admin");
+  assert.equal(Object.keys(capturedRpc.args).length, 13);
+  assert.equal(capturedRpc.args.p_unit_kind, null);
+
+  const { buildLeaveMonthlyReportXlsx } = await import("./leave-export.ts");
+  const bytes = await buildLeaveMonthlyReportXlsx({
+    year_month: "2026-11",
+    rows: [
+      {
+        account: { personnel_code: "NV10", display_name: "Custom Dept User", login_id: "custom1" },
+        org_department: {
+          has_active_person_link: true,
+          person_status: "ACTIVE",
+          department_id: "d-ops",
+          department_code: "OPS",
+          department_name: "Vận hành",
+          department_system_key: null,
+        },
+        unit_kind: "UNCLASSIFIED",
+        employment_status: "OFFICIAL",
+        attendance_dates: [],
+        leave_days: [],
+        balance: {},
+      },
+      {
+        account: { personnel_code: "NV11", display_name: "Legacy Mock User", login_id: "legacy1" },
+        unit_kind: "MARKETING",
+        employment_status: "OFFICIAL",
+        attendance_dates: [],
+        leave_days: [],
+        balance: {},
+      },
+    ],
+  });
+  const imported = await import("exceljs");
+  const wb = new imported.default.Workbook();
+  await wb.xlsx.load(Buffer.from(bytes));
+  const sheet = wb.getWorksheet("Nghỉ phép 2026-11");
+  assert.equal(sheet.getRow(2).getCell(4).value, "Vận hành");
+  assert.equal(sheet.getRow(3).getCell(4).value, "MARKETING");
 });

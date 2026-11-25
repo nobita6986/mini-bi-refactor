@@ -15,6 +15,7 @@ import {
   formatHalfDayUnits,
   formatIsoDateVi,
   formatLeaveAdminAccountOptionLabel,
+  formatLeaveOrgDepartmentDisplay,
   formatSignedHalfDayUnits,
   halfDayUnitsToDays,
   isEligibleLeaveAdminDropdownEmployee,
@@ -90,6 +91,93 @@ test("WP2 session units and Vietnamese labels match WP1 leave contract", () => {
   assert.equal(leaveUnitKindLabel("MARKETING"), "Marketing");
   assert.equal(leaveUnitKindLabel("IT"), "IT");
   assert.equal(leaveUnitKindLabel("ACCOUNTING"), "Kế toán");
+
+  // WP10-3: formatLeaveOrgDepartmentDisplay covers system, custom, inactive person, missing dept, missing Org link, and legacy fallback
+  assert.equal(
+    formatLeaveOrgDepartmentDisplay(
+      {
+        has_active_person_link: true,
+        person_status: "ACTIVE",
+        department_id: "d-mkt",
+        department_code: "MARKETING",
+        department_name: "Marketing",
+        department_system_key: "MARKETING",
+      },
+      "MARKETING",
+    ),
+    "Marketing",
+  );
+  assert.equal(
+    formatLeaveOrgDepartmentDisplay(
+      {
+        has_active_person_link: true,
+        person_status: "ACTIVE",
+        department_id: "d-it",
+        department_code: "IT",
+        department_name: null,
+        department_system_key: "IT",
+      },
+      "IT",
+    ),
+    "IT",
+  );
+  assert.equal(
+    formatLeaveOrgDepartmentDisplay(
+      {
+        has_active_person_link: true,
+        person_status: "ACTIVE",
+        department_id: "d-ops",
+        department_code: "OPS",
+        department_name: "Vận hành",
+        department_system_key: null,
+      },
+      "UNCLASSIFIED",
+    ),
+    "Vận hành (OPS)",
+  );
+  assert.equal(
+    formatLeaveOrgDepartmentDisplay(
+      {
+        has_active_person_link: true,
+        person_status: "INACTIVE",
+        department_id: null,
+        department_code: null,
+        department_name: null,
+        department_system_key: null,
+      },
+      "UNCLASSIFIED",
+    ),
+    "Nhân sự Org ngừng hoạt động",
+  );
+  assert.equal(
+    formatLeaveOrgDepartmentDisplay(
+      {
+        has_active_person_link: true,
+        person_status: "ACTIVE",
+        department_id: null,
+        department_code: null,
+        department_name: null,
+        department_system_key: null,
+      },
+      "UNCLASSIFIED",
+    ),
+    "Chưa có phòng ban Org hoạt động",
+  );
+  assert.equal(
+    formatLeaveOrgDepartmentDisplay(
+      {
+        has_active_person_link: false,
+        person_status: null,
+        department_id: null,
+        department_code: null,
+        department_name: null,
+        department_system_key: null,
+      },
+      "MARKETING",
+    ),
+    "Chưa liên kết nhân sự Org",
+  );
+  assert.equal(formatLeaveOrgDepartmentDisplay(undefined, "ACCOUNTING"), "Kế toán");
 
   assert.equal(leaveEmploymentStatusBadge("OFFICIAL").label, "Chính thức");
   assert.equal(leaveEmploymentStatusBadge("PROBATION").label, "Thử việc");

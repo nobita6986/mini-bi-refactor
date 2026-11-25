@@ -100,6 +100,20 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
   assert.ok(workspaceSource.includes("UPSERT_EMPLOYEE_PROFILE"));
   assert.ok(workspaceSource.includes("UPDATE_POLICY"));
   assert.ok(workspaceSource.includes("SET_DEPARTMENT_APPROVER"));
+  assert.ok(workspaceSource.includes("formatLeaveOrgDepartmentDisplay"));
+  assert.ok(workspaceSource.includes('data-testid="leave-summary-org-department"'));
+  assert.ok(workspaceSource.includes('data-testid="leave-profile-org-department-readonly"'));
+  assert.equal(workspaceSource.includes('data-testid="leave-profile-unit-select"'), false);
+  assert.equal(workspaceSource.includes("profileUnitKind"), false);
+  const upsertPayloadBlock = workspaceSource.slice(
+    workspaceSource.indexOf('operation: "UPSERT_EMPLOYEE_PROFILE"'),
+    workspaceSource.indexOf('operation: "UPSERT_EMPLOYEE_PROFILE"') + 600,
+  );
+  assert.equal(
+    upsertPayloadBlock.includes("unit_kind"),
+    false,
+    "UPSERT_EMPLOYEE_PROFILE client payload must not send unit_kind",
+  );
   assert.ok(workspaceSource.includes("resolveDepartmentApproverMutationPayload"));
   assert.ok(workspaceSource.includes("transitionDepartmentApproverAfterMutation"));
   assert.ok(workspaceSource.includes("transitionDepartmentApproverAfterReload"));

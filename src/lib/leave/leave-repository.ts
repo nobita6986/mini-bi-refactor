@@ -347,7 +347,7 @@ export function createLeaveRepository(
             p_actor_app_user_id: input.app_user_id,
             p_target_app_user_id: input.target_app_user_id,
             p_employment_status: input.employment_status,
-            p_unit_kind: input.unit_kind,
+            p_unit_kind: null,
             p_work_start_date: input.work_start_date,
             p_official_effective_date: input.official_effective_date,
             p_next_seniority_effective_date: input.next_seniority_effective_date,

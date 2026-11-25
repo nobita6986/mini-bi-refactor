@@ -277,12 +277,22 @@ export type LeaveLedgerEntryProjection = {
   created_at: string;
 };
 
+export type LeaveOrgDepartmentProjection = {
+  has_active_person_link: boolean;
+  person_status: string | null;
+  department_id: string | null;
+  department_code: string | null;
+  department_name: string | null;
+  department_system_key: string | null;
+};
+
 export type LeaveMeSummaryProjection = {
   as_of_date: string;
   leave_year: number;
   account: LeaveAccountProjection | null;
   authority: LeaveAuthorityProjection;
   routing: LeaveRoutingProjection;
+  org_department?: LeaveOrgDepartmentProjection | null;
   policy: LeavePolicyProjection;
   balance: LeaveBalanceProjection;
   requests: readonly LeaveRequestProjection[];
@@ -337,6 +347,7 @@ export type LeaveEmployeeProfileProjection = {
 export type LeaveAdminEmployeeItemProjection = {
   account: LeaveAccountProjection;
   profile: LeaveEmployeeProfileProjection;
+  org_department?: LeaveOrgDepartmentProjection | null;
   routing: LeaveRoutingProjection;
   balance: LeaveBalanceProjection;
 };
@@ -411,6 +422,7 @@ export type LeaveMonthlyReportRowProjection = {
   app_user_id: string;
   account: LeaveAccountProjection | null;
   routing: LeaveRoutingProjection | null;
+  org_department?: LeaveOrgDepartmentProjection | null;
   employment_status: LeaveEmploymentStatus | string;
   unit_kind: LeaveUnitKind | string;
   work_start_date: string | null;
@@ -659,6 +671,36 @@ export function leaveUnitKindLabel(unitKind: string): string {
     default:
       return unitKind;
   }
+}
+
+export function formatLeaveOrgDepartmentDisplay(
+  orgDepartment: LeaveOrgDepartmentProjection | null | undefined,
+  unitKind?: string | null,
+): string {
+  if (!orgDepartment) {
+    return leaveUnitKindLabel((unitKind ?? "UNCLASSIFIED").trim() || "UNCLASSIFIED");
+  }
+  if (!orgDepartment.has_active_person_link) {
+    return "Chưa liên kết nhân sự Org";
+  }
+  if (orgDepartment.person_status && orgDepartment.person_status !== "ACTIVE") {
+    return "Nhân sự Org ngừng hoạt động";
+  }
+  if (orgDepartment.department_id) {
+    const sysKey = orgDepartment.department_system_key?.trim();
+    const deptName = orgDepartment.department_name?.trim();
+    const deptCode = orgDepartment.department_code?.trim();
+    if (sysKey) {
+      return deptName || leaveUnitKindLabel(sysKey);
+    }
+    if (deptName) {
+      return deptCode && deptCode !== deptName ? `${deptName} (${deptCode})` : deptName;
+    }
+    if (deptCode) {
+      return deptCode;
+    }
+  }
+  return "Chưa có phòng ban Org hoạt động";
 }
 
 export function leaveRequestStatusBadge(status: string): {
