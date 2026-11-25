@@ -141,7 +141,7 @@ export async function AppShell({
           {/* Logo HR Partner */}
           <Link
             href="/dashboard"
-            className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-[var(--navy)] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-full px-1.5 py-0.5"
+            className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-[var(--navy)] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-full py-0.5"
           >
             <Image src="/brand/hrpartner-logo.png" alt="HR Partner" width={2166} height={1706} className="h-9 w-auto" />
             <span>HR Partner</span>

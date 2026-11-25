@@ -534,13 +534,14 @@ div:has(> [role="tablist"]) {
   box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--primary) 58%, transparent);
 }
 
-/* Halvi Layout Alignment: unify top header container & prevent nested PageShell double-padding inside Admin layout */
+/* Halvi Layout Alignment: unify top header container & prevent nested PageShell/tabpanel double-padding */
 header > div.max-w-6xl {
   max-width: var(--container-7xl, 80rem);
 }
 
 [data-admin-subnav="true"] ~ [data-ui-page-shell="true"],
-[data-admin-subnav="true"] ~ * [data-ui-page-shell="true"] {
+[data-admin-subnav="true"] ~ * [data-ui-page-shell="true"],
+[role="tabpanel"] > main.max-w-7xl {
   max-width: none !important;
   padding-inline: 0 !important;
   padding-top: 0 !important;
