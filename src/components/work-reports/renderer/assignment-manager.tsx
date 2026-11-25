@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useRouter as readNextAppRouter,
   useSearchParams,
@@ -11,6 +11,10 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
 import { StatusBanner } from "@/components/ui/status-banner";
+import {
+  resolveAssignmentCreateAttempt,
+  type PendingAssignmentCreateAttempt,
+} from "@/lib/work-reports/assignment-create-idempotency";
 import {
   buildWorkReportAssignmentTabHref,
   parseWorkReportAssignmentTab,
@@ -97,15 +101,18 @@ export function AssignmentManager({
   const [frequency, setFrequency] = useState("DAILY");
   const [dueDayOffset, setDueDayOffset] = useState("0");
   const [dueTime, setDueTime] = useState("23:59:59");
-  const [effectiveFrom, setEffectiveFrom] = useState(() =>
-    new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Ho_Chi_Minh" }),
-  );
+  const pendingCreateAttemptRef = useRef<PendingAssignmentCreateAttempt | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trackingLoadedTeamId, setTrackingLoadedTeamId] = useState<string | null>(null);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   const [trackingBusy, setTrackingBusy] = useState(false);
   const templatesLoaded = loadedTeamId === teamId;
+
+  function resetCreateConfirmation() {
+    setConfirmingCreate(false);
+    pendingCreateAttemptRef.current = null;
+  }
 
   function switchSubView(next: WorkReportAssignmentSubTab) {
     if (next === activeSubView) return;
@@ -618,30 +625,29 @@ export function AssignmentManager({
     setBusy(true);
     setError(null);
     const ids = targetKind === "USER_SET" ? targetUsers : [];
+    const attempt = resolveAssignmentCreateAttempt(pendingCreateAttemptRef.current, {
+      template_id: templateId,
+      target_kind: targetKind,
+      target_user_id: targetKind === "USER" ? targetId : null,
+      target_team_id: targetKind === "TEAM" ? teamId : null,
+      target_group_id: targetKind === "GROUP" ? targetGroupId : null,
+      target_user_ids: ids,
+      frequency,
+      is_mandatory: true,
+      due_day_offset: Number(dueDayOffset),
+      due_time_local: dueTime,
+      exclude_sundays: false,
+    });
+    pendingCreateAttemptRef.current = attempt;
     try {
-      const idempotency_key = crypto.randomUUID();
       const response = await fetch("/api/work-reports/assignments", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotency_key },
-        body: JSON.stringify({
-          template_id: templateId,
-          target_kind: targetKind,
-          target_user_id: targetKind === "USER" ? targetId : null,
-          target_team_id: targetKind === "TEAM" ? teamId : null,
-          target_group_id: targetKind === "GROUP" ? targetGroupId : null,
-          target_user_ids: ids,
-          frequency,
-          is_mandatory: true,
-          due_day_offset: Number(dueDayOffset),
-          due_time_local: dueTime,
-          exclude_sundays: false,
-          effective_from: effectiveFrom,
-          effective_to: null,
-          idempotency_key,
-        }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": attempt.idempotency_key },
+        body: JSON.stringify(attempt.payload),
       });
       const result = await response.json().catch(() => null);
       if (!response.ok || result?.ok !== true) throw new Error(result?.code ?? "WORK_REPORT_UNAVAILABLE");
+      pendingCreateAttemptRef.current = null;
       notify.success({
         title: "Đã tạo đợt giao báo cáo và phát sinh nghĩa vụ kỳ hiện hành.",
         dedupeKey: "work-report-assignment-create",
@@ -666,7 +672,9 @@ export function AssignmentManager({
                 ? "Nhóm nhận báo cáo đang ngừng sử dụng. Hãy kích hoạt lại nhóm hoặc chọn nhóm khác."
                 : code === "WORK_REPORT_TEMPLATE_NOT_ACTIVE"
                   ? "Mẫu báo cáo đã chọn không còn ở trạng thái phát hành. Hãy tải lại trang và chọn mẫu khác."
-                  : "Không tạo được đợt giao. Vui lòng kiểm tra thông tin hoặc thử lại.";
+                  : code === "WORK_REPORT_ASSIGNMENT_INVALID"
+                    ? "Thông tin đợt giao không hợp lệ hoặc ngày hiệu lực không được hỗ trợ. Ngày bắt đầu luôn được máy chủ tính theo ngày Việt Nam khi lưu."
+                    : "Không tạo được đợt giao. Vui lòng kiểm tra thông tin hoặc thử lại.";
       setError(msg);
       if (code === "WORK_REPORT_VERSION_CONFLICT") {
         notify.warning({ title: msg, dedupeKey: "work-report-assignment-create", countBurst: false });
@@ -745,7 +753,7 @@ export function AssignmentManager({
                     setTeamId(event.target.value);
                     setTargetId("");
                     setTargetUsers([]);
-                    setConfirmingCreate(false);
+                    resetCreateConfirmation();
                   }}
                   className={controlClass}
                 >
@@ -768,7 +776,7 @@ export function AssignmentManager({
                   value={templateId}
                   onChange={(event) => {
                     setTemplateId(event.target.value);
-                    setConfirmingCreate(false);
+                    resetCreateConfirmation();
                   }}
                   className={controlClass}
                 >
@@ -791,7 +799,7 @@ export function AssignmentManager({
                   value={targetKind}
                   onChange={(event) => {
                     setTargetKind(event.target.value as typeof targetKind);
-                    setConfirmingCreate(false);
+                    resetCreateConfirmation();
                   }}
                   className={controlClass}
                 >
@@ -812,7 +820,7 @@ export function AssignmentManager({
                     value={targetUsers}
                     onChange={(event) => {
                       setTargetUsers(Array.from(event.target.selectedOptions, (option) => option.value));
-                      setConfirmingCreate(false);
+                      resetCreateConfirmation();
                     }}
                     className="min-h-32 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
                   >
@@ -832,7 +840,7 @@ export function AssignmentManager({
                     value={targetId}
                     onChange={(event) => {
                       setTargetId(event.target.value);
-                      setConfirmingCreate(false);
+                      resetCreateConfirmation();
                     }}
                     className={controlClass}
                   >
@@ -858,7 +866,7 @@ export function AssignmentManager({
                     value={targetGroupId}
                     onChange={(event) => {
                       setTargetGroupId(event.target.value);
-                      setConfirmingCreate(false);
+                      resetCreateConfirmation();
                     }}
                     className={controlClass}
                   >
@@ -897,14 +905,14 @@ export function AssignmentManager({
               Danh sách nhân viên được xác định từ liên kết tài khoản và thành viên nhóm hiện hành. Scope vẫn được kiểm tra lại trong RPC khi tạo assignment.
             </p>
 
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-3">
               <label className="space-y-1.5 text-sm font-medium">
                 Chu kỳ
                 <select
                   value={frequency}
                   onChange={(event) => {
                     setFrequency(event.target.value);
-                    setConfirmingCreate(false);
+                    resetCreateConfirmation();
                   }}
                   className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
                 >
@@ -913,19 +921,6 @@ export function AssignmentManager({
                   <option value="MONTHLY">Hằng tháng</option>
                   <option value="ONCE">Một lần</option>
                 </select>
-              </label>
-              <label className="space-y-1.5 text-sm font-medium">
-                Ngày bắt đầu
-                <input
-                  type="date"
-                  required
-                  value={effectiveFrom}
-                  onChange={(event) => {
-                    setEffectiveFrom(event.target.value);
-                    setConfirmingCreate(false);
-                  }}
-                  className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
-                />
               </label>
               <label className="space-y-1.5 text-sm font-medium">
                 Số ngày cộng vào kỳ hạn
@@ -937,7 +932,7 @@ export function AssignmentManager({
                   value={dueDayOffset}
                   onChange={(event) => {
                     setDueDayOffset(event.target.value);
-                    setConfirmingCreate(false);
+                    resetCreateConfirmation();
                   }}
                   className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
                 />
@@ -951,7 +946,7 @@ export function AssignmentManager({
                   value={dueTime}
                   onChange={(event) => {
                     setDueTime(event.target.value);
-                    setConfirmingCreate(false);
+                    resetCreateConfirmation();
                   }}
                   className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
                 />
@@ -986,7 +981,7 @@ export function AssignmentManager({
                 </div>
                 <div>
                   <dt className="text-xs text-muted">Ngày bắt đầu</dt>
-                  <dd className="font-medium tabular-nums text-foreground">{effectiveFrom || "—"}</dd>
+                  <dd className="font-medium text-foreground">Hiệu lực ngay khi lưu (ngày VN trên máy chủ)</dd>
                 </div>
                 <div>
                   <dt className="text-xs text-muted">Hạn nộp</dt>
