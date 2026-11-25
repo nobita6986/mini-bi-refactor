@@ -540,17 +540,21 @@ export function TeamCatalogManager({
             </button>
           </Dialog.Trigger>}
           <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
+            <Dialog.Overlay
+              data-ui-overlay-motion="true"
+              className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]"
+            />
             <Dialog.Content
+              data-ui-dialog-motion="true"
               onCloseAutoFocus={(event) => {
                 if (busy) event.preventDefault();
               }}
-              className="fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-xl focus:outline-none sm:p-6"
+              className="fixed left-1/2 top-1/2 z-50 max-h-[90dvh] w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border border-t-2 border-t-primary bg-surface p-5 text-foreground shadow-[var(--shadow-dialog)] focus:outline-none sm:p-6"
               aria-describedby="team-dialog-description"
             >
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start justify-between gap-4 border-b border-border pb-3.5">
                 <div>
-                  <Dialog.Title className="text-xl font-semibold text-foreground">
+                  <Dialog.Title className="text-xl font-semibold tracking-tight text-[var(--navy)]">
                     {dialog?.kind === "create" ? "Thêm tổ đội tuyển dụng" :
                       dialog?.kind === "edit" ? "Chỉnh sửa tổ đội tuyển dụng" :
                         dialog?.active ? "Kích hoạt tổ đội tuyển dụng" : "Ngừng hoạt động tổ đội"}
@@ -564,7 +568,7 @@ export function TeamCatalogManager({
                     type="button"
                     aria-label="Đóng hộp thoại"
                     disabled={dismissLocked}
-                    className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 sm:size-10"
+                    className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-muted text-sm font-medium text-[var(--navy)] transition-colors hover:border-primary hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50 sm:size-10"
                   >
                     <span aria-hidden="true">×</span>
                   </button>
@@ -706,7 +710,7 @@ export function TeamCatalogManager({
                 value={searchInput}
                 maxLength={departmentId ? DEPARTMENT_UI_MAX_SEARCH_LENGTH : 256}
                 onChange={(event) => setSearchInput(event.currentTarget.value)}
-                className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-md border border-border bg-background px-3 text-base sm:text-sm"
+                className="mt-1 block min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 text-base sm:text-sm"
               />
             </label>
             <label className="flex min-h-11 sm:min-h-10 items-center gap-2 text-sm">
@@ -762,7 +766,7 @@ export function TeamCatalogManager({
             ) : (
               <>
                 <div role="region" aria-label="Bảng danh sách tổ đội tuyển dụng" tabIndex={0} className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-                  <table className="r22-card-table w-full min-w-[640px] border-collapse text-left text-sm">
+                  <table className="r22-card-table w-full border-collapse text-left text-sm">
                     <caption className="sr-only">Danh sách tổ đội tuyển dụng</caption>
                     <thead className="border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted">
                       <tr>
@@ -887,7 +891,7 @@ function Field({
         required={required}
         readOnly={readOnly}
         onChange={(event) => onChange(event.currentTarget.value)}
-        className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3 text-sm"
+        className="mt-1 block min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm"
       />
     </label>
   );
@@ -904,7 +908,7 @@ function ReasonField({ value, readOnly, onChange }: { value: string; readOnly: b
         onChange={(event) => onChange(event.currentTarget.value)}
         maxLength={4000}
         rows={3}
-        className="mt-1 block w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+        className="mt-1 block w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
       />
     </label>
   );
@@ -920,16 +924,16 @@ function DialogActions({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap justify-end gap-2">
+    <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
       <Dialog.Close asChild>
-        <button type="button" disabled={dismissLocked} className="min-h-11 rounded-md border border-border px-4 text-sm">
+        <button type="button" disabled={dismissLocked} className="min-h-11 rounded-lg border border-border bg-surface px-4 text-sm font-medium text-[var(--navy)] hover:bg-surface-muted">
           Hủy
         </button>
       </Dialog.Close>
       <button
         type="submit"
         disabled={disabled}
-        className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50"
+        className="min-h-11 whitespace-nowrap shrink-0 rounded-lg bg-primary px-4 text-sm font-medium text-on-primary shadow-2xs hover:bg-[var(--primary-hover)] disabled:opacity-50"
       >
         {children}
       </button>

@@ -130,25 +130,39 @@ export function KpiCard({
     <div
       className={
         compact
-          ? "relative flex h-full min-h-28 flex-col overflow-hidden rounded-xl border border-border bg-surface p-3 shadow-sm"
-          : "relative overflow-hidden rounded-2xl border border-border bg-surface p-5 shadow-sm"
+          ? "group relative flex h-full min-h-28 flex-col overflow-hidden rounded-[20px] border border-border/80 bg-surface p-4 shadow-[var(--shadow-card)] transition-[box-shadow,border-color,transform] duration-[var(--ui-motion-hover,160ms)] hover:-translate-y-[1px] hover:border-[var(--line-strong)] hover:shadow-[var(--shadow-card-hover)]"
+          : "group relative overflow-hidden rounded-[20px] border border-border/80 bg-surface p-5 shadow-[var(--shadow-card)] transition-[box-shadow,border-color,transform] duration-[var(--ui-motion-hover,160ms)] hover:-translate-y-[1px] hover:border-[var(--line-strong)] hover:shadow-[var(--shadow-card-hover)]"
       }
     >
-      <div className="absolute inset-x-0 top-0 h-1" style={{ background: accent }} aria-hidden />
-      <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
-        <span className="inline-block h-2 w-2 rounded-full" style={{ background: accent }} aria-hidden />
-        {label}
+      <div
+        className="pointer-events-none absolute -right-5 -top-5 h-24 w-24 rounded-full opacity-[0.14] transition-opacity duration-200 group-hover:opacity-25"
+        style={{
+          backgroundImage: `repeating-linear-gradient(135deg, ${accent} 0px, ${accent} 1.5px, transparent 1.5px, transparent 6px)`,
+        }}
+        aria-hidden
+      />
+      <p className="flex items-center gap-2.5 text-xs font-medium tracking-wide text-muted">
+        <span
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border/60 bg-surface-muted/80"
+          aria-hidden
+        >
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full"
+            style={{ background: accent }}
+          />
+        </span>
+        <span className="truncate">{label}</span>
       </p>
       <div
         className={
-          "mt-2 font-semibold tracking-tight tabular-nums text-foreground transition-opacity duration-[var(--ui-motion-kpi,220ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none " +
+          "mt-2.5 font-semibold tracking-tight tabular-nums text-[var(--navy)] transition-opacity duration-[var(--ui-motion-kpi,220ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none " +
           (compact ? "text-2xl" : "text-3xl")
         }
         data-kpi-final-value={authoritativeNumericText}
       >
         {renderedValue}
       </div>
-      {hint ? <p className={"text-xs text-muted " + (compact ? "mt-auto pt-1" : "mt-1.5")}>{hint}</p> : null}
+      {hint ? <p className={"text-xs text-muted/85 " + (compact ? "mt-auto pt-1" : "mt-1.5")}>{hint}</p> : null}
     </div>
   );
 }

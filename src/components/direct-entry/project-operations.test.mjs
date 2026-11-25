@@ -132,7 +132,7 @@ test("hotfix UI: chi dung token theme that, modal co nen dac va dung z-index", (
     "text-muted-foreground", "bg-background", "border-destructive", "bg-destructive"]) {
     assert.equal(source.includes(invalid), false, "token khong ton tai: " + invalid);
   }
-  assert.match(source, /Dialog\.Overlay className="[^"]*z-40[^"]*bg-black/);
+  assert.match(source, /Dialog\.Overlay className="[^"]*z-40[^"]*(?:bg-black|bg-\[var\(--backdrop\)\])/);
   assert.match(source, /Dialog\.Content[\s\S]{0,300}z-50[\s\S]{0,300}bg-surface/);
   assert.match(source, /safe-area-inset-top/);
   assert.match(source, /max-h-\[min\(90dvh,48rem\)\]/);

@@ -56,20 +56,20 @@ export function OwnDashboardView({
 
   return (
     <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-4 sm:px-6">
-      <header className="rounded-2xl border border-border bg-gradient-to-r from-primary/10 via-surface to-secondary/10 px-5 py-4">
+      <header className="rounded-[10px] border border-border border-l-4 border-l-primary bg-surface px-5 py-4 shadow-[var(--shadow-card)]">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium uppercase tracking-wide text-primary">{view.eyebrow}</p>
-            <h1 className="mt-0.5 text-xl font-semibold tracking-tight text-foreground">{view.title}</h1>
-            <p className="mt-0.5 max-w-2xl text-sm text-muted">{view.description}</p>
+            <p className="inline-flex items-center rounded-md bg-[var(--selected-bg)] px-2.5 py-0.5 text-xs font-medium uppercase tracking-wider text-primary">{view.eyebrow}</p>
+            <h1 className="mt-1.5 text-xl font-semibold tracking-tight text-[var(--navy)] sm:text-2xl">{view.title}</h1>
+            <p className="mt-1 max-w-2xl text-sm text-muted">{view.description}</p>
             {generatedAt ? (
-              <p className="mt-1 text-xs text-muted">
-                Báo cáo tạo lúc: <time>{formatTimestamp(generatedAt)}</time>
+              <p className="mt-1.5 text-xs text-muted">
+                Báo cáo tạo lúc: <time className="font-mono text-[var(--navy)]">{formatTimestamp(generatedAt)}</time>
               </p>
             ) : null}
           </div>
           {showData ? (
-            <dl aria-label="Chỉ số cá nhân" className="grid w-full grid-cols-2 gap-2 sm:w-auto sm:min-w-80 sm:grid-cols-2">
+            <dl aria-label="Chỉ số cá nhân" className="grid w-full grid-cols-2 gap-2.5 sm:w-auto sm:min-w-80 sm:grid-cols-2">
               <KpiCard variant="compact" label="Tuyển mới của tôi" value={summary.recruitedTotal} hint="lượt tuyển ghi nhận" accent="var(--primary)" />
               <KpiCard variant="compact" label="Ngày tôi có tuyển" value={summary.activeHiringDays} hint="trong khoảng hiển thị" accent="var(--secondary)" />
             </dl>

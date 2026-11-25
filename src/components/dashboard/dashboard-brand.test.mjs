@@ -106,7 +106,7 @@ test("theme selector uses shared state, unique IDs, compact trigger and safe dra
   assert.ok(src.includes('aria-label="Chọn màu giao diện"'));
   assert.ok(src.includes("compact ? undefined : \"Màu giao diện\""));
   assert.ok(src.includes("h-11 w-11"), "compact touch target is at least 44 by 44");
-  assert.match(src, /\["var\(--primary\)", "var\(--secondary\)", "var\(--accent\)"\]/);
+  assert.match(src, /style=\{\{ background: "var\(--primary\)" \}\}/);
   assert.match(src, /<span className="flex items-center gap-0\.5" aria-hidden>/);
   assert.ok(src.includes("focus-visible:ring-2"));
   assert.ok(src.includes("setTheme(t.id)") && src.includes("THEMES.map"));

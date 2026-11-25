@@ -1456,24 +1456,24 @@ export function PersonDetailManager({
                 description="Mỗi nhân sự chỉ thuộc tối đa một phòng ban chính tại một thời điểm."
               />
               <div className="space-y-4">
-                <dl className="grid grid-cols-1 gap-2 rounded-lg border border-border bg-surface-muted/30 p-3 text-sm sm:grid-cols-2">
+                <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-border/80 bg-surface-muted/40 p-4 text-sm sm:grid-cols-2">
                   <div>
                     <dt className="text-xs text-muted">Mã nhân viên</dt>
-                    <dd className="font-mono font-medium text-foreground">{person.employee_code}</dd>
+                    <dd className="font-mono font-semibold text-[var(--navy)]">{person.employee_code}</dd>
                   </div>
                   <div>
                     <dt className="text-xs text-muted">Ngày gia nhập</dt>
-                    <dd className="font-mono text-foreground">{formatOrgDate(person.joined_on)}</dd>
+                    <dd className="font-mono font-medium text-[var(--navy)]">{formatOrgDate(person.joined_on)}</dd>
                   </div>
                 </dl>
 
                 {person.active_department ? (
                   <div className="space-y-3">
-                    <div className="rounded-lg border border-border bg-surface-muted/40 p-3.5 text-sm space-y-1.5">
+                    <div className="rounded-2xl border border-border/80 bg-surface-muted/40 p-4 text-sm space-y-1.5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <Link
                           href={`/admin/departments/${encodeURIComponent(person.active_department.department_id)}`}
-                          className="text-base font-semibold text-foreground hover:text-primary hover:underline"
+                          className="text-base font-semibold text-[var(--navy)] hover:text-primary hover:underline"
                         >
                           {person.active_department.name}
                         </Link>
@@ -1535,9 +1535,9 @@ export function PersonDetailManager({
                 )}
 
                 {/* Collapsible non-exclusive history disclosures (closed by default) */}
-                <div className="space-y-2 border-t border-border pt-3">
-                  <details className="rounded-lg border border-border bg-surface p-3">
-                    <summary className="cursor-pointer select-none text-sm font-medium text-foreground">
+                <div className="space-y-2.5 border-t border-border pt-3.5">
+                  <details className="rounded-2xl border border-border/80 bg-surface p-3.5 shadow-2xs">
+                    <summary className="cursor-pointer select-none text-sm font-semibold text-[var(--navy)]">
                       Lịch sử phòng ban ({person.department_history.length})
                     </summary>
                     <div className="mt-3">
@@ -1568,10 +1568,10 @@ export function PersonDetailManager({
                             <tbody>
                               {person.department_history.map((item) => (
                                 <tr key={item.membership_id} className={DATA_TABLE_ROW_CLASS}>
-                                  <td data-label="Phòng ban" className={DATA_TABLE_TD_CLASS}>
+                                  <td data-card-header="true" data-label="Phòng ban" className={DATA_TABLE_TD_CLASS}>
                                     <Link
                                       href={`/admin/departments/${encodeURIComponent(item.department_id)}`}
-                                      className="font-medium text-foreground hover:text-primary hover:underline"
+                                      className="font-semibold text-[var(--navy)] hover:text-primary hover:underline"
                                     >
                                       {item.name}
                                     </Link>
@@ -1602,8 +1602,8 @@ export function PersonDetailManager({
                     </div>
                   </details>
 
-                  <details className="rounded-lg border border-border bg-surface p-3">
-                    <summary className="cursor-pointer select-none text-sm font-medium text-foreground">
+                  <details className="rounded-2xl border border-border/80 bg-surface p-3.5 shadow-2xs">
+                    <summary className="cursor-pointer select-none text-sm font-semibold text-[var(--navy)]">
                       Lịch sử chức danh Trưởng phòng ({person.head_assignments.length})
                     </summary>
                     <div className="mt-3">
@@ -1637,12 +1637,13 @@ export function PersonDetailManager({
                               {person.head_assignments.map((item) => (
                                 <tr key={item.head_assignment_id} className={DATA_TABLE_ROW_CLASS}>
                                   <td
+                                    data-card-header="true"
                                     data-label="Phòng ban phụ trách"
                                     className={DATA_TABLE_TD_CLASS}
                                   >
                                     <Link
                                       href={`/admin/departments/${encodeURIComponent(item.department_id)}`}
-                                      className="font-medium text-foreground hover:text-primary hover:underline"
+                                      className="font-semibold text-[var(--navy)] hover:text-primary hover:underline"
                                     >
                                       {item.name}
                                     </Link>
@@ -1688,9 +1689,9 @@ export function PersonDetailManager({
               />
               {person.active_account_link ? (
                 <div className="space-y-4">
-                  <div className="rounded-lg border border-border bg-surface-muted/40 p-3.5 text-sm space-y-1.5">
+                  <div className="rounded-2xl border border-border/80 bg-surface-muted/40 p-4 text-sm space-y-1.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="font-mono text-sm font-semibold text-foreground">
+                      <p className="font-mono text-sm font-semibold text-[var(--navy)]">
                         {person.active_account_link.login_id ?? "Chưa có tên đăng nhập"}
                       </p>
                       <StatusBadge
@@ -1854,16 +1855,16 @@ export function PersonDetailManager({
                     </Button>
                   </div>
                 ) : recruiterState.kind === "ready" ? (
-                  <dl className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-surface-muted/35 p-3.5 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                  <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-border/80 bg-surface-muted/40 p-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
                     <div>
                       <dt className="text-xs text-muted">Mã hồ sơ tính công</dt>
-                      <dd className="font-mono font-medium text-foreground">
+                      <dd className="font-mono font-semibold text-[var(--navy)]">
                         {recruiterState.personnel.personnel_code ?? "Chưa cập nhật"}
                       </dd>
                     </div>
                     <div>
                       <dt className="text-xs text-muted">Vị trí</dt>
-                      <dd className="font-medium text-foreground">
+                      <dd className="font-medium text-[var(--navy)]">
                         {recruiterState.personnel.personnel_position === "TEAM_LEADER"
                           ? "Trưởng nhóm (TEAM_LEADER)"
                           : "Nhân viên (STAFF)"}
@@ -1897,7 +1898,7 @@ export function PersonDetailManager({
                 <div className="flex flex-wrap gap-2">
                   <Link
                     href={`/admin/catalog/personnel?recruiter=${encodeURIComponent(person.recruiter_id)}`}
-                    className={buttonClasses({ variant: "primary", size: "sm" })}
+                    className={buttonClasses({ variant: "soft", size: "sm" })}
                   >
                     Mở hồ sơ tính công &amp; phân Tổ đội
                   </Link>
@@ -2316,7 +2317,7 @@ export function PersonDetailManager({
             </p>
           ) : null}
 
-          <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3">
+          <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
             <Button
               type="button"
               variant="secondary"

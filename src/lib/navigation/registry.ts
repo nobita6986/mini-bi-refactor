@@ -16,13 +16,14 @@
 
 import type { ComponentType, SVGProps } from "react";
 import {
+  Banknote,
   Building2,
   CalendarDays,
   ClipboardList,
   FileDiff,
-  Landmark,
   LayoutDashboard,
   NotebookPen,
+  Receipt,
   ShieldCheck,
   Users,
   type LucideIcon,
@@ -256,7 +257,7 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     path: "/finance",
     description:
       "Theo dõi công nợ, tạm ứng, sổ cái, đối soát và chứng từ tài chính Vendor theo quyền được máy chủ xác nhận.",
-    icon: Landmark,
+    icon: Receipt,
     status: "current",
     capability: "finance",
     group: "finance",
@@ -268,7 +269,7 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     path: "/salary-advances",
     description:
       "Tạo đề nghị ứng lương cho người lao động thuộc dự án, xử lý phê duyệt/từ chối và đối chiếu ảnh NLĐ nhận tiền mặt theo phân quyền máy chủ.",
-    icon: Landmark,
+    icon: Banknote,
     status: "current",
     capability: "salary_advances",
     group: "finance",

@@ -758,7 +758,7 @@ export function PermissionGroupsManager() {
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <h2 className="text-base font-semibold text-foreground">{group.name}</h2>
+                        <h2 className="text-base font-semibold tracking-tight text-[var(--navy)]">{group.name}</h2>
                         {group.is_system_admin ? (
                           <StatusBadge tone="primary">Mặc định hệ thống</StatusBadge>
                         ) : null}
@@ -789,7 +789,7 @@ export function PermissionGroupsManager() {
                         {actionLabels.map((label) => (
                           <span
                             key={label}
-                            className="inline-flex rounded-md border border-border/80 bg-surface-muted/35 px-2 py-0.5 text-xs text-foreground"
+                            className="inline-flex rounded-full border border-border/80 bg-surface-muted/45 px-2.5 py-0.5 text-xs text-foreground"
                           >
                             {label}
                           </span>
@@ -1024,16 +1024,16 @@ export function PermissionGroupsManager() {
               </label>
             ) : null}
 
-            <div className="space-y-3 border-t border-border pt-3">
-              <p className="text-sm font-semibold text-foreground">
+            <div className="space-y-3 border-t border-border pt-3.5">
+              <p className="text-sm font-semibold text-[var(--navy)]">
                 Thao tác nghiệp vụ của nhóm
               </p>
               {capabilityCategories.map(({ category, items }) => (
                 <fieldset
                   key={category}
-                  className="space-y-2 rounded-lg border border-border p-3"
+                  className="space-y-2 rounded-2xl border border-border/80 bg-surface-muted/20 p-3.5"
                 >
-                  <legend className="px-1 text-xs font-semibold text-muted">{category}</legend>
+                  <legend className="px-1 text-xs font-semibold text-[var(--navy)]">{category}</legend>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {items.map((item) => {
                       const checked = selectedCaps.includes(item.capability);
@@ -1046,7 +1046,7 @@ export function PermissionGroupsManager() {
                             checked={checked}
                             disabled={busy || conflictLocked}
                             onChange={() => toggleCapability(item.capability)}
-                            className="mt-1 h-4 w-4 shrink-0 rounded border-border"
+                            className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-primary"
                           />
                           <label htmlFor={checkId} className="cursor-pointer text-xs">
                             <span className="block font-medium text-foreground">{item.label}</span>
@@ -1061,15 +1061,15 @@ export function PermissionGroupsManager() {
 
               {!isTeamScoped ? (
                 <div className="space-y-2 pt-2">
-                  <p className="text-sm font-semibold text-foreground">
+                  <p className="text-sm font-semibold text-[var(--navy)]">
                     Quyền toàn công ty theo phân hệ (Tài chính NCC &amp; Nghỉ phép)
                   </p>
                   {moduleRoleCategories.map(({ category, items }) => (
                     <fieldset
                       key={category}
-                      className="space-y-2 rounded-lg border border-border p-3"
+                      className="space-y-2 rounded-2xl border border-border/80 bg-surface-muted/20 p-3.5"
                     >
-                      <legend className="px-1 text-xs font-semibold text-muted">{category}</legend>
+                      <legend className="px-1 text-xs font-semibold text-[var(--navy)]">{category}</legend>
                       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                         {items.map((item) => {
                           const roleObj: PermissionGroupModuleRole =
@@ -1089,7 +1089,7 @@ export function PermissionGroupsManager() {
                                 checked={checked}
                                 disabled={busy || conflictLocked}
                                 onChange={() => toggleModuleRole(roleObj)}
-                                className="mt-1 h-4 w-4 shrink-0 rounded border-border"
+                                className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-primary"
                               />
                               <label htmlFor={checkId} className="cursor-pointer text-xs">
                                 <span className="block font-medium text-foreground">
@@ -1123,7 +1123,7 @@ export function PermissionGroupsManager() {
               />
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3">
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               <Button type="button" variant="secondary" disabled={busy} onClick={closeEditor}>
                 Đóng
               </Button>
@@ -1188,12 +1188,12 @@ export function PermissionGroupsManager() {
                   return (
                     <div
                       key={entry.directory_entry_key}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface p-2.5 text-sm"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-surface p-3 text-sm transition-colors hover:border-primary/35 hover:bg-[var(--selected-bg)]/40"
                     >
                       <div className="min-w-0">
                         <Link
                           href={resolveUserDirectoryDetailHref(entry)}
-                          className="font-medium text-foreground hover:text-primary hover:underline"
+                          className="font-semibold text-[var(--navy)] hover:text-primary hover:underline"
                         >
                           {entry.display_name}
                         </Link>
@@ -1229,7 +1229,7 @@ export function PermissionGroupsManager() {
               </div>
             )}
 
-            <div className="flex justify-end border-t border-border pt-3">
+            <div className="flex justify-end border-t border-border pt-4">
               <Button
                 type="button"
                 variant="secondary"

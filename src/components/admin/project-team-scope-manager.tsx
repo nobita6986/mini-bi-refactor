@@ -308,7 +308,7 @@ export function ProjectTeamScopeManager() {
         {state === "ready" && mappings.length === 0 ? <EmptyState title="Chưa có phân công nào" /> : null}
         {state === "ready" && mappings.length > 0 ? (
           <div className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs">
-            <table className="r22-card-table w-full min-w-[720px] border-collapse text-left text-sm">
+            <table className="r22-card-table w-full border-collapse text-left text-sm">
               <thead className="border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted"><tr>
                 <th scope="col" className="px-3.5 py-3 font-semibold">Dự án</th>
                 <th scope="col" className="px-3.5 py-3 font-semibold">Tổ đội</th>

@@ -15,7 +15,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Building2, CalendarDays, ChevronDown, ClipboardList, FileDiff, Landmark, LayoutDashboard, NotebookPen, ShieldCheck, Users } from "lucide-react";
+import { Banknote, Building2, CalendarDays, ChevronDown, ClipboardList, FileDiff, Landmark, LayoutDashboard, NotebookPen, Receipt, ShieldCheck, Users } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
 import {
@@ -37,10 +37,10 @@ const NAV_ICONS: Record<string, typeof LayoutDashboard> = {
   "work-reports": NotebookPen,
   "work-report-management": ClipboardList,
   "attendance-report": CalendarDays,
-  finance: Landmark,
+  finance: Receipt,
   leave: CalendarDays,
   "leave-admin": CalendarDays,
-  "salary-advances": Landmark,
+  "salary-advances": Banknote,
   "recruitment-posts": ClipboardList,
   admin: ShieldCheck,
 } as const;
@@ -59,7 +59,10 @@ export function DesktopNav({
   const pathname = usePathname();
   const active = findActiveNavEntry(pathname, items);
   return (
-    <nav aria-label="Điều hướng chính" className="ml-2 hidden items-center gap-1 md:flex">
+    <nav
+      aria-label="Điều hướng chính"
+      className="ml-2 hidden items-center gap-1 rounded-full border border-border/80 bg-surface p-1 shadow-[var(--shadow-card)] md:flex"
+    >
       {groupNavEntries(items).map((item) => {
         if (item.type === "entry") {
           const entry = item.entry;
@@ -72,11 +75,11 @@ export function DesktopNav({
               href={entry.path}
               aria-current={isActive ? "page" : undefined}
               className={cn(
-                "inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
+                "inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-sm transition-[color,background-color,box-shadow] duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                 isActive
-                  ? "bg-primary/10 text-foreground"
-                  : "text-muted hover:bg-muted/10 hover:text-foreground"
+                  ? "bg-primary font-semibold text-on-primary shadow-[0_6px_16px_-6px_var(--primary)]"
+                  : "font-medium text-muted hover:bg-surface-muted hover:text-[var(--navy)]"
               )}
             >
               <Icon className="h-4 w-4" aria-hidden />
@@ -88,15 +91,15 @@ export function DesktopNav({
         const Icon = GROUP_ICONS[item.id];
         const isActive = item.entries.some((entry) => active?.id === entry.id);
         return (
-          <DropdownMenu.Root key={item.id}>
+          <DropdownMenu.Root key={item.id} modal={false}>
             <DropdownMenu.Trigger
               aria-label={item.label}
               className={cn(
-                "inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
+                "inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-sm transition-[color,background-color,box-shadow] duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                 isActive
-                  ? "bg-primary/10 text-foreground"
-                  : "text-muted hover:bg-muted/10 hover:text-foreground"
+                  ? "bg-primary font-semibold text-on-primary shadow-[0_6px_16px_-6px_var(--primary)]"
+                  : "font-medium text-muted hover:bg-surface-muted hover:text-[var(--navy)]"
               )}
             >
               <Icon className="h-4 w-4" aria-hidden />
@@ -106,8 +109,8 @@ export function DesktopNav({
             <DropdownMenu.Portal>
               <DropdownMenu.Content
                 align="start"
-                sideOffset={6}
-                className="z-50 min-w-56 rounded-md border border-border bg-surface p-1 shadow-lg"
+                sideOffset={8}
+                className="z-50 min-w-56 rounded-[18px] border border-border/80 bg-surface p-1.5 shadow-[var(--shadow-card-hover)]"
               >
                 {item.entries.map((entry) => {
                   const EntryIcon = NAV_ICONS[entry.id];
@@ -119,11 +122,11 @@ export function DesktopNav({
                         href={entry.path}
                         aria-current={entryActive ? "page" : undefined}
                         className={cn(
-                          "flex h-10 items-center gap-3 rounded px-3 text-sm outline-none transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
-                          "data-[highlighted]:bg-primary/10 data-[highlighted]:text-foreground",
+                          "flex h-10 items-center gap-3 rounded-xl px-3 text-sm font-medium outline-none transition-colors duration-[var(--ui-motion-hover,160ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none",
+                          "data-[highlighted]:bg-[var(--selected-bg)] data-[highlighted]:text-primary",
                           entryActive
-                            ? "bg-primary/10 text-foreground"
-                            : "text-muted hover:bg-surface-hover hover:text-foreground"
+                            ? "bg-[var(--selected-bg)] font-semibold text-primary"
+                            : "text-muted hover:bg-surface-hover hover:text-[var(--navy)]"
                         )}
                       >
                         <EntryIcon className="h-4 w-4" aria-hidden />

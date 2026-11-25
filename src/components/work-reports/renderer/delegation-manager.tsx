@@ -214,7 +214,7 @@ export function DelegationManager() {
           data.options.scopes.length > 0 ? (
             <form
               onSubmit={(event) => void create(event)}
-              className="max-w-2xl space-y-4 rounded-xl border border-border p-4 sm:p-6"
+              className="w-full space-y-4 rounded-xl border border-border bg-surface p-4 sm:p-6 shadow-[var(--shadow-card)]"
             >
               <h2 className="font-semibold">Tạo ủy quyền</h2>
               <label className="block space-y-1.5 text-sm font-medium">
@@ -330,50 +330,85 @@ export function DelegationManager() {
               </p>
             </div>
             {data.items.length === 0 ? (
-              <p className="rounded-xl border border-border p-4 text-sm text-muted">
+              <p className="rounded-[22px] border border-border/80 bg-surface p-4 text-sm text-muted shadow-[var(--shadow-card)]">
                 Chưa có ủy quyền.
               </p>
             ) : (
-              <ul className="space-y-3">
-                {data.items.map((item) => {
-                  const itemStatus = item.status ?? item.state ?? "ACTIVE";
-                  const endLabel =
-                    item.effective_to ??
-                    (item.revoked_at
-                      ? `Thu hồi lúc ${item.revoked_at}`
-                      : "Đến khi thu hồi");
-                  return (
-                    <li
-                      key={item.delegation_id}
-                      className="flex flex-col gap-3 rounded-xl border border-border p-4 sm:flex-row sm:items-start sm:justify-between"
-                    >
-                      <div className="space-y-1">
-                        <h3 className="font-semibold">
-                          {item.delegate_display_name} ·{" "}
-                          {item.capability === "report_review"
-                            ? "Duyệt báo cáo"
-                            : "Giao báo cáo"}
-                        </h3>
-                        <p className="text-sm text-muted">
-                          {item.template_name} · {item.scope_label}
-                        </p>
-                        <p className="text-xs text-muted">
-                          {item.effective_from} – {endLabel} · {itemStatus}
-                        </p>
-                      </div>
-                      {itemStatus !== "REVOKED" && item.state !== "REVOKED" && (
-                        <Button
-                          variant="secondary"
-                          disabled={busy}
-                          onClick={() => void revoke(item)}
-                        >
-                          Thu hồi
-                        </Button>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
+              <div className="relative overflow-hidden rounded-xl [border-radius:22px] border border-border/80 bg-surface shadow-[var(--shadow-card)]">
+                <div className="relative overflow-x-auto">
+                  <table className="r22-card-table w-full border-collapse text-left text-sm">
+                    <thead className="border-b border-border bg-surface-muted text-xs font-bold uppercase tracking-wider text-[var(--navy)]">
+                      <tr>
+                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Người nhận ủy quyền</th>
+                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Quyền ủy nhiệm</th>
+                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Mẫu báo cáo & Phạm vi</th>
+                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Thời hạn hiệu lực</th>
+                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Trạng thái</th>
+                        <th scope="col" className="px-3.5 py-3 text-right font-bold whitespace-nowrap">Thao tác</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.items.map((item) => {
+                        const itemStatus = item.status ?? item.state ?? "ACTIVE";
+                        const isRevoked = itemStatus === "REVOKED" || item.state === "REVOKED";
+                        const endLabel =
+                          item.effective_to ??
+                          (item.revoked_at
+                            ? `Thu hồi lúc ${item.revoked_at}`
+                            : "Đến khi thu hồi");
+                        return (
+                          <tr
+                            key={item.delegation_id}
+                            className="border-b border-border/65 last:border-b-0 transition-colors hover:bg-[var(--selected-bg)] align-middle"
+                          >
+                            <td className="px-3.5 py-2.5 align-middle font-semibold text-[var(--navy)]" data-card-header="true">
+                              {item.delegate_display_name}
+                            </td>
+                            <td className="px-3.5 py-2.5 align-middle whitespace-nowrap" data-label="Quyền ủy nhiệm">
+                              <span className="inline-flex items-center rounded-full border border-primary/25 bg-[var(--selected-bg)] px-2.5 py-0.5 text-xs font-semibold text-primary">
+                                {item.capability === "report_review" ? "Duyệt báo cáo" : "Giao báo cáo"}
+                              </span>
+                            </td>
+                            <td className="px-3.5 py-2.5 align-middle" data-label="Mẫu báo cáo & Phạm vi">
+                              <div className="font-medium text-foreground">{item.template_name}</div>
+                              <div className="text-xs text-muted">{item.scope_label}</div>
+                            </td>
+                            <td className="px-3.5 py-2.5 align-middle font-mono text-xs text-muted whitespace-nowrap" data-label="Thời hạn hiệu lực">
+                              {item.effective_from} – {endLabel}
+                            </td>
+                            <td className="px-3.5 py-2.5 align-middle font-mono text-xs whitespace-nowrap" data-label="Trạng thái">
+                              <span
+                                className={
+                                  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium " +
+                                  (isRevoked
+                                    ? "border-border bg-muted/12 text-muted"
+                                    : "border-emerald-500/30 bg-emerald-500/12 text-emerald-800 dark:text-emerald-200")
+                                }
+                              >
+                                {itemStatus}
+                              </span>
+                            </td>
+                            <td className="px-3.5 py-2.5 align-middle text-right whitespace-nowrap" data-card-actions="true">
+                              {!isRevoked ? (
+                                <Button
+                                  variant="danger-outline"
+                                  size="sm"
+                                  disabled={busy}
+                                  onClick={() => void revoke(item)}
+                                >
+                                  Thu hồi
+                                </Button>
+                              ) : (
+                                <span className="text-xs text-muted">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )}
           </section>
         </>

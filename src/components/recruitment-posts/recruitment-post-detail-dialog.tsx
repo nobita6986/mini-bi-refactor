@@ -23,16 +23,16 @@ function DetailField({
     <div
       className={
         fullWidth
-          ? "min-w-0 space-y-1 sm:col-span-2"
-          : "min-w-0 space-y-1"
+          ? "min-w-0 space-y-1 rounded-lg bg-surface-muted/75 px-3 py-2 sm:col-span-2"
+          : "min-w-0 space-y-1 rounded-lg bg-surface-muted/75 px-3 py-2"
       }
     >
-      <dt className="text-xs font-medium text-muted">{label}</dt>
+      <dt className="text-[11px] font-normal uppercase tracking-wider text-muted">{label}</dt>
       <dd
         className={[
-          "text-sm text-foreground break-words",
+          "text-sm font-medium text-foreground break-words",
           mono ? "font-mono tabular-nums" : "",
-          multiline ? "whitespace-pre-line" : "",
+          multiline ? "whitespace-pre-line font-normal text-foreground" : "",
         ]
           .filter(Boolean)
           .join(" ")}
@@ -75,7 +75,7 @@ export function RecruitmentPostDetailDialog({
       description={descriptionText}
       descriptionId="recruitment-post-detail-description"
       closeAriaLabel="Đóng hộp thoại chi tiết tin tuyển dụng"
-      contentClassName="sm:w-[min(56rem,calc(100vw-2rem))]"
+      contentClassName="sm:w-[min(56rem,calc(100vw-2rem))] lg:w-[min(64rem,calc(100vw-2rem))] border-t-2 border-t-primary"
       dataTestId="recruitment-post-detail-dialog"
     >
       <div className="space-y-5">
@@ -115,16 +115,17 @@ export function RecruitmentPostDetailDialog({
         {detail ? (
           <div
             data-testid="recruitment-post-detail-content"
-            className="space-y-5"
+            className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start"
           >
+            <div className="space-y-5 lg:col-span-5">
             {/* Phần 1 — Thông tin chung dự án */}
             <section
               aria-labelledby="recruitment-post-detail-sec-1"
-              className="rounded-xl border border-border bg-surface p-4 space-y-3"
+              className="rounded-[10px] border border-border border-t-[3px] border-t-primary bg-surface p-4 shadow-[var(--shadow-card)] space-y-3"
             >
               <h3
                 id="recruitment-post-detail-sec-1"
-                className="text-sm font-semibold text-foreground border-b border-border pb-2"
+                className="text-sm font-semibold tracking-tight text-[var(--navy)] border-b border-primary/20 pb-2"
               >
                 1. Thông tin chung dự án
               </h3>
@@ -205,11 +206,11 @@ export function RecruitmentPostDetailDialog({
             {/* Phần 2 — Yêu cầu ứng viên */}
             <section
               aria-labelledby="recruitment-post-detail-sec-2"
-              className="rounded-xl border border-border bg-surface p-4 space-y-3"
+              className="rounded-[10px] border border-border bg-surface p-4 shadow-[var(--shadow-card)] space-y-3"
             >
               <h3
                 id="recruitment-post-detail-sec-2"
-                className="text-sm font-semibold text-foreground border-b border-border pb-2"
+                className="text-sm font-semibold tracking-tight text-[var(--navy)] border-b border-primary/20 pb-2"
               >
                 2. Yêu cầu ứng viên
               </h3>
@@ -273,15 +274,17 @@ export function RecruitmentPostDetailDialog({
                 />
               </dl>
             </section>
+            </div>
 
+            <div className="space-y-5 lg:col-span-7">
             {/* Phần 3 — Lương, thưởng và phúc lợi */}
             <section
               aria-labelledby="recruitment-post-detail-sec-3"
-              className="rounded-xl border border-border bg-surface p-4 space-y-3"
+              className="rounded-[10px] border border-border border-t-[3px] border-t-primary bg-surface p-4 shadow-[var(--shadow-card)] space-y-3"
             >
               <h3
                 id="recruitment-post-detail-sec-3"
-                className="text-sm font-semibold text-foreground border-b border-border pb-2"
+                className="text-sm font-semibold tracking-tight text-[var(--navy)] border-b border-primary/20 pb-2"
               >
                 3. Lương, thưởng và phúc lợi
               </h3>
@@ -511,11 +514,11 @@ export function RecruitmentPostDetailDialog({
             {/* Phần 4 — Hồ sơ ứng viên cần chuẩn bị */}
             <section
               aria-labelledby="recruitment-post-detail-sec-4"
-              className="rounded-xl border border-border bg-surface p-4 space-y-3"
+              className="rounded-[10px] border border-border bg-surface p-4 shadow-[var(--shadow-card)] space-y-3"
             >
               <h3
                 id="recruitment-post-detail-sec-4"
-                className="text-sm font-semibold text-foreground border-b border-border pb-2"
+                className="text-sm font-semibold tracking-tight text-[var(--navy)] border-b border-primary/20 pb-2"
               >
                 4. Hồ sơ ứng viên cần chuẩn bị
               </h3>
@@ -578,8 +581,9 @@ export function RecruitmentPostDetailDialog({
                 />
               </dl>
             </section>
+            </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-muted">
+            <div className="lg:col-span-12 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-muted">
               <span>
                 Đăng bởi: {detail.createdByDisplayName} ({detail.publishedAtDisplay})
               </span>

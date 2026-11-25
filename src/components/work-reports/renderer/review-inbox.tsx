@@ -1,7 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DATA_TABLE_CLASS,
+  DATA_TABLE_HEAD_CLASS,
+  DATA_TABLE_ROW_CLASS,
+  DATA_TABLE_TD_CLASS,
+  DATA_TABLE_TH_CLASS,
+  DataTableContainer,
+  RowActionCluster,
+} from "@/components/ui/data-table";
 import { useNotify } from "@/components/ui/notify-provider";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { ReportReadonlyContent } from "@/components/work-reports/reader/report-readonly-content";
@@ -133,12 +143,59 @@ export function ReviewInbox() {
     {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
     {loading && !page ? <p role="status" className="text-sm text-muted">Đang tải hàng đợi duyệt…</p> : null}
     {page && page.items.length === 0 ? <StatusBanner>Không có báo cáo đang chờ duyệt trong phạm vi của bạn.</StatusBanner> : null}
-    <ul className="space-y-3">{page?.items.map((item) => <li key={item.obligation_id} className="flex flex-col gap-3 rounded-xl border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-      <div><h2 className="font-semibold">{item.template_name} · v{item.template_version}</h2><p className="text-sm text-muted">{item.assignee_label}{item.team_label ? ` · ${item.team_label}` : ""} · Kỳ {item.period_key}</p><p className="mt-1 text-xs text-muted">Nộp {dateTime(item.submitted_at)} · Hạn {dateTime(item.due_at)} · {item.state}</p></div>
-      <Button variant="outline" disabled={busy} onClick={() => void open(item)}>Xem và xử lý</Button>
-    </li>)}</ul>
+    {page && page.items.length > 0 ? (
+      <DataTableContainer>
+        <table className={DATA_TABLE_CLASS}>
+          <thead className={DATA_TABLE_HEAD_CLASS}>
+            <tr>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Mẫu báo cáo</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Người nộp & Nhóm</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Kỳ báo cáo</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Thời điểm nộp & Hạn</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS}>Trạng thái</th>
+              <th scope="col" className={DATA_TABLE_TH_CLASS + " text-right"}>Thao tác</th>
+            </tr>
+          </thead>
+          <tbody>
+            {page.items.map((item) => (
+              <tr key={item.obligation_id} className={DATA_TABLE_ROW_CLASS}>
+                <td className={DATA_TABLE_TD_CLASS + " font-semibold text-[var(--navy)]"} data-card-header="true">
+                  {item.template_name}{" "}
+                  <span className="ml-1 inline-flex items-center rounded-md border border-border/80 bg-surface-muted/75 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">
+                    v{item.template_version}
+                  </span>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS} data-label="Người nộp & Nhóm">
+                  <div className="font-medium text-foreground">{item.assignee_label}</div>
+                  {item.team_label ? <div className="text-xs text-muted">{item.team_label}</div> : null}
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Kỳ báo cáo">
+                  <span className="inline-flex items-center rounded-md border border-border/80 bg-surface-muted/75 px-2 py-0.5 font-mono text-xs font-medium text-[var(--navy)]">
+                    Kỳ {item.period_key}
+                  </span>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " font-mono text-xs tabular-nums text-muted whitespace-nowrap"} data-label="Thời điểm nộp & Hạn">
+                  <div>Nộp: {dateTime(item.submitted_at)}</div>
+                  <div>Hạn: {dateTime(item.due_at)}</div>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Trạng thái">
+                  <StatusBadge tone="warning" dot>Chờ duyệt</StatusBadge>
+                </td>
+                <td className={DATA_TABLE_TD_CLASS + " text-right whitespace-nowrap"} data-card-actions="true">
+                  <RowActionCluster>
+                    <Button variant="soft" size="sm" disabled={busy} onClick={() => void open(item)}>
+                      Xem và xử lý
+                    </Button>
+                  </RowActionCluster>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </DataTableContainer>
+    ) : null}
     {page?.has_more && cursor ? <div className="flex justify-center"><Button variant="secondary" disabled={loading} onClick={() => void load(cursor, true)}>{loading ? "Đang tải…" : "Tải thêm"}</Button></div> : null}
-    {detail ? <section className="space-y-4 rounded-xl border border-border bg-surface p-4 sm:p-6" aria-labelledby="review-detail-title">
+    {detail ? <section className="space-y-4 rounded-[22px] border border-border/80 bg-surface p-4 sm:p-6 shadow-[var(--shadow-card)]" aria-labelledby="review-detail-title">
       <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 id="review-detail-title" className="text-lg font-semibold">{detail.value.template.display_name}</h2><p className="text-sm text-muted">{detail.value.assignee_display_name}{detail.value.team_display_name ? ` · ${detail.value.team_display_name}` : ""} · Kỳ {detail.value.obligation.period_key}</p><p className="text-xs text-muted">Nộp {dateTime(detail.value.submission.latest_submitted_at)} · Bản {detail.value.current_revision.revision_no} · {detail.value.submission.state}</p></div><Button variant="ghost" onClick={() => setDetail(null)}>Đóng</Button></div>
       <ReportReadonlyContent schema={detail.value.template.schema_json} payload={detail.value.current_revision.payload_json} />
       {detail.value.review_events.length ? <details><summary className="cursor-pointer text-sm font-medium">Lịch sử duyệt ({detail.value.review_events.length})</summary><ul className="mt-2 space-y-2 text-sm text-muted">{detail.value.review_events.map((event, index) => <li key={`${event.reviewed_at}:${index}`}>{event.decision} · {event.reviewer_display_name} · {dateTime(event.reviewed_at)}{event.reason ? ` · ${event.reason}` : ""}</li>)}</ul></details> : null}

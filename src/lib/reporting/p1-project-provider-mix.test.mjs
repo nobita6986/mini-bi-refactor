@@ -233,7 +233,7 @@ test("13. Top 10 không làm mất full list", () => {
   assert.equal(rows.reduce((a, r) => a + r.projectTotal, 0), mix.reduce((a, m) => a + m.projectTotal, 0));
 });
 
-test("14. 5 theme vẫn dùng semantic/chart tokens (light + dark)", () => {
+test("14. 6 theme vẫn dùng semantic/chart tokens (light + dark)", () => {
   const mix = buildProjectProviderMix([
     fact({ key: "alpha", provider: "vendor", count: 6 }),
     fact({ key: "alpha", provider: "hrp", count: 4 }),
@@ -245,7 +245,7 @@ test("14. 5 theme vẫn dùng semantic/chart tokens (light + dark)", () => {
   assert.equal(row.segments[2].slot, UNKNOWN_SLOT);
   assert.equal(row.segments[3].slot, INVALID_SLOT);
   assert.notEqual(row.segments[0].slot, row.segments[1].slot, "HRP và Vendor phải khác slot");
-  assert.equal(THEMES.length, 5);
+  assert.equal(THEMES.length, 6);
   for (const mode of ["light", "dark"]) {
     for (const theme of THEMES) {
       for (const seg of row.segments) {

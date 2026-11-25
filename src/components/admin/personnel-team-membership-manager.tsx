@@ -517,15 +517,19 @@ export function PersonnelTeamMembershipManager({
           }}
         >
           <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
+            <Dialog.Overlay
+              data-ui-overlay-motion="true"
+              className="fixed inset-0 z-40 bg-[var(--backdrop)] backdrop-blur-[7px]"
+            />
             <Dialog.Content
+              data-ui-dialog-motion="true"
               onCloseAutoFocus={(event) => event.preventDefault()}
               aria-describedby="membership-dialog-description"
-              className="fixed left-1/2 top-1/2 z-50 max-h-[92dvh] w-[min(64rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-xl focus:outline-none sm:p-6"
+              className="fixed left-1/2 top-1/2 z-50 max-h-[92dvh] w-[min(64rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border border-t-2 border-t-primary bg-surface p-5 text-foreground shadow-[var(--shadow-dialog)] focus:outline-none sm:p-6"
             >
-              <header className="flex items-start justify-between gap-4">
+              <header className="flex items-start justify-between gap-4 border-b border-border pb-3.5">
                 <div>
-                  <Dialog.Title className="text-xl font-semibold">Quản lý nhóm</Dialog.Title>
+                  <Dialog.Title className="text-xl font-semibold tracking-tight text-[var(--navy)]">Quản lý nhóm</Dialog.Title>
                   <Dialog.Description id="membership-dialog-description" className="mt-1 text-sm text-muted">
                     {personnel.display_name}
                     {personnel.personnel_code ? ` · ${personnel.personnel_code}` : ""}
@@ -533,7 +537,7 @@ export function PersonnelTeamMembershipManager({
                 </div>
                 <Dialog.Close asChild>
                   <button type="button" aria-label="Đóng quản lý nhóm" disabled={busy}
-                    className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+                    className="inline-flex min-h-11 min-w-11 sm:min-h-9 sm:min-w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-muted px-3 text-sm font-medium text-[var(--navy)] transition-colors hover:border-primary hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50">
                     <span aria-hidden="true">×</span>
                   </button>
                 </Dialog.Close>
@@ -684,7 +688,7 @@ export function PersonnelTeamMembershipManager({
                             setActiveForm((value) => ({ ...value, teamId }));
                           }}
                           disabled={teamState.kind !== "loaded" || activeListLock}
-                          className="mt-1 block min-h-11 w-full rounded-md border border-border bg-background px-3">
+                          className="mt-1 block min-h-11 w-full rounded-lg border border-border bg-surface px-3">
                           <option value="">Chọn nhóm</option>
                           {teamState.kind === "loaded" && preferredTeam?.active &&
                             (operation.kind !== "move" || operation.currentTeamId !== preferredTeam.team_id) &&
@@ -714,10 +718,10 @@ export function PersonnelTeamMembershipManager({
                           const reason = event.currentTarget.value;
                           setActiveForm((value) => ({ ...value, reason }));
                         }}
-                        className="mt-1 block w-full rounded-md border border-border bg-background px-3 py-2" />
+                        className="mt-1 block w-full rounded-lg border border-border bg-surface px-3 py-2" />
                     </label>
                     {formError ? <p role="alert" className="text-sm text-red-700 dark:text-red-300">{formError}</p> : null}
-                    <div className="flex flex-wrap justify-end gap-2">
+                    <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
                       <button type="button" disabled={busy} onClick={() => setActiveOperation(null)}
                         className="min-h-11 whitespace-nowrap shrink-0 rounded-md border border-border px-4 text-sm">Hủy thao tác</button>
                       <button type="submit"
@@ -811,7 +815,7 @@ function MembershipSection({
         <>
           <div role="region" aria-label={`Bảng ${stateLabel(state).toLowerCase()}`} tabIndex={0}
             className="overflow-x-auto rounded-xl border border-border bg-surface shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-            <table className="r22-card-table w-full min-w-[640px] border-collapse text-left text-sm">
+            <table className="r22-card-table w-full border-collapse text-left text-sm">
               <caption className="sr-only">{stateLabel(state)} của hồ sơ</caption>
               <thead className="border-b border-border bg-surface-muted text-xs font-semibold uppercase tracking-wider text-muted"><tr>
                 <th scope="col" className="px-3.5 py-3">Nhóm</th>

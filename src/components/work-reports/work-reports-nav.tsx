@@ -85,7 +85,7 @@ export function WorkReportsModuleNav({
     <div className="mb-4 space-y-2">
       <nav
         aria-label="Báo cáo công việc"
-        className="flex flex-wrap gap-1.5 rounded-xl border border-border bg-surface p-1.5"
+        className="inline-flex flex-wrap gap-1 rounded-full border border-border/80 bg-surface p-1 shadow-[var(--shadow-card)]"
       >
         {links.map((item) => {
           const active = isTopItemActive(item);
@@ -95,10 +95,10 @@ export function WorkReportsModuleNav({
               href={item.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "inline-flex min-h-11 sm:min-h-9 items-center rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-[color,background-color,transform] duration-[var(--ui-motion-hover,160ms)] active:scale-[0.99] motion-reduce:transition-none motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                "inline-flex min-h-11 sm:min-h-9 items-center rounded-full px-4 py-1.5 text-xs font-semibold transition-[color,background-color,box-shadow,transform] duration-[var(--ui-motion-hover,160ms)] active:scale-[0.99] motion-reduce:transition-none motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                 active
-                  ? "bg-primary text-on-primary shadow-2xs"
-                  : "text-muted hover:bg-muted/10 hover:text-foreground",
+                  ? "bg-primary text-on-primary shadow-[0_6px_16px_-6px_var(--primary)]"
+                  : "text-muted hover:bg-surface-muted hover:text-[var(--navy)]",
               )}
             >
               {item.label}
@@ -110,7 +110,7 @@ export function WorkReportsModuleNav({
       {subLinks.length > 0 ? (
         <nav
           aria-label="Chuyển mục con Báo cáo công việc"
-          className="flex flex-wrap gap-1.5 rounded-xl border border-border/80 bg-background/60 p-1"
+          className="inline-flex flex-wrap gap-1 rounded-full border border-border/75 bg-surface/80 p-1 shadow-2xs"
         >
           {subLinks.map((sub) => {
             const isSubActive = sub.activeKey === effectiveActiveKey;
@@ -122,10 +122,10 @@ export function WorkReportsModuleNav({
                 scroll={false}
                 aria-current={isSubActive ? "page" : undefined}
                 className={cn(
-                  "inline-flex min-h-11 sm:min-h-8 items-center rounded-lg px-3 py-1 text-xs font-medium transition-[color,background-color,transform] duration-[var(--ui-motion-hover,160ms)] active:scale-[0.99] motion-reduce:transition-none motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  "inline-flex min-h-11 sm:min-h-8 items-center rounded-full px-3.5 py-1 text-xs font-medium transition-[color,background-color,transform] duration-[var(--ui-motion-hover,160ms)] active:scale-[0.99] motion-reduce:transition-none motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                   isSubActive
                     ? "border border-primary/30 bg-primary/10 font-semibold text-primary"
-                    : "text-muted hover:bg-muted/10 hover:text-foreground",
+                    : "text-muted hover:bg-surface-muted hover:text-[var(--navy)]",
                 )}
               >
                 {sub.label}

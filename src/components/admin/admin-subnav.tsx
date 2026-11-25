@@ -20,8 +20,8 @@ export function AdminSubnav({
   const pathname = usePathname();
   const items = groupAdminSections(sections);
   return (
-    <nav aria-label="Điều hướng Quản trị" className="mb-4 sm:mb-6 overflow-x-auto border-b border-border">
-      <ul className="flex flex-nowrap sm:flex-wrap gap-1 sm:gap-2 whitespace-nowrap">
+    <nav aria-label="Điều hướng Quản trị" data-admin-subnav="true" className="mb-4 sm:mb-6 overflow-x-auto">
+      <ul className="flex flex-nowrap sm:flex-wrap gap-1 sm:gap-2 w-max sm:w-fit sm:max-w-full items-center whitespace-nowrap rounded-full border border-border/80 bg-surface p-1.5 shadow-[var(--shadow-card)]">
         {items.map((item) => {
           if (item.type === "group") {
             const current = item.sections.some((section) =>
@@ -33,10 +33,10 @@ export function AdminSubnav({
                   <DropdownMenu.Trigger
                     aria-label={item.label}
                     className={cn(
-                      "inline-flex min-h-11 sm:min-h-10 items-center gap-1 whitespace-nowrap border-b-2 border-transparent px-3 text-sm font-medium transition-[color,background-color,border-color,transform] duration-[var(--ui-motion-tab,200ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none motion-reduce:transform-none hover:bg-surface-hover/60 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                      "inline-flex min-h-11 sm:min-h-9 items-center gap-1 whitespace-nowrap rounded-full border border-transparent px-3.5 text-sm font-medium transition-[color,background-color,border-color,transform] duration-[var(--ui-motion-tab,200ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none motion-reduce:transform-none hover:bg-surface-muted active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                       current
-                        ? "border-primary bg-primary/10 font-semibold text-foreground"
-                        : "text-muted hover:text-foreground",
+                        ? "border-primary bg-primary/10 font-semibold text-primary shadow-2xs"
+                        : "text-muted hover:text-[var(--navy)]",
                     )}
                   >
                     {item.label}
@@ -45,8 +45,9 @@ export function AdminSubnav({
                   <DropdownMenu.Portal>
                     <DropdownMenu.Content
                       align="start"
-                      sideOffset={6}
-                      className="z-50 min-w-56 rounded-md border border-border bg-surface p-1 shadow-lg"
+                      sideOffset={8}
+                      data-ui-popover-motion="true"
+                      className="z-50 min-w-56 rounded-[18px] border border-border/80 bg-surface p-1.5 shadow-[var(--shadow-card-hover)]"
                     >
                       {item.sections.map((section) => {
                         const sectionCurrent = isAdminSectionActive(pathname, section.href);
@@ -56,9 +57,9 @@ export function AdminSubnav({
                               href={section.href}
                               aria-current={sectionCurrent ? "page" : undefined}
                               className={cn(
-                                "flex min-h-10 items-center rounded px-3 text-sm outline-none transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover",
+                                "flex min-h-10 items-center rounded-xl px-3 text-sm font-medium outline-none transition-colors hover:bg-surface-hover hover:text-[var(--navy)] focus-visible:bg-surface-hover",
                                 sectionCurrent
-                                  ? "bg-primary/10 font-semibold text-foreground"
+                                  ? "bg-primary/10 font-semibold text-primary"
                                   : "text-muted",
                               )}
                             >
@@ -81,7 +82,7 @@ export function AdminSubnav({
               <Link
                 href={section.href}
                 aria-current={current ? "page" : undefined}
-                className="inline-flex min-h-11 sm:min-h-10 items-center whitespace-nowrap border-b-2 border-transparent px-3 text-sm font-medium text-muted transition-[color,background-color,border-color,transform] duration-[var(--ui-motion-tab,200ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none motion-reduce:transform-none hover:bg-surface-hover/60 hover:text-foreground active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 aria-[current=page]:border-primary aria-[current=page]:bg-primary/10 aria-[current=page]:font-semibold aria-[current=page]:text-foreground"
+                className="inline-flex min-h-11 sm:min-h-9 items-center whitespace-nowrap rounded-full border border-transparent px-3.5 text-sm font-medium text-muted transition-[color,background-color,border-color,transform] duration-[var(--ui-motion-tab,200ms)] ease-[var(--ui-motion-ease,cubic-bezier(0.22,1,0.36,1))] motion-reduce:transition-none motion-reduce:transform-none hover:bg-surface-muted hover:text-[var(--navy)] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 aria-[current=page]:border-primary aria-[current=page]:bg-primary/10 aria-[current=page]:font-semibold aria-[current=page]:text-primary"
               >
                 {section.label}
               </Link>
