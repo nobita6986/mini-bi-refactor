@@ -99,7 +99,21 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
   assert.ok(workspaceSource.includes('data-testid="leave-admin-opening-section"'));
   assert.ok(workspaceSource.includes("UPSERT_EMPLOYEE_PROFILE"));
   assert.ok(workspaceSource.includes("UPDATE_POLICY"));
-  assert.ok(workspaceSource.includes("SET_DEPARTMENT_APPROVER"));
+  // WP10-4: SET_DEPARTMENT_APPROVER is retired in favor of read-only Org Department Heads (/admin/departments)
+  assert.equal(workspaceSource.includes("SET_DEPARTMENT_APPROVER"), false);
+  assert.equal(workspaceSource.includes('data-testid="leave-dept-unit-select"'), false);
+  assert.equal(workspaceSource.includes('data-testid="leave-dept-approver-select"'), false);
+  assert.equal(workspaceSource.includes('data-testid="leave-save-dept-approver-btn"'), false);
+  assert.ok(workspaceSource.includes('data-testid="leave-org-department-heads-card"'));
+  assert.ok(workspaceSource.includes('href="/admin/departments"'));
+  assert.ok(workspaceSource.includes("Quản lý tại Phòng ban"));
+  assert.ok(
+    workspaceSource.includes(
+      "Khi phòng ban chưa có Trưởng phòng đủ điều kiện duyệt, đơn chuyển về Ban Giám đốc/Admin.",
+    ),
+  );
+  assert.equal(workspaceSource.includes("IT/Kế toán hoặc"), false);
+  assert.ok(workspaceSource.includes("da.department_name ?? leaveUnitKindLabel(da.unit_kind)"));
   assert.ok(workspaceSource.includes("formatLeaveOrgDepartmentDisplay"));
   assert.ok(workspaceSource.includes('data-testid="leave-summary-org-department"'));
   assert.ok(workspaceSource.includes('data-testid="leave-profile-org-department-readonly"'));
@@ -113,21 +127,6 @@ test("WP2 Admin & HR Config surface covers employee profiles, seniority mileston
     upsertPayloadBlock.includes("unit_kind"),
     false,
     "UPSERT_EMPLOYEE_PROFILE client payload must not send unit_kind",
-  );
-  assert.ok(workspaceSource.includes("resolveDepartmentApproverMutationPayload"));
-  assert.ok(workspaceSource.includes("transitionDepartmentApproverAfterMutation"));
-  assert.ok(workspaceSource.includes("transitionDepartmentApproverAfterReload"));
-  assert.ok(workspaceSource.includes('dataTestId="leave-dept-approver-pending-banner"'));
-  assert.ok(workspaceSource.includes('data-testid="leave-reload-dept-approver-btn"'));
-  assert.equal(
-    workspaceSource.includes("setPendingDeptApproverPayload(null)"),
-    false,
-    "Department approver form must not silently drop pending state on input change",
-  );
-  assert.equal(
-    workspaceSource.includes("valid_from: adminData.as_of_date || todayVietnamIsoDate()"),
-    false,
-    "Department approver mutation must not send stale adminData.as_of_date as valid_from",
   );
   // PR #28 D4 / T0-R2 / UX-03: per-account MANAGE_MODULE_GRANT is retired in favor of Permission Groups (/admin/access/groups)
   assert.equal(workspaceSource.includes("MANAGE_MODULE_GRANT"), false);

@@ -101,6 +101,7 @@ const KNOWN_LEAVE_ERROR_CODES = new Set<LeaveErrorCode>([
   "LEAVE_DEPARTMENT_APPROVER_ADMIN_FORBIDDEN",
   "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN",
   "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN",
+  "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN",
   "LEAVE_UNIT_KIND_INVALID",
   "LEAVE_APPROVER_USER_NOT_FOUND",
   "LEAVE_MODULE_GRANT_ADMIN_FORBIDDEN",
@@ -352,18 +353,6 @@ export function createLeaveRepository(
             p_official_effective_date: input.official_effective_date,
             p_next_seniority_effective_date: input.next_seniority_effective_date,
             p_next_seniority_units: input.next_seniority_units,
-            p_expected_row_version: input.expected_row_version,
-            p_reason: input.reason,
-            p_idempotency_key: input.idempotency_key,
-            p_request_fingerprint: input.request_fingerprint,
-          });
-        case "SET_DEPARTMENT_APPROVER":
-          return invoke("leave_management_set_department_approver_admin", {
-            p_actor_auth_subject: input.auth_subject,
-            p_actor_app_user_id: input.app_user_id,
-            p_unit_kind: input.unit_kind,
-            p_approver_app_user_id: input.approver_app_user_id,
-            p_valid_from: input.valid_from,
             p_expected_row_version: input.expected_row_version,
             p_reason: input.reason,
             p_idempotency_key: input.idempotency_key,

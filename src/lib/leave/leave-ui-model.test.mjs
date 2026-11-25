@@ -1168,6 +1168,10 @@ test("Opening balance reconciliation helpers: resolveAppliedOpeningRowCount neve
   assert.ok(
     leaveErrorMessage("LEAVE_OPENING_PREVIEW_STALE").includes("Xem trước"),
   );
+  assert.equal(
+    leaveErrorMessage("LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN"),
+    "Cấu hình trưởng phòng duyệt phép đã chuyển sang Quản trị -> Phòng ban.",
+  );
 });
 
 test("resolveDepartmentApproverMutationPayload sends valid_from: null, normalizes optional reason, and preserves idempotency_key on ambiguous retry", () => {

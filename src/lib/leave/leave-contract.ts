@@ -117,6 +117,7 @@ export type LeaveErrorCode =
   | "LEAVE_DEPARTMENT_APPROVER_ADMIN_FORBIDDEN"
   | "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN"
   | "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN"
+  | "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN"
   | "LEAVE_UNIT_KIND_INVALID"
   | "LEAVE_APPROVER_USER_NOT_FOUND"
   | "LEAVE_MODULE_GRANT_ADMIN_FORBIDDEN"
@@ -168,6 +169,7 @@ export function leaveHttpStatusForError(code: LeaveErrorCode): number {
     case "LEAVE_OPENING_PREVIEW_STALE":
     case "LEAVE_REPORT_EXPORT_INCOMPLETE":
     case "LEAVE_PROFILE_ORG_FIELD_MANAGED_BY_ORG_ADMIN":
+    case "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN":
       return 409;
     case "LEAVE_INSUFFICIENT_BALANCE":
     case "LEAVE_TYPE_LIMIT_EXCEEDED":
@@ -309,16 +311,6 @@ export type PatchAdminConfigInput =
       official_effective_date: string | null;
       next_seniority_effective_date: string | null;
       next_seniority_units: number;
-      expected_row_version: number;
-      reason: string | null;
-      idempotency_key: string;
-      request_fingerprint: string;
-    }
-  | {
-      operation: "SET_DEPARTMENT_APPROVER";
-      unit_kind: LeaveDepartmentApproverUnitKind;
-      approver_app_user_id: string | null;
-      valid_from: string | null;
       expected_row_version: number;
       reason: string | null;
       idempotency_key: string;
@@ -858,11 +850,18 @@ export function parseGetAdminOverviewQuery(
 
 export function parsePatchAdminConfigBody(
   body: unknown,
-  todayVn?: string | null,
 ): { ok: true; data: PatchAdminConfigInput } | { ok: false; code: LeaveErrorCode } {
   if (!isPlainObject(body)) {
     return { ok: false, code: "INVALID_REQUEST" };
   }
+  const operation =
+    typeof body.operation === "string"
+      ? body.operation.trim().toUpperCase()
+      : "";
+  if (operation === "SET_DEPARTMENT_APPROVER") {
+    return { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN" };
+  }
+
   const idem = normalizeIdempotencyKey(body.idempotency_key);
   if (!idem.ok) return idem;
 
@@ -873,11 +872,6 @@ export function parsePatchAdminConfigBody(
   if (!Number.isInteger(expectedRowVersion) || expectedRowVersion < 0) {
     return { ok: false, code: "INVALID_REQUEST" };
   }
-
-  const operation =
-    typeof body.operation === "string"
-      ? body.operation.trim().toUpperCase()
-      : "";
 
   if (operation === "UPDATE_POLICY") {
     const month = Number(body.carry_over_expiry_month);
@@ -1000,77 +994,6 @@ export function parsePatchAdminConfigBody(
         official_effective_date: officialEffectiveDate,
         next_seniority_effective_date: nextSeniorityDate,
         next_seniority_units: nextSeniorityUnits,
-        expected_row_version: expectedRowVersion,
-        reason: reason.reason,
-        idempotency_key: idem.key,
-        request_fingerprint,
-      },
-    };
-  }
-
-  if (operation === "SET_DEPARTMENT_APPROVER") {
-    const unitKind =
-      typeof body.unit_kind === "string"
-        ? body.unit_kind.trim().toUpperCase()
-        : "";
-    if (
-      !LEAVE_DEPARTMENT_APPROVER_UNIT_KINDS.includes(
-        unitKind as LeaveDepartmentApproverUnitKind,
-      )
-    ) {
-      return { ok: false, code: "LEAVE_UNIT_KIND_INVALID" };
-    }
-    const approverAppUserId =
-      body.approver_app_user_id === null ||
-      body.approver_app_user_id === undefined
-        ? null
-        : isValidUuid(body.approver_app_user_id)
-          ? body.approver_app_user_id.trim().toLowerCase()
-          : undefined;
-    if (approverAppUserId === undefined) {
-      return { ok: false, code: "INVALID_REQUEST" };
-    }
-    const businessToday =
-      typeof todayVn === "string" && isValidIsoDate(todayVn)
-        ? todayVn.trim()
-        : new Intl.DateTimeFormat("en-CA", {
-            timeZone: "Asia/Ho_Chi_Minh",
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-          }).format(new Date());
-    const validFrom =
-      body.valid_from === null || body.valid_from === undefined
-        ? null
-        : isValidIsoDate(body.valid_from)
-          ? body.valid_from.trim()
-          : undefined;
-    if (validFrom === undefined) {
-      return { ok: false, code: "INVALID_REQUEST" };
-    }
-    if (validFrom !== null && validFrom > businessToday) {
-      return { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_FUTURE_DATE_FORBIDDEN" };
-    }
-    if (validFrom !== null && validFrom < businessToday) {
-      return { ok: false, code: "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN" };
-    }
-
-    const request_fingerprint = sha256Hex({
-      op: "SET_DEPARTMENT_APPROVER",
-      unit_kind: unitKind,
-      approver_app_user_id: approverAppUserId,
-      valid_from: validFrom,
-      expected_row_version: expectedRowVersion,
-      reason: reason.reason,
-    });
-
-    return {
-      ok: true,
-      data: {
-        operation: "SET_DEPARTMENT_APPROVER",
-        unit_kind: unitKind as LeaveDepartmentApproverUnitKind,
-        approver_app_user_id: approverAppUserId,
-        valid_from: validFrom,
         expected_row_version: expectedRowVersion,
         reason: reason.reason,
         idempotency_key: idem.key,

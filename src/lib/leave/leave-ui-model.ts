@@ -310,7 +310,7 @@ export type LeaveApprovalInboxProjection = {
 
 export type LeaveDepartmentApproverProjection = {
   approver_assignment_id: string;
-  unit_kind: LeaveDepartmentApproverUnitKind;
+  unit_kind: LeaveUnitKind | string;
   approver_app_user_id: string;
   approver: LeaveAccountProjection | null;
   valid_from: string;
@@ -318,6 +318,10 @@ export type LeaveDepartmentApproverProjection = {
   is_current: boolean;
   reason: string | null;
   row_version: number;
+  department_id?: string | null;
+  department_code?: string | null;
+  department_name?: string | null;
+  department_system_key?: string | null;
 };
 
 export type LeaveModuleGrantProjection = {
@@ -950,6 +954,8 @@ export function leaveErrorMessage(code: string | null | undefined): string {
       return "Ngày bắt đầu hiệu lực của người duyệt bộ phận không được vượt quá ngày nghiệp vụ hiện tại.";
     case "LEAVE_DEPARTMENT_APPROVER_PAST_DATE_FORBIDDEN":
       return "Ngày bắt đầu hiệu lực của người duyệt bộ phận không được chọn ngày quá khứ.";
+    case "LEAVE_DEPARTMENT_APPROVER_MANAGED_BY_ORG_ADMIN":
+      return "Cấu hình trưởng phòng duyệt phép đã chuyển sang Quản trị -> Phòng ban.";
     case "LEAVE_UNIT_KIND_INVALID":
       return "Đơn vị / bộ phận không hợp lệ.";
     case "LEAVE_APPROVER_USER_NOT_FOUND":
