@@ -61,6 +61,7 @@ import {
   parseVendorEntriesPageEnvelope,
   parseVendorFinanceContextEnvelope,
   resolveVendorFinanceMonthlyReportExportFilename,
+  summarizeMonthlyReportOpeningTotals,
   validateUiCalendarMonth,
   VFIN_UI_CONTRACT_TYPE_FILTERS,
   VFIN_UI_REFERENCE_TOTAL_LABEL_VI,
@@ -430,6 +431,9 @@ export function VendorFinanceMonthlyReportView({
     ? reportData.allowed_actions.can_manage_project_assignments
     : initialCanManageProjectAssignments;
   const totals = reportData?.totals ?? null;
+  const openingTotals = reportData
+    ? summarizeMonthlyReportOpeningTotals(reportData.rows)
+    : null;
   const projectFilterOptions = useMemo<CatalogFilterOption[]>(
     () =>
       (contextData?.projects ?? []).map((proj) => ({
@@ -581,29 +585,67 @@ export function VendorFinanceMonthlyReportView({
       {/* Non-Netted Monthly KPI Summary */}
       <section
         aria-label="Chỉ số tổng tham khảo công nợ tháng theo phạm vi lọc (không thay thế số dư riêng từng sổ)"
-        className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 xl:grid-cols-4"
+        className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
         data-testid="vfin-monthly-kpis"
       >
-        <Card className="grid h-full grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-4">
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+          <p className="text-xs font-medium leading-snug text-muted">
+            Đầu kỳ & mở sổ
+          </p>
+          <p
+            data-testid="vfin-monthly-kpi-opening-payable"
+            className="flex flex-wrap items-baseline gap-x-1.5 font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+          >
+            <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
+            <span>
+              {openingTotals ? formatVndMinor(openingTotals.opening_payable_minor) : "—"}
+            </span>
+          </p>
+          <div className="space-y-0.5">
+            <p
+              data-testid="vfin-monthly-kpi-opening-advance"
+              className="whitespace-nowrap font-mono text-xs tabular-nums text-muted"
+            >
+              Dư ứng:{" "}
+              {openingTotals ? formatVndMinor(openingTotals.opening_advance_minor) : "—"}
+            </p>
+            {openingTotals?.has_in_month_opening ? (
+              <p
+                data-testid="vfin-monthly-kpi-opening-in-month"
+                className="flex flex-wrap gap-x-1.5 font-mono text-[11px] leading-snug tabular-nums text-muted"
+              >
+                <span className="whitespace-nowrap">
+                  Mở nợ: {formatVndMinor(openingTotals.opening_payable_in_month_minor)}
+                </span>{" "}
+                ·{" "}
+                <span className="whitespace-nowrap">
+                  Mở ứng: {formatVndMinor(openingTotals.opening_advance_in_month_minor)}
+                </span>
+              </p>
+            ) : null}
+          </div>
+        </Card>
+
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
           <p className="text-xs font-medium leading-snug text-muted">
             Tổng phải trả phát sinh trong tháng
           </p>
           <p
             data-testid="vfin-monthly-kpi-obligations"
-            className="whitespace-nowrap font-mono text-xl font-semibold leading-tight tabular-nums text-foreground"
+            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.obligations_in_month_minor) : "—"}
           </p>
           <p className="text-xs text-muted">Công nợ, lương & điều chỉnh tăng (+)</p>
         </Card>
 
-        <Card className="grid h-full grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-4">
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
           <p className="text-xs font-medium leading-snug text-muted">
             Đã thanh toán & tạm ứng trong tháng
           </p>
           <p
             data-testid="vfin-monthly-kpi-paid-advanced"
-            className="whitespace-nowrap font-mono text-xl font-semibold leading-tight tabular-nums text-foreground"
+            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.paid_and_advanced_in_month_minor) : "—"}
           </p>
@@ -624,26 +666,27 @@ export function VendorFinanceMonthlyReportView({
           </p>
         </Card>
 
-        <Card className="grid h-full grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-4">
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
           <p className="text-xs font-medium leading-snug text-muted">
             Khấu trừ ứng trong tháng
           </p>
           <p
             data-testid="vfin-monthly-kpi-advance-offset"
-            className="whitespace-nowrap font-mono text-xl font-semibold leading-tight tabular-nums text-foreground"
+            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.advance_offset_in_month_minor) : "—"}
           </p>
           <p className="text-xs text-muted">Khấu trừ từ số dư ứng (-)</p>
         </Card>
 
-        <Card className="grid h-full grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-4">
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
           <p className="text-xs font-medium leading-snug text-muted">Số dư cuối tháng</p>
           <p
             data-testid="vfin-monthly-kpi-closing-payable"
-            className="whitespace-nowrap font-mono text-xl font-semibold leading-tight tabular-nums text-foreground"
+            className="flex flex-wrap items-baseline gap-x-1.5 font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
-            Còn nợ: {totals ? formatVndMinor(totals.closing_payable_minor) : "—"}
+            <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
+            <span>{totals ? formatVndMinor(totals.closing_payable_minor) : "—"}</span>
           </p>
           <p
             data-testid="vfin-monthly-kpi-closing-advance"
@@ -1051,11 +1094,31 @@ export function VendorFinanceMonthlyReportView({
 
                             <td
                               data-label="Đầu tháng"
-                              className={`${REPORT_TD_CLASS} text-right font-mono tabular-nums whitespace-nowrap`}
+                              className={`${REPORT_TD_CLASS} text-right font-mono tabular-nums`}
                             >
-                              <span className="whitespace-nowrap">
-                                {formatSignedVndDelta(row.balance_before_month_minor)}
-                              </span>
+                              <div className="space-y-0.5">
+                                <p className="whitespace-nowrap">
+                                  {formatSignedVndDelta(row.balance_before_month_minor)}
+                                </p>
+                                {row.opening_payable_in_month_minor !== "0" ||
+                                row.opening_advance_in_month_minor !== "0" ? (
+                                  <p
+                                    data-testid="vfin-monthly-row-opening-in-month"
+                                    className="mt-0.5 text-[11px] text-muted whitespace-normal"
+                                  >
+                                    {[
+                                      row.opening_payable_in_month_minor !== "0"
+                                        ? `Mở nợ: +${formatVndMinor(row.opening_payable_in_month_minor)}`
+                                        : null,
+                                      row.opening_advance_in_month_minor !== "0"
+                                        ? `Mở ứng: -${formatVndMinor(row.opening_advance_in_month_minor)}`
+                                        : null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </p>
+                                ) : null}
+                              </div>
                             </td>
 
                             <td

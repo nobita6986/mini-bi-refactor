@@ -7137,3 +7137,55 @@ export function unlockRecordEntryDialogAfterLedgerReconciliation(
     },
   };
 }
+
+export interface MonthlyReportOpeningTotals {
+  opening_payable_minor: string;
+  opening_advance_minor: string;
+  opening_payable_in_month_minor: string;
+  opening_advance_in_month_minor: string;
+  has_in_month_opening: boolean;
+}
+
+/**
+ * Summarizes non-netted opening balances (carried from prior months plus
+ * in-month opening entries) and in-month opening totals across visible
+ * monthly report sub-ledger rows using exact BigInt arithmetic.
+ */
+export function summarizeMonthlyReportOpeningTotals(
+  rows: readonly Pick<
+    VendorFinanceMonthlyReportRow,
+    | "balance_before_month_minor"
+    | "opening_payable_in_month_minor"
+    | "opening_advance_in_month_minor"
+  >[],
+): MonthlyReportOpeningTotals {
+  let openingPayable = BigInt(0);
+  let openingAdvance = BigInt(0);
+  let openingPayableInMonth = BigInt(0);
+  let openingAdvanceInMonth = BigInt(0);
+
+  for (const row of rows) {
+    const balanceBefore = BigInt(row.balance_before_month_minor);
+    const inMonthPayable = BigInt(row.opening_payable_in_month_minor);
+    const inMonthAdvance = BigInt(row.opening_advance_in_month_minor);
+    const effectiveOpening = balanceBefore + inMonthPayable - inMonthAdvance;
+
+    if (effectiveOpening > BigInt(0)) {
+      openingPayable += effectiveOpening;
+    } else if (effectiveOpening < BigInt(0)) {
+      openingAdvance += -effectiveOpening;
+    }
+
+    openingPayableInMonth += inMonthPayable;
+    openingAdvanceInMonth += inMonthAdvance;
+  }
+
+  return {
+    opening_payable_minor: openingPayable.toString(),
+    opening_advance_minor: openingAdvance.toString(),
+    opening_payable_in_month_minor: openingPayableInMonth.toString(),
+    opening_advance_in_month_minor: openingAdvanceInMonth.toString(),
+    has_in_month_opening:
+      openingPayableInMonth !== BigInt(0) || openingAdvanceInMonth !== BigInt(0),
+  };
+}

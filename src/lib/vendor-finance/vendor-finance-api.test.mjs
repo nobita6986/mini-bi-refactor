@@ -2833,11 +2833,11 @@ test("VFIN-05 handlePostRecordVendorPaymentWithOffset: atomic combined payment +
   });
 });
 
-test("Monthly report XLSX builder: 2 worksheets, 15/19 columns, zero revenue column, signed VND numbers, formula neutralization, and empty fallback", async () => {
+test("Monthly report XLSX builder: 2 worksheets, 15/21 columns, zero revenue column, signed VND numbers, formula neutralization, and empty fallback", async () => {
   assert.equal(VENDOR_FINANCE_MONTHLY_SUMMARY_SHEET_NAME.length <= 31, true);
   assert.equal(VENDOR_FINANCE_MONTHLY_DETAIL_SHEET_NAME.length <= 31, true);
   assert.equal(VENDOR_FINANCE_MONTHLY_SUMMARY_EXPORT_COLUMNS.length, 15);
-  assert.equal(VENDOR_FINANCE_MONTHLY_DETAIL_EXPORT_COLUMNS.length, 19);
+  assert.equal(VENDOR_FINANCE_MONTHLY_DETAIL_EXPORT_COLUMNS.length, 21);
   assert.equal(vendorFinanceMonthlyReportExportFilename("2026-11"), "bao-cao-cong-no-vendor-2026-11.xlsx");
   assert.match(
     vendorFinanceMonthlyReportExportFilename("../bad"),
@@ -2985,7 +2985,7 @@ test("Monthly report XLSX builder: 2 worksheets, 15/19 columns, zero revenue col
         project_revenue_status: "MISSING_CANONICAL_SOURCE",
         project_revenue_minor: null,
         balance_before_month_minor: "2000000",
-        opening_payable_in_month_minor: "2000000",
+        opening_payable_in_month_minor: "6579716031",
         opening_advance_in_month_minor: "0",
         obligations_in_month_minor: "3000000",
         paid_in_month_minor: "0",
@@ -3064,6 +3064,8 @@ test("Monthly report XLSX builder: 2 worksheets, 15/19 columns, zero revenue col
     detailHeaders,
     VENDOR_FINANCE_MONTHLY_DETAIL_EXPORT_COLUMNS.map((c) => c.header),
   );
+  assert.equal(detailSheet.getRow(1).getCell(10).value, "Mở sổ nợ trong tháng (VND)");
+  assert.equal(detailSheet.getRow(1).getCell(11).value, "Mở sổ ứng trong tháng (VND)");
   assert.equal(detailHeaders.some((h) => h.toLowerCase().includes("doanh thu")), false);
 
   // Summary rows check: formula sanitization, labels, numeric cells
@@ -3101,20 +3103,32 @@ test("Monthly report XLSX builder: 2 worksheets, 15/19 columns, zero revenue col
   assert.equal(detRow1.getCell(8).value, "Thời vụ");
   assert.equal(detRow1.getCell(9).value, -2500000);
   assert.equal(detRow1.getCell(9).numFmt, "#,##0");
-  assert.equal(detRow1.getCell(10).value, 15000000);
-  assert.equal(detRow1.getCell(11).value, 13500000);
-  assert.equal(detRow1.getCell(12).value, 10000000);
-  assert.equal(detRow1.getCell(13).value, 3500000);
-  assert.equal(detRow1.getCell(14).value, 2000000);
-  assert.equal(detRow1.getCell(15).value, -1000000);
-  assert.equal(detRow1.getCell(15).numFmt, "#,##0");
-  assert.equal(detRow1.getCell(16).value, "Đang dư ứng");
-  assert.equal(detRow1.getCell(17).value, 0);
-  assert.equal(detRow1.getCell(18).value, 1000000);
-  assert.equal(detRow1.getCell(19).value, 3);
+  assert.equal(detRow1.getCell(10).value, 0);
+  assert.equal(typeof detRow1.getCell(10).value, "number");
+  assert.equal(detRow1.getCell(10).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(11).value, 2500000);
+  assert.equal(typeof detRow1.getCell(11).value, "number");
+  assert.equal(detRow1.getCell(11).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(12).value, 15000000);
+  assert.equal(detRow1.getCell(13).value, 13500000);
+  assert.equal(detRow1.getCell(14).value, 10000000);
+  assert.equal(detRow1.getCell(15).value, 3500000);
+  assert.equal(detRow1.getCell(16).value, 2000000);
+  assert.equal(detRow1.getCell(17).value, -1000000);
+  assert.equal(detRow1.getCell(17).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(18).value, "Đang dư ứng");
+  assert.equal(detRow1.getCell(19).value, 0);
+  assert.equal(detRow1.getCell(20).value, 1000000);
+  assert.equal(detRow1.getCell(21).value, 3);
 
-  assert.equal(detailSheet.getRow(3).getCell(16).value, "Còn phải trả");
-  assert.equal(detailSheet.getRow(4).getCell(16).value, "Cân bằng (0 ₫)");
+  assert.equal(detailSheet.getRow(3).getCell(10).value, 6579716031);
+  assert.equal(typeof detailSheet.getRow(3).getCell(10).value, "number");
+  assert.equal(detailSheet.getRow(3).getCell(10).numFmt, "#,##0");
+  assert.equal(detailSheet.getRow(3).getCell(11).value, 0);
+  assert.equal(typeof detailSheet.getRow(3).getCell(11).value, "number");
+  assert.equal(detailSheet.getRow(3).getCell(11).numFmt, "#,##0");
+  assert.equal(detailSheet.getRow(3).getCell(18).value, "Còn phải trả");
+  assert.equal(detailSheet.getRow(4).getCell(18).value, "Cân bằng (0 ₫)");
 
   // Empty-row fallback produces 2 valid header-only sheets
   const emptyBytes = await buildVendorFinanceMonthlyReportExportXlsx({
@@ -3201,7 +3215,7 @@ test("Monthly report XLSX builder preserves Excel 15-digit numeric precision vs 
         project_revenue_status: "MISSING_CANONICAL_SOURCE",
         project_revenue_minor: null,
         balance_before_month_minor: "-9007199254740993",
-        opening_payable_in_month_minor: "0",
+        opening_payable_in_month_minor: "1000000000000001",
         opening_advance_in_month_minor: "9007199254740993",
         obligations_in_month_minor: "999999999999999",
         paid_and_advanced_in_month_minor: "1000000000000001",
@@ -3231,8 +3245,8 @@ test("Monthly report XLSX builder preserves Excel 15-digit numeric precision vs 
         project_revenue_status: "MISSING_CANONICAL_SOURCE",
         project_revenue_minor: null,
         balance_before_month_minor: "-999999999999999",
-        opening_payable_in_month_minor: "0",
-        opening_advance_in_month_minor: "999999999999999",
+        opening_payable_in_month_minor: "999999999999999",
+        opening_advance_in_month_minor: "2500000",
         obligations_in_month_minor: "0",
         paid_and_advanced_in_month_minor: 1000000000000001,
         paid_in_month_minor: -1000000000000001,
@@ -3288,7 +3302,12 @@ test("Monthly report XLSX builder preserves Excel 15-digit numeric precision vs 
   assert.equal(typeof sumRow.getCell(13).value, "string");
   assert.equal(sumRow.getCell(13).numFmt, "@");
 
-  const detRow1 = wb.worksheets[1].getRow(2);
+  const boundaryDetailSheet = wb.worksheets[1];
+  assert.equal(boundaryDetailSheet.getRow(1).getCell(10).value, "Mở sổ nợ trong tháng (VND)");
+  assert.equal(boundaryDetailSheet.getRow(1).getCell(11).value, "Mở sổ ứng trong tháng (VND)");
+  assert.equal(boundaryDetailSheet.columnCount, 21);
+
+  const detRow1 = boundaryDetailSheet.getRow(2);
   assert.equal(detRow1.getCell(2).value, "'=1+1");
   assert.equal(detRow1.getCell(3).value, "'-Tên dự án công thức");
   assert.equal(detRow1.getCell(4).value, "'+Kế toán");
@@ -3299,40 +3318,52 @@ test("Monthly report XLSX builder preserves Excel 15-digit numeric precision vs 
   assert.equal(detRow1.getCell(9).value, "-9007199254740993");
   assert.equal(typeof detRow1.getCell(9).value, "string");
   assert.equal(detRow1.getCell(9).numFmt, "@");
-  assert.equal(detRow1.getCell(10).value, 999999999999999);
-  assert.equal(detRow1.getCell(10).numFmt, "#,##0");
-  assert.equal(detRow1.getCell(11).value, "1000000000000001");
+  assert.equal(detRow1.getCell(10).value, "1000000000000001");
+  assert.equal(typeof detRow1.getCell(10).value, "string");
+  assert.equal(detRow1.getCell(10).numFmt, "@");
+  assert.equal(detRow1.getCell(11).value, "9007199254740993");
   assert.equal(typeof detRow1.getCell(11).value, "string");
   assert.equal(detRow1.getCell(11).numFmt, "@");
-  assert.equal(detRow1.getCell(12).value, "1000000000000000");
-  assert.equal(detRow1.getCell(12).numFmt, "@");
-  assert.equal(detRow1.getCell(13).value, -2500000);
-  assert.equal(typeof detRow1.getCell(13).value, "number");
-  assert.equal(detRow1.getCell(13).numFmt, "#,##0");
-  assert.equal(detRow1.getCell(14).value, "-1000000000000000");
+  assert.equal(detRow1.getCell(12).value, 999999999999999);
+  assert.equal(detRow1.getCell(12).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(13).value, "1000000000000001");
+  assert.equal(typeof detRow1.getCell(13).value, "string");
+  assert.equal(detRow1.getCell(13).numFmt, "@");
+  assert.equal(detRow1.getCell(14).value, "1000000000000000");
   assert.equal(detRow1.getCell(14).numFmt, "@");
-  assert.equal(detRow1.getCell(15).value, "-9223372036854775808");
-  assert.equal(typeof detRow1.getCell(15).value, "string");
-  assert.equal(detRow1.getCell(15).numFmt, "@");
-  assert.equal(detRow1.getCell(17).value, "-1000000000000001");
+  assert.equal(detRow1.getCell(15).value, -2500000);
+  assert.equal(typeof detRow1.getCell(15).value, "number");
+  assert.equal(detRow1.getCell(15).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(16).value, "-1000000000000000");
+  assert.equal(detRow1.getCell(16).numFmt, "@");
+  assert.equal(detRow1.getCell(17).value, "-9223372036854775808");
+  assert.equal(typeof detRow1.getCell(17).value, "string");
   assert.equal(detRow1.getCell(17).numFmt, "@");
-  assert.equal(detRow1.getCell(18).value, 15000000);
-  assert.equal(detRow1.getCell(18).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(19).value, "-1000000000000001");
+  assert.equal(detRow1.getCell(19).numFmt, "@");
+  assert.equal(detRow1.getCell(20).value, 15000000);
+  assert.equal(detRow1.getCell(20).numFmt, "#,##0");
 
-  const detRow2 = wb.worksheets[1].getRow(3);
+  const detRow2 = boundaryDetailSheet.getRow(3);
   assert.equal(detRow2.getCell(9).value, -999999999999999);
   assert.equal(typeof detRow2.getCell(9).value, "number");
   assert.equal(detRow2.getCell(9).numFmt, "#,##0");
-  assert.equal(detRow2.getCell(10).value, 0);
+  assert.equal(detRow2.getCell(10).value, 999999999999999);
+  assert.equal(typeof detRow2.getCell(10).value, "number");
   assert.equal(detRow2.getCell(10).numFmt, "#,##0");
-  assert.equal(detRow2.getCell(11).value, "1000000000000001");
-  assert.equal(typeof detRow2.getCell(11).value, "string");
-  assert.equal(detRow2.getCell(11).numFmt, "@");
-  assert.equal(detRow2.getCell(12).value, "-1000000000000001");
-  assert.equal(typeof detRow2.getCell(12).value, "string");
-  assert.equal(detRow2.getCell(12).numFmt, "@");
-  assert.equal(detRow2.getCell(15).value, -2500000);
-  assert.equal(detRow2.getCell(15).numFmt, "#,##0");
+  assert.equal(detRow2.getCell(11).value, 2500000);
+  assert.equal(typeof detRow2.getCell(11).value, "number");
+  assert.equal(detRow2.getCell(11).numFmt, "#,##0");
+  assert.equal(detRow2.getCell(12).value, 0);
+  assert.equal(detRow2.getCell(12).numFmt, "#,##0");
+  assert.equal(detRow2.getCell(13).value, "1000000000000001");
+  assert.equal(typeof detRow2.getCell(13).value, "string");
+  assert.equal(detRow2.getCell(13).numFmt, "@");
+  assert.equal(detRow2.getCell(14).value, "-1000000000000001");
+  assert.equal(typeof detRow2.getCell(14).value, "string");
+  assert.equal(detRow2.getCell(14).numFmt, "@");
+  assert.equal(detRow2.getCell(17).value, -2500000);
+  assert.equal(detRow2.getCell(17).numFmt, "#,##0");
 });
 
 test("handleGetExportVendorFinanceMonthlyReport: filter pass-through, security headers, auth/query guards, PROJECT_SCOPED enforcement, and 503 failure handling", async () => {

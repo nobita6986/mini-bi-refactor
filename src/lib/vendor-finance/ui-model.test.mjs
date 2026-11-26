@@ -172,6 +172,7 @@ import {
   resolveVendorFinanceExportFilename,
   resolveVendorFinanceMonthlyReportExportFilename,
   shouldCommitSharedAdvanceLoadMore,
+  summarizeMonthlyReportOpeningTotals,
   unlockRecordEntryDialogAfterLedgerReconciliation,
   uploadEvidenceForCommittedTarget,
   validateEvidenceFilePreflight,
@@ -3477,4 +3478,110 @@ test("VFIN-04: Shared advance URL/request builders, redaction-aware envelope par
   );
   assert.equal(unlockedAfterReconcile.next_state.amount_input, "");
   assert.equal(unlockedAfterReconcile.next_state.offset_amount_input, "");
+});
+
+test("summarizeMonthlyReportOpeningTotals aggregates non-netted effective openings, REQ Nov case, flips from negative carry-in, BigInt > MAX_SAFE_INTEGER, and empty/zero cases", () => {
+  // 1. REQ Nov case totaling "6579716031"
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        balance_before_month_minor: "0",
+        opening_payable_in_month_minor: "4120500000",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        balance_before_month_minor: "0",
+        opening_payable_in_month_minor: "2459216031",
+        opening_advance_in_month_minor: "0",
+      },
+    ]),
+    {
+      opening_payable_minor: "6579716031",
+      opening_advance_minor: "0",
+      opening_payable_in_month_minor: "6579716031",
+      opening_advance_in_month_minor: "0",
+      has_in_month_opening: true,
+    },
+  );
+
+  // 2. Mixed payable + advance books (strictly non-netted) plus negative carry-in flipped positive by larger in-month opening payable
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        // -300_000 + 1_000_000 - 0 = +700_000 (payable)
+        balance_before_month_minor: "-300000",
+        opening_payable_in_month_minor: "1000000",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        // +500_000 + 0 - 0 = +500_000 (payable)
+        balance_before_month_minor: "500000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        // -200_000 + 0 - 400_000 = -600_000 (advance)
+        balance_before_month_minor: "-200000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "400000",
+      },
+    ]),
+    {
+      opening_payable_minor: "1200000",
+      opening_advance_minor: "600000",
+      opening_payable_in_month_minor: "1000000",
+      opening_advance_in_month_minor: "400000",
+      has_in_month_opening: true,
+    },
+  );
+
+  // 3. Large integers above Number.MAX_SAFE_INTEGER (exact BigInt sum)
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        balance_before_month_minor: "9007199254740993",
+        opening_payable_in_month_minor: "1000000000000001",
+        opening_advance_in_month_minor: "0",
+      },
+    ]),
+    {
+      opening_payable_minor: "10007199254740994",
+      opening_advance_minor: "0",
+      opening_payable_in_month_minor: "1000000000000001",
+      opening_advance_in_month_minor: "0",
+      has_in_month_opening: true,
+    },
+  );
+
+  // 4. Zero in-month opening (carried balances only) -> has_in_month_opening: false
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        balance_before_month_minor: "1500000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        balance_before_month_minor: "-250000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "0",
+      },
+    ]),
+    {
+      opening_payable_minor: "1500000",
+      opening_advance_minor: "250000",
+      opening_payable_in_month_minor: "0",
+      opening_advance_in_month_minor: "0",
+      has_in_month_opening: false,
+    },
+  );
+
+  // 5. Empty rows array
+  assert.deepEqual(summarizeMonthlyReportOpeningTotals([]), {
+    opening_payable_minor: "0",
+    opening_advance_minor: "0",
+    opening_payable_in_month_minor: "0",
+    opening_advance_in_month_minor: "0",
+    has_in_month_opening: false,
+  });
 });

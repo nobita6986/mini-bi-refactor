@@ -137,13 +137,19 @@ test("Vendor List & Detail views implement KPIs, debounced search, pagination, v
   assert.match(detailView, /vfin-subledger-switcher/);
 });
 
-test("VFIN-02: Monthly project debt report & Full Admin governance views enforce non-netted sub-ledgers, clean 4-card KPIs without unbacked revenue, monthly Excel export, and OCC/idempotent admin dialogs", () => {
+test("VFIN-02: Monthly project debt report & Full Admin governance views enforce non-netted sub-ledgers, clean 5-card KPIs (opening & in-month opening) without unbacked revenue, monthly Excel export, and OCC/idempotent admin dialogs", () => {
   assert.doesNotMatch(monthlyReportView, /PROJECT_REVENUE_MISSING_SOURCE_LABEL_VI/);
   assert.doesNotMatch(monthlyReportView, /PROJECT_REVENUE_MISSING_SOURCE_NOTE_VI/);
   assert.doesNotMatch(monthlyReportView, /vfin-project-revenue-missing-note/);
   assert.doesNotMatch(monthlyReportView, /vfin-kpi-revenue-missing/);
   assert.doesNotMatch(monthlyReportView, /Doanh thu dự án/);
   assert.doesNotMatch(monthlyReportView, /exceljs/);
+  assert.match(monthlyReportView, /summarizeMonthlyReportOpeningTotals\(/);
+  assert.match(monthlyReportView, /Đầu kỳ & mở sổ/);
+  assert.match(monthlyReportView, /vfin-monthly-kpi-opening-payable/);
+  assert.match(monthlyReportView, /vfin-monthly-kpi-opening-advance/);
+  assert.match(monthlyReportView, /vfin-monthly-kpi-opening-in-month/);
+  assert.match(monthlyReportView, /vfin-monthly-row-opening-in-month/);
   assert.match(monthlyReportView, /parseMonthlyReportEnvelope\(/);
   assert.match(monthlyReportView, /buildMonthlyReportUrl\(/);
   assert.match(monthlyReportView, /buildMonthlyReportExportUrl\(/);
@@ -418,7 +424,7 @@ test("Compact Vendor Finance UI: streamlined PageHeaders, aligned filter grids w
   assert.match(monthlyReportView, /<PageHeader\s+title="Báo cáo công nợ Vendor theo Dự án & Tháng"\s+actions=\{/);
   assert.doesNotMatch(monthlyReportView, /eyebrow="Báo cáo quản trị tài chính dự án"/);
   assert.match(monthlyReportView, /grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5/);
-  assert.match(monthlyReportView, /grid-cols-1 items-stretch gap-3 sm:grid-cols-2 xl:grid-cols-4/);
+  assert.doesNotMatch(monthlyReportView, /grid-cols-1 items-stretch gap-3 sm:grid-cols-2 xl:grid-cols-4/);
   assert.match(monthlyReportView, /whitespace-normal break-words/);
   assert.match(monthlyReportView, /whitespace-nowrap/);
   assert.match(monthlyReportView, /REPORT_TD_CLASS\s*=\s*`\$\{DATA_TABLE_TD_CLASS\}[^`]*align-middle`/);
