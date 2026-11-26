@@ -1,10 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  useRouter as readNextAppRouter,
-  useSearchParams,
-} from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -16,7 +13,6 @@ import {
   type PendingAssignmentCreateAttempt,
 } from "@/lib/work-reports/assignment-create-idempotency";
 import {
-  buildWorkReportAssignmentTabHref,
   parseWorkReportAssignmentTab,
   type WorkReportAssignmentSubTab,
 } from "@/lib/work-reports/assignment-tab-model";
@@ -27,14 +23,6 @@ import type {
   WorkReportEligibleGroupUser,
   WorkReportGroupItem,
 } from "@/lib/work-reports/assignment-repository";
-
-function getOptionalAppRouter() {
-  try {
-    return readNextAppRouter();
-  } catch {
-    return null;
-  }
-}
 
 type Template = {
   template_id: string;
@@ -63,13 +51,11 @@ export function AssignmentManager({
   initialSubView?: WorkReportAssignmentSubTab;
 } = {}) {
   const notify = useNotify();
-  const router = getOptionalAppRouter();
   const searchParams = useSearchParams();
-  const [localSubView, setLocalSubView] = useState<WorkReportAssignmentSubTab>(initialSubView);
   const activeSubView: WorkReportAssignmentSubTab =
     searchParams !== null
       ? parseWorkReportAssignmentTab(searchParams.get("tab"))
-      : localSubView;
+      : initialSubView;
   const [showCreateForm, setShowCreateForm] = useState(true);
   const [confirmingCreate, setConfirmingCreate] = useState(false);
   const [stateFilter, setStateFilter] = useState<"ACTIVE" | "PAUSED" | "REVOKED">("ACTIVE");
@@ -113,19 +99,6 @@ export function AssignmentManager({
   function resetCreateConfirmation() {
     if (busy || createInFlightRef.current) return;
     setConfirmingCreate(false);
-  }
-
-  function switchSubView(next: WorkReportAssignmentSubTab) {
-    if (next === activeSubView) return;
-    if (searchParams === null) {
-      setLocalSubView(next);
-    }
-    const href = buildWorkReportAssignmentTabHref(next);
-    if (router) {
-      router.push(href, { scroll: false });
-    } else if (typeof window !== "undefined" && window.history?.pushState) {
-      window.history.pushState(null, "", href);
-    }
   }
 
   const fetchGroupsPayload = useCallback(async (signal?: AbortSignal) => {
@@ -692,29 +665,8 @@ export function AssignmentManager({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant={activeSubView === "assignments" ? "primary" : "secondary"}
-            size="sm"
-            aria-pressed={activeSubView === "assignments"}
-            onClick={() => switchSubView("assignments")}
-          >
-            Đợt giao ({assignments.length})
-          </Button>
-          <Button
-            type="button"
-            variant={activeSubView === "groups" ? "primary" : "secondary"}
-            size="sm"
-            aria-pressed={activeSubView === "groups"}
-            onClick={() => switchSubView("groups")}
-          >
-            Nhóm nhận báo cáo ({groups.length})
-          </Button>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+      {(activeSubView === "assignments" && !showCreateForm) || activeSubView === "groups" ? (
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {activeSubView === "assignments" ? (
             <Button
               type="button"
@@ -722,11 +674,11 @@ export function AssignmentManager({
               disabled={busy}
               onClick={() => {
                 if (busy || createInFlightRef.current) return;
-                setShowCreateForm((prev) => !prev);
+                setShowCreateForm(true);
                 setConfirmingCreate(false);
               }}
             >
-              {showCreateForm ? "Thu gọn biểu mẫu" : "Tạo đợt giao"}
+              Mở biểu mẫu tạo đợt giao
             </Button>
           ) : (
             <Button type="button" variant="primary" disabled={groupBusy} onClick={openNewGroupDialog}>
@@ -734,7 +686,7 @@ export function AssignmentManager({
             </Button>
           )}
         </div>
-      </div>
+      ) : null}
 
       {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
 
@@ -743,6 +695,21 @@ export function AssignmentManager({
           <CardHeader
             title="Tạo đợt giao"
             description="Thiết lập mẫu báo cáo, đối tượng/nhóm nhận, chu kỳ và hạn nộp. Khi đợt giao có hiệu lực trong ngày, hệ thống tự động phát sinh ngay nghĩa vụ kỳ hiện tại cho nhân viên."
+            action={
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  if (busy || createInFlightRef.current) return;
+                  setShowCreateForm(false);
+                  setConfirmingCreate(false);
+                }}
+              >
+                Thu gọn biểu mẫu
+              </Button>
+            }
           />
 
           <form onSubmit={(event) => void create(event)} className="space-y-5">
@@ -1213,19 +1180,24 @@ export function AssignmentManager({
             </p>
           ) : (
             <div className="space-y-4">
-              <div className="relative overflow-hidden rounded-xl [border-radius:22px] border border-border/80 bg-surface shadow-[var(--shadow-card)]">
-                <div className="relative overflow-x-auto">
-                  <table className="r22-card-table w-full border-collapse text-left text-sm">
+              <div className="relative overflow-hidden rounded-[22px] border border-border/80 bg-surface shadow-[var(--shadow-card)]">
+                <div
+                  role="region"
+                  aria-labelledby="assignment-tracking-title"
+                  tabIndex={0}
+                  className="relative max-w-full overflow-x-auto overscroll-x-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                >
+                  <table className="r22-card-table w-full md:min-w-[1000px] lg:min-w-0 md:table-fixed border-collapse text-left text-sm">
                     <thead className="border-b border-border bg-surface-muted text-xs font-bold uppercase tracking-wider text-[var(--navy)]">
                       <tr>
-                        <th scope="col" className="px-3.5 py-3 text-left font-bold whitespace-nowrap">Mẫu báo cáo & Đối tượng nhận</th>
-                        <th scope="col" className="px-3.5 py-3 text-center font-bold whitespace-nowrap">Trạng thái</th>
-                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Đã nộp</th>
-                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Chưa hoàn thành</th>
-                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Quá hạn chưa nộp</th>
-                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Tổng nghĩa vụ</th>
-                        <th scope="col" className="px-2.5 py-3 text-center font-bold whitespace-nowrap">Miễn / huỷ</th>
-                        <th scope="col" className="px-3.5 py-3 text-right font-bold whitespace-nowrap">Thao tác</th>
+                        <th scope="col" className="px-2.5 py-2.5 text-left font-bold leading-tight min-w-0">Mẫu báo cáo & Đối tượng nhận</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-bold leading-tight md:w-[144px] whitespace-nowrap">Trạng thái</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-bold leading-tight md:w-[68px]">Đã nộp</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-bold leading-tight md:w-[92px]">Chưa hoàn thành</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-bold leading-tight md:w-[96px]">Quá hạn chưa nộp</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-bold leading-tight md:w-[84px]">Tổng nghĩa vụ</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-bold leading-tight md:w-[76px]">Miễn / huỷ</th>
+                        <th scope="col" className="px-2.5 py-2.5 text-right font-bold leading-tight md:w-[216px]">Thao tác</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1242,7 +1214,7 @@ export function AssignmentManager({
                               (isSelected ? "bg-[var(--selected-bg)]" : "")
                             }
                           >
-                            <td className="px-3.5 py-3 align-middle text-foreground" data-card-header="true">
+                            <td className="px-2.5 py-3 align-middle text-foreground min-w-0 break-words" data-card-header="true">
                               <div className="font-semibold text-[var(--navy)]">{assignment.template_name}</div>
                               <div className="mt-0.5 text-xs font-medium text-foreground/85">
                                 {targetKindLabel(assignment.target_kind)}: {assignment.target_label}
@@ -1251,7 +1223,7 @@ export function AssignmentManager({
                                   : ""}{" "}
                                 · Tần suất: {frequencyLabel(assignment.frequency)}
                               </div>
-                              <div className="mt-0.5 font-mono text-[11px] text-muted">
+                              <div className="mt-0.5 font-mono text-[11px] leading-relaxed text-muted">
                                 Từ {assignment.effective_from}
                                 {assignment.effective_to ? ` đến ${assignment.effective_to}` : " · không giới hạn ngày kết thúc"}
                                 {typeof assignment.due_time_local === "string"
@@ -1259,7 +1231,7 @@ export function AssignmentManager({
                                   : ""}
                               </div>
                             </td>
-                            <td className="px-3.5 py-3 align-middle text-center whitespace-nowrap" data-label="Trạng thái">
+                            <td className="px-2 py-3 align-middle text-center whitespace-nowrap" data-label="Trạng thái">
                               <StatusBadge
                                 dot
                                 tone={
@@ -1273,7 +1245,7 @@ export function AssignmentManager({
                                 {stateLabel(assignment.state)}
                               </StatusBadge>
                             </td>
-                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Đã nộp">
+                            <td className="px-2 py-3 align-middle text-center whitespace-nowrap" data-label="Đã nộp">
                               <span
                                 className={
                                   "inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 font-mono text-xs font-bold tabular-nums " +
@@ -1285,7 +1257,7 @@ export function AssignmentManager({
                                 {assignment.submitted_count}
                               </span>
                             </td>
-                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Chưa hoàn thành">
+                            <td className="px-2 py-3 align-middle text-center whitespace-nowrap" data-label="Chưa hoàn thành">
                               <span
                                 className={
                                   "inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 font-mono text-xs font-bold tabular-nums " +
@@ -1297,7 +1269,7 @@ export function AssignmentManager({
                                 {incompleteCount}
                               </span>
                             </td>
-                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Quá hạn chưa nộp">
+                            <td className="px-2 py-3 align-middle text-center whitespace-nowrap" data-label="Quá hạn chưa nộp">
                               <span
                                 className={
                                   "inline-flex min-w-8 items-center justify-center rounded-full border px-2 py-0.5 font-mono text-xs font-bold tabular-nums " +
@@ -1309,16 +1281,16 @@ export function AssignmentManager({
                                 {overdueCount}
                               </span>
                             </td>
-                            <td className="px-2.5 py-3 align-middle text-center whitespace-nowrap" data-label="Tổng nghĩa vụ">
+                            <td className="px-2 py-3 align-middle text-center whitespace-nowrap" data-label="Tổng nghĩa vụ">
                               <span className="inline-flex min-w-8 items-center justify-center rounded-full border border-primary/25 bg-[var(--selected-bg)] px-2.5 py-0.5 font-mono text-xs font-bold tabular-nums text-primary">
                                 {assignment.obligation_total}
                               </span>
                             </td>
-                            <td className="px-2.5 py-3 align-middle text-center font-mono text-xs tabular-nums text-muted whitespace-nowrap" data-label="Miễn / huỷ">
+                            <td className="px-2 py-3 align-middle text-center font-mono text-xs tabular-nums text-muted whitespace-nowrap" data-label="Miễn / huỷ">
                               {exemptCancelCount}
                             </td>
-                            <td className="px-3.5 py-3 align-middle text-right whitespace-nowrap" data-card-actions="true">
-                              <div className="inline-flex flex-wrap md:flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap">
+                            <td className="px-2.5 py-3 align-middle text-right" data-card-actions="true">
+                              <div className="flex flex-wrap items-center justify-end gap-1.5">
                                 <Button
                                   type="button"
                                   size="sm"

@@ -1,0 +1,22 @@
+/* Scope +1px header strip outer border (top edge + top-right 22px corner) strictly to leave-admin-profiles-table on desktop (>=768px). */
+@media (min-width: 768px) {
+  .leaveAdminProfilesTable::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: calc(2.25rem + 1.5px);
+    box-sizing: border-box;
+    pointer-events: none;
+    z-index: 2;
+    border-top-width: 1px;
+    border-top-style: solid;
+    border-top-color: inherit;
+    border-right-width: 1px;
+    border-right-style: solid;
+    border-right-color: inherit;
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+  }
+}

@@ -4453,3 +4453,170 @@ test("F-03 [Wizard Step 3]: 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT keeps Steps 1-
   stepper.unmount();
   pl.unmount();
 });
+
+test("PersonnelCatalogManager list hides Vị trí column, Edit hides Vị trí dropdown for non-null rows, and allows filling legacy NULL personnel_position", async () => {
+  const team = { team_id: GROUP_RECRUIT_ID, display_name: "Tổ Bắc", code: "BAC", active: true, version: 2, revision_count: 1 };
+  const tlRow = makePersonnel({
+    recruiter_id: RECRUITER_ID,
+    personnel_code: "tl.bac",
+    display_name: "Trưởng Nhóm Bắc",
+    personnel_position: "TEAM_LEADER",
+    version: 5,
+    team_names: ["Tổ Bắc"],
+  });
+  const nullPosRow = makePersonnel({
+    recruiter_id: RECRUITER_PAGE2_ID,
+    personnel_code: "legacy.null",
+    display_name: "Nhân Sự Legacy",
+    personnel_position: null,
+    version: 2,
+    team_names: ["Tổ Bắc"],
+  });
+
+  const pcm = mount(PersonnelCatalogManager, {
+    team,
+    teamReturnHref: `/admin/departments/${DEPT_ID}?view=teams`,
+    canManageAccountLinks: false,
+  });
+  await pcm.flush();
+
+  const listReq = findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?"));
+  respond(listReq, 200, {
+    ok: true,
+    list: {
+      authorization_date: AUTH_DATE,
+      include_inactive: false,
+      search: null,
+      page: 1,
+      page_size: 25,
+      total: 2,
+      personnel: [tlRow, nullPosRow],
+    },
+  });
+  await pcm.flush();
+
+  // Table header & rows do NOT contain Vị trí column
+  const thTexts = collectNodes(pcm.tree)
+    .filter((n) => n.type === "th")
+    .map((n) => textOf(n).trim());
+  assert.deepEqual(thTexts, ["Nhân sự", "Nhóm", "Trạng thái", "Hiệu lực HRP", "Thao tác"]);
+  assert.equal(
+    collectNodes(pcm.tree).some((n) => n.type === "td" && n.props?.["data-label"] === "Vị trí"),
+    false,
+  );
+
+  // Open Edit on TEAM_LEADER row -> #personnel-position dropdown is hidden, PATCH preserves "TEAM_LEADER"
+  const editButtons = collectNodes(pcm.tree).filter(
+    (n) => n.type === "button" && textOf(n).trim() === "Chỉnh sửa",
+  );
+  assert.equal(editButtons.length, 2);
+  editButtons[0].props.onClick();
+  await pcm.flush();
+
+  assert.equal(
+    collectNodes(pcm.tree).some((n) => n.type === "select" && n.props?.id === "personnel-position"),
+    false,
+  );
+  findNode(pcm, (n) => n.props?.id === "personnel-name").props.onChange("Trưởng Nhóm Bắc Mới");
+  await pcm.flush();
+  findNode(
+    pcm,
+    (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "personnel-name"),
+  ).props.onSubmit({ preventDefault() {} });
+  await pcm.flush();
+
+  const patchReq = findLastRequest((r) => r.method === "PATCH" && r.url === `/api/admin/catalog/personnel/${RECRUITER_ID}`);
+  const patchBody = JSON.parse(patchReq.options.body);
+  assert.equal(patchBody.display_name, "Trưởng Nhóm Bắc Mới");
+  assert.equal(patchBody.personnel_code, "tl.bac");
+  assert.equal(patchBody.personnel_position, "TEAM_LEADER");
+  assert.equal(patchBody.expected_version, 5);
+
+  respond(patchReq, 200, {
+    ok: true,
+    personnel: {
+      recruiter_id: RECRUITER_ID,
+      display_name: "Trưởng Nhóm Bắc Mới",
+      personnel_code: "tl.bac",
+      personnel_position: "TEAM_LEADER",
+      active: true,
+      version: 6,
+      revision_id: REVISION_ID,
+    },
+  });
+  await pcm.flush();
+
+  // Reloaded list with legacy NULL row -> (a) Edit shows #personnel-position with empty initial value "" + legacy/TL explanation
+  const reloadReq = findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?"));
+  respond(reloadReq, 200, {
+    ok: true,
+    list: {
+      authorization_date: AUTH_DATE,
+      include_inactive: false,
+      search: null,
+      page: 1,
+      page_size: 25,
+      total: 1,
+      personnel: [nullPosRow],
+    },
+  });
+  await pcm.flush();
+
+  const reqCountBeforeNullEdit = requests.length;
+  findButton(pcm, "Chỉnh sửa").props.onClick();
+  await pcm.flush();
+  const posSelect = findNode(pcm, (n) => n.type === "select" && n.props?.id === "personnel-position");
+  assert.equal(posSelect.props.value, "");
+  assert.ok(
+    textOf(pcm.tree).includes(
+      "Chỉ hiển thị cho hồ sơ cũ chưa có vị trí để bổ sung khi lưu. Quyền Trưởng nhóm được quản lý ở mục bổ nhiệm Trưởng nhóm.",
+    ),
+  );
+
+  // (b) Submitting without choosing a position fails client-side without sending PATCH
+  findNode(
+    pcm,
+    (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "personnel-name"),
+  ).props.onSubmit({ preventDefault() {} });
+  await pcm.flush();
+  assert.equal(requests.length, reqCountBeforeNullEdit);
+  assert.ok(textOf(pcm.tree).includes("Vị trí nhân sự không hợp lệ."));
+
+  // (c) Changing display name + actively selecting "STAFF" sends PATCH and closes dialog cleanly on 200 OK
+  findNode(pcm, (n) => n.props?.id === "personnel-name").props.onChange("Nhân Sự Legacy Đã Sửa");
+  findNode(pcm, (n) => n.type === "select" && n.props?.id === "personnel-position").props.onChange({
+    currentTarget: { value: "STAFF" },
+  });
+  await pcm.flush();
+  findNode(
+    pcm,
+    (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "personnel-name"),
+  ).props.onSubmit({ preventDefault() {} });
+  await pcm.flush();
+
+  const legacyPatchReq = findLastRequest(
+    (r) => r.method === "PATCH" && r.url === `/api/admin/catalog/personnel/${RECRUITER_PAGE2_ID}`,
+  );
+  const legacyPatchBody = JSON.parse(legacyPatchReq.options.body);
+  assert.equal(legacyPatchBody.display_name, "Nhân Sự Legacy Đã Sửa");
+  assert.equal(legacyPatchBody.personnel_code, "legacy.null");
+  assert.equal(legacyPatchBody.personnel_position, "STAFF");
+  assert.equal(legacyPatchBody.expected_version, 2);
+
+  respond(legacyPatchReq, 200, {
+    ok: true,
+    personnel: {
+      recruiter_id: RECRUITER_PAGE2_ID,
+      display_name: "Nhân Sự Legacy Đã Sửa",
+      personnel_code: "legacy.null",
+      personnel_position: "STAFF",
+      active: true,
+      version: 3,
+      revision_id: REVISION_ID,
+    },
+  });
+  await pcm.flush();
+  assert.equal(findNode(pcm, (n) => n.type === dialogStub.Root).props.open, false);
+
+  pcm.unmount();
+});

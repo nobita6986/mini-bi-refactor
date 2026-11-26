@@ -24,6 +24,7 @@ import { useNotify } from "@/components/ui/notify-provider";
 import { OffsetPager } from "@/components/ui/offset-pager";
 import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import { StatusBanner } from "@/components/ui/status-banner";
+import styles from "./leave-admin-profiles-table.module.css";
 import type { LeaveAdminAccountStatusFilter } from "@/lib/leave/leave-contract";
 import {
   LEAVE_EMPLOYMENT_STATUSES,
@@ -2341,6 +2342,7 @@ export function LeaveManagementWorkspace({
 
                   <DataTableContainer
                     dataTestId="leave-admin-profiles-table"
+                    className={styles.leaveAdminProfilesTable}
                     footer={
                       <OffsetPager
                         page={adminPage}

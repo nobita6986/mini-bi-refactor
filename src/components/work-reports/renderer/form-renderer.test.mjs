@@ -63,6 +63,36 @@ test("assignment manager provides Tạo đợt giao form, pre-confirmation summa
   assert.match(source, /Các báo cáo đã nộp và toàn bộ lịch sử bài nộp được giữ nguyên, không bị xóa/);
 });
 
+test("assignment manager removes duplicate secondary nav buttons, moves collapse toggle into CardHeader, and keeps responsive non-clipping table layout", async () => {
+  const source = await readFile(assignmentManagerPath, "utf8");
+  const cardSource = await readFile(new URL("../../ui/card.tsx", import.meta.url), "utf8");
+
+  // CardHeader accepts optional action without breaking existing callers
+  assert.match(cardSource, /action\?: ReactNode/);
+
+  // Duplicate secondary nav buttons removed; URL->state sync preserved
+  assert.doesNotMatch(source, /Đợt giao \(\{assignments\.length\}\)/);
+  assert.doesNotMatch(source, /Nhóm nhận báo cáo \(\{groups\.length\}\)/);
+  assert.match(source, /parseWorkReportAssignmentTab\(searchParams\.get\("tab"\)\)/);
+
+  // Collapse toggle lives in Tạo đợt giao CardHeader with busy lock; collapsed state offers clear reopen button; groups subview preserves Tạo nhóm nhận báo cáo
+  assert.match(source, /<CardHeader[\s\S]*title="Tạo đợt giao"[\s\S]*action=\{[\s\S]*disabled=\{busy\}[\s\S]*Thu gọn biểu mẫu/);
+  assert.match(source, /!showCreateForm[\s\S]*disabled=\{busy\}[\s\S]*Mở biểu mẫu tạo đợt giao/);
+  assert.match(source, /Tạo nhóm nhận báo cáo/);
+  assert.match(source, /<fieldset disabled=\{busy\}/);
+  assert.match(source, /Chỉnh sửa lại/);
+
+  // Table wrapper confines horizontal overflow cleanly and action buttons wrap instead of clipping
+  assert.match(
+    source,
+    /role="region"[\s\S]*aria-labelledby="assignment-tracking-title"[\s\S]*tabIndex=\{0\}[\s\S]*max-w-full overflow-x-auto overscroll-x-contain/,
+  );
+  assert.match(source, /<th scope="col" className="px-2\.5 py-2\.5 text-left font-bold leading-tight min-w-0">Mẫu báo cáo & Đối tượng nhận<\/th>/);
+  assert.match(source, /data-card-actions="true"[\s\S]*<div className="flex flex-wrap items-center justify-end gap-1\.5">/);
+  assert.doesNotMatch(source, /md:flex-nowrap/);
+  assert.doesNotMatch(source, /data-card-actions="true"[^>]*whitespace-nowrap/);
+});
+
 test("assignment page resolves the request actor and requires report_assign scope server-side (including delegated read-only probe)", async () => {
   const source = await readFile(assignmentPagePath, "utf8");
   assert.match(source, /resolveActorForRequest\(\)/);

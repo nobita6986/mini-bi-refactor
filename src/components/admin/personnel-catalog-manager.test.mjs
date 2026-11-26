@@ -94,3 +94,17 @@ test("Full Admin can link an existing HRP personnel profile to an existing acces
   assert.match(source, /error:\s*outcome\.message/);
   assert.match(source, /Xác nhận liên kết/);
 });
+
+test("edit dialog hides Vị trí dropdown for non-null rows, shows it for legacy null rows, and list hides Vị trí column", () => {
+  assert.doesNotMatch(source, />Vị trí<\/th>/);
+  assert.doesNotMatch(source, /data-label="Vị trí"/);
+  assert.match(
+    source,
+    /dialog\?\.kind === "create" \|\|\s*\(dialog\?\.kind === "edit" && dialog\.personnel\.personnel_position === null\)\s*\?\s*\(\s*<label[^>]*htmlFor="personnel-position"/,
+  );
+  assert.match(
+    source,
+    /Chỉ hiển thị cho hồ sơ cũ chưa có vị trí để bổ sung khi lưu\. Quyền Trưởng nhóm được quản lý ở mục bổ nhiệm Trưởng nhóm\./,
+  );
+  assert.match(source, /personnelPosition:\s*dialog\.personnel\.personnel_position \?\? form\.personnelPosition/);
+});

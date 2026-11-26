@@ -46,7 +46,6 @@ import {
   WORKER_PROPOSE_TARGET_LABELS,
   WORKER_PROVIDER_TYPES,
   applyPage,
-  bankAccountSummary,
   canSelectQuickOffboardingWorker,
   buildDirectEditEntryFieldProposal,
   buildDirectEditPaymentPatch,
@@ -1311,7 +1310,6 @@ function WorkerTable({
             const cta = proposeCta(row);
             const canDirectEdit = row.allowed_actions.direct_edit;
             const canQuickOffboard = canSelectQuickOffboardingWorker(row);
-            const bank = bankAccountSummary(row.payment);
             const statusTone = row.employment_status === "ON"
               ? "success"
               : row.employment_status === "UNCONFIRMED"
@@ -1352,13 +1350,6 @@ function WorkerTable({
                   <StatusBadge tone={statusTone} dot>
                     {workerStatusLabel(row.employment_status)}
                   </StatusBadge>
-                  {bank ? (
-                    <div className="mt-1 text-xs text-muted line-clamp-1">
-                      <span className="font-medium">{BANK_ACCOUNT_SECTION_LABEL}: </span>
-                      {(bank.accountNumber ?? "chưa có") + " · " + (bank.bankId ?? "chưa có") +
-                        " · " + (bank.accountHolder ?? "chưa có")}
-                    </div>
-                  ) : null}
                 </td>
                 <td className={DATA_TABLE_TD_CLASS} data-label="Loại hình">
                   {row.labor_type_display}
