@@ -73,6 +73,7 @@ test("R2.1 Zero-Orphan Test Manifest: every *.test.mjs file in src/ and scripts/
     "scripts/wp10-6-immediate-work-report-assignment-db.test.mjs",
     "scripts/wp10-7-1b-drop-leave-department-approvers-db.test.mjs",
     "scripts/hf-block-move-unassign-team-leader-concurrency.test.mjs",
+    "scripts/wp10-6-pause-windows-concurrency.test.mjs",
   ]);
 
   const summary = assertZeroOrphanTests({
