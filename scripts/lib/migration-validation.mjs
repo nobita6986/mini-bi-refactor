@@ -1671,6 +1671,38 @@ export function createWp1072bArchiveGuard(expected) {
   };
 }
 
+/**
+ * Create a `beforeApplyMigration` hook that fails closed whenever #251 is
+ * pending and the caller did not supply explicit archive parity verification.
+ */
+export function createWp1072bMissingArchiveGuard() {
+  return async function rejectMissingWp1072bArchive({ migration }) {
+    if (migration?.name !== WP10_7_2B_MIGRATION_NAME) {
+      return;
+    }
+    throw new Error(
+      `WP10-7-2B migration (${WP10_7_2B_MIGRATION_NAME}) requires verified archive parity before dropping public.leave_employee_profiles.unit_kind. ` +
+        "Re-run scripts/apply-migrations.mjs with --verify-wp10-7-2b-archive <csvPath> --wp10-7-2b-expected-count <n> --wp10-7-2b-expected-sha256 <hex>.",
+    );
+  };
+}
+
+async function assertDirectWp1072bApplyAllowedInTx(client) {
+  await client.query(
+    "LOCK TABLE public.leave_employee_profiles IN ACCESS EXCLUSIVE MODE;",
+  );
+  const { rows } = await client.query(
+    "select count(*)::bigint as row_count from public.leave_employee_profiles",
+  );
+  const liveCount = Number(rows?.[0]?.row_count ?? 0);
+  if (liveCount > 0) {
+    throw new Error(
+      `WP10-7-2B migration (${WP10_7_2B_MIGRATION_NAME}) requires verified archive parity when public.leave_employee_profiles has existing rows (live row_count=${liveCount}). ` +
+        "Provide createWp1072bArchiveGuard(...) or run scripts/apply-migrations.mjs with --verify-wp10-7-2b-archive <csvPath> --wp10-7-2b-expected-count <n> --wp10-7-2b-expected-sha256 <hex>.",
+    );
+  }
+}
+
 async function defaultRunMigrationInTransaction(client, runMigrationBody) {
   await client.query("begin");
   try {
@@ -1761,6 +1793,8 @@ export async function runMigrationApply({
       await txRunner(client, async () => {
         if (typeof beforeApplyMigration === "function") {
           await beforeApplyMigration({ client, migration });
+        } else if (migration.name === WP10_7_2B_MIGRATION_NAME) {
+          await assertDirectWp1072bApplyAllowedInTx(client);
         }
         await client.query(migrationSqlForTransaction(migration.sql));
         await client.query(

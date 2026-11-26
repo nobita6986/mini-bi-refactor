@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   createWp1072bArchiveGuard,
+  createWp1072bMissingArchiveGuard,
   extractS0T1CAllowlistSignatures,
   migrationChecksum,
   migrationSqlForTransaction,
@@ -756,4 +757,126 @@ test("scripts/apply-migrations.mjs CLI accepts pnpm '--' separator with --offlin
   );
   assert.equal(res.status, 0, res.stderr || res.stdout);
   assert.match(res.stdout, /OFFLINE VALIDATION/);
+});
+
+test("createWp1072bMissingArchiveGuard and direct runMigrationApply fail closed when #251 is pending without archive verification", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "migration-251-default-gate-"));
+  try {
+    const preMigration = "20261126190000_wp10_7_2a_stop_leave_profile_unit_kind_mirror.sql";
+    const preSql = "select 250;\n";
+    const m251Sql = "begin;\nselect 251;\ncommit;\n";
+    await writeFile(path.join(directory, preMigration), preSql);
+    await writeFile(path.join(directory, WP10_7_2B_MIGRATION_NAME), m251Sql);
+
+    // 1. Default CLI guard (`createWp1072bMissingArchiveGuard`): blocks pending #251 before DDL even on 0-row DB, allows #250, skips when #251 already recorded
+    {
+      const ops = [];
+      let rolledBack = false;
+      await assert.rejects(
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: createWp1072bMissingArchiveGuard(),
+          log() {},
+          errorLog() {},
+        }),
+        /requires verified archive parity before dropping public\.leave_employee_profiles\.unit_kind/,
+      );
+      assert.equal(rolledBack, true);
+      assert.equal(ops.some((o) => o.sql.includes("select 251;")), false);
+      assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+    }
+
+    // 2. When #251 is already in schema_migrations with matching checksum, default missing-archive guard is NOT invoked and #251 is skipped cleanly
+    {
+      const ops = [];
+      const res = await runMigrationApply({
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql, params) {
+            ops.push({ sql, params });
+            if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+            if (sql === "select version, checksum from public.schema_migrations") {
+              return {
+                rows: [
+                  { version: preMigration, checksum: migrationChecksum(preSql) },
+                  { version: WP10_7_2B_MIGRATION_NAME, checksum: migrationChecksum(m251Sql) },
+                ],
+              };
+            }
+            return { rows: [] };
+          },
+          async end() {},
+        }),
+        beforeApplyMigration: createWp1072bMissingArchiveGuard(),
+        log() {},
+        errorLog() {},
+      });
+      assert.equal(res.appliedCount, 0);
+      assert.equal(res.skippedCount, 2);
+      assert.equal(ops.some((o) => o.sql === "begin"), false);
+    }
+
+    // 3. Direct library call without beforeApplyMigration: blocks populated leave_employee_profiles before DDL, allows 0-row fresh bootstrap DB
+    for (const [liveCount, shouldReject] of [[5, true], [0, false]]) {
+      const ops = [];
+      let rolledBack = false;
+      const exec = () =>
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              if (sql.includes("from public.leave_employee_profiles")) {
+                return { rows: [{ row_count: String(liveCount) }] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          log() {},
+          errorLog() {},
+        });
+      if (shouldReject) {
+        await assert.rejects(exec, /requires verified archive parity when public\.leave_employee_profiles has existing rows/);
+        assert.equal(rolledBack, true);
+        assert.equal(ops.some((o) => o.sql.includes("select 251;")), false);
+        assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+      } else {
+        const res = await exec();
+        assert.equal(res.appliedCount, 1);
+        assert.ok(ops.some((o) => o.sql.includes("select 251;")));
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

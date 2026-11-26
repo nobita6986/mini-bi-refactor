@@ -42,7 +42,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -345,8 +345,8 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     );
     started = true;
 
-    const setup = await connect(port, "wp10-7-2b-setup");
-    const observer = await connect(port, "wp10-7-2b-observer");
+    let setup = await connect(port, "wp10-7-2b-setup");
+    let observer = await connect(port, "wp10-7-2b-observer");
     clients.push(setup, observer);
 
     await setup.query(
@@ -802,8 +802,8 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     // -------------------------------------------------------------------------
     // 3. Atomic Rollback + Non-Public Static/Dynamic Failure Gates + 2-Conn TOCTOU
     // -------------------------------------------------------------------------
-    async function assertUnitKindIntact(label, expectedManifest = archiveManifest) {
-      const { rows: [col] } = await observer.query(
+    async function assertUnitKindIntact(label, expectedManifest = archiveManifest, queryClient = observer) {
+      const { rows: [col] } = await queryClient.query(
         `select a.attnotnull
            from pg_catalog.pg_attribute a
           where a.attrelid = 'public.leave_employee_profiles'::pg_catalog.regclass
@@ -812,7 +812,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
             and not a.attisdropped`,
       );
       assert.equal(col?.attnotnull, true, `${label}: unit_kind column (attnotnull=true) must remain intact`);
-      const { rows: [trg] } = await observer.query(
+      const { rows: [trg] } = await queryClient.query(
         `select 1 as ok
            from pg_catalog.pg_trigger t
           where t.tgrelid = 'public.leave_employee_profiles'::pg_catalog.regclass
@@ -820,16 +820,16 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
             and not t.tgisinternal`,
       );
       assert.ok(trg, `${label}: guard trigger must remain intact`);
-      const { rows: [fn] } = await observer.query(
+      const { rows: [fn] } = await queryClient.query(
         "select pg_catalog.to_regprocedure('public.org_department__internal_guard_leave_profile()') as oid",
       );
       assert.ok(fn.oid !== null, `${label}: guard helper function must remain intact`);
-      const { rows: mig251Rows } = await observer.query(
+      const { rows: mig251Rows } = await queryClient.query(
         "select 1 from public.schema_migrations where version = $1",
         [WP10_7_2B_MIGRATION_NAME],
       );
       assert.equal(mig251Rows.length, 0, `${label}: schema_migrations must NOT record #251`);
-      const currentManifest = await computeDbUnitKindManifest(observer);
+      const currentManifest = await computeDbUnitKindManifest(queryClient);
       assert.equal(currentManifest.rowCount, expectedManifest.rowCount, `${label}: row count must stay intact`);
       assert.equal(currentManifest.canonicalSha256, expectedManifest.canonicalSha256, `${label}: stored values must stay intact`);
     }
@@ -988,7 +988,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     //   Out-of-tx source check already passed on 11 rows; before connA acquires the table lock,
     //   connB inserts a brand-new leave profile -> runMigrationApply on connA MUST reject on parity mismatch,
     //   roll back cleanly, preserve unit_kind/trigger/guard/new profile, and record 0 #251 schema_migrations row.
-    const connB = await connect(port, "wp10-7-2b-connB");
+    let connB = await connect(port, "wp10-7-2b-connB");
     clients.push(connB);
     const toctouInsertFp = sha256(JSON.stringify({
       op: "UPSERT_EMPLOYEE_PROFILE",
@@ -1068,8 +1068,162 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     const archivedByUserId = new Map(archivedEntries.map((e) => [e.app_user_id, e.unit_kind]));
 
     // -------------------------------------------------------------------------
-    // 4. Clean Apply #251 via runMigrationApply + ACCESS EXCLUSIVE Lock Proof + Postconditions
+    // 3b. Default Path (`scripts/apply-migrations.mjs` / `runMigrationApply` without archive):
+    //     Must preserve --offline/--dry-run, FAIL CLOSED before DDL on populated #250 DB without archive,
+    //     succeed with verified archive flags, and SKIP #251 by checksum on subsequent normal runs.
     // -------------------------------------------------------------------------
+    const writeTmpSupabaseConfig = async (fileName, dbName) => {
+      const cfgPath = path.join(tmpDir, fileName);
+      await writeFile(
+        cfgPath,
+        [
+          "NEXT_PUBLIC_SUPABASE_URL=https://wp10-7-2b-local.supabase.co",
+          "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_local_test",
+          "SUPABASE_SECRET_KEY=sb_secret_local_test",
+          `SUPABASE_DB_URL=postgresql://postgres@127.0.0.1:${port}/${dbName}?sslmode=disable`,
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      return cfgPath;
+    };
+    const runApplyCli = (args, cfgPath = null) => {
+      const cliEnv = {
+        ...process.env,
+        SUPABASE_DB_SSL_MODE: "disable",
+        SUPABASE_SECRET_KEY: "sb_secret_local_test",
+        ...(cfgPath ? { SUPABASE_CONFIG_FILE: cfgPath } : {}),
+      };
+      delete cliEnv.SUPABASE_DB_URL;
+      delete cliEnv.SUPABASE_POOLER_HOST;
+      delete cliEnv.SUPABASE_POOLER_PORT;
+      return spawnSync(process.execPath, [path.join(ROOT, "scripts", "apply-migrations.mjs"), ...args], {
+        cwd: ROOT,
+        env: cliEnv,
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 60000,
+      });
+    };
+
+    const mainCfgPath = await writeTmpSupabaseConfig("supabase-main.config", "postgres");
+    const cliDbCfgPath = await writeTmpSupabaseConfig("supabase-cli-e2e.config", "wp1072b_cli_e2e");
+
+    // 1. Offline & Dry-run before #251
+    const offlineCli = runApplyCli(["--", "--offline"]);
+    assert.equal(offlineCli.status, 0, offlineCli.stderr || offlineCli.stdout);
+    assert.match(offlineCli.stdout, /OFFLINE VALIDATION/);
+
+    const dryRunPreCli = runApplyCli(["--dry-run"], mainCfgPath);
+    assert.equal(dryRunPreCli.status, 0, dryRunPreCli.stderr || dryRunPreCli.stdout);
+    assert.match(dryRunPreCli.stdout, new RegExp(`PENDING ${WP10_7_2B_MIGRATION_NAME.replaceAll(".", "\\.")}`));
+
+    // 2. Direct runMigrationApply without beforeApplyMigration on populated #250 DB -> MUST fail before DDL
+    await assert.rejects(
+      () =>
+        runMigrationApply({
+          directory: MIGRATION_DIR,
+          loadConfig: async () => ({
+            databaseUrl: `postgresql://postgres@127.0.0.1:${port}/postgres`,
+            projectRef: "local",
+          }),
+          createClient: (databaseUrl) =>
+            new Client({
+              connectionString: databaseUrl,
+              application_name: "wp10-7-2b-direct-noguard",
+              connectionTimeoutMillis: 5000,
+            }),
+          log: () => {},
+          errorLog: () => {},
+        }),
+      /requires verified archive parity when public\.leave_employee_profiles has existing rows/i,
+    );
+    await assertUnitKindIntact("Direct runMigrationApply without archive", postToctouManifest);
+
+    // 3. Clone populated #250 DB (`wp1072b_cli_e2e`) in <0.5s to verify end-to-end CLI default -> guarded apply -> normal re-run
+    await observer.end();
+    await connB.end();
+    await setup.end();
+    const adminTpl = await connect(port, "wp10-7-2b-tpl", "template1");
+    await adminTpl.query("create database wp1072b_cli_e2e template postgres");
+    await adminTpl.end();
+    setup = await connect(port, "wp10-7-2b-setup");
+    observer = await connect(port, "wp10-7-2b-observer");
+    connB = await connect(port, "wp10-7-2b-connB");
+    clients.push(setup, observer, connB);
+
+    const cliObserver = await connect(port, "wp10-7-2b-cli-observer", "wp1072b_cli_e2e");
+    clients.push(cliObserver);
+
+    // 3a. Default CLI without archive flags on populated #250 DB -> MUST fail closed and leave DB/column/trigger/rows/ledger intact
+    const cliDefaultNoArchive = runApplyCli([], cliDbCfgPath);
+    assert.notEqual(
+      cliDefaultNoArchive.status,
+      0,
+      `Default CLI without archive must fail closed on pending #251:\n${cliDefaultNoArchive.stdout}`,
+    );
+    assert.match(
+      cliDefaultNoArchive.stderr,
+      /requires verified archive parity before dropping public\.leave_employee_profiles\.unit_kind/,
+    );
+    await assertUnitKindIntact("CLI default without archive on wp1072b_cli_e2e", postToctouManifest, cliObserver);
+
+    // 3b. Guarded CLI apply with verified archive CSV + expected count + expected sha256 -> MUST apply cleanly
+    const cliGuardedApply = runApplyCli(
+      [
+        "--verify-wp10-7-2b-archive",
+        freshArchiveCsvPath,
+        "--wp10-7-2b-expected-count",
+        String(freshArchiveParity.rowCount),
+        "--wp10-7-2b-expected-sha256",
+        freshArchiveParity.canonicalSha256,
+      ],
+      cliDbCfgPath,
+    );
+    assert.equal(
+      cliGuardedApply.status,
+      0,
+      `Guarded CLI apply failed:\n${cliGuardedApply.stderr || cliGuardedApply.stdout}`,
+    );
+    assert.match(
+      cliGuardedApply.stdout,
+      new RegExp(`APPLY\\s+${WP10_7_2B_MIGRATION_NAME.replaceAll(".", "\\.")}`),
+    );
+    const { rows: [cliMig251] } = await cliObserver.query(
+      "select version, checksum from public.schema_migrations where version = $1",
+      [WP10_7_2B_MIGRATION_NAME],
+    );
+    assert.ok(cliMig251, "CLI guarded apply must record #251 in public.schema_migrations");
+    assert.equal(cliMig251.checksum, migrationChecksum(wp1072bSql));
+    const { rows: cliColsAfter } = await cliObserver.query(
+      `select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'leave_employee_profiles' and column_name = 'unit_kind'`,
+    );
+    assert.equal(cliColsAfter.length, 0, "CLI guarded apply must drop unit_kind column");
+
+    // 3c. Subsequent normal default CLI run (no archive flags) -> MUST skip #251 by checksum and exit 0
+    const cliNormalRerun = runApplyCli([], cliDbCfgPath);
+    assert.equal(
+      cliNormalRerun.status,
+      0,
+      `Normal default CLI re-run after #251 failed:\n${cliNormalRerun.stderr || cliNormalRerun.stdout}`,
+    );
+    assert.match(
+      cliNormalRerun.stdout,
+      new RegExp(`SKIP\\s+${WP10_7_2B_MIGRATION_NAME.replaceAll(".", "\\.")}`),
+    );
+    assert.match(cliNormalRerun.stdout, /0 áp dụng mới, 251 bỏ qua/);
+
+    const cliDryRunAfter = runApplyCli(["--dry-run"], cliDbCfgPath);
+    assert.equal(cliDryRunAfter.status, 0, cliDryRunAfter.stderr || cliDryRunAfter.stdout);
+    assert.match(
+      cliDryRunAfter.stdout,
+      new RegExp(`APPLIED ${WP10_7_2B_MIGRATION_NAME.replaceAll(".", "\\.")}`),
+    );
+    await cliObserver.end();
+
+    // -------------------------------------------------------------------------
+    // 4. Clean Apply #251 via runMigrationApply + ACCESS EXCLUSIVE Lock Proof + Postconditions
     let connBConcurrentUpsert = null;
     const applyResult = await runApply251ViaHelper({
       parityExpectation: freshArchiveParity,

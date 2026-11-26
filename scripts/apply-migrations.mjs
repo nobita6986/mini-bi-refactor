@@ -23,6 +23,7 @@ import pg from "pg";
 import { loadSupabaseConfig } from "./lib/load-supabase-config.mjs";
 import {
   createWp1072bArchiveGuard,
+  createWp1072bMissingArchiveGuard,
   loadLeaveProfileUnitKindArchiveCsv,
   runMigrationApply,
   runMigrationValidation,
@@ -202,6 +203,8 @@ async function main() {
       expectedRowCount: wp1072bArchive.expectedRowCount,
       expectedCanonicalSha256: wp1072bArchive.expectedCanonicalSha256,
     });
+  } else {
+    beforeApplyMigration = createWp1072bMissingArchiveGuard();
   }
 
   await runMigrationApply({
