@@ -12,15 +12,22 @@
 --      - RLS enabled + forced; REVOKE ALL from PUBLIC, anon, authenticated, service_role.
 --   2. Pre-upgrade closed + open pause-window backfill from authoritative
 --      work_report_audit_events evidence ONLY (action = 'ASSIGNMENT_STATE',
---      outcome = 'APPLIED', state in ('PAUSED', 'ACTIVE', 'REVOKED')), ordered
---      deterministically per assignment_id by (created_at ASC, audit_event_id ASC):
---      - Collapses consecutive PAUSED -> PAUSED events via LAG(state).
---      - Pairs each pause stretch with the first subsequent ACTIVE/REVOKED event
---        to insert closed [paused_date, greatest(paused_date, resumed_date)) windows
---        for ALL matching assignments (including currently ACTIVE assignments).
---      - Inserts an unpaired open [paused_date, NULL) window ONLY when
---        a.state = 'PAUSED' and a.is_current (never locks out ACTIVE assignments
---        and never fabricates paused_date when audit evidence is absent).
+--      outcome = 'APPLIED', state in ('PAUSED', 'ACTIVE', 'REVOKED')), grouped
+--      into (assignment_id, created_at) timestamp buckets ordered strictly by
+--      created_at ASC (NEVER using random audit_event_id UUIDs to guess order):
+--      - Same-timestamp conflicting states (COUNT(DISTINCT state) > 1) are
+--        marked bucket_state = 'AMBIGUOUS' and act as strict sequence barriers.
+--      - Collapses consecutive unambiguous PAUSED buckets via LAG(bucket_state).
+--      - Pairs each pause stretch with the first subsequent non-PAUSED bucket:
+--        * ACTIVE/REVOKED -> closed [paused_date, greatest(paused_date, resumed_date))
+--          for ALL matching assignments (including currently ACTIVE assignments).
+--        * AMBIGUOUS -> skipped (never fabricates a close date or bridges across it).
+--        * NULL (no later non-PAUSED bucket) -> open [paused_date, NULL) ONLY when
+--          a.state = 'PAUSED' and a.is_current (never locks out ACTIVE assignments
+--          and never fabricates paused_date when audit evidence is absent).
+--      - Includes a read-only preflight diagnostic query comment block plus an
+--        apply-time RAISE NOTICE diagnostic block reporting all 4 ambiguous/
+--        missing-audit classes.
 --   3. Apply the identical half-open Vietnam business-date pause exclusion across
 --      every materialization and read-only probe path:
 --      - public.work_report__internal_actor_materialization_candidates (STABLE;
@@ -71,42 +78,161 @@ comment on table public.work_report_assignment_pause_windows is
   'WP10-6 internal table recording half-open Vietnam business-date pause intervals [paused_date, resumed_date) for work_report_assignments.';
 
 -- -----------------------------------------------------------------------------
--- 2. Backfill Closed & Open Pre-Upgrade Pause Windows
---    (Strictly from authoritative ASSIGNMENT_STATE audit events; never fabricated;
---     never inserts an open window for non-PAUSED assignments)
+-- 2. Backfill Closed & Open Pre-Upgrade Pause Windows (Timestamp-Bucket Pairing)
+--    (Strictly from authoritative ASSIGNMENT_STATE audit events; NEVER infers
+--     business order from random audit_event_id UUIDs; treats same-created_at
+--     conflicting states as an 'AMBIGUOUS' sequence barrier; never fabricates
+--     paused_date; never inserts an open window for non-PAUSED assignments)
+--
+-- Read-only preflight diagnostic query (runnable inside BEGIN TRANSACTION READ ONLY
+-- BEFORE applying this migration; references only work_report_assignments &
+-- work_report_audit_events):
+--
+--   with state_buckets as (
+--     select a.assignment_id,
+--            a.state as current_state,
+--            a.is_current,
+--            e.created_at,
+--            (e.created_at at time zone 'Asia/Ho_Chi_Minh')::date as business_date_vn,
+--            case
+--              when pg_catalog.count(distinct (e.metadata_json ->> 'state')) = 1
+--                then pg_catalog.min(e.metadata_json ->> 'state')
+--              else 'AMBIGUOUS'
+--            end as bucket_state,
+--            pg_catalog.string_agg(
+--              distinct (e.metadata_json ->> 'state'), ','
+--              order by (e.metadata_json ->> 'state')
+--            ) as states_csv
+--       from public.work_report_audit_events e
+--       join public.work_report_assignments a
+--         on e.metadata_json ->> 'assignment_id' = a.assignment_id::text
+--      where e.action = 'ASSIGNMENT_STATE'
+--        and e.outcome = 'APPLIED'
+--        and e.metadata_json ->> 'state' in ('PAUSED', 'ACTIVE', 'REVOKED')
+--      group by a.assignment_id, a.state, a.is_current, e.created_at
+--   ),
+--   ordered_buckets as (
+--     select sb.*,
+--            lag(sb.bucket_state) over (
+--              partition by sb.assignment_id
+--              order by sb.created_at asc
+--            ) as prev_bucket_state,
+--            row_number() over (
+--              partition by sb.assignment_id
+--              order by sb.created_at asc
+--            ) as seq_no
+--       from state_buckets sb
+--   ),
+--   pause_starts as (
+--     select ob.assignment_id,
+--            ob.current_state,
+--            ob.is_current,
+--            ob.seq_no,
+--            ob.created_at as paused_at,
+--            ob.business_date_vn as paused_date
+--       from ordered_buckets ob
+--      where ob.bucket_state = 'PAUSED'
+--        and (ob.prev_bucket_state is null or ob.prev_bucket_state <> 'PAUSED')
+--   ),
+--   paired_windows as (
+--     select ps.*,
+--            next_b.bucket_state as next_bucket_state,
+--            next_b.created_at as next_event_at
+--       from pause_starts ps
+--       left join lateral (
+--         select ob2.bucket_state, ob2.created_at
+--           from ordered_buckets ob2
+--          where ob2.assignment_id = ps.assignment_id
+--            and ob2.seq_no > ps.seq_no
+--            and ob2.bucket_state <> 'PAUSED'
+--          order by ob2.seq_no asc
+--          limit 1
+--       ) next_b on true
+--   )
+--   select 'CONFLICTING_SAME_TIMESTAMP_BUCKET'::text as diagnostic_kind,
+--          sb.assignment_id,
+--          sb.created_at as event_at,
+--          'states=' || sb.states_csv as detail
+--     from state_buckets sb
+--    where sb.bucket_state = 'AMBIGUOUS'
+--   union all
+--   select 'PAUSE_TRUNCATED_BY_AMBIGUOUS_BUCKET'::text as diagnostic_kind,
+--          pw.assignment_id,
+--          pw.paused_at as event_at,
+--          'paused_date=' || pw.paused_date::text || ',ambiguous_at=' || pw.next_event_at::text as detail
+--     from paired_windows pw
+--    where pw.next_bucket_state = 'AMBIGUOUS'
+--   union all
+--   select 'PAUSED_WITHOUT_AUTHORITATIVE_OPEN_WINDOW'::text as diagnostic_kind,
+--          a.assignment_id,
+--          null::timestamptz as event_at,
+--          'current_state=PAUSED'::text as detail
+--     from public.work_report_assignments a
+--    where a.state = 'PAUSED'
+--      and a.is_current
+--      and not exists (
+--        select 1
+--          from paired_windows pw
+--         where pw.assignment_id = a.assignment_id
+--           and pw.next_bucket_state is null
+--      )
+--   union all
+--   select 'ACTIVE_WITH_UNPAIRED_TRAILING_PAUSE'::text as diagnostic_kind,
+--          pw.assignment_id,
+--          pw.paused_at as event_at,
+--          'paused_date=' || pw.paused_date::text || ',current_state=ACTIVE' as detail
+--     from paired_windows pw
+--    where pw.next_bucket_state is null
+--      and pw.current_state = 'ACTIVE'
+--      and pw.is_current
+--   order by diagnostic_kind, assignment_id, event_at nulls first;
 -- -----------------------------------------------------------------------------
-with ordered_state_events as (
+with state_buckets as (
   select a.assignment_id,
          a.state as current_state,
          a.is_current,
-         e.audit_event_id,
          e.created_at,
-         e.metadata_json ->> 'state' as event_state,
-         lag(e.metadata_json ->> 'state') over (
-           partition by a.assignment_id
-           order by e.created_at asc, e.audit_event_id asc
-         ) as prev_state,
-         row_number() over (
-           partition by a.assignment_id
-           order by e.created_at asc, e.audit_event_id asc
-         ) as seq_no
+         (e.created_at at time zone 'Asia/Ho_Chi_Minh')::date as business_date_vn,
+         case
+           when pg_catalog.count(distinct (e.metadata_json ->> 'state')) = 1
+             then pg_catalog.min(e.metadata_json ->> 'state')
+           else 'AMBIGUOUS'
+         end as bucket_state
     from public.work_report_audit_events e
     join public.work_report_assignments a
       on e.metadata_json ->> 'assignment_id' = a.assignment_id::text
    where e.action = 'ASSIGNMENT_STATE'
      and e.outcome = 'APPLIED'
      and e.metadata_json ->> 'state' in ('PAUSED', 'ACTIVE', 'REVOKED')
+   group by a.assignment_id, a.state, a.is_current, e.created_at
+),
+ordered_buckets as (
+  select sb.assignment_id,
+         sb.current_state,
+         sb.is_current,
+         sb.created_at,
+         sb.business_date_vn,
+         sb.bucket_state,
+         lag(sb.bucket_state) over (
+           partition by sb.assignment_id
+           order by sb.created_at asc
+         ) as prev_bucket_state,
+         row_number() over (
+           partition by sb.assignment_id
+           order by sb.created_at asc
+         ) as seq_no
+    from state_buckets sb
 ),
 pause_starts as (
-  select ose.assignment_id,
-         ose.current_state,
-         ose.is_current,
-         ose.seq_no,
-         ose.created_at as paused_at,
-         (ose.created_at at time zone 'Asia/Ho_Chi_Minh')::date as paused_date
-    from ordered_state_events ose
-   where ose.event_state = 'PAUSED'
-     and (ose.prev_state is null or ose.prev_state <> 'PAUSED')
+  select ob.assignment_id,
+         ob.current_state,
+         ob.is_current,
+         ob.seq_no,
+         ob.created_at as paused_at,
+         ob.business_date_vn as paused_date
+    from ordered_buckets ob
+   where ob.bucket_state = 'PAUSED'
+     and (ob.prev_bucket_state is null or ob.prev_bucket_state <> 'PAUSED')
 ),
 paired_windows as (
   select ps.assignment_id,
@@ -114,24 +240,23 @@ paired_windows as (
          ps.is_current,
          ps.paused_at,
          ps.paused_date,
+         next_b.bucket_state as next_bucket_state,
          case
-           when res_ev.resumed_at is not null then
-             greatest(
-               ps.paused_date,
-               (res_ev.resumed_at at time zone 'Asia/Ho_Chi_Minh')::date
-             )
+           when next_b.bucket_state in ('ACTIVE', 'REVOKED') then
+             greatest(ps.paused_date, next_b.business_date_vn)
            else null::date
          end as resumed_date
     from pause_starts ps
     left join lateral (
-      select ose2.created_at as resumed_at
-        from ordered_state_events ose2
-       where ose2.assignment_id = ps.assignment_id
-         and ose2.seq_no > ps.seq_no
-         and ose2.event_state in ('ACTIVE', 'REVOKED')
-       order by ose2.seq_no asc
+      select ob2.bucket_state,
+             ob2.business_date_vn
+        from ordered_buckets ob2
+       where ob2.assignment_id = ps.assignment_id
+         and ob2.seq_no > ps.seq_no
+         and ob2.bucket_state <> 'PAUSED'
+       order by ob2.seq_no asc
        limit 1
-    ) res_ev on true
+    ) next_b on true
 ),
 deduped_windows as (
   select pw.assignment_id,
@@ -139,8 +264,12 @@ deduped_windows as (
          pw.resumed_date,
          min(pw.paused_at) as created_at
     from paired_windows pw
-   where pw.resumed_date is not null
-      or (pw.current_state = 'PAUSED' and pw.is_current)
+   where pw.next_bucket_state in ('ACTIVE', 'REVOKED')
+      or (
+        pw.next_bucket_state is null
+        and pw.current_state = 'PAUSED'
+        and pw.is_current
+      )
    group by pw.assignment_id, pw.paused_date, pw.resumed_date
 )
 insert into public.work_report_assignment_pause_windows (
@@ -164,6 +293,126 @@ select dw.assignment_id,
       and existing.resumed_date is not distinct from dw.resumed_date
  )
 on conflict (assignment_id) where resumed_date is null do nothing;
+
+-- Apply-time diagnostic notice for any ambiguous or missing-audit pause chain
+-- (silent when 0 anomalies exist).
+do $diagnose_wp10_6_pause_audit$
+declare
+  v_diag record;
+begin
+  for v_diag in
+    with state_buckets as (
+      select a.assignment_id,
+             a.state as current_state,
+             a.is_current,
+             e.created_at,
+             (e.created_at at time zone 'Asia/Ho_Chi_Minh')::date as business_date_vn,
+             case
+               when pg_catalog.count(distinct (e.metadata_json ->> 'state')) = 1
+                 then pg_catalog.min(e.metadata_json ->> 'state')
+               else 'AMBIGUOUS'
+             end as bucket_state,
+             pg_catalog.string_agg(
+               distinct (e.metadata_json ->> 'state'), ','
+               order by (e.metadata_json ->> 'state')
+             ) as states_csv
+        from public.work_report_audit_events e
+        join public.work_report_assignments a
+          on e.metadata_json ->> 'assignment_id' = a.assignment_id::text
+       where e.action = 'ASSIGNMENT_STATE'
+         and e.outcome = 'APPLIED'
+         and e.metadata_json ->> 'state' in ('PAUSED', 'ACTIVE', 'REVOKED')
+       group by a.assignment_id, a.state, a.is_current, e.created_at
+    ),
+    ordered_buckets as (
+      select sb.*,
+             lag(sb.bucket_state) over (
+               partition by sb.assignment_id
+               order by sb.created_at asc
+             ) as prev_bucket_state,
+             row_number() over (
+               partition by sb.assignment_id
+               order by sb.created_at asc
+             ) as seq_no
+        from state_buckets sb
+    ),
+    pause_starts as (
+      select ob.assignment_id,
+             ob.current_state,
+             ob.is_current,
+             ob.seq_no,
+             ob.created_at as paused_at,
+             ob.business_date_vn as paused_date
+        from ordered_buckets ob
+       where ob.bucket_state = 'PAUSED'
+         and (ob.prev_bucket_state is null or ob.prev_bucket_state <> 'PAUSED')
+    ),
+    paired_windows as (
+      select ps.assignment_id,
+             ps.current_state,
+             ps.is_current,
+             ps.paused_at,
+             ps.paused_date,
+             next_b.bucket_state as next_bucket_state,
+             next_b.created_at as next_event_at
+        from pause_starts ps
+        left join lateral (
+          select ob2.bucket_state,
+                 ob2.created_at
+            from ordered_buckets ob2
+           where ob2.assignment_id = ps.assignment_id
+             and ob2.seq_no > ps.seq_no
+             and ob2.bucket_state <> 'PAUSED'
+           order by ob2.seq_no asc
+           limit 1
+        ) next_b on true
+    )
+    select 'CONFLICTING_SAME_TIMESTAMP_BUCKET'::text as diagnostic_kind,
+           sb.assignment_id,
+           sb.created_at as event_at,
+           'states=' || sb.states_csv as detail
+      from state_buckets sb
+     where sb.bucket_state = 'AMBIGUOUS'
+    union all
+    select 'PAUSE_TRUNCATED_BY_AMBIGUOUS_BUCKET'::text as diagnostic_kind,
+           pw.assignment_id,
+           pw.paused_at as event_at,
+           'paused_date=' || pw.paused_date::text || ',ambiguous_at=' || pw.next_event_at::text as detail
+      from paired_windows pw
+     where pw.next_bucket_state = 'AMBIGUOUS'
+    union all
+    select 'PAUSED_WITHOUT_AUTHORITATIVE_OPEN_WINDOW'::text as diagnostic_kind,
+           a.assignment_id,
+           null::timestamptz as event_at,
+           'current_state=PAUSED'::text as detail
+      from public.work_report_assignments a
+     where a.state = 'PAUSED'
+       and a.is_current
+       and not exists (
+         select 1
+           from paired_windows pw
+          where pw.assignment_id = a.assignment_id
+            and pw.next_bucket_state is null
+       )
+    union all
+    select 'ACTIVE_WITH_UNPAIRED_TRAILING_PAUSE'::text as diagnostic_kind,
+           pw.assignment_id,
+           pw.paused_at as event_at,
+           'paused_date=' || pw.paused_date::text || ',current_state=ACTIVE' as detail
+      from paired_windows pw
+     where pw.next_bucket_state is null
+       and pw.current_state = 'ACTIVE'
+       and pw.is_current
+    order by diagnostic_kind, assignment_id, event_at nulls first
+  loop
+    raise notice 'WP10-6 pause-windows audit diagnostic: kind=% assignment_id=% event_at=% detail=%',
+      v_diag.diagnostic_kind,
+      v_diag.assignment_id,
+      coalesce(v_diag.event_at::text, 'none'),
+      v_diag.detail;
+  end loop;
+end
+$diagnose_wp10_6_pause_audit$;
 
 -- -----------------------------------------------------------------------------
 -- 3. Materialization & Read-Only Probe Paths (Unified Pause-Window Exclusion)

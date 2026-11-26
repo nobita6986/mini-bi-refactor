@@ -117,6 +117,8 @@ const EMP_PW08_B = makeEmp(116, "pw08b", "NV PW08 Existing");
 const EMP_PW08_C = makeEmp(117, "pw08c", "NV PW08 FullPaused");
 const EMP_PRE_ACTIVE_CLOSED = makeEmp(118, "pre.active.closed", "NV Pre Active Closed");
 const EMP_PRE_AMBIG_ACTIVE = makeEmp(119, "pre.ambig.active", "NV Pre Ambig Active");
+const EMP_PRE_SAME_TS_CHAIN = makeEmp(120, "pre.samets", "NV Pre Same TS");
+const EMP_PRE_TRUNC_AMBIG = makeEmp(121, "pre.truncambig", "NV Pre Trunc Ambig");
 
 const MINIMAL_TEMPLATE_SCHEMA = {
   version: "work-report-schema/1.0",
@@ -212,8 +214,8 @@ async function loadMigrationFiles() {
 async function createEngine() {
   const db = new PGlite();
   return {
-    async exec(sql) {
-      await db.exec(sql);
+    async exec(sql, options) {
+      await db.exec(sql, options);
     },
     async query(sql, params = []) {
       return db.query(sql, params);
@@ -564,10 +566,13 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
     await seedEmployee(engine, EMP_PRE_NO_AUDIT, mktDept.department_id, TEAM_A);
     await seedEmployee(engine, EMP_PRE_ACTIVE_CLOSED, mktDept.department_id, TEAM_A);
     await seedEmployee(engine, EMP_PRE_AMBIG_ACTIVE, mktDept.department_id, TEAM_A);
+    await seedEmployee(engine, EMP_PRE_SAME_TS_CHAIN, mktDept.department_id, TEAM_A);
+    await seedEmployee(engine, EMP_PRE_TRUNC_AMBIG, mktDept.department_id, TEAM_A);
 
     const { rows: [{ today_vn: todayVn }] } = await engine.query(
       "select (pg_catalog.now() at time zone 'Asia/Ho_Chi_Minh')::date::text as today_vn",
     );
+    const D_M6 = addDaysIso(todayVn, -6);
     const D_M5 = addDaysIso(todayVn, -5);
     const D_M4 = addDaysIso(todayVn, -4);
     const D_M3 = addDaysIso(todayVn, -3);
@@ -576,15 +581,27 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
 
     const insertHistoricalAudit = async (templateId, assignmentId, events) => {
       for (const ev of events) {
-        await engine.query(
-          `insert into public.work_report_audit_events (
-             action, actor_user_id, capability, scope_kind, template_id, outcome, metadata_json, created_at
-           ) values (
-             'ASSIGNMENT_STATE', $1::uuid, 'report_assign', 'all', $2::uuid, 'APPLIED',
-             jsonb_build_object('assignment_id', $3::uuid, 'state', $4::text), $5::timestamptz
-           )`,
-          [OWNER.app, templateId, assignmentId, ev.st, ev.ts],
-        );
+        if (ev.id) {
+          await engine.query(
+            `insert into public.work_report_audit_events (
+               audit_event_id, action, actor_user_id, capability, scope_kind, template_id, outcome, metadata_json, created_at
+             ) values (
+               $6::uuid, 'ASSIGNMENT_STATE', $1::uuid, 'report_assign', 'all', $2::uuid, 'APPLIED',
+               jsonb_build_object('assignment_id', $3::uuid, 'state', $4::text), $5::timestamptz
+             )`,
+            [OWNER.app, templateId, assignmentId, ev.st, ev.ts, ev.id],
+          );
+        } else {
+          await engine.query(
+            `insert into public.work_report_audit_events (
+               action, actor_user_id, capability, scope_kind, template_id, outcome, metadata_json, created_at
+             ) values (
+               'ASSIGNMENT_STATE', $1::uuid, 'report_assign', 'all', $2::uuid, 'APPLIED',
+               jsonb_build_object('assignment_id', $3::uuid, 'state', $4::text), $5::timestamptz
+             )`,
+            [OWNER.app, templateId, assignmentId, ev.st, ev.ts],
+          );
+        }
       }
     };
 
@@ -688,6 +705,90 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
       { st: "PAUSED", ts: `${D_M1} 14:00:00+07` },
     ]);
 
+    // Pre-upgrade Case E: Same-created_at PAUSED + ACTIVE on D_M4 where ACTIVE UUID sorts BEFORE PAUSED UUID
+    // (00000000-... < ffffffff-...), preceded by deterministic closed [D_M6, D_M5) and followed by clean PAUSED on D_M2
+    // (while a.state = 'PAUSED'). Must treat D_M4 as AMBIGUOUS barrier, keep [D_M6, D_M5), start open window at D_M2
+    // (NOT D_M4!), and flag CONFLICTING_SAME_TIMESTAMP_BUCKET.
+    const tplPreE = await createPublishedTemplate(engine, "PW_PRE_SAMETS", "Pre-Upgrade Same-TS Ambiguous");
+    const asgnSameTs = await createUserAssignment(engine, tplPreE.template_id, EMP_PRE_SAME_TS_CHAIN.app);
+    await engine.query(
+      "update public.work_report_assignments set effective_from = $2::date, state = 'PAUSED', version = 6 where assignment_id = $1::uuid",
+      [asgnSameTs.assignment_id, D_M6],
+    );
+    await engine.query(
+      "delete from public.work_report_obligations where assignment_id = $1::uuid",
+      [asgnSameTs.assignment_id],
+    );
+    await insertHistoricalAudit(tplPreE.template_id, asgnSameTs.assignment_id, [
+      { st: "PAUSED", ts: `${D_M6} 09:00:00+07` },
+      { st: "ACTIVE", ts: `${D_M5} 09:00:00+07` },
+      { st: "ACTIVE", ts: `${D_M4} 12:00:00+07`, id: "00000000-0000-4000-8000-000000000001" },
+      { st: "PAUSED", ts: `${D_M4} 12:00:00+07`, id: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+      { st: "PAUSED", ts: `${D_M2} 10:00:00+07` },
+    ]);
+
+    // Pre-upgrade Case F: Deterministic PAUSED on D_M5 truncated by an AMBIGUOUS same-timestamp D_M4
+    // (ACTIVE + PAUSED) followed by D_M2 ACTIVE. Must NOT bridge D_M5 across D_M4 to D_M2 and must flag
+    // BOTH CONFLICTING_SAME_TIMESTAMP_BUCKET and PAUSE_TRUNCATED_BY_AMBIGUOUS_BUCKET.
+    const tplPreF = await createPublishedTemplate(engine, "PW_PRE_TRUNC", "Pre-Upgrade Truncated Ambiguous");
+    const asgnTruncAmbig = await createUserAssignment(engine, tplPreF.template_id, EMP_PRE_TRUNC_AMBIG.app);
+    await engine.query(
+      "update public.work_report_assignments set effective_from = $2::date where assignment_id = $1::uuid",
+      [asgnTruncAmbig.assignment_id, D_M5],
+    );
+    await engine.query(
+      "delete from public.work_report_obligations where assignment_id = $1::uuid",
+      [asgnTruncAmbig.assignment_id],
+    );
+    await insertHistoricalAudit(tplPreF.template_id, asgnTruncAmbig.assignment_id, [
+      { st: "PAUSED", ts: `${D_M5} 10:00:00+07` },
+      { st: "ACTIVE", ts: `${D_M4} 12:00:00+07`, id: "00000000-0000-4000-8000-000000000002" },
+      { st: "PAUSED", ts: `${D_M4} 12:00:00+07`, id: "ffffffff-ffff-4fff-8fff-fffffffffff2" },
+      { st: "ACTIVE", ts: `${D_M2} 10:00:00+07` },
+    ]);
+
+    // Execute the exact embedded read-only preflight query from Section 2 comment block BEFORE migration apply
+    const preflightMatch = pwSql.match(
+      /--   with state_buckets as \([\s\S]*?--   order by diagnostic_kind, assignment_id, event_at nulls first;/,
+    );
+    assert.ok(preflightMatch, "Migration Section 2 must embed the read-only preflight diagnostic query");
+    const preflightSql = preflightMatch[0].replace(/^-- {3}/gm, "");
+    await engine.exec("begin transaction read only;");
+    const { rows: preflightRows } = await engine.query(preflightSql);
+    await engine.exec("commit;");
+    const hasPreflightRow = (kind, assignmentId, detailSubstr) =>
+      preflightRows.some(
+        (r) =>
+          r.diagnostic_kind === kind &&
+          String(r.assignment_id) === assignmentId &&
+          String(r.detail).includes(detailSubstr),
+      );
+    assert.equal(
+      hasPreflightRow("CONFLICTING_SAME_TIMESTAMP_BUCKET", asgnSameTs.assignment_id, "states=ACTIVE,PAUSED"),
+      true,
+      "Preflight query must detect same-timestamp conflict on Case E",
+    );
+    assert.equal(
+      hasPreflightRow("CONFLICTING_SAME_TIMESTAMP_BUCKET", asgnTruncAmbig.assignment_id, "states=ACTIVE,PAUSED"),
+      true,
+      "Preflight query must detect same-timestamp conflict on Case F",
+    );
+    assert.equal(
+      hasPreflightRow("PAUSE_TRUNCATED_BY_AMBIGUOUS_BUCKET", asgnTruncAmbig.assignment_id, `paused_date=${D_M5}`),
+      true,
+      "Preflight query must detect pause truncated by ambiguous bucket on Case F",
+    );
+    assert.equal(
+      hasPreflightRow("PAUSED_WITHOUT_AUTHORITATIVE_OPEN_WINDOW", asgnPreNoAudit.assignment_id, "current_state=PAUSED"),
+      true,
+      "Preflight query must detect PAUSED without audit evidence on Case B",
+    );
+    assert.equal(
+      hasPreflightRow("ACTIVE_WITH_UNPAIRED_TRAILING_PAUSE", asgnPreAmbigActive.assignment_id, `paused_date=${D_M1}`),
+      true,
+      "Preflight query must detect ACTIVE with unpaired trailing PAUSED on Case D",
+    );
+
     // Pre-migration S0-T1-C security baseline + function snapshot
     const s0Sql = migrations.find((m) => m.name === S0_T1_C_MIGRATION_NAME).sql;
     const preFlags = new Map(migrations.slice(0, pwIdx).map((m) => [m.name, true]));
@@ -727,8 +828,42 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
     assert.equal(tblAfterRollback.reg, null, "Atomic rollback must drop pause_windows table");
     assert.deepEqual(await inspectFns(), preMeta, "Atomic rollback must leave all RPCs untouched");
 
-    // Apply migration cleanly
-    await engine.exec(pwSql);
+    // Apply migration cleanly and capture apply-time diagnostic RAISE NOTICE messages
+    const migrationNotices = [];
+    await engine.exec(pwSql, { onNotice: (notice) => migrationNotices.push(String(notice?.message ?? "")) });
+    const hasNotice = (kind, assignmentId, detailSubstr) =>
+      migrationNotices.some(
+        (msg) =>
+          msg.includes("WP10-6 pause-windows audit diagnostic:") &&
+          msg.includes(`kind=${kind}`) &&
+          msg.includes(`assignment_id=${assignmentId}`) &&
+          msg.includes(detailSubstr),
+      );
+    assert.equal(
+      hasNotice("CONFLICTING_SAME_TIMESTAMP_BUCKET", asgnSameTs.assignment_id, "detail=states=ACTIVE,PAUSED"),
+      true,
+      `Apply-time NOTICE must report Case E conflicting same-timestamp bucket; got: ${migrationNotices.join(" | ")}`,
+    );
+    assert.equal(
+      hasNotice("CONFLICTING_SAME_TIMESTAMP_BUCKET", asgnTruncAmbig.assignment_id, "detail=states=ACTIVE,PAUSED"),
+      true,
+      "Apply-time NOTICE must report Case F conflicting same-timestamp bucket",
+    );
+    assert.equal(
+      hasNotice("PAUSE_TRUNCATED_BY_AMBIGUOUS_BUCKET", asgnTruncAmbig.assignment_id, `paused_date=${D_M5}`),
+      true,
+      "Apply-time NOTICE must report Case F pause truncated by ambiguous bucket",
+    );
+    assert.equal(
+      hasNotice("PAUSED_WITHOUT_AUTHORITATIVE_OPEN_WINDOW", asgnPreNoAudit.assignment_id, "current_state=PAUSED"),
+      true,
+      "Apply-time NOTICE must report Case B PAUSED without authoritative open window",
+    );
+    assert.equal(
+      hasNotice("ACTIVE_WITH_UNPAIRED_TRAILING_PAUSE", asgnPreAmbigActive.assignment_id, `paused_date=${D_M1}`),
+      true,
+      "Apply-time NOTICE must report Case D ACTIVE with unpaired trailing pause",
+    );
 
     // Post-migration S0-T1-C allowlist (+0 net public/service_role RPCs)
     const postFlags = new Map([...preFlags, [PAUSE_WINDOWS_MIGRATION_NAME, true]]);
@@ -892,6 +1027,57 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
       obsD.map((r) => r.period_start_date),
       [D_M5, D_M3, D_M2, D_M1, todayVn],
       "ACTIVE assignment with unpaired trailing PAUSED audit remains active on D_M1 & todayVn while still excluding paired [D_M4, D_M3)",
+    );
+
+    // Verify Pre-Upgrade Backfill Case E (same-timestamp D_M4 ACTIVE+PAUSED with ACTIVE UUID < PAUSED UUID,
+    // preceded by closed [D_M6, D_M5) and followed by clean PAUSED on D_M2):
+    // - Open window MUST start at D_M2 (NOT D_M4!), closed [D_M6, D_M5) preserved!
+    const sameTsWindows = await fetchPauseWindows(engine, asgnSameTs.assignment_id);
+    assert.deepEqual(
+      sameTsWindows.map((w) => [w.paused_date, w.resumed_date]),
+      [
+        [D_M6, D_M5],
+        [D_M2, null],
+      ],
+      "Same-timestamp D_M4 AMBIGUOUS bucket must NOT corrupt open pause window start (must be D_M2, keeping closed [D_M6, D_M5))",
+    );
+    const reactE = await engine.serviceRpc("work_report_set_assignment_state", [
+      OWNER.auth, OWNER.app, asgnSameTs.assignment_id, 6, "ACTIVE", nextKey("pre-e-react"),
+    ]);
+    assert.equal(reactE.state, "ACTIVE");
+    assert.deepEqual(
+      (await fetchPauseWindows(engine, asgnSameTs.assignment_id)).map((w) => [w.paused_date, w.resumed_date]),
+      [
+        [D_M6, D_M5],
+        [D_M2, todayVn],
+      ],
+    );
+    await engine.serviceRpc("work_report_list_my_obligations", [
+      EMP_PRE_SAME_TS_CHAIN.auth, EMP_PRE_SAME_TS_CHAIN.app, null,
+    ]);
+    const obsE = await fetchAssignmentObligations(engine, asgnSameTs.assignment_id);
+    assert.deepEqual(
+      obsE.map((r) => r.period_start_date),
+      [D_M5, D_M4, D_M3, todayVn],
+      "Reactivating Case E must materialize D_M5, D_M4, D_M3, todayVn (zero corruption of D_M3 by D_M4; D_M6, D_M2, D_M1 excluded)",
+    );
+
+    // Verify Pre-Upgrade Backfill Case F (deterministic PAUSED D_M5 truncated by AMBIGUOUS D_M4, followed by ACTIVE D_M2):
+    // - Must NOT bridge D_M5 across D_M4 to D_M2 and must NOT fabricate any pause window!
+    const truncWindows = await fetchPauseWindows(engine, asgnTruncAmbig.assignment_id);
+    assert.equal(
+      truncWindows.length,
+      0,
+      "Migration must NOT bridge D_M5 PAUSED across ambiguous D_M4 bucket to D_M2 ACTIVE",
+    );
+    await engine.serviceRpc("work_report_list_my_obligations", [
+      EMP_PRE_TRUNC_AMBIG.auth, EMP_PRE_TRUNC_AMBIG.app, null,
+    ]);
+    const obsF = await fetchAssignmentObligations(engine, asgnTruncAmbig.assignment_id);
+    assert.deepEqual(
+      obsF.map((r) => r.period_start_date),
+      [D_M5, D_M4, D_M3, D_M2, D_M1, todayVn],
+      "Case F must not silently drop dates via fabricated bridge across ambiguous D_M4",
     );
   } finally {
     await engine.close();
