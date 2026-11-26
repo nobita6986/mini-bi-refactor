@@ -55,7 +55,7 @@ import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
 const PAUSE_WINDOWS_MIGRATION_NAME =
-  "20261126130000_wp10_6_work_report_assignment_pause_windows.sql";
+  "20261126153000_wp10_6_work_report_assignment_pause_windows.sql";
 
 const CREATE_ASSIGNMENT_CASTS = [
   "uuid", "uuid", "uuid", "text", "uuid", "uuid", "uuid[]",

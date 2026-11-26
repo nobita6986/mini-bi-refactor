@@ -10,10 +10,17 @@
 --      - partial unique index (assignment_id) where resumed_date is null
 --      - lookup index (assignment_id, paused_date, resumed_date)
 --      - RLS enabled + forced; REVOKE ALL from PUBLIC, anon, authenticated, service_role.
---   2. Pre-upgrade PAUSED backfill from authoritative work_report_audit_events
---      evidence ONLY (action = 'ASSIGNMENT_STATE', outcome = 'APPLIED',
---      metadata_json->>'state' = 'PAUSED' on or after latest non-PAUSED state event);
---      never fabricates paused_date when audit evidence is absent.
+--   2. Pre-upgrade closed + open pause-window backfill from authoritative
+--      work_report_audit_events evidence ONLY (action = 'ASSIGNMENT_STATE',
+--      outcome = 'APPLIED', state in ('PAUSED', 'ACTIVE', 'REVOKED')), ordered
+--      deterministically per assignment_id by (created_at ASC, audit_event_id ASC):
+--      - Collapses consecutive PAUSED -> PAUSED events via LAG(state).
+--      - Pairs each pause stretch with the first subsequent ACTIVE/REVOKED event
+--        to insert closed [paused_date, greatest(paused_date, resumed_date)) windows
+--        for ALL matching assignments (including currently ACTIVE assignments).
+--      - Inserts an unpaired open [paused_date, NULL) window ONLY when
+--        a.state = 'PAUSED' and a.is_current (never locks out ACTIVE assignments
+--        and never fabricates paused_date when audit evidence is absent).
 --   3. Apply the identical half-open Vietnam business-date pause exclusion across
 --      every materialization and read-only probe path:
 --      - public.work_report__internal_actor_materialization_candidates (STABLE;
@@ -64,9 +71,78 @@ comment on table public.work_report_assignment_pause_windows is
   'WP10-6 internal table recording half-open Vietnam business-date pause intervals [paused_date, resumed_date) for work_report_assignments.';
 
 -- -----------------------------------------------------------------------------
--- 2. Backfill Open Pause Windows for Pre-Upgrade PAUSED Assignments
---    (Strictly from authoritative ASSIGNMENT_STATE audit events; never fabricated)
+-- 2. Backfill Closed & Open Pre-Upgrade Pause Windows
+--    (Strictly from authoritative ASSIGNMENT_STATE audit events; never fabricated;
+--     never inserts an open window for non-PAUSED assignments)
 -- -----------------------------------------------------------------------------
+with ordered_state_events as (
+  select a.assignment_id,
+         a.state as current_state,
+         a.is_current,
+         e.audit_event_id,
+         e.created_at,
+         e.metadata_json ->> 'state' as event_state,
+         lag(e.metadata_json ->> 'state') over (
+           partition by a.assignment_id
+           order by e.created_at asc, e.audit_event_id asc
+         ) as prev_state,
+         row_number() over (
+           partition by a.assignment_id
+           order by e.created_at asc, e.audit_event_id asc
+         ) as seq_no
+    from public.work_report_audit_events e
+    join public.work_report_assignments a
+      on e.metadata_json ->> 'assignment_id' = a.assignment_id::text
+   where e.action = 'ASSIGNMENT_STATE'
+     and e.outcome = 'APPLIED'
+     and e.metadata_json ->> 'state' in ('PAUSED', 'ACTIVE', 'REVOKED')
+),
+pause_starts as (
+  select ose.assignment_id,
+         ose.current_state,
+         ose.is_current,
+         ose.seq_no,
+         ose.created_at as paused_at,
+         (ose.created_at at time zone 'Asia/Ho_Chi_Minh')::date as paused_date
+    from ordered_state_events ose
+   where ose.event_state = 'PAUSED'
+     and (ose.prev_state is null or ose.prev_state <> 'PAUSED')
+),
+paired_windows as (
+  select ps.assignment_id,
+         ps.current_state,
+         ps.is_current,
+         ps.paused_at,
+         ps.paused_date,
+         case
+           when res_ev.resumed_at is not null then
+             greatest(
+               ps.paused_date,
+               (res_ev.resumed_at at time zone 'Asia/Ho_Chi_Minh')::date
+             )
+           else null::date
+         end as resumed_date
+    from pause_starts ps
+    left join lateral (
+      select ose2.created_at as resumed_at
+        from ordered_state_events ose2
+       where ose2.assignment_id = ps.assignment_id
+         and ose2.seq_no > ps.seq_no
+         and ose2.event_state in ('ACTIVE', 'REVOKED')
+       order by ose2.seq_no asc
+       limit 1
+    ) res_ev on true
+),
+deduped_windows as (
+  select pw.assignment_id,
+         pw.paused_date,
+         pw.resumed_date,
+         min(pw.paused_at) as created_at
+    from paired_windows pw
+   where pw.resumed_date is not null
+      or (pw.current_state = 'PAUSED' and pw.is_current)
+   group by pw.assignment_id, pw.paused_date, pw.resumed_date
+)
 insert into public.work_report_assignment_pause_windows (
   assignment_id,
   paused_date,
@@ -74,38 +150,19 @@ insert into public.work_report_assignment_pause_windows (
   created_at,
   updated_at
 )
-select a.assignment_id,
-       (pause_ev.created_at at time zone 'Asia/Ho_Chi_Minh')::date as paused_date,
-       null::date as resumed_date,
-       pause_ev.created_at,
+select dw.assignment_id,
+       dw.paused_date,
+       dw.resumed_date,
+       dw.created_at,
        pg_catalog.now()
-  from public.work_report_assignments a
-  left join lateral (
-    select e_non.created_at
-      from public.work_report_audit_events e_non
-     where e_non.action = 'ASSIGNMENT_STATE'
-       and e_non.outcome = 'APPLIED'
-       and e_non.metadata_json ->> 'assignment_id' = a.assignment_id::text
-       and e_non.metadata_json ->> 'state' in ('ACTIVE', 'REVOKED')
-     order by e_non.created_at desc, e_non.audit_event_id desc
-     limit 1
-  ) last_non_pause on true
-  join lateral (
-    select e_p.created_at
-      from public.work_report_audit_events e_p
-     where e_p.action = 'ASSIGNMENT_STATE'
-       and e_p.outcome = 'APPLIED'
-       and e_p.metadata_json ->> 'assignment_id' = a.assignment_id::text
-       and e_p.metadata_json ->> 'state' = 'PAUSED'
-       and (
-         last_non_pause.created_at is null
-         or e_p.created_at >= last_non_pause.created_at
-       )
-     order by e_p.created_at asc, e_p.audit_event_id asc
-     limit 1
-  ) pause_ev on true
- where a.state = 'PAUSED'
-   and a.is_current
+  from deduped_windows dw
+ where not exists (
+   select 1
+     from public.work_report_assignment_pause_windows existing
+    where existing.assignment_id = dw.assignment_id
+      and existing.paused_date = dw.paused_date
+      and existing.resumed_date is not distinct from dw.resumed_date
+ )
 on conflict (assignment_id) where resumed_date is null do nothing;
 
 -- -----------------------------------------------------------------------------

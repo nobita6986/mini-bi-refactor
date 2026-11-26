@@ -45,7 +45,7 @@ import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
 const PAUSE_WINDOWS_MIGRATION_NAME =
-  "20261126130000_wp10_6_work_report_assignment_pause_windows.sql";
+  "20261126153000_wp10_6_work_report_assignment_pause_windows.sql";
 
 const CREATE_ASSIGNMENT_CASTS = [
   "uuid", "uuid", "uuid", "text", "uuid", "uuid", "uuid[]",
@@ -115,6 +115,8 @@ const EMP_PW05 = makeEmp(114, "pw05", "NV PW05 Idem");
 const EMP_PW08_A = makeEmp(115, "pw08a", "NV PW08 Empty");
 const EMP_PW08_B = makeEmp(116, "pw08b", "NV PW08 Existing");
 const EMP_PW08_C = makeEmp(117, "pw08c", "NV PW08 FullPaused");
+const EMP_PRE_ACTIVE_CLOSED = makeEmp(118, "pre.active.closed", "NV Pre Active Closed");
+const EMP_PRE_AMBIG_ACTIVE = makeEmp(119, "pre.ambig.active", "NV Pre Ambig Active");
 
 const MINIMAL_TEMPLATE_SCHEMA = {
   version: "work-report-schema/1.0",
@@ -560,6 +562,8 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
     );
     await seedEmployee(engine, EMP_PRE_AUDIT, mktDept.department_id, TEAM_A);
     await seedEmployee(engine, EMP_PRE_NO_AUDIT, mktDept.department_id, TEAM_A);
+    await seedEmployee(engine, EMP_PRE_ACTIVE_CLOSED, mktDept.department_id, TEAM_A);
+    await seedEmployee(engine, EMP_PRE_AMBIG_ACTIVE, mktDept.department_id, TEAM_A);
 
     const { rows: [{ today_vn: todayVn }] } = await engine.query(
       "select (pg_catalog.now() at time zone 'Asia/Ho_Chi_Minh')::date::text as today_vn",
@@ -570,44 +574,40 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
     const D_M2 = addDaysIso(todayVn, -2);
     const D_M1 = addDaysIso(todayVn, -1);
 
-    // Pre-upgrade Case A: Assignment paused before migration with authoritative audit history
-    // including an older PAUSED -> ACTIVE stretch so backfill MUST pick the current stretch only,
-    // AND using UTC 17:30Z on D_M3 (= 00:30+07 on D_M2) to verify VN timezone conversion!
+    const insertHistoricalAudit = async (templateId, assignmentId, events) => {
+      for (const ev of events) {
+        await engine.query(
+          `insert into public.work_report_audit_events (
+             action, actor_user_id, capability, scope_kind, template_id, outcome, metadata_json, created_at
+           ) values (
+             'ASSIGNMENT_STATE', $1::uuid, 'report_assign', 'all', $2::uuid, 'APPLIED',
+             jsonb_build_object('assignment_id', $3::uuid, 'state', $4::text), $5::timestamptz
+           )`,
+          [OWNER.app, templateId, assignmentId, ev.st, ev.ts],
+        );
+      }
+    };
+
+    // Pre-upgrade Case A: Assignment paused before migration with BOTH a closed stretch [D_M4, D_M3)
+    // AND a currently-open stretch starting at D_M3 17:30Z (= 00:30+07 on D_M2, cross-UTC-day VN boundary!),
+    // plus a redundant consecutive PAUSED at D_M1 that must collapse into the D_M2 stretch.
     const tplPreA = await createPublishedTemplate(engine, "PW_PRE_AUD", "Pre-Upgrade Audit");
     const asgnPreAudit = await createUserAssignment(engine, tplPreA.template_id, EMP_PRE_AUDIT.app);
     await engine.query(
-      "update public.work_report_assignments set effective_from = $2::date where assignment_id = $1::uuid",
+      "update public.work_report_assignments set effective_from = $2::date, state = 'PAUSED', version = 5 where assignment_id = $1::uuid",
       [asgnPreAudit.assignment_id, D_M5],
     );
     await engine.query(
       "delete from public.work_report_obligations where assignment_id = $1::uuid",
       [asgnPreAudit.assignment_id],
     );
-    // Simulate historical pre-upgrade state transitions via append-only audit events:
-    // older pause (D_M4) -> active (D_M3 10:00+07) -> current pause (D_M3 17:30Z = D_M2 00:30+07)
-    // plus a second redundant PAUSED event at D_M1 09:00+07 to verify earliest PAUSED in current stretch is chosen.
-    await engine.query(
-      "update public.work_report_assignments set state = 'PAUSED', version = 5 where assignment_id = $1::uuid",
-      [asgnPreAudit.assignment_id],
-    );
-    const historicalEvents = [
+    await insertHistoricalAudit(tplPreA.template_id, asgnPreAudit.assignment_id, [
       { st: "PAUSED", ts: `${D_M4} 10:00:00+07` },
       { st: "ACTIVE", ts: `${D_M3} 10:00:00+07` },
       // 17:30 UTC on D_M3 === 00:30+07 on D_M2 (cross-UTC-day VN boundary!)
       { st: "PAUSED", ts: `${D_M3} 17:30:00+00` },
       { st: "PAUSED", ts: `${D_M1} 09:00:00+07` },
-    ];
-    for (const ev of historicalEvents) {
-      await engine.query(
-        `insert into public.work_report_audit_events (
-           action, actor_user_id, capability, scope_kind, template_id, outcome, metadata_json, created_at
-         ) values (
-           'ASSIGNMENT_STATE', $1::uuid, 'report_assign', 'all', $2::uuid, 'APPLIED',
-           jsonb_build_object('assignment_id', $3::uuid, 'state', $4::text), $5::timestamptz
-         )`,
-        [OWNER.app, tplPreA.template_id, asgnPreAudit.assignment_id, ev.st, ev.ts],
-      );
-    }
+    ]);
 
     // Pre-upgrade Case B: Assignment with state = 'PAUSED' and ZERO audit evidence (must NOT fabricate)
     const tplPreB = await createPublishedTemplate(engine, "PW_PRE_NOAUD", "Pre-Upgrade No Audit");
@@ -620,6 +620,73 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
       "update public.work_report_assignments set state = 'PAUSED', version = 2 where assignment_id = $1::uuid",
       [asgnPreNoAudit.assignment_id],
     );
+
+    // Pre-upgrade Case C1: Already ACTIVE at upgrade time with closed pause window [D_M4, D_M3)
+    // inside 7-day lookback -> D_M4 MUST NOT be backfilled post-upgrade.
+    const tplPreC1 = await createPublishedTemplate(engine, "PW_PRE_ACT1", "Pre-Upgrade Active Closed");
+    const asgnPreActiveClosed = await createUserAssignment(engine, tplPreC1.template_id, EMP_PRE_ACTIVE_CLOSED.app);
+    await engine.query(
+      "update public.work_report_assignments set effective_from = $2::date where assignment_id = $1::uuid",
+      [asgnPreActiveClosed.assignment_id, D_M5],
+    );
+    await engine.query(
+      "delete from public.work_report_obligations where assignment_id = $1::uuid",
+      [asgnPreActiveClosed.assignment_id],
+    );
+    await insertHistoricalAudit(tplPreC1.template_id, asgnPreActiveClosed.assignment_id, [
+      { st: "PAUSED", ts: `${D_M4} 11:00:00+07` },
+      { st: "ACTIVE", ts: `${D_M3} 08:30:00+07` },
+    ]);
+
+    // Pre-upgrade Case C2: Already ACTIVE at upgrade time with closed pause window [D_M4, D_M3)
+    // AND a pre-existing obligation created on D_M4 BEFORE pausing -> must stay 100% intact!
+    const tplPreC2 = await createPublishedTemplate(engine, "PW_PRE_ACT2", "Pre-Upgrade Active Existing Ob");
+    const asgnPreActiveExisting = await createUserAssignment(engine, tplPreC2.template_id, EMP_PRE_ACTIVE_CLOSED.app, {
+      dueDayOffset: 10,
+      dueTimeLocal: "23:59:59",
+    });
+    await engine.query(
+      "update public.work_report_assignments set effective_from = $2::date where assignment_id = $1::uuid",
+      [asgnPreActiveExisting.assignment_id, D_M5],
+    );
+    await engine.query(
+      "delete from public.work_report_obligations where assignment_id = $1::uuid",
+      [asgnPreActiveExisting.assignment_id],
+    );
+    await engine.query(
+      "select public.work_report__internal_materialize_assignment_for_date($1::uuid, $2::date)",
+      [asgnPreActiveExisting.assignment_id, D_M4],
+    );
+    const [preC2ObD4] = await fetchAssignmentObligations(engine, asgnPreActiveExisting.assignment_id);
+    assert.equal(preC2ObD4.period_start_date, D_M4);
+    await engine.serviceRpc("work_report_submit", [
+      EMP_PRE_ACTIVE_CLOSED.auth, EMP_PRE_ACTIVE_CLOSED.app, preC2ObD4.obligation_id,
+      JSON.stringify({ calls_made: 77 }), null, nextKey("pre-c2-sub"),
+    ]);
+    const [preC2SnapshotD4] = await fetchAssignmentObligations(engine, asgnPreActiveExisting.assignment_id);
+    await insertHistoricalAudit(tplPreC2.template_id, asgnPreActiveExisting.assignment_id, [
+      { st: "PAUSED", ts: `${D_M4} 15:00:00+07` },
+      { st: "ACTIVE", ts: `${D_M3} 09:00:00+07` },
+    ]);
+
+    // Pre-upgrade Case D: Ambiguous audit — ACTIVE assignment with an earlier paired [D_M4, D_M3)
+    // PLUS an unpaired trailing PAUSED audit event on D_M1 (missing resume audit).
+    // Must backfill [D_M4, D_M3) ONLY and NEVER insert an open window that permanently locks out ACTIVE!
+    const tplPreD = await createPublishedTemplate(engine, "PW_PRE_AMBIG", "Pre-Upgrade Ambiguous Active");
+    const asgnPreAmbigActive = await createUserAssignment(engine, tplPreD.template_id, EMP_PRE_AMBIG_ACTIVE.app);
+    await engine.query(
+      "update public.work_report_assignments set effective_from = $2::date where assignment_id = $1::uuid",
+      [asgnPreAmbigActive.assignment_id, D_M5],
+    );
+    await engine.query(
+      "delete from public.work_report_obligations where assignment_id = $1::uuid",
+      [asgnPreAmbigActive.assignment_id],
+    );
+    await insertHistoricalAudit(tplPreD.template_id, asgnPreAmbigActive.assignment_id, [
+      { st: "PAUSED", ts: `${D_M4} 10:00:00+07` },
+      { st: "ACTIVE", ts: `${D_M3} 10:00:00+07` },
+      { st: "PAUSED", ts: `${D_M1} 14:00:00+07` },
+    ]);
 
     // Pre-migration S0-T1-C security baseline + function snapshot
     const s0Sql = migrations.find((m) => m.name === S0_T1_C_MIGRATION_NAME).sql;
@@ -728,28 +795,38 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
       "Partial unique index must reject 2nd open pause window on same assignment",
     );
 
-    // Verify Pre-Upgrade Backfill Case A (authoritative audit -> VN date D_M2 from D_M3 17:30Z!)
+    // Verify Pre-Upgrade Backfill Case A: BOTH closed [D_M4, D_M3) AND open [D_M2, NULL) (17:30Z -> VN D_M2)!
     const preAuditWindows = await fetchPauseWindows(engine, asgnPreAudit.assignment_id);
-    assert.equal(preAuditWindows.length, 1);
-    assert.equal(preAuditWindows[0].paused_date, D_M2, "17:30Z on D_M3 must convert to VN date D_M2");
-    assert.equal(preAuditWindows[0].resumed_date, null);
+    assert.deepEqual(
+      preAuditWindows.map((w) => [w.paused_date, w.resumed_date]),
+      [
+        [D_M4, D_M3],
+        [D_M2, null],
+      ],
+      "Backfill must reconstruct closed [D_M4, D_M3) AND open [D_M2, NULL) (17:30Z on D_M3 -> VN D_M2, collapsing consecutive D_M1 PAUSED)",
+    );
 
-    // Reactivate Case A on todayVn -> closes [D_M2, todayVn), skips D_M2 & D_M1, backfills D_M5..D_M3 + todayVn
+    // Reactivate Case A on todayVn -> closes [D_M2, todayVn), excludes BOTH D_M4 and D_M2..D_M1 -> exact [D_M5, D_M3, todayVn]!
     const reactA = await engine.serviceRpc("work_report_set_assignment_state", [
       OWNER.auth, OWNER.app, asgnPreAudit.assignment_id, 5, "ACTIVE", nextKey("pre-a-react"),
     ]);
     assert.equal(reactA.state, "ACTIVE");
     const preAuditWindowsAfter = await fetchPauseWindows(engine, asgnPreAudit.assignment_id);
-    assert.equal(preAuditWindowsAfter.length, 1);
-    assert.equal(preAuditWindowsAfter[0].paused_date, D_M2);
-    assert.equal(preAuditWindowsAfter[0].resumed_date, todayVn);
+    assert.deepEqual(
+      preAuditWindowsAfter.map((w) => [w.paused_date, w.resumed_date]),
+      [
+        [D_M4, D_M3],
+        [D_M2, todayVn],
+      ],
+    );
 
+    await engine.serviceRpc("work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, D_M4]);
     await engine.serviceRpc("work_report_list_my_obligations", [EMP_PRE_AUDIT.auth, EMP_PRE_AUDIT.app, null]);
     const obsA = await fetchAssignmentObligations(engine, asgnPreAudit.assignment_id);
     assert.deepEqual(
       obsA.map((r) => r.period_start_date),
-      [D_M5, D_M4, D_M3, todayVn],
-      "Backfilled pre-upgrade pause window [D_M2, todayVn) skips D_M2 and D_M1 on reactivation",
+      [D_M5, D_M3, todayVn],
+      "Backfilled closed [D_M4, D_M3) + open [D_M2, todayVn) must yield exact [D_M5, D_M3, todayVn] (D_M4, D_M2, D_M1 excluded)",
     );
 
     // Verify Pre-Upgrade Backfill Case B (no audit evidence -> 0 fabricated rows, graceful reactivation!)
@@ -764,6 +841,58 @@ test("WP10-6 PW #1 (PGlite): Migration hygiene, atomic rollback, RLS/ACL/constra
     assert.equal((await fetchPauseWindows(engine, asgnPreNoAudit.assignment_id)).length, 0);
     const obsB = await fetchAssignmentObligations(engine, asgnPreNoAudit.assignment_id);
     assert.deepEqual(obsB.map((r) => r.period_start_date), [todayVn]);
+
+    // Verify Pre-Upgrade Backfill Case C1 & C2 (already ACTIVE at upgrade time with closed [D_M4, D_M3)):
+    // - C1: D_M4 NOT backfilled on list_my_obligations / ensure; [D_M5, D_M3, D_M2, D_M1, todayVn] materialized
+    // - C2: Pre-existing obligation created on D_M4 before pausing stays 100% untouched!
+    assert.deepEqual(
+      (await fetchPauseWindows(engine, asgnPreActiveClosed.assignment_id)).map((w) => [w.paused_date, w.resumed_date]),
+      [[D_M4, D_M3]],
+      "Pre-upgrade ACTIVE assignment must backfill closed pause window [D_M4, D_M3)",
+    );
+    assert.deepEqual(
+      (await fetchPauseWindows(engine, asgnPreActiveExisting.assignment_id)).map((w) => [w.paused_date, w.resumed_date]),
+      [[D_M4, D_M3]],
+    );
+
+    await engine.serviceRpc("work_report_ensure_obligations_for_window", [OWNER.auth, OWNER.app, D_M4]);
+    assert.equal(
+      (await fetchAssignmentObligations(engine, asgnPreActiveClosed.assignment_id)).length,
+      0,
+      "ensure_obligations_for_window(D_M4) must NOT backfill closed pre-upgrade pause day D_M4",
+    );
+
+    await assertReadOnlyProbeParity(engine, EMP_PRE_ACTIVE_CLOSED, true, "Pre-upgrade ACTIVE closed window");
+    const obsC1 = await fetchAssignmentObligations(engine, asgnPreActiveClosed.assignment_id);
+    assert.deepEqual(
+      obsC1.map((r) => r.period_start_date),
+      [D_M5, D_M3, D_M2, D_M1, todayVn],
+      "Already-ACTIVE assignment must skip closed pre-upgrade D_M4 while materializing D_M5, D_M3..todayVn",
+    );
+
+    const obsC2 = await fetchAssignmentObligations(engine, asgnPreActiveExisting.assignment_id);
+    const obsC2D4 = obsC2.find((r) => r.period_start_date === D_M4);
+    assert.deepEqual(
+      obsC2D4,
+      preC2SnapshotD4,
+      "Pre-existing obligation created on D_M4 before pausing must remain 100% intact after closed-window backfill",
+    );
+
+    // Verify Pre-Upgrade Backfill Case D (ambiguous ACTIVE with unpaired trailing PAUSED event):
+    // - Earlier paired [D_M4, D_M3) is backfilled; ZERO open window inserted (no permanent lockout!)
+    const ambigWindows = await fetchPauseWindows(engine, asgnPreAmbigActive.assignment_id);
+    assert.deepEqual(
+      ambigWindows.map((w) => [w.paused_date, w.resumed_date]),
+      [[D_M4, D_M3]],
+      "ACTIVE assignment with unpaired trailing PAUSED audit must NOT get an open pause window",
+    );
+    await assertReadOnlyProbeParity(engine, EMP_PRE_AMBIG_ACTIVE, true, "Pre-upgrade ambiguous ACTIVE not locked out");
+    const obsD = await fetchAssignmentObligations(engine, asgnPreAmbigActive.assignment_id);
+    assert.deepEqual(
+      obsD.map((r) => r.period_start_date),
+      [D_M5, D_M3, D_M2, D_M1, todayVn],
+      "ACTIVE assignment with unpaired trailing PAUSED audit remains active on D_M1 & todayVn while still excluding paired [D_M4, D_M3)",
+    );
   } finally {
     await engine.close();
   }
