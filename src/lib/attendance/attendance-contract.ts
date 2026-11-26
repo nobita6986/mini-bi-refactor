@@ -83,6 +83,20 @@ export const ATTENDANCE_METADATA_KEYS = [
   "time_token",
 ] as const;
 
+const ATTENDANCE_METADATA_KEY_SET: ReadonlySet<string> = new Set(ATTENDANCE_METADATA_KEYS);
+
+const ATTENDANCE_METADATA_CORE_KEYS = [
+  "accuracy_meters",
+  "address_hint",
+  "client_captured_at",
+  "idempotency_key",
+  "latitude",
+  "longitude",
+  "note",
+  "photo_sha256",
+  "time_source",
+] as const;
+
 export const ATTENDANCE_CLIENT_TIME_SKEW_TOLERANCE_MS = 5_000;
 export const ATTENDANCE_FUTURE_TIMESTAMP_TOLERANCE_MS = 30_000;
 export const ATTENDANCE_ADDRESS_HINT_MAX_LENGTH = 500;
@@ -231,15 +245,17 @@ export function parseAttendanceCheckInMetadata(input: {
     return { ok: false, code: "ATTENDANCE_REQUEST_INVALID" };
   }
 
-  const ownKeys = Object.getOwnPropertyNames(parsed).sort();
-  if (
-    ownKeys.length !== ATTENDANCE_METADATA_KEYS.length ||
-    ownKeys.some((key, index) => key !== ATTENDANCE_METADATA_KEYS[index])
-  ) {
-    return { ok: false, code: "ATTENDANCE_REQUEST_INVALID" };
-  }
-
   const record = parsed as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(record)) {
+    if (!ATTENDANCE_METADATA_KEY_SET.has(key)) {
+      return { ok: false, code: "ATTENDANCE_REQUEST_INVALID" };
+    }
+  }
+  for (const key of ATTENDANCE_METADATA_CORE_KEYS) {
+    if (!Object.hasOwn(record, key)) {
+      return { ok: false, code: "ATTENDANCE_REQUEST_INVALID" };
+    }
+  }
 
   if (
     typeof record.idempotency_key !== "string" ||
@@ -312,7 +328,12 @@ export function parseAttendanceCheckInMetadata(input: {
   };
 
   if (record.time_source === "SERVER_ANCHORED") {
-    if (record.time_token === null || record.elapsed_since_anchor_ms === null) {
+    if (
+      !Object.hasOwn(record, "time_token") ||
+      !Object.hasOwn(record, "elapsed_since_anchor_ms") ||
+      record.time_token === null ||
+      record.elapsed_since_anchor_ms === null
+    ) {
       return { ok: false, code: "ATTENDANCE_REQUEST_INVALID" };
     }
     if (typeof record.time_token !== "string" || record.time_token.trim().length === 0) {
@@ -338,7 +359,11 @@ export function parseAttendanceCheckInMetadata(input: {
   }
 
   if (record.time_source === "DEVICE_CLOCK_UNVERIFIED") {
-    if (record.time_token !== null || record.elapsed_since_anchor_ms !== null) {
+    if (
+      (Object.hasOwn(record, "time_token") && record.time_token !== null) ||
+      (Object.hasOwn(record, "elapsed_since_anchor_ms") &&
+        record.elapsed_since_anchor_ms !== null)
+    ) {
       return { ok: false, code: "ATTENDANCE_REQUEST_INVALID" };
     }
     return {
