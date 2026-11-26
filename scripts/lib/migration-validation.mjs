@@ -519,6 +519,8 @@ export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME =
 export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)",
 ]);
+export const WP10_7_2B_MIGRATION_NAME =
+  "20261126210000_wp10_7_2b_drop_leave_profile_unit_kind.sql";
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
   "20261121090000_retire_ai_reports_and_provider_config.sql";
 export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
@@ -1490,12 +1492,192 @@ export async function runMigrationValidation({
   }
 }
 
+const LEAVE_PROFILE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VALID_LEAVE_PROFILE_UNIT_KINDS = new Set([
+  "UNCLASSIFIED",
+  "RECRUITMENT",
+  "MARKETING",
+  "IT",
+  "ACCOUNTING",
+  "MANAGEMENT_BOD",
+]);
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+
+function normalizeArchiveParityExpectation({
+  expectedRowCount,
+  expectedCanonicalSha256,
+}) {
+  if (!Number.isInteger(expectedRowCount) || expectedRowCount < 0) {
+    throw new Error(
+      `Invalid WP10-7-2B expectedRowCount: ${String(expectedRowCount)}`,
+    );
+  }
+  if (
+    typeof expectedCanonicalSha256 !== "string" ||
+    !SHA256_HEX_RE.test(expectedCanonicalSha256)
+  ) {
+    throw new Error(
+      `Invalid WP10-7-2B expectedCanonicalSha256: ${String(expectedCanonicalSha256)}`,
+    );
+  }
+  return {
+    expectedRowCount,
+    expectedCanonicalSha256: expectedCanonicalSha256.toLowerCase(),
+  };
+}
+
+/**
+ * Parse a `leave_employee_profiles` archive CSV (`app_user_id,unit_kind`),
+ * validate UUIDs, allowed `unit_kind` values, and uniqueness, sort ascending
+ * by `app_user_id` to match PostgreSQL `ORDER BY app_user_id ASC`, and compute
+ * `{ rowCount, canonicalSha256 }` over UTF-8 `app_user_id|unit_kind` lines.
+ */
+export function parseLeaveProfileUnitKindArchiveCsv(csvText) {
+  if (typeof csvText !== "string") {
+    throw new Error("WP10-7-2B archive CSV must be a UTF-8 string");
+  }
+  const lines = csvText.replace(/^\uFEFF/, "").split(/\r?\n/);
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  if (lines.length === 0 || lines[0] !== "app_user_id,unit_kind") {
+    throw new Error(
+      "WP10-7-2B archive CSV must start with exact header: app_user_id,unit_kind",
+    );
+  }
+
+  const seen = new Set();
+  const rows = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    const parts = line.split(",");
+    if (parts.length !== 2) {
+      throw new Error(
+        `WP10-7-2B archive CSV invalid column count on line ${i + 1}`,
+      );
+    }
+    const rawUserId = parts[0];
+    const unitKind = parts[1];
+    if (!LEAVE_PROFILE_UUID_RE.test(rawUserId)) {
+      throw new Error(
+        `WP10-7-2B archive CSV invalid app_user_id UUID on line ${i + 1}: ${rawUserId}`,
+      );
+    }
+    if (!VALID_LEAVE_PROFILE_UNIT_KINDS.has(unitKind)) {
+      throw new Error(
+        `WP10-7-2B archive CSV invalid unit_kind on line ${i + 1}: ${unitKind}`,
+      );
+    }
+    const appUserId = rawUserId.toLowerCase();
+    if (seen.has(appUserId)) {
+      throw new Error(
+        `WP10-7-2B archive CSV duplicate app_user_id on line ${i + 1}: ${appUserId}`,
+      );
+    }
+    seen.add(appUserId);
+    rows.push({ appUserId, unitKind });
+  }
+
+  rows.sort((a, b) =>
+    a.appUserId < b.appUserId ? -1 : a.appUserId > b.appUserId ? 1 : 0,
+  );
+  const canonicalPayload = rows
+    .map((row) => `${row.appUserId}|${row.unitKind}`)
+    .join("\n");
+  const canonicalSha256 = createHash("sha256")
+    .update(canonicalPayload, "utf8")
+    .digest("hex");
+
+  return { rowCount: rows.length, canonicalSha256 };
+}
+
+/**
+ * Load and parse a WP10-7-2B archive CSV file from disk.
+ */
+export async function loadLeaveProfileUnitKindArchiveCsv(csvPath) {
+  if (typeof csvPath !== "string" || csvPath.trim() === "") {
+    throw new Error("WP10-7-2B archive CSV path must be a non-empty string");
+  }
+  const csvText = await readFile(csvPath, "utf8");
+  return parseLeaveProfileUnitKindArchiveCsv(csvText);
+}
+
+/**
+ * Inside an active migration transaction, lock `public.leave_employee_profiles`
+ * with `ACCESS EXCLUSIVE` and assert live `(row_count, canonical_sha256)` parity
+ * against the pre-drop archive before executing #251.
+ */
+export async function assertLeaveProfileUnitKindArchiveParityInTx(
+  client,
+  expected,
+) {
+  const { expectedRowCount, expectedCanonicalSha256 } =
+    normalizeArchiveParityExpectation(expected ?? {});
+
+  await client.query(
+    "LOCK TABLE public.leave_employee_profiles IN ACCESS EXCLUSIVE MODE;",
+  );
+  const { rows } = await client.query(
+    `select count(*)::bigint as row_count,
+            pg_catalog.encode(
+              pg_catalog.sha256(
+                pg_catalog.convert_to(
+                  coalesce(
+                    pg_catalog.string_agg(
+                      p.app_user_id::text || '|' || p.unit_kind,
+                      E'\\n' order by p.app_user_id asc
+                    ),
+                    ''
+                  ),
+                  'UTF8'
+                )
+              ),
+              'hex'
+            ) as canonical_sha256
+       from public.leave_employee_profiles p`,
+  );
+
+  const row = rows?.[0];
+  const liveCount = Number(row?.row_count);
+  const liveSha256 = String(row?.canonical_sha256 ?? "").toLowerCase();
+  if (
+    !Number.isInteger(liveCount) ||
+    liveCount !== expectedRowCount ||
+    liveSha256 !== expectedCanonicalSha256
+  ) {
+    throw new Error(
+      `WP10-7-2B archive parity check failed in transaction: ` +
+        `expected (row_count=${expectedRowCount}, canonical_sha256=${expectedCanonicalSha256}), ` +
+        `live (row_count=${String(row?.row_count)}, canonical_sha256=${liveSha256 || "<empty>"})`,
+    );
+  }
+}
+
+/**
+ * Create a `beforeApplyMigration` hook that enforces live archive parity
+ * in the same transaction immediately before applying migration #251.
+ */
+export function createWp1072bArchiveGuard(expected) {
+  const normalized = normalizeArchiveParityExpectation(expected ?? {});
+  return async function verifyWp1072bArchiveBeforeApply({
+    client,
+    migration,
+  }) {
+    if (migration?.name !== WP10_7_2B_MIGRATION_NAME) {
+      return;
+    }
+    await assertLeaveProfileUnitKindArchiveParityInTx(client, normalized);
+  };
+}
+
 export async function runMigrationApply({
   directory,
   loadConfig,
   createClient,
   log = console.log,
   errorLog = console.error,
+  beforeApplyMigration = null,
 }) {
   const migrations = await readMigrations(directory);
   const { databaseUrl, projectRef = "local", usesPooler = false } = await loadConfig();
@@ -1560,6 +1742,9 @@ export async function runMigrationApply({
 
     try {
       await client.query("begin");
+      if (typeof beforeApplyMigration === "function") {
+        await beforeApplyMigration({ client, migration });
+      }
       await client.query(migrationSqlForTransaction(migration.sql));
       await client.query(
         "insert into public.schema_migrations (version, checksum) values ($1, $2)",

@@ -51,6 +51,11 @@ declare
   v_extra_trgs text;
   v_proc record;
   v_norm text;
+  v_no_comments text;
+  v_dyn text;
+  v_pass integer;
+  v_scan_sql text;
+  v_prefix text;
   v_stmt text;
   v_stmt_no_as text;
   v_alias text;
@@ -65,7 +70,7 @@ declare
     'wait', 'nowait', 'skip', 'locked', 'share', 'key', 'no', 'of'
   ];
 begin
-  -- 1a. Assert table and non-dropped unit_kind column exist
+  -- 1a. Assert table and non-dropped unit_kind column exist, then lock table
   v_tbl := pg_catalog.to_regclass('public.leave_employee_profiles');
   if v_tbl is null then
     raise exception 'WP10-7-2B precheck failed: public.leave_employee_profiles does not exist'
@@ -84,6 +89,8 @@ begin
     raise exception 'WP10-7-2B precheck failed: public.leave_employee_profiles.unit_kind does not exist'
       using errcode = '55000';
   end if;
+
+  lock table public.leave_employee_profiles in access exclusive mode;
 
   -- 1b. pg_depend gate on (refobjid = v_tbl, refobjsubid = v_attnum):
   --     allow ONLY unit_kind's own default (pg_attrdef) and table-local
@@ -279,69 +286,94 @@ begin
     );
     v_reason := null;
 
-    if v_norm ~* '\morg_department__internal_guard_leave_profile\M' then
-      v_reason := 'references org_department__internal_guard_leave_profile';
-    elsif v_norm ~* '\mleave_employee_profiles\s*\.\s*unit_kind\M' then
-      v_reason := 'references leave_employee_profiles.unit_kind';
-    elsif v_norm ~* '\mleave_employee_profiles\M' then
-      -- Check table aliases, FOR record variables, and %ROWTYPE variables bound to leave_employee_profiles
-      for v_alias in
-        select m[1]
-          from pg_catalog.regexp_matches(
-                 v_norm,
-                 '\mleave_employee_profiles\s+(?:as\s+)?([a-z_][a-z0-9_]*)\M',
-                 'gi'
-               ) as m
-        union
-        select m[1]
-          from pg_catalog.regexp_matches(
-                 v_norm,
-                 '\m([a-z_][a-z0-9_]*)\s+(?:[a-z_][a-z0-9_]*\s*\.\s*)?leave_employee_profiles\s*%\s*rowtype\M',
-                 'gi'
-               ) as m
-        union
-        select m[1]
-          from pg_catalog.regexp_matches(
-                 v_norm,
-                 '\mfor\s+([a-z_][a-z0-9_]*)\s+in\b[^;]*?\mleave_employee_profiles\M',
-                 'gi'
-               ) as m
-      loop
-        if lower(v_alias) <> all(v_keywords)
-           and v_norm ~* ('\m' || v_alias || '\s*\.\s*unit_kind\M') then
-          v_reason := 'references ' || v_alias || '.unit_kind';
-          exit;
-        end if;
-      end loop;
+    for v_pass in 1..2 loop
+      exit when v_reason is not null;
+      if v_pass = 1 then
+        v_scan_sql := v_norm;
+        v_prefix := '';
+      else
+        exit when v_norm !~* '\mexecute\M';
+        v_no_comments := pg_catalog.regexp_replace(
+          coalesce(v_proc.prosrc, ''),
+          $rx$(--[^\r\n]*|/\*.*?\*/)$rx$,
+          ' ',
+          'g'
+        );
+        exit when v_no_comments !~* '\morg_department__internal_guard_leave_profile\M'
+          and not (
+            v_no_comments ~* '\mleave_employee_profiles\M'
+            and v_no_comments ~* '\munit_kind\M'
+          );
+        v_dyn := pg_catalog.replace(
+          pg_catalog.regexp_replace(v_no_comments, $rx$''([^']|'''')*''$rx$, ' ', 'g'),
+          '''',
+          ' '
+        );
+        v_scan_sql := v_dyn;
+        v_prefix := 'dynamic EXECUTE: ';
+      end if;
 
-      if v_reason is null then
-        for v_stmt in
-          select s
-            from pg_catalog.regexp_split_to_table(v_norm, ';') as s
-           where s ~* '\mleave_employee_profiles\M'
+      if v_scan_sql ~* '\morg_department__internal_guard_leave_profile\M' then
+        v_reason := v_prefix || 'references org_department__internal_guard_leave_profile';
+      elsif v_scan_sql ~* '\mleave_employee_profiles\s*\.\s*unit_kind\M' then
+        v_reason := v_prefix || 'references leave_employee_profiles.unit_kind';
+      elsif v_scan_sql ~* '\mleave_employee_profiles\M' then
+        -- Check table aliases, FOR record variables, and %ROWTYPE variables bound to leave_employee_profiles
+        for v_alias in
+          select m[1]
+            from pg_catalog.regexp_matches(
+                   v_scan_sql,
+                   '\mleave_employee_profiles\s+(?:as\s+)?([a-z_][a-z0-9_]*)\M',
+                   'gi'
+                 ) as m
+          union
+          select m[1]
+            from pg_catalog.regexp_matches(
+                   v_scan_sql,
+                   '\m([a-z_][a-z0-9_]*)\s+(?:[a-z_][a-z0-9_]*\s*\.\s*)?leave_employee_profiles\s*%\s*rowtype\M',
+                   'gi'
+                 ) as m
+          union
+          select m[1]
+            from pg_catalog.regexp_matches(
+                   v_scan_sql,
+                   '\mfor\s+([a-z_][a-z0-9_]*)\s+in\b[^;]*?\mleave_employee_profiles\M',
+                   'gi'
+                 ) as m
         loop
-          if v_stmt ~* '\mupdate\s+(?:only\s+)?(?:[a-z_][a-z0-9_]*\s*\.\s*)?leave_employee_profiles\b.*?\mset\b.*?\munit_kind\s*=' then
-            v_reason := 'UPDATE SET unit_kind';
+          if lower(v_alias) <> all(v_keywords)
+             and v_scan_sql ~* ('\m' || v_alias || '\s*\.\s*unit_kind\M') then
+            v_reason := v_prefix || 'references ' || v_alias || '.unit_kind';
             exit;
-          elsif v_stmt ~* '\minsert\s+into\s+(?:[a-z_][a-z0-9_]*\s*\.\s*)?leave_employee_profiles\s*\([^)]*\munit_kind\M' then
-            v_reason := 'INSERT INTO leave_employee_profiles (... unit_kind ...)';
-            exit;
-          elsif v_stmt ~* '\m(insert\s+into|update|delete\s+from)\b.*?\mleave_employee_profiles\b.*?\mreturning\b.*?\munit_kind\M' then
-            v_reason := 'RETURNING unit_kind';
-            exit;
-          elsif v_stmt !~* '\mas\s+unit_kind\M' and v_stmt ~* '\munit_kind\M' then
-            v_reason := 'reads/writes unit_kind alongside leave_employee_profiles';
-            exit;
-          else
-            v_stmt_no_as := pg_catalog.regexp_replace(v_stmt, '\mas\s+unit_kind\M', ' ', 'gi');
-            if v_stmt_no_as ~* '(^|[^a-z0-9_.])unit_kind\M' then
-              v_reason := 'unqualified unit_kind in statement referencing leave_employee_profiles';
-              exit;
-            end if;
           end if;
         end loop;
+
+        if v_reason is null then
+          for v_stmt in
+            select s
+              from pg_catalog.regexp_split_to_table(v_scan_sql, ';') as s
+             where s ~* '\mleave_employee_profiles\M'
+          loop
+            if v_stmt ~* '\mupdate\s+(?:only\s+)?(?:[a-z_][a-z0-9_]*\s*\.\s*)?leave_employee_profiles\b.*?\mset\b.*?\munit_kind\s*=' then
+              v_reason := v_prefix || 'UPDATE SET unit_kind';
+              exit;
+            elsif v_stmt ~* '\minsert\s+into\s+(?:[a-z_][a-z0-9_]*\s*\.\s*)?leave_employee_profiles\s*\([^)]*\munit_kind\M' then
+              v_reason := v_prefix || 'INSERT INTO leave_employee_profiles (... unit_kind ...)';
+              exit;
+            elsif v_stmt ~* '\m(insert\s+into|update|delete\s+from)\b.*?\mleave_employee_profiles\b.*?\mreturning\b.*?\munit_kind\M' then
+              v_reason := v_prefix || 'RETURNING unit_kind';
+              exit;
+            else
+              v_stmt_no_as := pg_catalog.regexp_replace(v_stmt, '\mas\s+unit_kind\M', ' ', 'gi');
+              if v_stmt_no_as ~* '(^|[^a-z0-9_.])unit_kind\M' then
+                v_reason := v_prefix || 'unqualified unit_kind in statement referencing leave_employee_profiles';
+                exit;
+              end if;
+            end if;
+          end loop;
+        end if;
       end if;
-    end if;
+    end loop;
 
     if v_reason is not null then
       v_bad_procs := array_append(v_bad_procs, v_proc.sig || ' [' || v_reason || ']');

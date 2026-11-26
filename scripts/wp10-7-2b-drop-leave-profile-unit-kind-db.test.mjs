@@ -71,7 +71,11 @@ import {
   projectTransferPersonDepartmentResponse,
 } from "../src/lib/organization/person-contract.ts";
 import {
+  createWp1072bArchiveGuard,
+  loadLeaveProfileUnitKindArchiveCsv,
+  migrationChecksum,
   PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME,
+  runMigrationApply,
   S0_T1_C_MIGRATION_NAME,
   verifyS0T1CSecurityPostconditions,
 } from "./lib/migration-validation.mjs";
@@ -187,6 +191,40 @@ async function serviceRpc(client, fnName, args = [], casts = []) {
     .join(", ");
   const res = await serviceQuery(client, `select public.${fnName}(${placeholders}) as data`, args);
   return res.rows[0]?.data;
+}
+
+async function waitUntilBlocked(observer, appName, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { rows } = await observer.query(
+      `select a.pid,
+              a.application_name,
+              a.wait_event_type,
+              a.wait_event,
+              l.locktype,
+              l.mode
+         from pg_stat_activity a
+         join pg_locks l
+           on l.pid = a.pid
+          and l.granted = false
+        where a.application_name = $1
+          and a.state = 'active'
+          and a.wait_event_type = 'Lock'
+        limit 1`,
+      [appName],
+    );
+    if (rows.length === 1) {
+      return rows[0];
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const { rows: snap } = await observer.query(
+    `select pid, application_name, state, wait_event_type, wait_event, left(query, 120) as query_prefix
+       from pg_stat_activity
+      where application_name = $1`,
+    [appName],
+  );
+  throw new Error(`Timed out waiting for ${appName} to block on Lock. Snapshot: ${JSON.stringify(snap)}`);
 }
 
 async function setBusinessDate(setup, isoDate) {
@@ -546,6 +584,8 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
 
     // Extra archived profile that we will delete in the post-251 restore drill
     const toDeleteArchivedUser = await onboardOrgUser("todel", deptByKey.IT, "Archived To Delete");
+    // Unconfigured MARKETING user saved via connB between out-of-tx check and #251 apply (TOCTOU test)
+    const toctouUser = await onboardOrgUser("toctou", deptByKey.MARKETING, "TOCTOU Concurrent User");
 
     // Disabled unlinked user with mismatched legacy unit_kind = 'MARKETING'
     const disabledUnlinkedMkt = await seedPlainAccount(setup, "wp1072b.disunlmkt", "Disabled Unlinked MKT");
@@ -575,6 +615,23 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
 
     // Apply Migration #250 so the database is genuinely at #250 (pre-251)
     await setup.query(await readFile(path.join(MIGRATION_DIR, files[wp1072aIdx]), "utf8"));
+
+    // Seed public.schema_migrations for 0..250 with real checksums so runMigrationApply treats #251 as pending
+    await setup.query(`
+      create table if not exists public.schema_migrations (
+        version     text primary key,
+        checksum    text not null,
+        applied_at  timestamptz not null default now()
+      )
+    `);
+    for (let i = 0; i <= wp1072aIdx; i += 1) {
+      const fname = files[i];
+      const sqlText = await readFile(path.join(MIGRATION_DIR, fname), "utf8");
+      await setup.query(
+        "insert into public.schema_migrations (version, checksum) values ($1, $2) on conflict (version) do nothing",
+        [fname, migrationChecksum(sqlText)],
+      );
+    }
 
     // At #250 (pre-251): capture pre-251 profile save (Idempotency-Key + request_fingerprint)
     const preItIdemKey = "wp10-7-2b-pre-251-it-replay";
@@ -712,45 +769,49 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     const archiveManifest = await computeDbUnitKindManifest(observer);
     assert.equal(archiveManifest.rowCount, 11, "Pre-251 archive must contain all 11 seeded leave profiles");
 
+    const staleArchiveParity = await loadLeaveProfileUnitKindArchiveCsv(archiveCsvPath);
+    assert.equal(staleArchiveParity.rowCount, archiveManifest.rowCount);
+    assert.equal(staleArchiveParity.canonicalSha256, archiveManifest.canonicalSha256);
+
     const archiveCsvText = await readFile(archiveCsvPath, "utf8");
     const csvLines = archiveCsvText.trim().split(/\r?\n/);
     assert.equal(csvLines[0], "app_user_id,unit_kind");
-    const archivedEntries = csvLines.slice(1).map((line) => {
+    const staleArchivedEntries = csvLines.slice(1).map((line) => {
       const [appUserId, unitKind] = line.split(",");
       assert.ok(appUserId && unitKind, `Invalid archive CSV row: ${line}`);
       return { app_user_id: appUserId, unit_kind: unitKind };
     });
-    assert.equal(archivedEntries.length, archiveManifest.rowCount);
-    const archivedCanonicalFromCsv = archivedEntries
+    assert.equal(staleArchivedEntries.length, archiveManifest.rowCount);
+    const archivedCanonicalFromCsv = staleArchivedEntries
       .map((e) => `${e.app_user_id}|${e.unit_kind}`)
       .join("\n");
     assert.equal(sha256(archivedCanonicalFromCsv), archiveManifest.canonicalSha256);
 
-    const archivedByUserId = new Map(archivedEntries.map((e) => [e.app_user_id, e.unit_kind]));
-    assert.equal(archivedByUserId.get(itMember.acc.app), "IT");
-    assert.equal(archivedByUserId.get(mktMember.acc.app), "MARKETING");
-    assert.equal(archivedByUserId.get(acctMember.acc.app), "ACCOUNTING");
-    assert.equal(archivedByUserId.get(opsMember.acc.app), "UNCLASSIFIED");
-    assert.equal(archivedByUserId.get(disabledUnlinkedMkt.app), "MARKETING");
+    const staleArchivedByUserId = new Map(staleArchivedEntries.map((e) => [e.app_user_id, e.unit_kind]));
+    assert.equal(staleArchivedByUserId.get(itMember.acc.app), "IT");
+    assert.equal(staleArchivedByUserId.get(mktMember.acc.app), "MARKETING");
+    assert.equal(staleArchivedByUserId.get(acctMember.acc.app), "ACCOUNTING");
+    assert.equal(staleArchivedByUserId.get(opsMember.acc.app), "UNCLASSIFIED");
+    assert.equal(staleArchivedByUserId.get(disabledUnlinkedMkt.app), "MARKETING");
 
-    // Source-still-matches gate immediately before applying #251
+    // Out-of-tx source-still-matches gate immediately before failure gates
     const preDropGateManifest = await computeDbUnitKindManifest(observer);
     assert.equal(preDropGateManifest.rowCount, archiveManifest.rowCount);
     assert.equal(preDropGateManifest.canonicalSha256, archiveManifest.canonicalSha256);
 
     // -------------------------------------------------------------------------
-    // 3. Atomic Rollback + Non-Public-Schema Failure Gates (Function & View)
+    // 3. Atomic Rollback + Non-Public Static/Dynamic Failure Gates + 2-Conn TOCTOU
     // -------------------------------------------------------------------------
-    async function assertUnitKindIntact(label) {
+    async function assertUnitKindIntact(label, expectedManifest = archiveManifest) {
       const { rows: [col] } = await observer.query(
-        `select 1 as ok
+        `select a.attnotnull
            from pg_catalog.pg_attribute a
           where a.attrelid = 'public.leave_employee_profiles'::pg_catalog.regclass
             and a.attname = 'unit_kind'
             and a.attnum > 0
             and not a.attisdropped`,
       );
-      assert.ok(col, `${label}: unit_kind column must remain intact`);
+      assert.equal(col?.attnotnull, true, `${label}: unit_kind column (attnotnull=true) must remain intact`);
       const { rows: [trg] } = await observer.query(
         `select 1 as ok
            from pg_catalog.pg_trigger t
@@ -763,9 +824,42 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
         "select pg_catalog.to_regprocedure('public.org_department__internal_guard_leave_profile()') as oid",
       );
       assert.ok(fn.oid !== null, `${label}: guard helper function must remain intact`);
+      const { rows: mig251Rows } = await observer.query(
+        "select 1 from public.schema_migrations where version = $1",
+        [WP10_7_2B_MIGRATION_NAME],
+      );
+      assert.equal(mig251Rows.length, 0, `${label}: schema_migrations must NOT record #251`);
       const currentManifest = await computeDbUnitKindManifest(observer);
-      assert.equal(currentManifest.rowCount, archiveManifest.rowCount, `${label}: row count must stay intact`);
-      assert.equal(currentManifest.canonicalSha256, archiveManifest.canonicalSha256, `${label}: stored values must stay intact`);
+      assert.equal(currentManifest.rowCount, expectedManifest.rowCount, `${label}: row count must stay intact`);
+      assert.equal(currentManifest.canonicalSha256, expectedManifest.canonicalSha256, `${label}: stored values must stay intact`);
+    }
+
+    async function runApply251ViaHelper({ parityExpectation, beforeApplyWrapper = null }) {
+      const guard = createWp1072bArchiveGuard({
+        expectedRowCount: parityExpectation.rowCount,
+        expectedCanonicalSha256: parityExpectation.canonicalSha256,
+      });
+      return runMigrationApply({
+        directory: MIGRATION_DIR,
+        loadConfig: async () => ({
+          databaseUrl: `postgresql://postgres@127.0.0.1:${port}/postgres`,
+          projectRef: "local",
+        }),
+        createClient: (databaseUrl) =>
+          new Client({
+            connectionString: databaseUrl,
+            application_name: "wp10-7-2b-connA",
+            connectionTimeoutMillis: 5000,
+          }),
+        log: () => {},
+        errorLog: () => {},
+        beforeApplyMigration: async (ctx) => {
+          await guard(ctx);
+          if (typeof beforeApplyWrapper === "function") {
+            await beforeApplyWrapper(ctx);
+          }
+        },
+      });
     }
 
     // Atomic rollback check
@@ -816,10 +910,259 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     await assertUnitKindIntact("Blocked by app_custom.v_leave_unit view");
     await setup.query("drop view app_custom.v_leave_unit; drop schema app_custom;");
 
+    // Gate C (Dynamic EXECUTE PL/pgSQL in application schema `app_reports`):
+    await setup.query(`
+      create schema app_reports;
+      create function app_reports.report_legacy_unit_dynamic(p_user_id uuid)
+      returns text
+      language plpgsql
+      as $fn$
+      declare
+        v_uk text;
+      begin
+        execute 'SELECT unit_kind FROM public.leave_employee_profiles WHERE app_user_id = $1'
+          into v_uk
+          using p_user_id;
+        return v_uk;
+      end;
+      $fn$;
+    `);
+    await assert.rejects(
+      () => runApply251ViaHelper({ parityExpectation: staleArchiveParity }),
+      (err) =>
+        err?.code === "55000" &&
+        /app_reports\.report_legacy_unit_dynamic\((?:p_user_id\s+)?uuid\)/.test(String(err?.message)),
+      "Migration #251 MUST fail closed (55000) naming app_reports.report_legacy_unit_dynamic(p_user_id uuid)",
+    );
+    await assertUnitKindIntact("Blocked by app_reports.report_legacy_unit_dynamic");
+    await setup.query("drop function app_reports.report_legacy_unit_dynamic(uuid);");
+
+    await setup.query(`
+      create function app_reports.report_legacy_unit_format(p_user_id uuid)
+      returns text
+      language plpgsql
+      as $fn$
+      declare
+        v_uk text;
+      begin
+        execute format('SELECT %I FROM public.leave_employee_profiles WHERE app_user_id = $1', 'unit_kind')
+          into v_uk
+          using p_user_id;
+        return v_uk;
+      end;
+      $fn$;
+    `);
+    await assert.rejects(
+      () => runApply251ViaHelper({ parityExpectation: staleArchiveParity }),
+      (err) =>
+        err?.code === "55000" &&
+        /app_reports\.report_legacy_unit_format\((?:p_user_id\s+)?uuid\)/.test(String(err?.message)),
+      "Migration #251 MUST fail closed (55000) naming app_reports.report_legacy_unit_format(p_user_id uuid)",
+    );
+    await assertUnitKindIntact("Blocked by app_reports.report_legacy_unit_format");
+    await setup.query("drop function app_reports.report_legacy_unit_format(uuid);");
+
+    // Valid dynamic EXECUTE reporting function joining leave_employee_profiles with Org resolver
+    await setup.query(`
+      create function app_reports.report_org_unit_dynamic(p_user_id uuid)
+      returns jsonb
+      language plpgsql
+      as $fn$
+      declare
+        v_res jsonb;
+      begin
+        execute '
+          select jsonb_build_object(''resolved_unit_kind'', c.unit_kind) || jsonb_build_object(''unit_kind'', c.unit_kind)
+            from public.leave_employee_profiles lp
+            cross join lateral public.org_department__internal_resolve_leave_classification(lp.app_user_id, now()) c
+           where lp.app_user_id = $1
+        '
+          into v_res
+          using p_user_id;
+        return v_res;
+      end;
+      $fn$;
+    `);
+
+    // Gate D (Two-Connection TOCTOU):
+    //   Out-of-tx source check already passed on 11 rows; before connA acquires the table lock,
+    //   connB inserts a brand-new leave profile -> runMigrationApply on connA MUST reject on parity mismatch,
+    //   roll back cleanly, preserve unit_kind/trigger/guard/new profile, and record 0 #251 schema_migrations row.
+    const connB = await connect(port, "wp10-7-2b-connB");
+    clients.push(connB);
+    const toctouInsertFp = sha256(JSON.stringify({
+      op: "UPSERT_EMPLOYEE_PROFILE",
+      target_app_user_id: toctouUser.acc.app.toLowerCase(),
+      employment_status: "OFFICIAL",
+      unit_kind: "UNCLASSIFIED",
+      work_start_date: "2024-01-01",
+      official_effective_date: "2024-03-01",
+      next_seniority_effective_date: null,
+      next_seniority_units: 0,
+      expected_row_version: 0,
+      reason: "TOCTOU connB insert before #251 lock",
+    }));
+    const connBInserted = await serviceRpc(
+      connB,
+      "leave_management_upsert_employee_profile_admin",
+      [
+        OWNER.auth,
+        OWNER.app,
+        toctouUser.acc.app,
+        "OFFICIAL",
+        null,
+        "2024-01-01",
+        "2024-03-01",
+        null,
+        0,
+        0,
+        "TOCTOU connB insert before #251 lock",
+        nextKey("toctou_ins"),
+        toctouInsertFp,
+      ],
+      ["uuid", "uuid", "uuid", "text", "text", "date", "date", "date", "int", "int", "text", "text", "text"],
+    );
+    assert.equal(connBInserted.profile.row_version, 1);
+    assert.equal(connBInserted.profile.unit_kind, "MARKETING");
+
+    await assert.rejects(
+      () => runApply251ViaHelper({ parityExpectation: staleArchiveParity }),
+      (err) => /WP10-7-2B archive parity check failed/i.test(String(err?.message)),
+      "TOCTOU: stale 11-row archive MUST fail parity inside runMigrationApply tx after connB committed 12th row",
+    );
+
+    const postToctouManifest = await computeDbUnitKindManifest(observer);
+    assert.equal(postToctouManifest.rowCount, 12);
+    await assertUnitKindIntact("TOCTOU parity mismatch rollback", postToctouManifest);
+    const { rows: [toctouDbRow] } = await observer.query(
+      "select row_version, unit_kind from public.leave_employee_profiles where app_user_id = $1::uuid",
+      [toctouUser.acc.app],
+    );
+    assert.equal(toctouDbRow.row_version, 1);
+    assert.equal(toctouDbRow.unit_kind, "UNCLASSIFIED");
+
+    // Re-export fresh 12-row archive CSV after connB commit for clean #251 apply & restore drill
+    const freshArchiveCsvPath = path.join(tmpDir, "leave_employee_profiles_unit_kind.archive.v2.csv");
+    const freshArchiveCsvPosix = freshArchiveCsvPath.replaceAll("\\", "/");
+    runBin(
+      psqlBin,
+      [`postgresql://postgres@127.0.0.1:${port}/postgres`, "-X", "-v", "ON_ERROR_STOP=1"],
+      {
+        input: [
+          "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",
+          `\\copy (SELECT app_user_id::text AS app_user_id, unit_kind FROM public.leave_employee_profiles ORDER BY app_user_id ASC) TO '${freshArchiveCsvPosix}' WITH (FORMAT csv, HEADER true)`,
+          "ROLLBACK;",
+        ].join("\n"),
+      },
+    );
+    const freshArchiveParity = await loadLeaveProfileUnitKindArchiveCsv(freshArchiveCsvPath);
+    assert.equal(freshArchiveParity.rowCount, 12);
+    assert.equal(freshArchiveParity.canonicalSha256, postToctouManifest.canonicalSha256);
+
+    const freshCsvLines = (await readFile(freshArchiveCsvPath, "utf8")).trim().split(/\r?\n/);
+    const archivedEntries = freshCsvLines.slice(1).map((line) => {
+      const [appUserId, unitKind] = line.split(",");
+      assert.ok(appUserId && unitKind, `Invalid fresh archive CSV row: ${line}`);
+      return { app_user_id: appUserId, unit_kind: unitKind };
+    });
+    const archivedByUserId = new Map(archivedEntries.map((e) => [e.app_user_id, e.unit_kind]));
+
     // -------------------------------------------------------------------------
-    // 4. Clean Apply #251 & Catalog Postconditions
+    // 4. Clean Apply #251 via runMigrationApply + ACCESS EXCLUSIVE Lock Proof + Postconditions
     // -------------------------------------------------------------------------
-    await setup.query(wp1072bSql);
+    let connBConcurrentUpsert = null;
+    const applyResult = await runApply251ViaHelper({
+      parityExpectation: freshArchiveParity,
+      beforeApplyWrapper: async ({ client, migration }) => {
+        if (migration.name !== WP10_7_2B_MIGRATION_NAME) return;
+        const { rows: [connAInfo] } = await client.query("select pg_catalog.pg_backend_pid() as pid");
+        const { rows: lockRows } = await observer.query(
+          `select mode, granted
+             from pg_catalog.pg_locks
+            where pid = $1::int
+              and relation = 'public.leave_employee_profiles'::pg_catalog.regclass
+              and mode = 'AccessExclusiveLock'`,
+          [connAInfo.pid],
+        );
+        assert.equal(lockRows.length, 1, "runMigrationApply must hold AccessExclusiveLock on leave_employee_profiles");
+        assert.equal(lockRows[0].granted, true);
+
+        // Concurrent connB write must block on connA's AccessExclusiveLock until #251 commits
+        const concFp = sha256(JSON.stringify({
+          op: "UPSERT_EMPLOYEE_PROFILE",
+          target_app_user_id: toctouUser.acc.app.toLowerCase(),
+          employment_status: "OFFICIAL",
+          unit_kind: "UNCLASSIFIED",
+          work_start_date: "2024-01-01",
+          official_effective_date: "2024-03-01",
+          next_seniority_effective_date: null,
+          next_seniority_units: 0,
+          expected_row_version: 1,
+          reason: "Concurrent connB update waiting for #251 commit",
+        }));
+        connBConcurrentUpsert = serviceRpc(
+          connB,
+          "leave_management_upsert_employee_profile_admin",
+          [
+            OWNER.auth,
+            OWNER.app,
+            toctouUser.acc.app,
+            "OFFICIAL",
+            null,
+            "2024-01-01",
+            "2024-03-01",
+            null,
+            0,
+            1,
+            "Concurrent connB update waiting for #251 commit",
+            nextKey("toctou_conc_upd"),
+            concFp,
+          ],
+          ["uuid", "uuid", "uuid", "text", "text", "date", "date", "date", "int", "int", "text", "text", "text"],
+        ).then(
+          (value) => ({ status: "fulfilled", value }),
+          (reason) => ({ status: "rejected", reason }),
+        );
+        const blocked = await waitUntilBlocked(observer, "wp10-7-2b-connB");
+        const { rows: [blkCheck] } = await observer.query(
+          "select pg_catalog.pg_blocking_pids($1::int) as blockers",
+          [blocked.pid],
+        );
+        assert.equal(
+          blkCheck.blockers.includes(connAInfo.pid),
+          true,
+          "connB write must be blocked by connA holding AccessExclusiveLock across #251",
+        );
+      },
+    });
+    assert.equal(applyResult.appliedCount, 1);
+    assert.equal(applyResult.skippedCount, wp1072bIdx);
+
+    assert.ok(connBConcurrentUpsert, "Concurrent connB upsert must have been launched while AccessExclusiveLock was held");
+    const connBAfter251Settled = await connBConcurrentUpsert;
+    assert.equal(
+      connBAfter251Settled.status,
+      "fulfilled",
+      `Concurrent connB upsert after #251 failed: ${connBAfter251Settled.reason?.code} ${connBAfter251Settled.reason?.message}`,
+    );
+    const connBAfter251 = connBAfter251Settled.value;
+    assert.equal(connBAfter251.profile.row_version, 2);
+    assert.equal(connBAfter251.profile.unit_kind, "MARKETING");
+
+    const { rows: [mig251Row] } = await observer.query(
+      "select version, checksum from public.schema_migrations where version = $1",
+      [WP10_7_2B_MIGRATION_NAME],
+    );
+    assert.ok(mig251Row, "public.schema_migrations must record #251 after clean apply");
+    assert.equal(mig251Row.checksum, migrationChecksum(wp1072bSql));
+
+    // Valid dynamic EXECUTE Org reporting function works cleanly after #251!
+    const { rows: [orgDynRes] } = await observer.query(
+      "select app_reports.report_org_unit_dynamic($1::uuid) as res",
+      [itMember.acc.app],
+    );
+    assert.deepEqual(orgDynRes.res, { unit_kind: "IT", resolved_unit_kind: "IT" });
+    await setup.query("drop schema app_reports cascade;");
 
     const { rows: [postSchema] } = await observer.query(`
       select
@@ -1251,7 +1594,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
       "  app_user_id uuid PRIMARY KEY,",
       "  unit_kind text NOT NULL",
       ") ON COMMIT DROP;",
-      `\\copy _wp10_7_2b_unit_kind_restore (app_user_id, unit_kind) FROM '${archiveCsvPosix}' WITH (FORMAT csv, HEADER true)`,
+      `\\copy _wp10_7_2b_unit_kind_restore (app_user_id, unit_kind) FROM '${freshArchiveCsvPosix}' WITH (FORMAT csv, HEADER true)`,
       "UPDATE public.leave_employee_profiles lp",
       "   SET unit_kind = s.unit_kind",
       "  FROM _wp10_7_2b_unit_kind_restore s",
@@ -1408,7 +1751,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     assert.equal(restoredById.has(toDeleteArchivedUser.acc.app), false, "Deleted archived profile must NOT be resurrected");
 
     const survivingArchiveEntries = archivedEntries.filter((e) => restoredById.has(e.app_user_id));
-    assert.equal(survivingArchiveEntries.length, archiveManifest.rowCount - 1);
+    assert.equal(survivingArchiveEntries.length, freshArchiveParity.rowCount - 1);
     for (const entry of survivingArchiveEntries) {
       assert.equal(
         restoredById.get(entry.app_user_id),
