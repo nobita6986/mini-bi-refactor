@@ -57,6 +57,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp10-7-2b-drop-leave-profile-unit-kind-db.test.mjs",
   "scripts/wp10-7-3a-tl-effective-rollover-db.test.mjs",
   "scripts/wp10-7-3b-team-leader-authz-managed-cutover-db.test.mjs",
+  "scripts/wp10-7-3d-archive-restore-db.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {

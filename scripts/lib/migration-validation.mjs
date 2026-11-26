@@ -2,6 +2,24 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  isWp1073dMigrationName,
+  loadAndVerifyWp1073dArchiveManifest,
+  normalizeWp1073dArchiveExpectation,
+  verifyWp1073dArchiveInTransaction,
+  WP10_7_3D_LOCK_ORDER_SQL,
+  WP10_7_3D_MIGRATION_PATTERN,
+  WP10_7_3D_MIGRATION_SUFFIX,
+} from "./wp10-7-3d-legacy-grants-archive.mjs";
+
+export {
+  isWp1073dMigrationName,
+  loadAndVerifyWp1073dArchiveManifest,
+  verifyWp1073dArchiveInTransaction,
+  WP10_7_3D_MIGRATION_PATTERN,
+  WP10_7_3D_MIGRATION_SUFFIX,
+};
+
 export const S0_T1_C_MIGRATION_NAME =
   "20261020180000_s0_t1_c_rpc_acl_allowlist.sql";
 export const S0_T1_C_PRE_PR92_CHECKSUM =
@@ -1703,6 +1721,77 @@ async function assertDirectWp1072bApplyAllowedInTx(client) {
   }
 }
 
+/**
+ * Create a `beforeApplyMigration` hook that enforces live 3-table + bundle archive
+ * parity under ACCESS EXCLUSIVE locks inside the same transaction immediately before
+ * applying any migration matching `*_wp10_7_3d_drop_direct_entry_legacy_grants.sql`.
+ */
+export function createWp1073dArchiveGuard(expectedArchive) {
+  const normalized = normalizeWp1073dArchiveExpectation(expectedArchive);
+  return async function verifyWp1073dArchiveBeforeApply({
+    client,
+    migration,
+  }) {
+    if (!isWp1073dMigrationName(migration?.name)) {
+      return;
+    }
+    await verifyWp1073dArchiveInTransaction(client, normalized);
+  };
+}
+
+/**
+ * Create a `beforeApplyMigration` hook that fails closed whenever a WP10-7-3D
+ * migration is pending and the caller did not supply a verified archive manifest.
+ */
+export function createWp1073dMissingArchiveGuard() {
+  return async function rejectMissingWp1073dArchive({ migration }) {
+    if (!isWp1073dMigrationName(migration?.name)) {
+      return;
+    }
+    throw new Error(
+      `WP10-7-3D migration (${migration.name}) requires verified 3-table archive parity before dropping ` +
+        "public.work_report_team_leader_capability_grants, public.direct_entry_capability_grants, and public.direct_entry_scope_grants. " +
+        "Re-run scripts/apply-migrations.mjs with --wp10-7-3d-archive-manifest <manifestPath>.",
+    );
+  };
+}
+
+/**
+ * Compose multiple `beforeApplyMigration` hooks sequentially (ignoring null/undefined).
+ */
+export function composeBeforeApplyMigrationGuards(...guards) {
+  const active = guards.filter((guard) => typeof guard === "function");
+  if (active.length === 0) {
+    return null;
+  }
+  return async function runComposedBeforeApplyMigrationGuards(context) {
+    for (const guard of active) {
+      await guard(context);
+    }
+  };
+}
+
+async function assertDirectWp1073dApplyAllowedInTx(client, migrationName) {
+  await client.query(WP10_7_3D_LOCK_ORDER_SQL);
+  const { rows } = await client.query(`
+    select (select count(*)::bigint from public.direct_entry_capability_grants) as cap_count,
+           (select count(*)::bigint from public.direct_entry_scope_grants) as scope_count,
+           (select count(*)::bigint from public.work_report_team_leader_capability_grants) as bridge_count
+  `);
+  const row = rows?.[0] ?? {};
+  const capCount = Number(row.cap_count ?? 0);
+  const scopeCount = Number(row.scope_count ?? 0);
+  const bridgeCount = Number(row.bridge_count ?? 0);
+  const totalCount = capCount + scopeCount + bridgeCount;
+  if (totalCount > 0) {
+    throw new Error(
+      `WP10-7-3D migration (${migrationName}) requires verified 3-table archive parity when legacy grant tables have existing rows ` +
+        `(live counts: capability=${capCount}, scope=${scopeCount}, bridge=${bridgeCount}). ` +
+        "Provide createWp1073dArchiveGuard(...) or run scripts/apply-migrations.mjs with --wp10-7-3d-archive-manifest <manifestPath>.",
+    );
+  }
+}
+
 async function defaultRunMigrationInTransaction(client, runMigrationBody) {
   await client.query("begin");
   try {
@@ -1795,6 +1884,8 @@ export async function runMigrationApply({
           await beforeApplyMigration({ client, migration });
         } else if (migration.name === WP10_7_2B_MIGRATION_NAME) {
           await assertDirectWp1072bApplyAllowedInTx(client);
+        } else if (isWp1073dMigrationName(migration.name)) {
+          await assertDirectWp1073dApplyAllowedInTx(client, migration.name);
         }
         await client.query(migrationSqlForTransaction(migration.sql));
         await client.query(
