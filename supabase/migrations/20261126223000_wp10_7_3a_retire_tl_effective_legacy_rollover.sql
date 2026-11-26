@@ -9,23 +9,27 @@
 --      not is_current, not suspended_by_account_disable, valid_from <= today,
 --      valid interval (valid_to is null or valid_to > valid_from)) would
 --      change effective status between pre-3A (old_effective) and post-3A
---      (new_effective) at any date:
+--      (new_effective) at any date.
+--      Specifically, block only rows that have designate/replace provenance
+--      (direct_entry_team_leader_revisions.action in ('designate', 'replace'))
+--      AND:
 --        - Case A (old=true -> new=false): unclosed or still-active rollover row
---          at today (valid_to is null or valid_to > today) that satisfies all
---          3 legacy rollover conditions (scope_grants + capability_grants +
---          team_leader_revisions).
+--          at today (valid_to is null or valid_to > today) that also has the
+--          legacy grant pair (scope_grants + capability_grants).
 --        - Case B (old=false -> new=true): closed historical assignment
---          (valid_to is not null and valid_to <= today) missing any of the 3
---          legacy rollover conditions (previously hidden on historical dates).
---      Valid closed historical assignments (valid_to is not null and
---      valid_to <= today with all 3 legacy rollover conditions) keep the same
---      effective status on every date and are NOT blocked.
+--          (valid_to is not null and valid_to <= today) missing the legacy
+--          grant pair (previously hidden on historical dates).
+--      Assignments without designate/replace provenance (such as legacy
+--      'transition' rows) and valid closed historical designate/replace
+--      assignments with the legacy grant pair keep the same effective status
+--      on every date and are NOT blocked.
 --   2. CREATE OR REPLACE FUNCTION
 --      public.direct_entry__internal_team_leader_assignment_effective(uuid, date)
 --      preserving all non-rollover guards and closed-historical validity
 --      (p_as_of < authorization_date and valid_to is not null and
---      valid_to <= authorization_date), while removing ONLY the legacy
---      rollover branch.
+--      valid_to <= authorization_date and designate/replace revision
+--      provenance in direct_entry_team_leader_revisions), while removing
+--      ALL reads of direct_entry_scope_grants and direct_entry_capability_grants.
 --   3. Preserve exact ACL:
 --      REVOKE ALL ... FROM public, anon, authenticated, service_role.
 --   4. Owner alignment + fail-closed postcheck verification.
@@ -69,15 +73,15 @@ begin
                   and not g.is_current
                   and not g.suspended_by_account_disable
              )
-             and exists (
-               select 1
-                 from public.direct_entry_team_leader_revisions rev
-                where rev.team_id = a.team_id
-                  and rev.action in ('designate', 'replace')
-                  and rev.after_snapshot->>'leader_app_user_id' = a.leader_app_user_id::text
-                  and rev.after_snapshot->>'valid_from' = a.valid_from::text
-             )
-           ) as has_legacy_rollover_trio
+           ) as has_legacy_grant_pair,
+           exists (
+             select 1
+               from public.direct_entry_team_leader_revisions rev
+              where rev.team_id = a.team_id
+                and rev.action in ('designate', 'replace')
+                and rev.after_snapshot->>'leader_app_user_id' = a.leader_app_user_id::text
+                and rev.after_snapshot->>'valid_from' = a.valid_from::text
+           ) as has_designate_or_replace_revision
       from public.direct_entry_team_leader_assignments a
       join public.teams t
         on t.team_id = a.team_id
@@ -101,14 +105,17 @@ begin
            c.valid_from,
            c.valid_to
       from candidate_assignments c
-     where (
-             (c.valid_to is null or c.valid_to > v_today)
-             and c.has_legacy_rollover_trio
-           )
-        or (
-             c.valid_to is not null
-             and c.valid_to <= v_today
-             and not c.has_legacy_rollover_trio
+     where c.has_designate_or_replace_revision
+       and (
+             (
+               (c.valid_to is null or c.valid_to > v_today)
+               and c.has_legacy_grant_pair
+             )
+             or (
+               c.valid_to is not null
+               and c.valid_to <= v_today
+               and not c.has_legacy_grant_pair
+             )
            )
   )
   select count(*) over ()::integer as blocked_count,
@@ -171,6 +178,14 @@ as $function$
            p_as_of < public.direct_entry_authorization_date()
            and a.valid_to is not null
            and a.valid_to <= public.direct_entry_authorization_date()
+           and exists (
+             select 1
+               from public.direct_entry_team_leader_revisions rev
+              where rev.team_id = a.team_id
+                and rev.action in ('designate', 'replace')
+                and rev.after_snapshot->>'leader_app_user_id' = a.leader_app_user_id::text
+                and rev.after_snapshot->>'valid_from' = a.valid_from::text
+           )
          )
        )
   )
@@ -241,8 +256,13 @@ begin
       using errcode = '55000';
   end if;
 
-  if v_rec.prosrc ~* '(direct_entry_scope_grants|direct_entry_capability_grants|direct_entry_team_leader_revisions)' then
-    raise exception 'WP10-7-3A postcheck failed: legacy rollover reference remains in %', v_fn_sig
+  if v_rec.prosrc ~* '(direct_entry_scope_grants|direct_entry_capability_grants)' then
+    raise exception 'WP10-7-3A postcheck failed: legacy grant table reference remains in %', v_fn_sig
+      using errcode = '55000';
+  end if;
+
+  if not (v_rec.prosrc ~* 'direct_entry_team_leader_revisions') then
+    raise exception 'WP10-7-3A postcheck failed: missing team leader revision provenance check in %', v_fn_sig
       using errcode = '55000';
   end if;
 

@@ -1212,7 +1212,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
       cliNormalRerun.stdout,
       new RegExp(`SKIP\\s+${WP10_7_2B_MIGRATION_NAME.replaceAll(".", "\\.")}`),
     );
-    assert.match(cliNormalRerun.stdout, /0 áp dụng mới, 251 bỏ qua/);
+    assert.match(cliNormalRerun.stdout, new RegExp(`0 áp dụng mới, ${files.length} bỏ qua`));
 
     const cliDryRunAfter = runApplyCli(["--dry-run"], cliDbCfgPath);
     assert.equal(cliDryRunAfter.status, 0, cliDryRunAfter.stderr || cliDryRunAfter.stdout);
@@ -1289,7 +1289,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
         );
       },
     });
-    assert.equal(applyResult.appliedCount, 1);
+    assert.equal(applyResult.appliedCount, files.length - wp1072bIdx);
     assert.equal(applyResult.skippedCount, wp1072bIdx);
 
     assert.ok(connBConcurrentUpsert, "Concurrent connB upsert must have been launched while AccessExclusiveLock was held");

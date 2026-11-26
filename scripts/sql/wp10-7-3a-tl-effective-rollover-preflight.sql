@@ -178,6 +178,7 @@ evaluated_probes as (
                p.probe_date < ctx.authorization_date
                and a.valid_to is not null
                and a.valid_to <= ctx.authorization_date
+               and a.matching_revisions > 0
              )
            )
          ) as new_effective
@@ -410,6 +411,7 @@ evaluated_probes as (
                p.probe_date < ctx.authorization_date
                and a.valid_to is not null
                and a.valid_to <= ctx.authorization_date
+               and a.matching_revisions > 0
              )
            )
          ) as new_effective,

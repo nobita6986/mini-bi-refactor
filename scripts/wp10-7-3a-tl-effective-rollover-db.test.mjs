@@ -9,16 +9,19 @@
  * Covers:
  *   1. Preflight SQL & Fail-Closed Block vs Ready Upgrade (0..pre-3A -> 3A):
  *      - Executes both queries of `scripts/sql/wp10-7-3a-tl-effective-rollover-preflight.sql`.
- *      - Verifies a legitimately closed historical assignment (`is_current=false, valid_from=month-start, valid_to=today-1`
- *        with legacy `scope_grants`, `capability_grants`, `team_leader_revisions`) produces `ready_for_slice_3a=true`,
- *        `detailRows=[]`, zero drift, and is NOT blocked by migration 3A.
+ *      - Verifies a legitimately closed `designate`/`replace` historical assignment (`is_current=false,
+ *        valid_from=month-start, valid_to=today-1` with legacy grants + `replace` revision), a closed `transition`
+ *        assignment (REQ #251 scenario: grants + `transition` revision, zero `designate`/`replace`), and a closed
+ *        unprovenanced assignment (grants without revisions) each produce `ready_for_slice_3a=true`,
+ *        `detailRows=[]`, zero drift (`old=false, new=false` on `transition`/unprovenanced), and do NOT block 3A.
  *      - Verifies all 3 blocked drift cases reject with `WP10_7_3A_PREFLIGHT_BLOCKED` (`P0001`):
- *        (a) live open legacy rollover (`valid_to IS NULL`),
- *        (b) future-ending legacy rollover (`valid_to=today+2`),
- *        (c) anomalous closed row missing the legacy triad (`old=false, new=true` at historical dates).
+ *        (a) live open legacy rollover (`valid_to IS NULL`, grants + `designate` rev),
+ *        (b) future-ending legacy rollover (`valid_to=today+2`, grants + `replace` rev),
+ *        (c) closed `designate`/`replace` row missing legacy grants (`valid_to=today-1`, `designate` rev, no grants -> `old=false, new=true`).
  *      - Cleans injected rows -> verifies `ready_for_slice_3a=true` -> applies 3A cleanly.
  *   2. Post-3A Catalog & ACL + Preserved Function Semantics + Rollover Cut:
- *      - Verifies `pg_get_functiondef` has zero references to legacy grant/revision tables and
+ *      - Verifies `pg_get_functiondef` has zero references to `direct_entry_scope_grants` /
+ *        `direct_entry_capability_grants` while retaining `direct_entry_team_leader_revisions` provenance, and
  *        `has_function_privilege` is `false` for `public`, `anon`, `authenticated`, `service_role`.
  *      - Re-inserts synthetic open (`valid_to IS NULL`) and future-ending (`valid_to=today+2`) legacy rollover rows
  *        plus an open `is_current=false` row (deactivate-then-reactivate pattern) post-3A -> verifies `false` at `today` and `today-2`.
@@ -33,12 +36,13 @@
  *      - #42 active guard + Replace `leader1` -> `leader2`: `leader1` loses `TEAM_LEADER`/Work Reports scope
  *        and cannot `CANCEL_APPROVED` Leave request; `leader1` can move teams; `leader2` gains authority & routes.
  *      - Revoke `leader2` -> loses authority, Leave/Attendance falls back to `ADMIN_BOD_FALLBACK`, `leader2` can unassign.
- *   4. Simulated 2-Day Business Clock (`D` designate -> `D+1` revoke) + `leave_management_monthly_report` + Edge Cases:
+ *   4. Simulated 2-Day Business Clock (`D` designate -> `D+1` revoke) + `leave_management_monthly_report` + Transition & Provenance Edge Cases:
  *      - Overrides `direct_entry_authorization_date()` across month-end `D` and next-month `D+1`, always restoring in `finally`.
  *      - Verifies historical routing (`TEAM_LEADER` at `D`) and current routing (`ADMIN_BOD_FALLBACK` at `D+1`),
  *        `leave_management_monthly_report` at `D` and `D+1`, `resolve_actor_context` at `D+1`, same-day cancellation
  *        marker (`valid_from = valid_to = D`), `disable`/`enable` interaction, `suspended_by_account_disable`,
- *        and post-3B closed assignment without legacy grants.
+ *        post-3B closed assignment without legacy grants (both `resolve_routing` and `leave_management_monthly_report` at `D`),
+ *        closed `transition` (REQ #251 -> `false` + `ADMIN_BOD_FALLBACK`), unprovenanced closed (`false`), and active `transition` (`true`).
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -184,6 +188,21 @@ async function serviceRpc(client, fnName, args = [], casts = []) {
     .join(", ");
   const res = await serviceQuery(client, `select public.${fnName}(${placeholders}) as data`, args);
   return res.rows[0]?.data;
+}
+
+async function serviceRpcInTx(client, fnName, args = [], casts = []) {
+  const placeholders = args
+    .map((_, i) => (casts[i] ? `$${i + 1}::${casts[i]}` : `$${i + 1}`))
+    .join(", ");
+  await client.query("savepoint sp_svc_rpc; set local role service_role");
+  try {
+    const res = await client.query(`select public.${fnName}(${placeholders}) as data`, args);
+    await client.query("release savepoint sp_svc_rpc; reset role");
+    return res.rows[0]?.data;
+  } catch (err) {
+    await client.query("rollback to savepoint sp_svc_rpc").catch(() => {});
+    throw err;
+  }
 }
 
 async function seedLegacyAdmin(client, user) {
@@ -382,13 +401,15 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
     const team2 = nextUuid();
     const teamClock = nextUuid();
     const teamClockCancel = nextUuid();
+    const teamTransition = nextUuid();
     await setup.query(
       `insert into public.teams (team_id, code, display_name, active, version)
        values ($1::uuid, 'wp10_7_3a_t1', 'Team 1 WP10-7-3A', true, 1),
               ($2::uuid, 'wp10_7_3a_t2', 'Team 2 WP10-7-3A', true, 1),
               ($3::uuid, 'wp10_7_3a_tclk', 'Team Clock WP10-7-3A', true, 1),
-              ($4::uuid, 'wp10_7_3a_tclk_cancel', 'Team Clock Cancel WP10-7-3A', true, 1)`,
-      [team1, team2, teamClock, teamClockCancel],
+              ($4::uuid, 'wp10_7_3a_tclk_cancel', 'Team Clock Cancel WP10-7-3A', true, 1),
+              ($5::uuid, 'wp10_7_3a_ttrans', 'Team Transition WP10-7-3A', true, 1)`,
+      [team1, team2, teamClock, teamClockCancel, teamTransition],
     );
 
     async function onboardOrgUser(tag, { createPersonnel = false, teamId = null, seedLeave = false } = {}) {
@@ -535,6 +556,16 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
     const leaderClock = await onboardOrgUser("leader_clock", { createPersonnel: true, teamId: teamClock, seedLeave: true });
     const leaderClockCancel = await onboardOrgUser("leader_clock_cancel", { createPersonnel: true, teamId: teamClockCancel });
     const memberClock = await onboardOrgUser("member_clock", { createPersonnel: true, teamId: teamClock, seedLeave: true });
+    const leaderTransition = await onboardOrgUser("leader_transition", {
+      createPersonnel: true,
+      teamId: teamTransition,
+      seedLeave: true,
+    });
+    const memberTransition = await onboardOrgUser("member_transition", {
+      createPersonnel: true,
+      teamId: teamTransition,
+      seedLeave: true,
+    });
 
     // Work Report setup: template + TEAM assignment on team1 + member1 submission
     const tpl = await serviceRpc(setup, "work_report_create_template", [
@@ -608,49 +639,56 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
       leaderUser,
       validFrom,
       validTo,
-      revVersion,
-      revAction,
+      isCurrent = false,
+      revVersion = 1,
+      revAction = "designate",
+      includeGrants = true,
+      includeRevision = true,
     }) {
       await client.query(
         `insert into public.direct_entry_team_leader_assignments (
            assignment_id, team_id, leader_app_user_id, leader_recruiter_id,
            valid_from, valid_to, is_current, suspended_by_account_disable
-         ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date, false, false)`,
-        [assignmentId, teamId, leaderUser.app, leaderUser.recruiterId, validFrom, validTo],
+         ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date, $7::boolean, false)`,
+        [assignmentId, teamId, leaderUser.app, leaderUser.recruiterId, validFrom, validTo, isCurrent],
       );
-      await client.query(
-        `insert into public.direct_entry_scope_grants (
-           app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable
-         ) values ($1::uuid, 'team', $2::uuid, $3::date, $4::date, false, false)`,
-        [leaderUser.app, teamId, validFrom, validTo],
-      );
-      await client.query(
-        `insert into public.direct_entry_capability_grants (
-           app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable
-         ) values ($1::uuid, 'team_manager_assign', $2::date, $3::date, false, false)`,
-        [leaderUser.app, validFrom, validTo],
-      );
-      await client.query(
-        `insert into public.direct_entry_team_leader_revisions (
-           team_id, version, actor_user_id, action, before_snapshot, after_snapshot
-         ) values ($1::uuid, $2::int, $3::uuid, $4, null, $5::jsonb)`,
-        [
-          teamId,
-          revVersion,
-          OWNER.app,
-          revAction,
-          JSON.stringify({
-            team_id: teamId,
-            leader_app_user_id: leaderUser.app,
-            leader_recruiter_id: leaderUser.recruiterId,
-            valid_from: validFrom,
-            valid_to: validTo,
-            previous_leader_recruiter_id: null,
-            version: revVersion,
-            change: revAction,
-          }),
-        ],
-      );
+      if (includeGrants) {
+        await client.query(
+          `insert into public.direct_entry_scope_grants (
+             app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable
+           ) values ($1::uuid, 'team', $2::uuid, $3::date, $4::date, $5::boolean, false)`,
+          [leaderUser.app, teamId, validFrom, validTo, isCurrent],
+        );
+        await client.query(
+          `insert into public.direct_entry_capability_grants (
+             app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable
+           ) values ($1::uuid, 'team_manager_assign', $2::date, $3::date, $4::boolean, false)`,
+          [leaderUser.app, validFrom, validTo, isCurrent],
+        );
+      }
+      if (includeRevision) {
+        await client.query(
+          `insert into public.direct_entry_team_leader_revisions (
+             team_id, version, actor_user_id, action, before_snapshot, after_snapshot
+           ) values ($1::uuid, $2::int, $3::uuid, $4, null, $5::jsonb)`,
+          [
+            teamId,
+            revVersion,
+            OWNER.app,
+            revAction,
+            JSON.stringify({
+              team_id: teamId,
+              leader_app_user_id: leaderUser.app,
+              leader_recruiter_id: leaderUser.recruiterId,
+              valid_from: validFrom,
+              valid_to: validTo,
+              previous_leader_recruiter_id: null,
+              version: revVersion,
+              change: revAction,
+            }),
+          ],
+        );
+      }
       return assignmentId;
     }
 
@@ -660,37 +698,102 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
     await t.test("Test 1: Preflight SQL & fail-closed block vs ready upgrade (0..pre-3A -> 3A)", async () => {
     const preflightRawSql = await readFile(PREFLIGHT_SQL_PATH, "utf8");
     const { query1: preflightSummarySql, query2: preflightDetailSql } = parsePreflightQueries(preflightRawSql);
+    assert.match(
+      preflightDetailSql,
+      /where\s+ep\.old_effective\s+is\s+distinct\s+from\s+ep\.new_effective/i,
+      "Preflight detail query must filter mismatches",
+    );
+    const preflightAllProbesForAssignmentSql = preflightDetailSql.replace(
+      /where\s+ep\.old_effective\s+is\s+distinct\s+from\s+ep\.new_effective/i,
+      "where ep.assignment_id = $1::uuid",
+    );
     const migration3aRawSql = await readFile(path.join(MIGRATION_DIR, WP10_7_3A_MIGRATION_NAME), "utf8");
     const migration3aInnerSql = stripOuterBeginCommit(migration3aRawSql);
 
-    // 1A: Legitimately closed historical assignment (valid_to <= today, is_current = false + legacy triad)
-    // must report zero drift (ready_for_slice_3a = true, detailRows = []) and MUST NOT block migration 3A.
-    await setup.query("begin");
-    try {
-      await insertLegacyRolloverRow(setup, {
-        assignmentId: nextUuid(),
-        teamId: team2,
-        leaderUser: rollHist,
-        validFrom: dates.hist_month_start,
-        validTo: dates.today_minus_1,
-        revVersion: 1,
-        revAction: "designate",
-      });
-      const { rows: [summaryLegit] } = await setup.query(preflightSummarySql);
-      assert.equal(summaryLegit.ready_for_slice_3a, true);
-      assert.equal(summaryLegit.distinct_changed_assignment_count, 0);
-      assert.equal(summaryLegit.changed_at_today_count, 0);
-      assert.equal(summaryLegit.changed_at_historical_dates_count, 0);
-      assert.equal(summaryLegit.changed_at_future_dates_count, 0);
-      const { rows: detailLegit } = await setup.query(preflightDetailSql);
-      assert.deepEqual(detailLegit, []);
+    async function assertReadyNoDriftCase({ label, seedFn, verifyAllProbesFalse = false }) {
+      await setup.query("begin");
+      try {
+        const targetId = await seedFn();
+        const { rows: [summaryReadyCase] } = await setup.query(preflightSummarySql);
+        assert.equal(summaryReadyCase.ready_for_slice_3a, true, `${label}: ready_for_slice_3a must be true`);
+        assert.equal(summaryReadyCase.distinct_changed_assignment_count, 0, `${label}: distinct count must be 0`);
+        assert.equal(summaryReadyCase.changed_at_today_count, 0, `${label}: today count must be 0`);
+        assert.equal(summaryReadyCase.changed_at_historical_dates_count, 0, `${label}: hist count must be 0`);
+        assert.equal(summaryReadyCase.changed_at_future_dates_count, 0, `${label}: future count must be 0`);
+        const { rows: detailReadyCase } = await setup.query(preflightDetailSql);
+        assert.deepEqual(detailReadyCase, [], `${label}: detailRows must be empty`);
 
-      await setup.query("savepoint sp_3a_legit_closed");
-      await setup.query(migration3aInnerSql);
-      await setup.query("rollback to savepoint sp_3a_legit_closed");
-    } finally {
-      await setup.query("rollback");
+        if (verifyAllProbesFalse) {
+          const { rows: allProbes } = await setup.query(preflightAllProbesForAssignmentSql, [targetId]);
+          const expectedProbeKinds = [
+            "today",
+            "historical_valid_from",
+            "historical_valid_to_minus_1",
+            "future",
+          ];
+          for (const kind of expectedProbeKinds) {
+            assert.ok(allProbes.some((r) => r.probe_kind === kind), `${label}: missing probe_kind ${kind}`);
+          }
+          for (const row of allProbes) {
+            assert.equal(row.old_effective, false, `${label}: ${row.probe_kind} old_effective must be false`);
+            assert.equal(row.new_effective, false, `${label}: ${row.probe_kind} new_effective must be false`);
+          }
+        }
+
+        await setup.query("savepoint sp_3a_ready_case");
+        await setup.query(migration3aInnerSql);
+        await setup.query("rollback to savepoint sp_3a_ready_case");
+      } finally {
+        await setup.query("rollback");
+      }
     }
+
+    // 1A-1: Legitimately closed designate/replace historical assignment (valid_to <= today, is_current = false + grants + replace rev)
+    // must report zero drift (ready_for_slice_3a = true, detailRows = []) and MUST NOT block migration 3A.
+    await assertReadyNoDriftCase({
+      label: "1A-1 Legitimately closed replace historical row",
+      seedFn: () =>
+        insertLegacyRolloverRow(setup, {
+          teamId: team2,
+          leaderUser: rollHist,
+          validFrom: dates.hist_month_start,
+          validTo: dates.today_minus_1,
+          revVersion: 1,
+          revAction: "replace",
+        }),
+    });
+
+    // 1A-2: Closed legacy 'transition' assignment (REQ #251 scenario: closed grants + action = 'transition', no designate/replace)
+    // must report zero drift (all probes old=false & new=false), ready_for_slice_3a = true, and MUST NOT block migration 3A.
+    await assertReadyNoDriftCase({
+      label: "1A-2 Closed transition assignment (REQ #251)",
+      verifyAllProbesFalse: true,
+      seedFn: () =>
+        insertLegacyRolloverRow(setup, {
+          teamId: team2,
+          leaderUser: rollHist,
+          validFrom: dates.hist_month_start,
+          validTo: dates.today_minus_1,
+          revVersion: 1,
+          revAction: "transition",
+        }),
+    });
+
+    // 1A-3: Closed unprovenanced assignment (grants without any team_leader_revisions row)
+    // must report zero drift (all probes old=false & new=false), ready_for_slice_3a = true, and MUST NOT block migration 3A.
+    await assertReadyNoDriftCase({
+      label: "1A-3 Closed unprovenanced assignment (no revisions)",
+      verifyAllProbesFalse: true,
+      seedFn: () =>
+        insertLegacyRolloverRow(setup, {
+          teamId: team2,
+          leaderUser: rollHist,
+          validFrom: dates.hist_month_start,
+          validTo: dates.today_minus_1,
+          includeGrants: true,
+          includeRevision: false,
+        }),
+    });
 
     // 1B: Verify all 3 blocked drift scenarios trigger WP10_7_3A_PREFLIGHT_BLOCKED (P0001)
     async function assertBlockedDriftCase({ label, seedFn, expectTodayMin, expectHistMin, assertRows }) {
@@ -765,7 +868,7 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
       },
     });
 
-    // (b) Future-ending legacy rollover (valid_to = today + 2) -> old=true, new=false at today & historical_*
+    // (b) Future-ending legacy rollover (valid_to = today + 2, grants + replace rev) -> old=true, new=false at today & historical_*
     await assertBlockedDriftCase({
       label: "(b) Future-ending legacy rollover",
       seedFn: () =>
@@ -775,7 +878,7 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
           validFrom: dates.hist_month_start,
           validTo: dates.today_plus_2,
           revVersion: 1,
-          revAction: "designate",
+          revAction: "replace",
         }),
       expectTodayMin: 1,
       expectHistMin: 1,
@@ -789,20 +892,20 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
       },
     });
 
-    // (c) Anomalous closed row missing legacy triad (valid_to = today - 1, no legacy grants/revisions) -> old=false, new=true at historical_*
+    // (c) Closed designate/replace row missing legacy grants (valid_to = today - 1, designate rev, NO scope/cap grants) -> old=false, new=true at historical_*
     await assertBlockedDriftCase({
-      label: "(c) Anomalous closed row missing legacy triad",
-      seedFn: async () => {
-        const anomalousId = nextUuid();
-        await setup.query(
-          `insert into public.direct_entry_team_leader_assignments (
-             assignment_id, team_id, leader_app_user_id, leader_recruiter_id,
-             valid_from, valid_to, is_current, suspended_by_account_disable
-           ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::date, $6::date, false, false)`,
-          [anomalousId, team2, rollHist.app, rollHist.recruiterId, dates.hist_month_start, dates.today_minus_1],
-        );
-        return anomalousId;
-      },
+      label: "(c) Closed designate/replace row missing legacy grants",
+      seedFn: () =>
+        insertLegacyRolloverRow(setup, {
+          teamId: team2,
+          leaderUser: rollHist,
+          validFrom: dates.hist_month_start,
+          validTo: dates.today_minus_1,
+          revVersion: 1,
+          revAction: "designate",
+          includeGrants: false,
+          includeRevision: true,
+        }),
       expectTodayMin: 0,
       expectHistMin: 1,
       assertRows: (rows) => {
@@ -847,7 +950,7 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
     `);
     assert.equal(/direct_entry_scope_grants/i.test(fnMeta.fn_def), false);
     assert.equal(/direct_entry_capability_grants/i.test(fnMeta.fn_def), false);
-    assert.equal(/direct_entry_team_leader_revisions/i.test(fnMeta.fn_def), false);
+    assert.equal(/direct_entry_team_leader_revisions/i.test(fnMeta.fn_def), true);
     assert.equal(fnMeta.pub_exec, false);
     assert.equal(fnMeta.anon_exec, false);
     assert.equal(fnMeta.auth_exec, false);
@@ -1484,9 +1587,9 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
 
     // -------------------------------------------------------------------------
     // Test 4: 2-Day Business Clock Simulation (D designate -> D+1 revoke) +
-    //         leave_management_monthly_report + Edge Cases
+    //         leave_management_monthly_report + Transition & Provenance Edge Cases
     // -------------------------------------------------------------------------
-    await t.test("Test 4: 2-day simulated clock (D designate -> D+1 revoke) + leave_management_monthly_report + edge cases", async () => {
+    await t.test("Test 4: 2-day simulated clock (D designate -> D+1 revoke) + leave_management_monthly_report + transition & provenance edge cases", async () => {
       const { rows: [origClockFn] } = await observer.query(
         "select pg_catalog.pg_get_functiondef('public.direct_entry_authorization_date()'::regprocedure) as fn_def",
       );
@@ -1687,6 +1790,9 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
           await setup.query("rollback to savepoint sp_clk_susp");
 
           // Simulate post-3B closed assignment without legacy scope_grants / capability_grants
+          // (keeping canonical designate revision): effective(D)=true, effective(D+1)=false,
+          // resolve_routing(D)=TEAM_LEADER, and leave_management_monthly_report month D=TEAM_LEADER.
+          await setup.query("savepoint sp_clk_post3b");
           await setup.query(
             "delete from public.direct_entry_scope_grants where app_user_id = $1::uuid and scope_kind = 'team'",
             [leaderClock.app],
@@ -1697,11 +1803,108 @@ test("WP10-7 Slice 3A (PG18): Preflight block/ready, catalog & ACL, preserved ef
           );
           const { rows: [post3bEval] } = await setup.query(
             `select public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $2::date) as at_d,
-                    public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $3::date) as at_d1`,
-            [asgClockId, clockDayD, clockDayDPlus1],
+                    public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $3::date) as at_d1,
+                    public.leave_management__internal_resolve_routing($4::uuid, $2::date) as routing_d`,
+            [asgClockId, clockDayD, clockDayDPlus1, memberClock.app],
           );
           assert.equal(post3bEval.at_d, true);
           assert.equal(post3bEval.at_d1, false);
+          assert.equal(post3bEval.routing_d.route_kind, "TEAM_LEADER");
+          assert.equal(post3bEval.routing_d.primary_approver_app_user_id, leaderClock.app);
+
+          const post3bReportMonthD = await serviceRpcInTx(
+            setup,
+            "leave_management_monthly_report",
+            [OWNER.auth, OWNER.app, clockDayD.slice(0, 7), null, memberClock.name, 50, 0],
+            ["uuid", "uuid", "text", "text", "text", "int", "int"],
+          );
+          assert.equal(post3bReportMonthD.as_of_date, clockDayD);
+          const post3bRowD = (post3bReportMonthD.rows ?? []).find((r) => r.app_user_id === memberClock.app);
+          assert.ok(post3bRowD, "memberClock row must appear in post-3B month D leave_management_monthly_report");
+          assert.equal(post3bRowD.routing.route_kind, "TEAM_LEADER");
+          assert.equal(post3bRowD.routing.primary_approver_app_user_id, leaderClock.app);
+          await setup.query("rollback to savepoint sp_clk_post3b");
+
+          // 4D (REQ #251 reproduction): Closed legacy 'transition' assignment at clock = D+1
+          // -> effective(D)=false, effective(D+1)=false, resolve_routing(D)=ADMIN_BOD_FALLBACK,
+          //    and leave_management_monthly_report month D = ADMIN_BOD_FALLBACK.
+          await setup.query("savepoint sp_clk_closed_transition");
+          const asgTransId = await insertLegacyRolloverRow(setup, {
+            teamId: teamTransition,
+            leaderUser: leaderTransition,
+            validFrom: clockDayD,
+            validTo: clockDayDPlus1,
+            isCurrent: false,
+            revVersion: 1,
+            revAction: "transition",
+            includeGrants: true,
+            includeRevision: true,
+          });
+          const { rows: [transEval] } = await setup.query(
+            `select public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $2::date) as at_d,
+                    public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $3::date) as at_d1,
+                    public.leave_management__internal_resolve_routing($4::uuid, $2::date) as routing_d`,
+            [asgTransId, clockDayD, clockDayDPlus1, memberTransition.app],
+          );
+          assert.equal(transEval.at_d, false, "Closed transition assignment must return false at D");
+          assert.equal(transEval.at_d1, false, "Closed transition assignment must return false at D+1");
+          assert.equal(transEval.routing_d.route_kind, "ADMIN_BOD_FALLBACK");
+          assert.equal(transEval.routing_d.primary_approver_app_user_id, null);
+
+          const transReportMonthD = await serviceRpcInTx(
+            setup,
+            "leave_management_monthly_report",
+            [OWNER.auth, OWNER.app, clockDayD.slice(0, 7), null, memberTransition.name, 50, 0],
+            ["uuid", "uuid", "text", "text", "text", "int", "int"],
+          );
+          assert.equal(transReportMonthD.as_of_date, clockDayD);
+          const transRowD = (transReportMonthD.rows ?? []).find((r) => r.app_user_id === memberTransition.app);
+          assert.ok(transRowD, "memberTransition row must appear in month D leave_management_monthly_report");
+          assert.equal(transRowD.routing.route_kind, "ADMIN_BOD_FALLBACK");
+          assert.equal(transRowD.routing.primary_approver_app_user_id, null);
+          await setup.query("rollback to savepoint sp_clk_closed_transition");
+
+          // Unprovenanced closed assignment (legacy grants without any revision row) -> false at D and D+1
+          await setup.query("savepoint sp_clk_unprovenanced");
+          const asgUnprovId = await insertLegacyRolloverRow(setup, {
+            teamId: teamTransition,
+            leaderUser: leaderTransition,
+            validFrom: clockDayD,
+            validTo: clockDayDPlus1,
+            isCurrent: false,
+            includeGrants: true,
+            includeRevision: false,
+          });
+          const { rows: [unprovEval] } = await setup.query(
+            `select public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $2::date) as at_d,
+                    public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $3::date) as at_d1`,
+            [asgUnprovId, clockDayD, clockDayDPlus1],
+          );
+          assert.equal(unprovEval.at_d, false, "Unprovenanced closed assignment must return false at D");
+          assert.equal(unprovEval.at_d1, false, "Unprovenanced closed assignment must return false at D+1");
+          await setup.query("rollback to savepoint sp_clk_unprovenanced");
+
+          // Active 'transition' assignment (is_current=true, valid_to=null, action='transition') -> true at D and D+1
+          await setup.query("savepoint sp_clk_active_transition");
+          const asgActiveTransId = await insertLegacyRolloverRow(setup, {
+            teamId: teamTransition,
+            leaderUser: leaderTransition,
+            validFrom: clockDayD,
+            validTo: null,
+            isCurrent: true,
+            revVersion: 1,
+            revAction: "transition",
+            includeGrants: true,
+            includeRevision: true,
+          });
+          const { rows: [activeTransEval] } = await setup.query(
+            `select public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $2::date) as at_d,
+                    public.direct_entry__internal_team_leader_assignment_effective($1::uuid, $3::date) as at_d1`,
+            [asgActiveTransId, clockDayD, clockDayDPlus1],
+          );
+          assert.equal(activeTransEval.at_d, true, "Active transition assignment must return true at D");
+          assert.equal(activeTransEval.at_d1, true, "Active transition assignment must return true at D+1");
+          await setup.query("rollback to savepoint sp_clk_active_transition");
         } finally {
           await setup.query("rollback");
         }
