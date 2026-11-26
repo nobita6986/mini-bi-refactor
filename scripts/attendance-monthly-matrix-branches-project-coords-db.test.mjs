@@ -1939,6 +1939,113 @@ test("HRP Branches, Branch Check-In Distance Snapshot Immutability, Project Coor
       ),
     );
 
+    // 8g-2. Hotfix regression: when organization_persons.full_name holds a login/code-like
+    // placeholder (e.g. 'anhhn.td' / 'loginonly.td'), Priority 1 must NOT short-circuit
+    // with the login code; it must preserve personnel_code and fall back to
+    // recruiters.display_name or direct_entry_app_users.display_name.
+    const linkedLoginPersonMatchedId = "49100000-0000-4000-8000-000000000021";
+    const linkedLoginPersonUnmatchedId = "49100000-0000-4000-8000-000000000022";
+    await db.query(
+      `insert into public.organization_persons (person_id, employee_code, full_name, status)
+       values
+         ($1::uuid, 'anhhn.td', 'anhhn.td', 'ACTIVE'),
+         ($2::uuid, 'loginonly.td', 'loginonly.td', 'ACTIVE')`,
+      [linkedLoginPersonMatchedId, linkedLoginPersonUnmatchedId],
+    );
+    await db.query(
+      `insert into public.organization_account_person_links (
+         app_user_id, person_id, started_at, ended_at, source_kind, reason
+       ) values
+         ($1::uuid, $2::uuid, '2026-01-01T00:00:00Z'::timestamptz, null, 'BACKFILL_CURRENT_STATE_ONLY', 'Backfill test anhhn.td'),
+         ($3::uuid, $4::uuid, '2026-01-01T00:00:00Z'::timestamptz, null, 'BACKFILL_CURRENT_STATE_ONLY', 'Backfill test loginonly.td')`,
+      [
+        loginStaffMatchedApp,
+        linkedLoginPersonMatchedId,
+        loginStaffUnmatchedApp,
+        linkedLoginPersonUnmatchedId,
+      ],
+    );
+
+    const adminReportWithPersonLogin = projectAttendanceAdminReport(
+      await callAsServiceRole(
+        db,
+        `select public.attendance_admin_report(
+          $1::uuid, $2::uuid, '2026-10-15'::date, '2026-10-15'::date, 1, 25, null, $3::uuid
+        ) as data`,
+        [ACTORS.FULL_ADMIN.auth, ACTORS.FULL_ADMIN.app, loginStaffMatchedApp],
+      ),
+    );
+    assert.ok(adminReportWithPersonLogin);
+    assert.equal(adminReportWithPersonLogin.items.length, 1);
+    assert.equal(adminReportWithPersonLogin.items[0].employee_display_name, "Nguyễn Thị Huệ");
+    assert.equal(adminReportWithPersonLogin.items[0].personnel_code, "anhhn.td");
+
+    const matrixWithPersonLogin = projectAttendanceMonthlyMatrixReport(
+      await callAsServiceRole(
+        db,
+        `select public.attendance_monthly_matrix_report(
+          $1::uuid, $2::uuid, '2026-10', null, $3::uuid, null, 1, 25
+        ) as data`,
+        [ACTORS.FULL_ADMIN.auth, ACTORS.FULL_ADMIN.app, loginStaffMatchedApp],
+      ),
+    );
+    assert.ok(matrixWithPersonLogin);
+    assert.equal(matrixWithPersonLogin.items[0].employee_display_name, "Nguyễn Thị Huệ");
+    assert.equal(matrixWithPersonLogin.items[0].personnel_code, "anhhn.td");
+
+    // When organization_persons.full_name is login-like ('loginonly.td'), no recruiter exists,
+    // and direct_entry_app_users.display_name has a real name, fall back to direct_entry_app_users.display_name
+    // while keeping organization_persons.employee_code ('loginonly.td').
+    await db.query(
+      `update public.direct_entry_app_users
+          set display_name = 'Nguyễn Thị Thúy Quỳnh'
+        where app_user_id = $1::uuid`,
+      [loginStaffUnmatchedApp],
+    );
+    const matrixFallbackToAppUserDisplay = projectAttendanceMonthlyMatrixReport(
+      await callAsServiceRole(
+        db,
+        `select public.attendance_monthly_matrix_report(
+          $1::uuid, $2::uuid, '2026-10', null, $3::uuid, null, 1, 25
+        ) as data`,
+        [ACTORS.FULL_ADMIN.auth, ACTORS.FULL_ADMIN.app, loginStaffUnmatchedApp],
+      ),
+    );
+    assert.ok(matrixFallbackToAppUserDisplay);
+    assert.equal(
+      matrixFallbackToAppUserDisplay.items[0].employee_display_name,
+      "Nguyễn Thị Thúy Quỳnh",
+    );
+    assert.equal(matrixFallbackToAppUserDisplay.items[0].personnel_code, "loginonly.td");
+
+    // Restore loginStaffUnmatchedApp display_name to 'loginonly.td' -> all sources are login-like -> 'Chưa cập nhật họ tên'
+    await db.query(
+      `update public.direct_entry_app_users
+          set display_name = 'loginonly.td'
+        where app_user_id = $1::uuid`,
+      [loginStaffUnmatchedApp],
+    );
+    const matrixAllLoginLike = projectAttendanceMonthlyMatrixReport(
+      await callAsServiceRole(
+        db,
+        `select public.attendance_monthly_matrix_report(
+          $1::uuid, $2::uuid, '2026-10', null, $3::uuid, null, 1, 25
+        ) as data`,
+        [ACTORS.FULL_ADMIN.auth, ACTORS.FULL_ADMIN.app, loginStaffUnmatchedApp],
+      ),
+    );
+    assert.ok(matrixAllLoginLike);
+    assert.equal(matrixAllLoginLike.items[0].employee_display_name, "Chưa cập nhật họ tên");
+    assert.equal(matrixAllLoginLike.items[0].personnel_code, "loginonly.td");
+
+    // When organization_persons.full_name is updated to a real full name, Priority 1 wins immediately
+    await db.query(
+      `update public.organization_persons
+          set full_name = 'Nguyễn Thị Huệ'
+        where person_id = $1::uuid`,
+      [linkedLoginPersonMatchedId],
+    );
+
     for (const sig of ATTENDANCE_EXPLANATIONS_WAVE2_RPC_SIGNATURES) {
       const { rows } = await db.query("select to_regprocedure($1)::text as oid_name", [sig]);
       assert.ok(rows[0].oid_name, `RPC ${sig} must exist`);
