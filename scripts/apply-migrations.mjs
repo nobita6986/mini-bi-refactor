@@ -10,27 +10,160 @@
  *
  * Dùng:
  *   node scripts/apply-migrations.mjs [--dry-run | --offline]
+ *   node scripts/apply-migrations.mjs \
+ *     --verify-wp10-7-2b-archive <csvPath> \
+ *     --wp10-7-2b-expected-count <n> \
+ *     --wp10-7-2b-expected-sha256 <hex>
  *   SUPABASE_CONFIG_FILE=<path> node scripts/apply-migrations.mjs
  */
-import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import pg from "pg";
 
 import { loadSupabaseConfig } from "./lib/load-supabase-config.mjs";
 import {
-  migrationChecksum,
-  migrationSqlForTransaction,
+  createWp1072bArchiveGuard,
+  createWp1072bMissingArchiveGuard,
+  loadLeaveProfileUnitKindArchiveCsv,
+  runMigrationApply,
   runMigrationValidation,
-  verifyAppliedMigrationChecksum,
 } from "./lib/migration-validation.mjs";
 import { buildSslOptions } from "./lib/supabase-tls.mjs";
 
 const MIGRATIONS_DIR = path.join(process.cwd(), "supabase", "migrations");
-const dryRun = process.argv.includes("--dry-run");
-const offline = process.argv.includes("--offline");
+const NON_NEG_INT_RE = /^(0|[1-9]\d*)$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+
+function parseCliArgs(argv) {
+  let dryRun = false;
+  let offline = false;
+  let archiveCsvPath = null;
+  let expectedCountRaw = null;
+  let expectedSha256Raw = null;
+
+  const takeValue = (args, index, flagName, inlineValue) => {
+    if (inlineValue !== null) {
+      if (inlineValue === "") {
+        throw new Error(`Thiếu giá trị cho tham số ${flagName}`);
+      }
+      return { value: inlineValue, nextIndex: index };
+    }
+    const next = args[index + 1];
+    if (next === undefined || next === "" || next.startsWith("--")) {
+      throw new Error(`Thiếu giá trị cho tham số ${flagName}`);
+    }
+    return { value: next, nextIndex: index + 1 };
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--") {
+      continue;
+    }
+    if (arg === "--dry-run") {
+      if (dryRun) throw new Error("Tham số --dry-run bị lặp lại");
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--offline") {
+      if (offline) throw new Error("Tham số --offline bị lặp lại");
+      offline = true;
+      continue;
+    }
+
+    const eqIdx = arg.indexOf("=");
+    const flag = eqIdx === -1 ? arg : arg.slice(0, eqIdx);
+    const inline = eqIdx === -1 ? null : arg.slice(eqIdx + 1);
+
+    if (flag === "--verify-wp10-7-2b-archive") {
+      if (archiveCsvPath !== null) {
+        throw new Error(`Tham số ${flag} bị lặp lại`);
+      }
+      const parsed = takeValue(argv, i, flag, inline);
+      archiveCsvPath = parsed.value;
+      i = parsed.nextIndex;
+      continue;
+    }
+    if (flag === "--wp10-7-2b-expected-count") {
+      if (expectedCountRaw !== null) {
+        throw new Error(`Tham số ${flag} bị lặp lại`);
+      }
+      const parsed = takeValue(argv, i, flag, inline);
+      expectedCountRaw = parsed.value;
+      i = parsed.nextIndex;
+      continue;
+    }
+    if (flag === "--wp10-7-2b-expected-sha256") {
+      if (expectedSha256Raw !== null) {
+        throw new Error(`Tham số ${flag} bị lặp lại`);
+      }
+      const parsed = takeValue(argv, i, flag, inline);
+      expectedSha256Raw = parsed.value;
+      i = parsed.nextIndex;
+      continue;
+    }
+
+    throw new Error(`Tham số không hợp lệ: ${arg}`);
+  }
+
+  if (dryRun && offline) {
+    throw new Error("Không thể dùng đồng thời --dry-run và --offline");
+  }
+
+  const archiveFlagsPresent = [
+    archiveCsvPath !== null,
+    expectedCountRaw !== null,
+    expectedSha256Raw !== null,
+  ];
+  const anyArchiveFlag = archiveFlagsPresent.some(Boolean);
+  const allArchiveFlags = archiveFlagsPresent.every(Boolean);
+
+  if (anyArchiveFlag && (offline || dryRun)) {
+    throw new Error(
+      "Không thể dùng --verify-wp10-7-2b-archive / --wp10-7-2b-expected-* cùng với --offline hoặc --dry-run",
+    );
+  }
+  if (anyArchiveFlag && !allArchiveFlags) {
+    throw new Error(
+      "Khi kiểm tra archive WP10-7-2B phải truyền đủ bộ 3 tham số: --verify-wp10-7-2b-archive, --wp10-7-2b-expected-count, --wp10-7-2b-expected-sha256",
+    );
+  }
+
+  if (!anyArchiveFlag) {
+    return { dryRun, offline, wp1072bArchive: null };
+  }
+
+  if (!NON_NEG_INT_RE.test(expectedCountRaw)) {
+    throw new Error(
+      `Giá trị --wp10-7-2b-expected-count không hợp lệ: ${expectedCountRaw}`,
+    );
+  }
+  const expectedRowCount = Number(expectedCountRaw);
+  if (!Number.isSafeInteger(expectedRowCount) || expectedRowCount < 0) {
+    throw new Error(
+      `Giá trị --wp10-7-2b-expected-count vượt giới hạn: ${expectedCountRaw}`,
+    );
+  }
+  if (!SHA256_HEX_RE.test(expectedSha256Raw)) {
+    throw new Error(
+      `Giá trị --wp10-7-2b-expected-sha256 không hợp lệ (cần 64 ký tự hex): ${expectedSha256Raw}`,
+    );
+  }
+
+  return {
+    dryRun,
+    offline,
+    wp1072bArchive: {
+      csvPath: archiveCsvPath,
+      expectedRowCount,
+      expectedCanonicalSha256: expectedSha256Raw.toLowerCase(),
+    },
+  };
+}
 
 async function main() {
+  const { dryRun, offline, wp1072bArchive } = parseCliArgs(process.argv.slice(2));
+
   if (offline || dryRun) {
     const result = await runMigrationValidation({
       mode: offline ? "offline" : "dry-run",
@@ -51,106 +184,46 @@ async function main() {
     return;
   }
 
-  const entries = (await readdir(MIGRATIONS_DIR))
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-
-  if (entries.length === 0) {
-    throw new Error(`Không tìm thấy file .sql trong ${MIGRATIONS_DIR}`);
+  let beforeApplyMigration = null;
+  if (wp1072bArchive) {
+    const parsedArchive = await loadLeaveProfileUnitKindArchiveCsv(
+      wp1072bArchive.csvPath,
+    );
+    if (
+      parsedArchive.rowCount !== wp1072bArchive.expectedRowCount ||
+      parsedArchive.canonicalSha256 !== wp1072bArchive.expectedCanonicalSha256
+    ) {
+      throw new Error(
+        `WP10-7-2B archive CSV không khớp tham số kỳ vọng: ` +
+          `csv=(row_count=${parsedArchive.rowCount}, canonical_sha256=${parsedArchive.canonicalSha256}), ` +
+          `expected=(row_count=${wp1072bArchive.expectedRowCount}, canonical_sha256=${wp1072bArchive.expectedCanonicalSha256})`,
+      );
+    }
+    beforeApplyMigration = createWp1072bArchiveGuard({
+      expectedRowCount: wp1072bArchive.expectedRowCount,
+      expectedCanonicalSha256: wp1072bArchive.expectedCanonicalSha256,
+    });
+  } else {
+    beforeApplyMigration = createWp1072bMissingArchiveGuard();
   }
 
-  const { databaseUrl, projectRef, usesPooler } = await loadSupabaseConfig();
-  const client = new pg.Client({ connectionString: databaseUrl, ssl: buildSslOptions() });
-  await client.connect();
-  console.log(`Kết nối DB thành công (project ref: ${projectRef.slice(0, 4)}***, pooler: ${usesPooler ? "có" : "không"})`);
-
-  await client.query(`
-    create table if not exists public.schema_migrations (
-      version     text primary key,
-      checksum    text not null,
-      applied_at  timestamptz not null default now()
-    )
-  `);
-
-  const { rows: applied } = await client.query("select version, checksum from public.schema_migrations");
-  const appliedMap = new Map(applied.map((r) => [r.version, r.checksum]));
-
-  let appliedCount = 0;
-  let skippedCount = 0;
-
-  for (const name of entries) {
-    const sql = await readFile(path.join(MIGRATIONS_DIR, name), "utf8");
-    const sum = migrationChecksum(sql);
-    const previous = appliedMap.get(name);
-
-    if (previous !== undefined) {
-      const check = await verifyAppliedMigrationChecksum(
-        client,
-        { name, sql, checksum: sum },
-        previous,
-        appliedMap,
-      );
-      if (check.status === "postcondition_failed") {
-        await client.end();
-        throw new Error(
-          `Migration ${name} khớp checksum trong ledger nhưng kiểm tra hậu điều kiện bảo mật thất bại (postcondition failed: ${check.reason}). ` +
-            "Chạy công cụ căn chỉnh ACL môi trường (scripts/align-routine-acl.mjs) trước khi áp dụng migration mới.",
-        );
-      }
-      if (check.status === "mismatch") {
-        await client.end();
-        throw new Error(
-          `Migration ${name} đã áp dụng nhưng nội dung đã thay đổi (checksum mismatch${check.reason ? `: ${check.reason}` : ""}). ` +
-            "Không sửa file migration đã áp dụng — hãy tạo file migration mới."
-        );
-      }
-      if (check.status === "compatible_historical") {
-        console.log(
-          `SKIP    ${name} (đã áp dụng — tương thích checksum lịch sử trước PR #92 đã xác minh postconditions)`,
-        );
-      } else if (check.postconditionsChecked) {
-        console.log(`SKIP    ${name} (đã áp dụng — khớp checksum và đạt postconditions bảo mật)`);
-      } else {
-        console.log(`SKIP    ${name} (đã áp dụng)`);
-      }
-      skippedCount += 1;
-      continue;
-    }
-
-    try {
+  await runMigrationApply({
+    directory: MIGRATIONS_DIR,
+    loadConfig: loadSupabaseConfig,
+    createClient: (databaseUrl) =>
+      new pg.Client({ connectionString: databaseUrl, ssl: buildSslOptions() }),
+    beforeApplyMigration,
+    runInTransaction: async (client, runMigrationBody) => {
       await client.query("begin");
-      await client.query(migrationSqlForTransaction(sql));
-      await client.query(
-        "insert into public.schema_migrations (version, checksum) values ($1, $2)",
-        [name, sum]
-      );
-      await client.query("commit");
-      appliedMap.set(name, sum);
-      console.log(`APPLY   ${name}`);
-      appliedCount += 1;
-    } catch (error) {
       try {
+        await runMigrationBody();
+        await client.query("commit");
+      } catch (error) {
         await client.query("rollback");
-      } finally {
-        await client.end();
+        throw error;
       }
-      console.error(`FAILED  ${name}: ${error.message}`);
-      throw error;
-    }
-  }
-
-  console.log(`\nKết quả: ${appliedCount} áp dụng mới, ${skippedCount} bỏ qua, ${entries.length} tổng.`);
-
-  const { rows: tables } = await client.query(`
-    select table_name
-      from information_schema.tables
-     where table_schema = 'public'
-       and table_name in ('data_sources', 'sync_runs', 'daily_recruitment_breakdown', 'sync_errors')
-     order by table_name
-  `);
-  console.log("Bảng hiện có:", tables.map((r) => r.table_name).join(", ") || "(không có)");
-
-  await client.end();
+    },
+  });
 }
 
 main().catch((error) => {

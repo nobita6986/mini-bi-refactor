@@ -814,7 +814,9 @@ test("WP10-7 Slice 2A (PG18): Retire live dependencies on leave_employee_profile
     // -------------------------------------------------------------------------
     // 2. Apply Migration #250 (249 -> 250 upgrade) & Catalog Verification
     // -------------------------------------------------------------------------
-    for (let i = baselineCutoffIdx + 1; i < files.length; i += 1) {
+    const wp1072aIdx = files.indexOf(WP10_7_2A_MIGRATION_NAME);
+    assert.ok(wp1072aIdx > baselineCutoffIdx, "WP10-7 Slice 2A migration #250 must exist");
+    for (let i = baselineCutoffIdx + 1; i <= wp1072aIdx; i += 1) {
       await setup.query(await readFile(path.join(MIGRATION_DIR, files[i]), "utf8"));
     }
 

@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  createWp1072bArchiveGuard,
+  createWp1072bMissingArchiveGuard,
   extractS0T1CAllowlistSignatures,
   migrationChecksum,
   migrationSqlForTransaction,
+  parseLeaveProfileUnitKindArchiveCsv,
   R1_2_MIGRATION_NAME,
   R1_2_SERVICE_RPC_SIGNATURE,
   runMigrationApply,
@@ -15,6 +20,7 @@ import {
   S0_T1_C_CURRENT_CHECKSUM,
   S0_T1_C_MIGRATION_NAME,
   S0_T1_C_PRE_PR92_CHECKSUM,
+  WP10_7_2B_MIGRATION_NAME,
 } from "./lib/migration-validation.mjs";
 import { buildSslOptions } from "./lib/supabase-tls.mjs";
 
@@ -517,6 +523,358 @@ test("migration #124 compatibility: accepts verified pre-PR #92 checksum only wh
       assert.ok(statements.some((s) => s.includes("exposed_client_or_public_count")), "dry-run must run live postcondition check even on exact checksum match");
       assert.ok(statements.every((s) => /^\s*select\b/i.test(s)), "dry-run must stay strictly SELECT-only");
       assert.match(dryRunLogs.join("\n"), /APPLIED 20261020180000_s0_t1_c_rpc_acl_allowlist\.sql \(checksum matches; security postconditions verified\)/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("parseLeaveProfileUnitKindArchiveCsv validates header, UUIDs, unit_kind enum, duplicates, and computes canonical SHA-256", () => {
+  const idA = "00000000-0000-4000-8000-000000000001";
+  const idB = "00000000-0000-4000-8000-000000000002";
+  const expectedCanonical = createHash("sha256")
+    .update(`${idA}|IT\n${idB}|MARKETING`, "utf8")
+    .digest("hex");
+
+  // Unsorted CRLF input with uppercase UUID normalizes to ascending order & lowercase UUID
+  const parsed = parseLeaveProfileUnitKindArchiveCsv(
+    `app_user_id,unit_kind\r\n${idB.toUpperCase()},MARKETING\r\n${idA},IT\r\n`,
+  );
+  assert.deepEqual(parsed, {
+    rowCount: 2,
+    canonicalSha256: expectedCanonical,
+  });
+
+  // Empty 0-row CSV hashes empty string ""
+  const emptyParsed = parseLeaveProfileUnitKindArchiveCsv("app_user_id,unit_kind\n");
+  assert.deepEqual(emptyParsed, {
+    rowCount: 0,
+    canonicalSha256: createHash("sha256").update("", "utf8").digest("hex"),
+  });
+
+  assert.throws(
+    () => parseLeaveProfileUnitKindArchiveCsv("wrong,header\n"),
+    /exact header: app_user_id,unit_kind/,
+  );
+  assert.throws(
+    () => parseLeaveProfileUnitKindArchiveCsv(`app_user_id,unit_kind\nnot-a-uuid,IT\n`),
+    /invalid app_user_id UUID/,
+  );
+  assert.throws(
+    () => parseLeaveProfileUnitKindArchiveCsv(`app_user_id,unit_kind\n${idA},INVALID_KIND\n`),
+    /invalid unit_kind/,
+  );
+  assert.throws(
+    () => parseLeaveProfileUnitKindArchiveCsv(`app_user_id,unit_kind\n${idA},IT\n${idA.toUpperCase()},MARKETING\n`),
+    /duplicate app_user_id/,
+  );
+  assert.throws(
+    () => parseLeaveProfileUnitKindArchiveCsv(`app_user_id,unit_kind\n${idA},IT,extra\n`),
+    /invalid column count/,
+  );
+});
+
+test("runMigrationApply with createWp1072bArchiveGuard locks table before parity, rolls back cleanly on mismatch, and commits on match", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "migration-251-guard-"));
+  try {
+    const preMigration = "20261126190000_wp10_7_2a_stop_leave_profile_unit_kind_mirror.sql";
+    const preSql = "select 250;\n";
+    const m251Sql = "begin;\nselect 251;\ncommit;\n";
+    await writeFile(path.join(directory, preMigration), preSql);
+    await writeFile(path.join(directory, WP10_7_2B_MIGRATION_NAME), m251Sql);
+
+    const expectedSha = createHash("sha256")
+      .update("00000000-0000-4000-8000-000000000001|IT", "utf8")
+      .digest("hex");
+    const guard = createWp1072bArchiveGuard({
+      expectedRowCount: 1,
+      expectedCanonicalSha256: expectedSha,
+    });
+
+    // 1. Mismatch (count or sha256) -> LOCK TABLE runs first, then parity fails, ROLLBACK runs, #251 SQL and schema_migrations INSERT never run
+    {
+      const ops = [];
+      let rolledBack = false;
+      let committed = false;
+      await assert.rejects(
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              if (sql === "commit") {
+                committed = true;
+                return { rows: [] };
+              }
+              if (sql.includes("from public.leave_employee_profiles p")) {
+                return {
+                  rows: [{ row_count: "2", canonical_sha256: "f".repeat(64) }],
+                };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: guard,
+          log() {},
+          errorLog() {},
+        }),
+        /WP10-7-2B archive parity check failed in transaction/,
+      );
+
+      assert.equal(rolledBack, true);
+      assert.equal(committed, false);
+      const lockIdx = ops.findIndex((o) =>
+        o.sql.includes("LOCK TABLE public.leave_employee_profiles IN ACCESS EXCLUSIVE MODE"),
+      );
+      const parityIdx = ops.findIndex((o) =>
+        o.sql.includes("from public.leave_employee_profiles p"),
+      );
+      assert.ok(lockIdx >= 0 && parityIdx > lockIdx, "LOCK TABLE must execute before parity query");
+      assert.equal(
+        ops.some((o) => o.sql.includes("select 251;")),
+        false,
+        "#251 DDL must not execute when parity fails",
+      );
+      assert.equal(
+        ops.some((o) => o.sql.includes("insert into public.schema_migrations")),
+        false,
+        "schema_migrations insert must not execute when parity fails",
+      );
+    }
+
+    // 2. Match -> non-#251 skips guard, #251 runs LOCK TABLE -> parity -> #251 SQL -> schema_migrations INSERT -> COMMIT
+    {
+      const ops = [];
+      const result = await runMigrationApply({
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql, params) {
+            ops.push({ sql, params });
+            if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+            if (sql === "select version, checksum from public.schema_migrations") {
+              return { rows: [] };
+            }
+            if (sql.includes("from public.leave_employee_profiles p")) {
+              return {
+                rows: [{ row_count: "1", canonical_sha256: expectedSha }],
+              };
+            }
+            return { rows: [] };
+          },
+          async end() {},
+        }),
+        beforeApplyMigration: guard,
+        log() {},
+        errorLog() {},
+      });
+
+      assert.equal(result.appliedCount, 2);
+      assert.equal(result.skippedCount, 0);
+      assert.equal(
+        ops.filter((o) => o.sql.includes("LOCK TABLE public.leave_employee_profiles IN ACCESS EXCLUSIVE MODE")).length,
+        1,
+        "guard locks table only for #251, not #250",
+      );
+      const lockIdx = ops.findIndex((o) =>
+        o.sql.includes("LOCK TABLE public.leave_employee_profiles IN ACCESS EXCLUSIVE MODE"),
+      );
+      const parityIdx = ops.findIndex((o) =>
+        o.sql.includes("from public.leave_employee_profiles p"),
+      );
+      const ddlIdx = ops.findIndex((o) => o.sql.includes("select 251;"));
+      const ledgerIdx = ops.findIndex(
+        (o) =>
+          o.sql.includes("insert into public.schema_migrations") &&
+          o.params?.[0] === WP10_7_2B_MIGRATION_NAME,
+      );
+      const commitIdx = ops.findIndex((o, idx) => idx > ledgerIdx && o.sql === "commit");
+      assert.ok(
+        lockIdx >= 0 &&
+          parityIdx > lockIdx &&
+          ddlIdx > parityIdx &&
+          ledgerIdx > ddlIdx &&
+          commitIdx > ledgerIdx,
+        "LOCK -> parity -> #251 DDL -> schema_migrations -> COMMIT order must hold",
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("scripts/apply-migrations.mjs CLI rejects invalid archive verification flags and CSV mismatches fail-closed", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "apply-mig-cli-"));
+  try {
+    const csvPath = path.join(tempDir, "archive.csv");
+    const idA = "00000000-0000-4000-8000-000000000001";
+    const validSha = createHash("sha256").update(`${idA}|IT`, "utf8").digest("hex");
+    await writeFile(csvPath, `app_user_id,unit_kind\n${idA},IT\n`, "utf8");
+
+    const runCli = (args) =>
+      spawnSync(process.execPath, ["scripts/apply-migrations.mjs", ...args], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+
+    for (const [label, args, pattern] of [
+      ["unknown arg", ["--bogus"], /Tham số không hợp lệ/],
+      ["incomplete pair", ["--verify-wp10-7-2b-archive", csvPath], /phải truyền đủ bộ 3 tham số/],
+      ["combined with offline", ["--offline", "--verify-wp10-7-2b-archive", csvPath, "--wp10-7-2b-expected-count", "1", "--wp10-7-2b-expected-sha256", validSha], /--offline hoặc --dry-run/],
+      ["bad expected count", ["--verify-wp10-7-2b-archive", csvPath, "--wp10-7-2b-expected-count", "-1", "--wp10-7-2b-expected-sha256", validSha], /expected-count không hợp lệ/],
+      ["bad expected sha", ["--verify-wp10-7-2b-archive", csvPath, "--wp10-7-2b-expected-count", "1", "--wp10-7-2b-expected-sha256", "abc"], /expected-sha256 không hợp lệ/],
+      ["csv mismatch", [`--verify-wp10-7-2b-archive=${csvPath}`, "--wp10-7-2b-expected-count=2", `--wp10-7-2b-expected-sha256=${validSha}`], /archive CSV không khớp tham số kỳ vọng/],
+    ]) {
+      const res = runCli(args);
+      assert.notEqual(res.status, 0, `${label} must fail`);
+      assert.match(res.stderr, pattern, `${label} error message`);
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("scripts/apply-migrations.mjs CLI accepts pnpm '--' separator with --offline", () => {
+  const res = spawnSync(
+    process.execPath,
+    ["scripts/apply-migrations.mjs", "--", "--offline"],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  assert.match(res.stdout, /OFFLINE VALIDATION/);
+});
+
+test("createWp1072bMissingArchiveGuard and direct runMigrationApply fail closed when #251 is pending without archive verification", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "migration-251-default-gate-"));
+  try {
+    const preMigration = "20261126190000_wp10_7_2a_stop_leave_profile_unit_kind_mirror.sql";
+    const preSql = "select 250;\n";
+    const m251Sql = "begin;\nselect 251;\ncommit;\n";
+    await writeFile(path.join(directory, preMigration), preSql);
+    await writeFile(path.join(directory, WP10_7_2B_MIGRATION_NAME), m251Sql);
+
+    // 1. Default CLI guard (`createWp1072bMissingArchiveGuard`): blocks pending #251 before DDL even on 0-row DB, allows #250, skips when #251 already recorded
+    {
+      const ops = [];
+      let rolledBack = false;
+      await assert.rejects(
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: createWp1072bMissingArchiveGuard(),
+          log() {},
+          errorLog() {},
+        }),
+        /requires verified archive parity before dropping public\.leave_employee_profiles\.unit_kind/,
+      );
+      assert.equal(rolledBack, true);
+      assert.equal(ops.some((o) => o.sql.includes("select 251;")), false);
+      assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+    }
+
+    // 2. When #251 is already in schema_migrations with matching checksum, default missing-archive guard is NOT invoked and #251 is skipped cleanly
+    {
+      const ops = [];
+      const res = await runMigrationApply({
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql, params) {
+            ops.push({ sql, params });
+            if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+            if (sql === "select version, checksum from public.schema_migrations") {
+              return {
+                rows: [
+                  { version: preMigration, checksum: migrationChecksum(preSql) },
+                  { version: WP10_7_2B_MIGRATION_NAME, checksum: migrationChecksum(m251Sql) },
+                ],
+              };
+            }
+            return { rows: [] };
+          },
+          async end() {},
+        }),
+        beforeApplyMigration: createWp1072bMissingArchiveGuard(),
+        log() {},
+        errorLog() {},
+      });
+      assert.equal(res.appliedCount, 0);
+      assert.equal(res.skippedCount, 2);
+      assert.equal(ops.some((o) => o.sql === "begin"), false);
+    }
+
+    // 3. Direct library call without beforeApplyMigration: blocks populated leave_employee_profiles before DDL, allows 0-row fresh bootstrap DB
+    for (const [liveCount, shouldReject] of [[5, true], [0, false]]) {
+      const ops = [];
+      let rolledBack = false;
+      const exec = () =>
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              if (sql.includes("from public.leave_employee_profiles")) {
+                return { rows: [{ row_count: String(liveCount) }] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          log() {},
+          errorLog() {},
+        });
+      if (shouldReject) {
+        await assert.rejects(exec, /requires verified archive parity when public\.leave_employee_profiles has existing rows/);
+        assert.equal(rolledBack, true);
+        assert.equal(ops.some((o) => o.sql.includes("select 251;")), false);
+        assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+      } else {
+        const res = await exec();
+        assert.equal(res.appliedCount, 1);
+        assert.ok(ops.some((o) => o.sql.includes("select 251;")));
+      }
     }
   } finally {
     await rm(directory, { recursive: true, force: true });
