@@ -132,6 +132,9 @@ import {
   PR28_CLEANUP_MIGRATION_NAME,
   PR28_CLEANUP_RETIRED_RPC_SIGNATURES,
   PR28_CLEANUP_ADDED_RPC_SIGNATURES,
+  HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME,
+  HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES,
+  HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
@@ -1169,9 +1172,13 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
         ...PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES,
         ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
-        ...PR28_CLEANUP_ADDED_RPC_SIGNATURES);
+        ...PR28_CLEANUP_ADDED_RPC_SIGNATURES,
+        ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES);
       for (let idx = expectedSignatures.length - 1; idx >= 0; idx -= 1) {
-        if (PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx])) {
+        if (
+          PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx]) ||
+          HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx])
+        ) {
           expectedSignatures.splice(idx, 1);
         }
       }
@@ -1244,8 +1251,10 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...WP13_PR0_BACKEND_FILTERS_OPTIONAL_REASON_RPC_SIGNATURES,
           ...PR28_UNIFIED_USER_DIRECTORY_READER_RPC_SIGNATURES,
           ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
-          ...PR28_CLEANUP_ADDED_RPC_SIGNATURES]
+          ...PR28_CLEANUP_ADDED_RPC_SIGNATURES,
+          ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES]
           .filter((sig) => !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
+          .filter((sig) => !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig))
           .sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
@@ -1624,6 +1633,39 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           [sig],
         );
         assert.equal(dropped[0].reg, null, `PR #28 cleanup dropped retired RPC ${sig}`);
+      }
+      const hfWorkerEditHistoryMigration = await readFile(
+        path.join(MIGRATION_DIR, HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME),
+        "utf8",
+      );
+      const hfWorkerEditHistoryNormalized = hfWorkerEditHistoryMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of [
+        ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
+        "public.worker_edit_history_get_revision(uuid, uuid, uuid, uuid)",
+      ]) {
+        assert.ok(
+          hfWorkerEditHistoryNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `HF worker edit history RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          hfWorkerEditHistoryNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `HF worker edit history RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      for (const sig of HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES) {
+        const { rows: dropped } = await client.query(
+          "select pg_catalog.to_regprocedure($1) as reg",
+          [sig],
+        );
+        assert.equal(dropped[0].reg, null, `HF worker edit history dropped retired RPC ${sig}`);
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(
         path.join(MIGRATION_DIR, ATTENDANCE_SLOT_POLICY_AND_FOUR_SLOT_MATRIX_MIGRATION_NAME),

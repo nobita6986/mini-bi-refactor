@@ -839,6 +839,7 @@ test("Lịch sử chỉnh sửa NLĐ contract & API: enforces 3-Admin capability
       action_group: null,
       project_id: null,
       recruiter_id: null,
+      employee_code: null,
       page_size: 50,
       cursor: null,
     },
