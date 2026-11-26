@@ -94,6 +94,7 @@ import {
   buildFinalizeEvidenceUrl,
   buildFundSharedAdvanceRequest,
   buildFundVendorSharedAdvanceUrl,
+  buildMonthlyReportExportUrl,
   buildMonthlyReportUrl,
   buildOpeningApplyRequest,
   buildOpeningApplyUrl,
@@ -169,6 +170,7 @@ import {
   reloadLedgerForAmbiguousRetryVerification,
   resolveActiveProjectSubLedgerForRecord,
   resolveVendorFinanceExportFilename,
+  resolveVendorFinanceMonthlyReportExportFilename,
   shouldCommitSharedAdvanceLoadMore,
   unlockRecordEntryDialogAfterLedgerReconciliation,
   uploadEvidenceForCommittedTarget,
@@ -801,6 +803,32 @@ test("URL and request builders round-trip cleanly through canonical VFIN-02 back
       contract_type: "SEASONAL",
     },
   });
+
+  const reportExportUrl = buildMonthlyReportExportUrl({
+    month: "2026-11",
+    project_id: PROJECT_ID,
+    accountant_ref: ACCOUNTANT_A_REF,
+    vendor_id: "VND-001",
+    contract_type: "OFFICIAL",
+  });
+  assert.equal(
+    reportExportUrl.startsWith("/api/vendor-finance/reports/monthly/export?"),
+    true,
+  );
+  assert.deepEqual(parseMonthlyReportQuery(new URL(`http://localhost${reportExportUrl}`)), {
+    ok: true,
+    value: {
+      month: "2026-11",
+      project_id: PROJECT_ID,
+      accountant_ref: ACCOUNTANT_A_REF,
+      vendor_id: "VND-001",
+      contract_type: "OFFICIAL",
+    },
+  });
+  assert.equal(
+    buildMonthlyReportExportUrl({ month: "2026-11", contract_type: "all" }),
+    "/api/vendor-finance/reports/monthly/export?month=2026-11",
+  );
 
   assert.equal(buildVendorFinanceContextUrl(), "/api/vendor-finance/context");
   assert.equal(buildVendorDetailUrl("VND-001"), "/api/vendor-finance/vendors/VND-001");
@@ -2821,6 +2849,24 @@ test("VFIN-04: Shared advance URL/request builders, redaction-aware envelope par
   assert.equal(
     resolveVendorFinanceExportFilename(null, "2026-10-25"),
     "danh-sach-vendor-cong-no-2026-10-25.xlsx",
+  );
+  assert.equal(
+    resolveVendorFinanceMonthlyReportExportFilename(
+      'attachment; filename="bao-cao-cong-no-vendor-2026-11.xlsx"',
+      "2026-10",
+    ),
+    "bao-cao-cong-no-vendor-2026-11.xlsx",
+  );
+  assert.equal(
+    resolveVendorFinanceMonthlyReportExportFilename(
+      'attachment; filename="../secret.xlsx"',
+      "2026-11",
+    ),
+    "bao-cao-cong-no-vendor-2026-11.xlsx",
+  );
+  assert.equal(
+    resolveVendorFinanceMonthlyReportExportFilename(null, "2026-11"),
+    "bao-cao-cong-no-vendor-2026-11.xlsx",
   );
 
   // 6. VFIN-05 Combined Payment + Shared Advance Offset request builder & envelope parser

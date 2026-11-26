@@ -978,13 +978,15 @@ export function buildClassifySubLedgerUrl(vendorId: string): string {
   return `/api/vendor-finance/vendors/${encodeURIComponent(vendorId)}/classify-contract-type`;
 }
 
-export function buildMonthlyReportUrl(params: {
+type MonthlyReportUrlParams = {
   month: string;
   project_id?: string | null;
   accountant_ref?: string | null;
   vendor_id?: string | null;
   contract_type?: VendorFinanceContractTypeFilter;
-}): string {
+};
+
+function buildMonthlyReportQueryString(params: MonthlyReportUrlParams): string {
   const sp = new URLSearchParams();
   sp.set("month", params.month.trim());
   if (params.project_id && isCanonicalUiProjectId(params.project_id)) {
@@ -999,7 +1001,15 @@ export function buildMonthlyReportUrl(params: {
   if (params.contract_type && params.contract_type !== "all") {
     sp.set("contract_type", params.contract_type);
   }
-  return `/api/vendor-finance/reports/monthly?${sp.toString()}`;
+  return sp.toString();
+}
+
+export function buildMonthlyReportUrl(params: MonthlyReportUrlParams): string {
+  return `/api/vendor-finance/reports/monthly?${buildMonthlyReportQueryString(params)}`;
+}
+
+export function buildMonthlyReportExportUrl(params: MonthlyReportUrlParams): string {
+  return `/api/vendor-finance/reports/monthly/export?${buildMonthlyReportQueryString(params)}`;
 }
 
 export function buildAdminProjectAccountantsUrl(params?: {
@@ -5816,20 +5826,43 @@ export async function isUsableVendorFinanceExportBlob(
 
 const XLSX_SAFE_FILENAME_REGEX = /^[A-Za-z0-9._-]+\.xlsx$/;
 
-export function resolveVendorFinanceExportFilename(
-  contentDisposition: string | null | undefined,
-  fallbackDate?: string | null,
-): string {
+function extractSafeXlsxFilename(contentDisposition: string | null | undefined): string | null {
   const match = contentDisposition?.match(/filename="([^"]+)"/);
   const candidate = match?.[1] ?? "";
   if (XLSX_SAFE_FILENAME_REGEX.test(candidate) && !candidate.includes("..")) {
     return candidate;
+  }
+  return null;
+}
+
+export function resolveVendorFinanceExportFilename(
+  contentDisposition: string | null | undefined,
+  fallbackDate?: string | null,
+): string {
+  const extracted = extractSafeXlsxFilename(contentDisposition);
+  if (extracted) {
+    return extracted;
   }
   const safeDate =
     typeof fallbackDate === "string" && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(fallbackDate)
       ? fallbackDate
       : new Date().toISOString().slice(0, 10);
   return `danh-sach-vendor-cong-no-${safeDate}.xlsx`;
+}
+
+export function resolveVendorFinanceMonthlyReportExportFilename(
+  contentDisposition: string | null | undefined,
+  month?: string | null,
+): string {
+  const extracted = extractSafeXlsxFilename(contentDisposition);
+  if (extracted) {
+    return extracted;
+  }
+  const safeMonth =
+    typeof month === "string" && CALENDAR_MONTH_REGEX.test(month)
+      ? month
+      : new Date().toISOString().slice(0, 7);
+  return `bao-cao-cong-no-vendor-${safeMonth}.xlsx`;
 }
 
 // -----------------------------------------------------------------------------
