@@ -575,6 +575,8 @@ function collectText(node) {
   return "";
 }
 
+let pendingDialogCloseAutoFocus = null;
+
 const uiStubs = {
   "@/components/ui/alert": {
     __esModule: true,
@@ -601,6 +603,72 @@ const uiStubs = {
   "@/components/ui/catalog-filter-combobox": {
     __esModule: true,
     CatalogFilterCombobox: ({ id, label, value }) => jsx("div", { "data-ui": "CatalogFilterCombobox", id, "data-label": label, "data-value": value }),
+  },
+  "@/components/ui/form-dialog": {
+    __esModule: true,
+    FormDialog: ({
+      open,
+      onOpenChange,
+      title,
+      description,
+      descriptionId,
+      closeAriaLabel = "Đóng hộp thoại",
+      onCloseAutoFocus,
+      children,
+      contentClassName,
+      dataTestId,
+    }) => {
+      if (!open) {
+        if (typeof pendingDialogCloseAutoFocus === "function") {
+          const closeAutoFocus = pendingDialogCloseAutoFocus;
+          pendingDialogCloseAutoFocus = null;
+          closeAutoFocus({
+            defaultPrevented: false,
+            preventDefault() {
+              this.defaultPrevented = true;
+            },
+          });
+        }
+        return null;
+      }
+      pendingDialogCloseAutoFocus = onCloseAutoFocus ?? null;
+      const triggerClose = () => {
+        pendingDialogCloseAutoFocus = null;
+        onOpenChange(false);
+        if (typeof onCloseAutoFocus === "function") {
+          onCloseAutoFocus({
+            defaultPrevented: false,
+            preventDefault() {
+              this.defaultPrevented = true;
+            },
+          });
+        }
+      };
+      return jsx("div", {
+        "data-ui": "FormDialog",
+        "data-testid": dataTestId,
+        "data-open": "true",
+        "data-content-class": contentClassName,
+        onEscapeKeyDown: triggerClose,
+        onOpenChange,
+        onCloseAutoFocus,
+        children: [
+          jsx("div", {
+            children: [
+              jsx("h2", { children: title }),
+              description ? jsx("p", { id: descriptionId, children: description }) : null,
+              jsx("button", {
+                type: "button",
+                "aria-label": closeAriaLabel,
+                onClick: triggerClose,
+                children: "×",
+              }),
+            ],
+          }),
+          children,
+        ],
+      });
+    },
   },
 };
 
@@ -645,6 +713,7 @@ after(() => {
 });
 
 function mountComponent(Component) {
+  pendingDialogCloseAutoFocus = null;
   const instance = { id: 1, slots: [], cursor: 0, dirty: true, unmounted: false, pendingEffects: [], cleanups: new Set(), tree: null };
   const renderOnce = () => {
     if (instance.unmounted) return;
@@ -817,18 +886,44 @@ test("UI: WorkerEditHistoryManager renders Mã NLĐ filter inside <search>, enfo
   assert.ok(secondParams.get("cursor"));
   assert.equal(findNodes(mounted.tree, (n) => n.type === "tr").length, 3); // 1 header + 2 rows
 
-  // 6. Opening detail renders all 3 snapshot panels with per-snapshot names, deduplicated rows, and zero UUIDs
+  // 6. Opening detail opens FormDialog (with NO bottom detail Card outside it) and renders all 3 snapshot panels + status/docs/audit inside the dialog
+  assert.equal(findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog").length, 0);
   const viewBtn = findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v2")[0];
-  viewBtn.props.onClick();
+  viewBtn.props.onClick({ currentTarget: null });
   await mounted.flush();
 
-  const sections = findNodes(mounted.tree, (n) => n.type === "section");
+  const dialogs = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog");
+  assert.equal(dialogs.length, 1);
+  const dialog = dialogs[0];
+  assert.equal(dialog.props["data-testid"], "worker-edit-history-detail-dialog");
+  assert.equal(dialog.props["data-open"], "true");
+  assert.match(dialog.props["data-content-class"], /overscroll-contain/);
+  assert.doesNotMatch(dialog.props["data-content-class"], /overflow-y-auto/);
+  const dialogTitle = collectText(findNodes(dialog, (n) => n.type === "h2")[0]);
+  assert.match(dialogTitle, /v2/);
+  assert.match(dialogTitle, /Nguyễn Văn Mẫu/);
+  assert.match(dialogTitle, /HRP-2026-000123/);
+
+  // No bottom detail Card exists outside FormDialog
+  const cards = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "Card");
+  assert.equal(cards.length, 2); // filter card + results card only
+  for (const card of cards) {
+    assert.equal(collectText(card).includes("Thông tin hiện tại của NLĐ"), false);
+    assert.equal(collectText(card).includes("Trước thay đổi"), false);
+  }
+
+  const sections = findNodes(dialog, (n) => n.type === "section");
   const panelByTitle = (title) => sections.find((s) => collectText(findNodes(s, (n) => n.type === "h4")[0]) === title);
 
   const currentPanel = panelByTitle("Thông tin hiện tại của NLĐ");
   const beforePanel = panelByTitle("Trước thay đổi");
   const afterPanel = panelByTitle("Sau thay đổi");
   assert.ok(currentPanel && beforePanel && afterPanel);
+
+  const dialogText = collectText(dialog);
+  assert.match(dialogText, /Trạng thái làm việc/);
+  assert.match(dialogText, /Hồ sơ \/ ảnh và người tải/);
+  assert.match(dialogText, /Audit/);
 
   const currentText = collectText(currentPanel);
   const beforeText = collectText(beforePanel);
@@ -859,6 +954,7 @@ test("UI: WorkerEditHistoryManager renders Mã NLĐ filter inside <search>, enfo
   const clearBtn = findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xóa lọc")[0];
   clearBtn.props.onClick();
   await mounted.flush();
+  assert.equal(findNodes(mounted.tree, (n) => n.type === "FormDialog" || n.props?.["data-ui"] === "FormDialog").length, 0);
   assert.equal(findNodes(mounted.tree, (n) => n.type === "input" && n.props.id === "worker-edit-history-employee-code")[0].props.value, "");
   assert.match(collectText(mounted.tree), /bấm “Tải lịch sử”/);
 
@@ -914,10 +1010,12 @@ test("UI: SnapshotPanel renders inactive catalog lookup, orphan missing-name lab
 
   findNodes(mounted.tree, (n) => n.type === "form")[0].props.onSubmit({ preventDefault() {} });
   await mounted.flush();
-  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v3")[0].props.onClick();
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v3")[0].props.onClick({ currentTarget: null });
   await mounted.flush();
 
-  const sections = findNodes(mounted.tree, (n) => n.type === "section");
+  const dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  assert.ok(dialog);
+  const sections = findNodes(dialog, (n) => n.type === "section");
   const panelByTitle = (title) => sections.find((s) => collectText(findNodes(s, (n) => n.type === "h4")[0]) === title);
   const currentPanel = panelByTitle("Thông tin hiện tại của NLĐ");
   const beforePanel = panelByTitle("Trước thay đổi");
@@ -942,6 +1040,263 @@ test("UI: SnapshotPanel renders inactive catalog lookup, orphan missing-name lab
   assert.match(currentText, /Không tìm thấy tên người tuyển/);
   const currentTeamRow = findNodes(currentPanel, (n) => n.type === "div" && collectText(findNodes(n, (c) => c.type === "dt")[0]) === "Nhóm")[0];
   assert.equal(collectText(findNodes(currentTeamRow, (c) => c.type === "dd")[0]), "—");
+
+  mounted.unmount();
+});
+
+test("UI: FormDialog ignores late stale response when switching quickly from Row A to Row B (even ignoring abort)", async () => {
+  const { WorkerEditHistoryManager } = repoRequire("./src/components/admin/worker-edit-history-manager.tsx");
+
+  const rowA = makeSearchRow({
+    revision_id: REV_ID,
+    version: 3,
+    display_name: "Người Lao Động A",
+    employee_code: "HRP-2026-000111",
+    project_name: "Dự Án Độc Quyền A",
+    changed_fields: ["recruiter_id"],
+  });
+  const rowB = makeSearchRow({
+    revision_id: REV_ID_2,
+    version: 2,
+    display_name: "Người Lao Động B",
+    employee_code: "HRP-2026-000222",
+    project_name: "Dự Án Độc Quyền B",
+    changed_fields: ["recruiter_id"],
+  });
+
+  let resolveRowA;
+  let resolveRowB;
+  const payloadA = makeRevisionPayload({
+    revision_id: REV_ID,
+    version: 3,
+    current_snapshot: {
+      employee_code: "HRP-2026-000111",
+      project_name: "Dự Án Độc Quyền A",
+      recruiter_id: REC_A_ID,
+      recruiter_name: "Chuyên Viên Độc Quyền A",
+      worker_details: { display_name: "Người Lao Động A" },
+      employment_status: { status: "ON" },
+      payment: { state: "omitted" },
+    },
+  });
+  const payloadB = makeRevisionPayload({
+    revision_id: REV_ID_2,
+    version: 2,
+    current_snapshot: {
+      employee_code: "HRP-2026-000222",
+      project_name: "Dự Án Độc Quyền B",
+      recruiter_id: REC_B_ID,
+      recruiter_name: "Chuyên Viên Độc Quyền B",
+      worker_details: { display_name: "Người Lao Động B" },
+      employment_status: { status: "ON" },
+      payment: { state: "omitted" },
+    },
+  });
+
+  globalThis.fetch = (url) => {
+    const urlStr = String(url);
+    if (urlStr.startsWith("/api/direct-entry/catalog")) {
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, projects: [], recruiters: [], banks: [] }), { status: 200 }));
+    }
+    if (urlStr.startsWith("/api/admin/worker-edit-history?")) {
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, data: { rows: [rowA, rowB], has_more: false, next_cursor: null } }), { status: 200 }));
+    }
+    // Intentionally ignore init.signal abort to simulate an unabortable late response
+    if (urlStr === `/api/admin/worker-edit-history/${ENTRY_ID}/${REV_ID}`) {
+      return new Promise((resolve) => {
+        resolveRowA = () => resolve(new Response(JSON.stringify({ ok: true, data: payloadA }), { status: 200 }));
+      });
+    }
+    if (urlStr === `/api/admin/worker-edit-history/${ENTRY_ID}/${REV_ID_2}`) {
+      return new Promise((resolve) => {
+        resolveRowB = () => resolve(new Response(JSON.stringify({ ok: true, data: payloadB }), { status: 200 }));
+      });
+    }
+    return Promise.resolve(new Response(JSON.stringify({ ok: false, code: "NOT_FOUND" }), { status: 404 }));
+  };
+
+  const mounted = mountComponent(WorkerEditHistoryManager);
+  await mounted.flush();
+
+  findNodes(mounted.tree, (n) => n.type === "form")[0].props.onSubmit({ preventDefault() {} });
+  await mounted.flush();
+
+  // Open Row A -> stays loading
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v3")[0].props.onClick({ currentTarget: null });
+  await mounted.flush();
+  assert.ok(resolveRowA);
+  let dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  assert.match(collectText(dialog), /Đang tải chi tiết/);
+
+  // Close Row A, then immediately open Row B
+  findNodes(dialog, (n) => n.type === "button" && collectText(n) === "Đóng")[0].props.onClick();
+  await mounted.flush();
+  assert.equal(findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog").length, 0);
+
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v2")[0].props.onClick({ currentTarget: null });
+  await mounted.flush();
+  assert.ok(resolveRowB);
+
+  // Resolve Row A late -> dialog MUST stay loading and NEVER render Row A data
+  resolveRowA();
+  await mounted.flush();
+  dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  assert.ok(dialog);
+  const dialogTextDuringRace = collectText(dialog);
+  assert.match(dialogTextDuringRace, /Đang tải chi tiết/);
+  assert.equal(dialogTextDuringRace.includes("Chuyên Viên Độc Quyền A"), false);
+  assert.equal(dialogTextDuringRace.includes("Dự Án Độc Quyền A"), false);
+
+  // Now resolve Row B -> dialog renders Row B cleanly
+  resolveRowB();
+  await mounted.flush();
+  dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  const dialogTextAfterB = collectText(dialog);
+  assert.match(dialogTextAfterB, /Chuyên Viên Độc Quyền B/);
+  assert.equal(dialogTextAfterB.includes("Chuyên Viên Độc Quyền A"), false);
+
+  mounted.unmount();
+});
+
+test("UI: FormDialog renders Alert tone=error on HTTP 500 detail failure while keeping list rows and filters intact", async () => {
+  const { WorkerEditHistoryManager } = repoRequire("./src/components/admin/worker-edit-history-manager.tsx");
+
+  const rowC = makeSearchRow({
+    revision_id: REV_ID,
+    version: 1,
+    display_name: "Nguyễn Văn Lỗi",
+    employee_code: "HRP-2026-000500",
+  });
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.startsWith("/api/direct-entry/catalog")) {
+      return new Response(JSON.stringify({ ok: true, projects: [], recruiters: [], banks: [] }), { status: 200 });
+    }
+    if (urlStr.startsWith("/api/admin/worker-edit-history?")) {
+      return new Response(JSON.stringify({ ok: true, data: { rows: [rowC], has_more: false, next_cursor: null } }), { status: 200 });
+    }
+    if (urlStr === `/api/admin/worker-edit-history/${ENTRY_ID}/${REV_ID}`) {
+      return new Response(JSON.stringify({ ok: false, code: "INTERNAL_ERROR" }), { status: 500 });
+    }
+    return new Response(JSON.stringify({ ok: false, code: "NOT_FOUND" }), { status: 404 });
+  };
+
+  const mounted = mountComponent(WorkerEditHistoryManager);
+  await mounted.flush();
+
+  findNodes(mounted.tree, (n) => n.type === "input" && n.props.id === "worker-edit-history-employee-code")[0]
+    .props.onChange({ target: { value: "HRP-2026-000500" } });
+  await mounted.flush();
+  findNodes(mounted.tree, (n) => n.type === "form")[0].props.onSubmit({ preventDefault() {} });
+  await mounted.flush();
+
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v1")[0].props.onClick({ currentTarget: null });
+  await mounted.flush();
+
+  const dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  assert.ok(dialog);
+  const dialogAlerts = findNodes(dialog, (n) => n.props?.["data-ui"] === "Alert" && n.props?.["data-tone"] === "error");
+  assert.equal(dialogAlerts.length, 1);
+  assert.match(collectText(dialogAlerts[0]), /Không tải được dữ liệu lịch sử/);
+
+  // List rows and filters remain intact behind the dialog
+  assert.equal(findNodes(mounted.tree, (n) => n.type === "input" && n.props.id === "worker-edit-history-employee-code")[0].props.value, "HRP-2026-000500");
+  assert.equal(findNodes(mounted.tree, (n) => n.type === "tr").length, 2); // header + rowC
+
+  mounted.unmount();
+});
+
+test("UI: FormDialog restores focus with preventScroll=true on Đóng button and Esc close, and Tải thêm works after close", async () => {
+  const { WorkerEditHistoryManager } = repoRequire("./src/components/admin/worker-edit-history-manager.tsx");
+
+  const fetchedUrls = [];
+  const row1 = makeSearchRow({
+    revision_id: REV_ID,
+    version: 2,
+    employee_code: "HRP-2026-000777",
+  });
+  const row2 = makeSearchRow({
+    revision_id: REV_ID_2,
+    version: 1,
+    employee_code: "HRP-2026-000777",
+  });
+
+  const page2Cursor = "2026-11-10T03:00:00.000000Z|22222222-2222-4222-8222-222222222222";
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    fetchedUrls.push(urlStr);
+    if (urlStr.startsWith("/api/direct-entry/catalog")) {
+      return new Response(JSON.stringify({ ok: true, projects: [], recruiters: [], banks: [] }), { status: 200 });
+    }
+    if (urlStr.startsWith("/api/admin/worker-edit-history?")) {
+      const parsed = new URL(`https://app.example${urlStr}`);
+      if (!parsed.searchParams.get("cursor")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { rows: [row1], has_more: true, next_cursor: page2Cursor },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: { rows: [row2], has_more: false, next_cursor: null },
+      }), { status: 200 });
+    }
+    if (urlStr === `/api/admin/worker-edit-history/${ENTRY_ID}/${REV_ID}`) {
+      return new Response(JSON.stringify({ ok: true, data: makeRevisionPayload() }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: false, code: "NOT_FOUND" }), { status: 404 });
+  };
+
+  const mounted = mountComponent(WorkerEditHistoryManager);
+  await mounted.flush();
+
+  findNodes(mounted.tree, (n) => n.type === "input" && n.props.id === "worker-edit-history-employee-code")[0]
+    .props.onChange({ target: { value: "HRP-2026-000777" } });
+  await mounted.flush();
+  findNodes(mounted.tree, (n) => n.type === "form")[0].props.onSubmit({ preventDefault() {} });
+  await mounted.flush();
+
+  const focusCalls = [];
+  const mockOpenerButton = {
+    isConnected: true,
+    focus(opts) {
+      focusCalls.push(opts);
+    },
+  };
+
+  // 1. Open and close via sticky footer "Đóng" button -> focus restored with { preventScroll: true }
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v2")[0].props.onClick({ currentTarget: mockOpenerButton });
+  await mounted.flush();
+  let dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  assert.ok(dialog);
+  findNodes(dialog, (n) => n.type === "button" && collectText(n) === "Đóng")[0].props.onClick();
+  await mounted.flush();
+  assert.equal(findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog").length, 0);
+  assert.deepEqual(focusCalls, [{ preventScroll: true }]);
+
+  // 2. Open again and close via Esc (onEscapeKeyDown -> onOpenChange(false) + onCloseAutoFocus) -> focus restored with { preventScroll: true }
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v2")[0].props.onClick({ currentTarget: mockOpenerButton });
+  await mounted.flush();
+  dialog = findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog")[0];
+  assert.ok(dialog);
+  dialog.props.onEscapeKeyDown();
+  await mounted.flush();
+  assert.equal(findNodes(mounted.tree, (n) => n.props?.["data-ui"] === "FormDialog").length, 0);
+  assert.deepEqual(focusCalls, [{ preventScroll: true }, { preventScroll: true }]);
+
+  // 3. Click Tải thêm after closing -> appends page 2 cleanly with preserved filters
+  const loadMoreBtn = findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Tải thêm")[0];
+  assert.ok(loadMoreBtn);
+  loadMoreBtn.props.onClick();
+  await mounted.flush();
+
+  const historyFetches = fetchedUrls.filter((u) => u.startsWith("/api/admin/worker-edit-history?"));
+  assert.equal(historyFetches.length, 2);
+  const page2Params = new URL(`https://app.example${historyFetches[1]}`).searchParams;
+  assert.equal(page2Params.get("employee_code"), "HRP-2026-000777");
+  assert.equal(page2Params.get("cursor"), page2Cursor);
+  assert.equal(findNodes(mounted.tree, (n) => n.type === "tr").length, 3); // header + row1 + row2
 
   mounted.unmount();
 });

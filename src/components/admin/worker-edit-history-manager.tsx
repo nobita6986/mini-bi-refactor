@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import { DATA_TABLE_CLASS, DATA_TABLE_HEAD_CLASS, DATA_TABLE_ROW_CLASS, DATA_TABLE_TD_CLASS, DATA_TABLE_TH_CLASS, DataTableContainer } from "@/components/ui/data-table";
 import { CatalogFilterCombobox, type CatalogFilterOption } from "@/components/ui/catalog-filter-combobox";
+import { FormDialog } from "@/components/ui/form-dialog";
 import { parseDirectEntryCatalogResponse } from "@/lib/direct-entry/catalog-response";
 import { hcmTodayDate } from "@/lib/direct-entry/change-request-proposal-builders";
 import {
@@ -203,16 +204,16 @@ function SnapshotPanel({ title, snapshot, changedFields, resolvedRecruiters, res
     <section className="min-w-0 rounded-xl border border-border p-4">
       <h4 className="mb-3 text-sm font-semibold text-foreground">{title}</h4>
       {!snapshot ? <p className="text-sm text-muted">Chưa có hồ sơ trước lần ghi này.</p> : (
-        <dl className="space-y-2">
+        <dl className="min-w-0 space-y-2">
           {visibleFields.map((field) => (
-            <div key={field} className="grid gap-1 border-b border-border/60 pb-2 sm:grid-cols-[minmax(8rem,0.7fr)_minmax(0,1.3fr)]">
-              <dt className="text-sm text-muted">{fieldLabel(field)}</dt>
+            <div key={field} className="grid min-w-0 gap-1 border-b border-border/60 pb-2 sm:grid-cols-[minmax(8rem,0.7fr)_minmax(0,1.3fr)]">
+              <dt className="min-w-0 break-words text-sm text-muted">{fieldLabel(field)}</dt>
               <dd className="min-w-0 whitespace-pre-wrap break-words text-sm text-foreground">
                 {formatValue(snapshotFieldValue(snapshot, field, resolvedRecruiters, resolvedTeams))}
               </dd>
             </div>
           ))}
-          {visibleFields.length === 0 ? <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(snapshot, null, 2)}</pre> : null}
+          {visibleFields.length === 0 ? <pre className="max-h-96 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(snapshot, null, 2)}</pre> : null}
         </dl>
       )}
     </section>
@@ -222,7 +223,7 @@ function SnapshotPanel({ title, snapshot, changedFields, resolvedRecruiters, res
 function DocumentHistory({ entryId, events }: { entryId: string; events: Record<string, unknown>[] }) {
   if (!events.length) return <p className="text-sm text-muted">Không ghi nhận sự kiện hồ sơ/ảnh trong revision này.</p>;
   return (
-    <ul className="space-y-3">
+    <ul className="min-w-0 space-y-3">
       {events.map((event, index) => {
         const documentId = typeof event.document_id === "string" ? event.document_id : "";
         const type = typeof event.document_type === "string" ? event.document_type : "Tài liệu";
@@ -235,12 +236,12 @@ function DocumentHistory({ entryId, events }: { entryId: string; events: Record<
           ? `/api/direct-entry/entries/${encodeURIComponent(entryId)}/documents/${encodeURIComponent(documentId)}/download`
           : null;
         return (
-          <li key={`${documentId}-${String(event.created_at ?? index)}-${index}`} className="rounded-xl border border-border p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          <li key={`${documentId}-${String(event.created_at ?? index)}-${index}`} className="min-w-0 rounded-xl border border-border p-3">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <strong className="text-sm">{type} · v{formatValue(event.version)}</strong>
               <span className="text-xs text-muted">{typeof event.created_at === "string" ? formatDateTime(event.created_at) : ""}</span>
             </div>
-            <p className="mt-1 text-sm text-muted">
+            <p className="mt-1 break-words text-sm text-muted">
               Người tải: {formatValue(event.uploader_display_name)} · Trạng thái: {formatValue(event.event_status)} · Kiểm tra: {formatValue(event.validation_status)}
             </p>
             {preview ? <a className="mt-3 inline-block text-sm font-medium text-primary underline" href={preview} target="_blank" rel="noreferrer">Mở ảnh qua quyền tài liệu hiện có</a> : null}
@@ -264,6 +265,8 @@ export function WorkerEditHistoryManager() {
   const [selected, setSelected] = useState<WorkerEditHistoryRow | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const listRequest = useRef<AbortController | null>(null);
+  const detailOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const detailRequestSeqRef = useRef(0);
   const projectOptions = useMemo<CatalogFilterOption[]>(
     () => (catalog?.projects ?? []).map((project) => ({ id: project.project_id, label: project.display_name, keywords: project.project_id })),
     [catalog],
@@ -322,6 +325,19 @@ export function WorkerEditHistoryManager() {
     }
   }
 
+  function openDetail(row: WorkerEditHistoryRow, trigger: HTMLButtonElement | null) {
+    detailOpenerRef.current = trigger;
+    detailRequestSeqRef.current += 1;
+    setDetail(null);
+    setSelected(row);
+  }
+
+  function closeDetail() {
+    detailRequestSeqRef.current += 1;
+    setSelected(null);
+    setDetail(null);
+  }
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     listRequest.current?.abort();
@@ -351,6 +367,8 @@ export function WorkerEditHistoryManager() {
     if (draft.projectId) query.set("project_id", draft.projectId);
     if (draft.recruiterId) query.set("recruiter_id", draft.recruiterId);
     if (draft.actionGroup) query.set("action_group", draft.actionGroup);
+    detailOpenerRef.current = null;
+    detailRequestSeqRef.current += 1;
     setAppliedQuery(query);
     setSelected(null);
     setDetail(null);
@@ -368,6 +386,8 @@ export function WorkerEditHistoryManager() {
   function clearFilters() {
     listRequest.current?.abort();
     listRequest.current = null;
+    detailOpenerRef.current = null;
+    detailRequestSeqRef.current += 1;
     setDraft({ ...defaultHistoryDates(), employeeCode: "", projectId: "", recruiterId: "", actionGroup: "" });
     setAppliedQuery(null);
     setResult(null);
@@ -381,24 +401,31 @@ export function WorkerEditHistoryManager() {
     if (!detailUrl || !selected) return;
     const controller = new AbortController();
     const key = detailKey;
+    const requestSeq = ++detailRequestSeqRef.current;
     void fetch(detailUrl, { cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         const payload: unknown = await response.json();
+        if (controller.signal.aborted || detailRequestSeqRef.current !== requestSeq) return null;
         if (!response.ok || !isRecord(payload) || payload.ok !== true || !isRecord(payload.data)) {
           throw new Error(errorMessage(isRecord(payload) ? payload.code : null));
         }
         const revision = projectWorkerEditHistoryRevision(payload.data);
         if (!revision) throw new Error("Chi tiết lịch sử trả về không đúng định dạng.");
+        if (controller.signal.aborted || detailRequestSeqRef.current !== requestSeq) return null;
         return revision;
       })
       .then((value) => {
-        if (!controller.signal.aborted) setDetail({ key, kind: "ready", value });
+        if (!value || controller.signal.aborted || detailRequestSeqRef.current !== requestSeq) return;
+        setDetail({ key, kind: "ready", value });
       })
       .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || detailRequestSeqRef.current !== requestSeq) return;
         setDetail({ key, kind: "error", message: error instanceof Error ? error.message : "Không tải được chi tiết." });
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      detailRequestSeqRef.current += 1;
+    };
   }, [detailKey, detailUrl, selected]);
 
   useEffect(() => () => listRequest.current?.abort(), []);
@@ -486,7 +513,7 @@ export function WorkerEditHistoryManager() {
                   <td className={DATA_TABLE_TD_CLASS}>{row.project_name}<div className="text-xs text-muted">Người tuyển: {row.recruiter_name}</div></td>
                   <td className={DATA_TABLE_TD_CLASS}>{ACTION_LABELS[row.action_group]}</td>
                   <td className={DATA_TABLE_TD_CLASS}>{row.actor_display_name}<div className="text-xs text-muted">{row.reason_text || "Không có lý do"}</div></td>
-                  <td className={DATA_TABLE_TD_CLASS}><Button size="sm" onClick={() => setSelected(row)}>Xem v{row.version}</Button><div className="mt-1 max-w-64 text-xs text-muted">{row.changed_fields.map(fieldLabel).join(", ") || row.audit_actions.join(", ")}</div></td>
+                  <td className={DATA_TABLE_TD_CLASS}><Button type="button" size="sm" onClick={(event) => openDetail(row, event.currentTarget)}>Xem v{row.version}</Button><div className="mt-1 max-w-64 text-xs text-muted">{row.changed_fields.map(fieldLabel).join(", ") || row.audit_actions.join(", ")}</div></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -495,42 +522,113 @@ export function WorkerEditHistoryManager() {
         {result.has_more ? <div className="mt-4"><Button onClick={loadMore} loading={listState === "loading"}>Tải thêm</Button></div> : null}
       </Card> : null}
 
-      {selected ? <Card>
-        <CardHeader title={`Chi tiết revision v${selected.version} · ${selected.display_name}`} description={`${selected.employee_code} · ${selected.project_name} · ${formatDateTime(selected.created_at)}`} />
-        {!currentDetail || currentDetail.kind === "loading" ? <p className="text-sm text-muted">Đang tải chi tiết…</p> : null}
-        {currentDetail?.kind === "error" ? <Alert tone="error" title={currentDetail.message} /> : null}
-        {currentDetail?.kind === "ready" ? <div className="space-y-5">
-          <div className="flex flex-wrap gap-2 text-sm"><span className="rounded-full bg-muted/20 px-3 py-1">{ACTION_LABELS[selected.action_group]}</span><span className="rounded-full bg-muted/20 px-3 py-1">Người sửa: {selected.actor_display_name}</span><span className="rounded-full bg-muted/20 px-3 py-1">{currentDetail.value.snapshot_state === "COMPLETE" ? "Có snapshot đầy đủ" : "Lịch sử cũ: chỉ có dữ liệu giới hạn"}</span></div>
-          {selected.reason_text ? <Alert title="Lý do">{selected.reason_text}</Alert> : null}
-          {currentDetail.value.snapshot_state === "LEGACY_LIMITED" ? <Alert tone="warning" title="Revision cũ chưa có snapshot đầy đủ">Hệ thống chỉ hiển thị được dữ liệu revision và audit còn lưu từ trước khi bật lịch sử mới.</Alert> : null}
-          <SnapshotPanel
-            title="Thông tin hiện tại của NLĐ"
-            snapshot={currentDetail.value.current_snapshot}
-            changedFields={CURRENT_WORKER_FIELDS}
-            resolvedRecruiters={currentDetail.value.resolved_recruiters}
-            resolvedTeams={currentDetail.value.resolved_teams}
-          />
-          <div className="grid gap-4 xl:grid-cols-2">
-            <SnapshotPanel
-              title="Trước thay đổi"
-              snapshot={currentDetail.value.before_snapshot}
-              changedFields={selected.changed_fields}
-              resolvedRecruiters={currentDetail.value.resolved_recruiters}
-              resolvedTeams={currentDetail.value.resolved_teams}
-            />
-            <SnapshotPanel
-              title="Sau thay đổi"
-              snapshot={currentDetail.value.after_snapshot}
-              changedFields={selected.changed_fields}
-              resolvedRecruiters={currentDetail.value.resolved_recruiters}
-              resolvedTeams={currentDetail.value.resolved_teams}
-            />
+      <FormDialog
+        open={selected !== null}
+        onOpenChange={(open) => {
+          if (!open) closeDetail();
+        }}
+        title={selected ? `Chi tiết revision v${selected.version} · ${selected.display_name} · ${selected.employee_code}` : "Chi tiết revision"}
+        description={selected ? `${selected.project_name} · ${formatDateTime(selected.created_at)}` : undefined}
+        descriptionId="worker-edit-history-detail-desc"
+        closeAriaLabel="Đóng chi tiết revision"
+        dataTestId="worker-edit-history-detail-dialog"
+        contentClassName="overscroll-contain sm:w-[min(56rem,calc(100vw-2rem))] lg:w-[min(64rem,calc(100vw-2rem))]"
+        onCloseAutoFocus={(event) => {
+          const opener = detailOpenerRef.current;
+          detailOpenerRef.current = null;
+          if (opener && opener.isConnected) {
+            event.preventDefault();
+            opener.focus({ preventScroll: true });
+          }
+        }}
+      >
+        {selected ? (
+          <div className="min-w-0 space-y-5">
+            {!currentDetail || currentDetail.kind === "loading" ? (
+              <p role="status" aria-live="polite" className="text-sm text-muted">
+                Đang tải chi tiết…
+              </p>
+            ) : null}
+            {currentDetail?.kind === "error" ? <Alert tone="error" title={currentDetail.message} /> : null}
+            {currentDetail?.kind === "ready" ? (
+              <div className="min-w-0 space-y-5">
+                <div className="flex min-w-0 flex-wrap gap-2 text-sm">
+                  <span className="rounded-full bg-muted/20 px-3 py-1">{ACTION_LABELS[selected.action_group]}</span>
+                  <span className="rounded-full bg-muted/20 px-3 py-1">Người sửa: {selected.actor_display_name}</span>
+                  <span className="rounded-full bg-muted/20 px-3 py-1">
+                    {currentDetail.value.snapshot_state === "COMPLETE" ? "Có snapshot đầy đủ" : "Lịch sử cũ: chỉ có dữ liệu giới hạn"}
+                  </span>
+                </div>
+                {selected.reason_text ? <Alert title="Lý do">{selected.reason_text}</Alert> : null}
+                {currentDetail.value.snapshot_state === "LEGACY_LIMITED" ? (
+                  <Alert tone="warning" title="Revision cũ chưa có snapshot đầy đủ">
+                    Hệ thống chỉ hiển thị được dữ liệu revision và audit còn lưu từ trước khi bật lịch sử mới.
+                  </Alert>
+                ) : null}
+                <SnapshotPanel
+                  title="Thông tin hiện tại của NLĐ"
+                  snapshot={currentDetail.value.current_snapshot}
+                  changedFields={CURRENT_WORKER_FIELDS}
+                  resolvedRecruiters={currentDetail.value.resolved_recruiters}
+                  resolvedTeams={currentDetail.value.resolved_teams}
+                />
+                <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+                  <SnapshotPanel
+                    title="Trước thay đổi"
+                    snapshot={currentDetail.value.before_snapshot}
+                    changedFields={selected.changed_fields}
+                    resolvedRecruiters={currentDetail.value.resolved_recruiters}
+                    resolvedTeams={currentDetail.value.resolved_teams}
+                  />
+                  <SnapshotPanel
+                    title="Sau thay đổi"
+                    snapshot={currentDetail.value.after_snapshot}
+                    changedFields={selected.changed_fields}
+                    resolvedRecruiters={currentDetail.value.resolved_recruiters}
+                    resolvedTeams={currentDetail.value.resolved_teams}
+                  />
+                </div>
+                <section className="min-w-0 space-y-3">
+                  <h3 className="font-semibold">Trạng thái làm việc</h3>
+                  {currentDetail.value.employment_status_events.length ? (
+                    currentDetail.value.employment_status_events.map((event, index) => (
+                      <div key={`${String(event.event_id)}-${index}`} className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
+                        {formatValue(event.status)} · hiệu lực {formatValue(event.effective_date)} · người thực hiện {formatValue(event.actor_display_name)} · {formatValue(event.reason_text)}
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted">Không có sự kiện trạng thái gắn với revision này.</p>
+                  )}
+                </section>
+                <section className="min-w-0 space-y-3">
+                  <h3 className="font-semibold">Hồ sơ / ảnh và người tải</h3>
+                  <DocumentHistory entryId={currentDetail.value.entry_id} events={currentDetail.value.document_events} />
+                </section>
+                <section className="min-w-0 space-y-3">
+                  <h3 className="font-semibold">Audit</h3>
+                  {currentDetail.value.audit_events.length ? (
+                    currentDetail.value.audit_events.map((event, index) => (
+                      <div key={`${String(event.event_id)}-${index}`} className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
+                        {formatValue(event.action)} · {formatValue(event.outcome)} · {formatValue(event.actor_display_name)} · {formatValue(event.reason_text)}
+                        <div className="mt-1 break-words text-xs text-muted">
+                          {formatValue(event.changed_fields)} · {typeof event.created_at === "string" ? formatDateTime(event.created_at) : ""}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted">Không có audit event cho revision này.</p>
+                  )}
+                </section>
+              </div>
+            ) : null}
+            <div className="sticky bottom-[calc(-1*max(1.25rem,env(safe-area-inset-bottom)))] -mx-4 mb-[calc(-1*max(1.25rem,env(safe-area-inset-bottom)))] flex justify-end border-t border-border bg-surface px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] sm:-bottom-6 sm:-mx-6 sm:-mb-6 sm:px-6 sm:pb-4">
+              <Button type="button" onClick={closeDetail}>
+                Đóng
+              </Button>
+            </div>
           </div>
-          <section className="space-y-3"><h3 className="font-semibold">Trạng thái làm việc</h3>{currentDetail.value.employment_status_events.length ? currentDetail.value.employment_status_events.map((event, index) => <div key={`${String(event.event_id)}-${index}`} className="rounded-lg border border-border p-3 text-sm">{formatValue(event.status)} · hiệu lực {formatValue(event.effective_date)} · người thực hiện {formatValue(event.actor_display_name)} · {formatValue(event.reason_text)}</div>) : <p className="text-sm text-muted">Không có sự kiện trạng thái gắn với revision này.</p>}</section>
-          <section className="space-y-3"><h3 className="font-semibold">Hồ sơ / ảnh và người tải</h3><DocumentHistory entryId={currentDetail.value.entry_id} events={currentDetail.value.document_events} /></section>
-          <section className="space-y-3"><h3 className="font-semibold">Audit</h3>{currentDetail.value.audit_events.length ? currentDetail.value.audit_events.map((event, index) => <div key={`${String(event.event_id)}-${index}`} className="rounded-lg border border-border p-3 text-sm">{formatValue(event.action)} · {formatValue(event.outcome)} · {formatValue(event.actor_display_name)} · {formatValue(event.reason_text)}<div className="mt-1 text-xs text-muted">{formatValue(event.changed_fields)} · {typeof event.created_at === "string" ? formatDateTime(event.created_at) : ""}</div></div>) : <p className="text-sm text-muted">Không có audit event cho revision này.</p>}</section>
-        </div> : null}
-      </Card> : null}
+        ) : null}
+      </FormDialog>
     </main>
   );
 }
