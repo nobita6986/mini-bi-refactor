@@ -310,10 +310,6 @@ begin
     raise exception 'HF_ATTENDANCE_IDENTITY_POSTCHECK_FAILED: public.attendance__internal_resolve_employee_identity(uuid) is missing';
   end if;
 
-  if exists (select 1 from pg_catalog.pg_roles where rolname = 'supabase_admin') then
-    execute 'alter function public.attendance__internal_resolve_employee_identity(uuid) owner to supabase_admin';
-  end if;
-
   select p.prosecdef, p.provolatile, p.proconfig
   into v_prosecdef, v_provolatile, v_proconfig
   from pg_catalog.pg_proc p
