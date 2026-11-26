@@ -4454,7 +4454,7 @@ test("F-03 [Wizard Step 3]: 409 PERSON_HAS_ACTIVE_TEAM_ASSIGNMENT keeps Steps 1-
   pl.unmount();
 });
 
-test("PersonnelCatalogManager list hides Vị trí column and Edit dialog hides Vị trí dropdown while preserving existing personnel_position", async () => {
+test("PersonnelCatalogManager list hides Vị trí column, Edit hides Vị trí dropdown for non-null rows, and allows filling legacy NULL personnel_position", async () => {
   const team = { team_id: GROUP_RECRUIT_ID, display_name: "Tổ Bắc", code: "BAC", active: true, version: 2, revision_count: 1 };
   const tlRow = makePersonnel({
     recruiter_id: RECRUITER_ID,
@@ -4546,7 +4546,7 @@ test("PersonnelCatalogManager list hides Vị trí column and Edit dialog hides 
   });
   await pcm.flush();
 
-  // Reloaded list with legacy NULL row -> Edit hides #personnel-position and fails closed client-side without PATCH
+  // Reloaded list with legacy NULL row -> (a) Edit shows #personnel-position with empty initial value "" + legacy/TL explanation
   const reloadReq = findLastRequest((r) => r.url.startsWith("/api/admin/catalog/personnel?"));
   respond(reloadReq, 200, {
     ok: true,
@@ -4565,10 +4565,15 @@ test("PersonnelCatalogManager list hides Vị trí column and Edit dialog hides 
   const reqCountBeforeNullEdit = requests.length;
   findButton(pcm, "Chỉnh sửa").props.onClick();
   await pcm.flush();
-  assert.equal(
-    collectNodes(pcm.tree).some((n) => n.type === "select" && n.props?.id === "personnel-position"),
-    false,
+  const posSelect = findNode(pcm, (n) => n.type === "select" && n.props?.id === "personnel-position");
+  assert.equal(posSelect.props.value, "");
+  assert.ok(
+    textOf(pcm.tree).includes(
+      "Chỉ hiển thị cho hồ sơ cũ chưa có vị trí để bổ sung khi lưu. Quyền Trưởng nhóm được quản lý ở mục bổ nhiệm Trưởng nhóm.",
+    ),
   );
+
+  // (b) Submitting without choosing a position fails client-side without sending PATCH
   findNode(
     pcm,
     (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "personnel-name"),
@@ -4576,6 +4581,42 @@ test("PersonnelCatalogManager list hides Vị trí column and Edit dialog hides 
   await pcm.flush();
   assert.equal(requests.length, reqCountBeforeNullEdit);
   assert.ok(textOf(pcm.tree).includes("Vị trí nhân sự không hợp lệ."));
+
+  // (c) Changing display name + actively selecting "STAFF" sends PATCH and closes dialog cleanly on 200 OK
+  findNode(pcm, (n) => n.props?.id === "personnel-name").props.onChange("Nhân Sự Legacy Đã Sửa");
+  findNode(pcm, (n) => n.type === "select" && n.props?.id === "personnel-position").props.onChange({
+    currentTarget: { value: "STAFF" },
+  });
+  await pcm.flush();
+  findNode(
+    pcm,
+    (n) => n.type === "form" && collectNodes(n).some((c) => c.props?.id === "personnel-name"),
+  ).props.onSubmit({ preventDefault() {} });
+  await pcm.flush();
+
+  const legacyPatchReq = findLastRequest(
+    (r) => r.method === "PATCH" && r.url === `/api/admin/catalog/personnel/${RECRUITER_PAGE2_ID}`,
+  );
+  const legacyPatchBody = JSON.parse(legacyPatchReq.options.body);
+  assert.equal(legacyPatchBody.display_name, "Nhân Sự Legacy Đã Sửa");
+  assert.equal(legacyPatchBody.personnel_code, "legacy.null");
+  assert.equal(legacyPatchBody.personnel_position, "STAFF");
+  assert.equal(legacyPatchBody.expected_version, 2);
+
+  respond(legacyPatchReq, 200, {
+    ok: true,
+    personnel: {
+      recruiter_id: RECRUITER_PAGE2_ID,
+      display_name: "Nhân Sự Legacy Đã Sửa",
+      personnel_code: "legacy.null",
+      personnel_position: "STAFF",
+      active: true,
+      version: 3,
+      revision_id: REVISION_ID,
+    },
+  });
+  await pcm.flush();
+  assert.equal(findNode(pcm, (n) => n.type === dialogStub.Root).props.open, false);
 
   pcm.unmount();
 });

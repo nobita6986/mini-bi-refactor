@@ -712,7 +712,7 @@ export function PersonnelCatalogManager({
       request = buildPersonnelUpdateRequest({
         personnelCode: form.personnelCode,
         displayName: form.displayName,
-        personnelPosition: dialog.personnel.personnel_position ?? "",
+        personnelPosition: dialog.personnel.personnel_position ?? form.personnelPosition,
         expectedVersion: dialog.personnel.version,
         reason: form.reason,
         idempotencyKey,
@@ -1126,32 +1126,35 @@ export function PersonnelCatalogManager({
                         onChange={(value) => changeForm("displayName", value)}
                       />
                     )}
+                    {dialog?.kind === "create" ||
+                    (dialog?.kind === "edit" && dialog.personnel.personnel_position === null) ? (
+                      <label className="block text-sm font-medium text-foreground" htmlFor="personnel-position">
+                        Vị trí
+                        <select
+                          id="personnel-position"
+                          value={form.personnelPosition}
+                          onChange={(event) => {
+                            const value = event.currentTarget.value;
+                            changeForm("personnelPosition", value === "STAFF" || value === "TEAM_LEADER" ? value : "");
+                          }}
+                          required
+                          className="mt-1 block min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm"
+                        >
+                          <option value="">Chọn vị trí</option>
+                          <option value="STAFF">Nhân viên</option>
+                          <option value="TEAM_LEADER">Trưởng nhóm</option>
+                        </select>
+                        <span className="mt-1 block text-xs font-normal text-muted">
+                          {dialog.kind === "create"
+                            ? "Vị trí không tự cấp quyền trong hệ thống."
+                            : "Chỉ hiển thị cho hồ sơ cũ chưa có vị trí để bổ sung khi lưu. Quyền Trưởng nhóm được quản lý ở mục bổ nhiệm Trưởng nhóm."}
+                        </span>
+                      </label>
+                    ) : null}
                     {dialog?.kind === "create" ? (
-                      <>
-                        <label className="block text-sm font-medium text-foreground" htmlFor="personnel-position">
-                          Vị trí
-                          <select
-                            id="personnel-position"
-                            value={form.personnelPosition}
-                            onChange={(event) => {
-                              const value = event.currentTarget.value;
-                              changeForm("personnelPosition", value === "STAFF" || value === "TEAM_LEADER" ? value : "");
-                            }}
-                            required
-                            className="mt-1 block min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm"
-                          >
-                            <option value="">Chọn vị trí</option>
-                            <option value="STAFF">Nhân viên</option>
-                            <option value="TEAM_LEADER">Trưởng nhóm</option>
-                          </select>
-                          <span className="mt-1 block text-xs font-normal text-muted">
-                            Vị trí không tự cấp quyền trong hệ thống.
-                          </span>
-                        </label>
-                        <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted sm:col-span-2">
-                          Ngày hiệu lực HRP được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
-                        </div>
-                      </>
+                      <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted sm:col-span-2">
+                        Ngày hiệu lực HRP được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
+                      </div>
                     ) : null}
                   </div>
                   <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
