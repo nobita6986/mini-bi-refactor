@@ -3,6 +3,9 @@ const DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const CURSOR = /^(\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})\.\d{6}Z)\|([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 const ACTION_GROUPS = ["NEW_ENTRY", "DUPLICATE_WITHDRAWN", "PROFILE_EDIT", "STATUS_CHANGE", "DOCUMENT_CHANGE"] as const;
 
+export const MISSING_RECRUITER_NAME_LABEL = "Không tìm thấy tên người tuyển";
+export const MISSING_TEAM_NAME_LABEL = "Không tìm thấy tên nhóm";
+
 export type WorkerEditHistoryActionGroup = (typeof ACTION_GROUPS)[number];
 export type WorkerEditHistorySearchQuery = {
   from_date: string;
@@ -10,6 +13,7 @@ export type WorkerEditHistorySearchQuery = {
   action_group: WorkerEditHistoryActionGroup | null;
   project_id: string | null;
   recruiter_id: string | null;
+  employee_code: string | null;
   page_size: number;
   cursor: string | null;
 };
@@ -52,6 +56,8 @@ export type WorkerEditHistoryRevision = {
   before_snapshot: Record<string, unknown> | null;
   after_snapshot: Record<string, unknown>;
   current_snapshot: Record<string, unknown>;
+  resolved_recruiters: Record<string, string>;
+  resolved_teams: Record<string, string>;
   audit_events: Record<string, unknown>[];
   employment_status_events: Record<string, unknown>[];
   document_events: Record<string, unknown>[];
@@ -90,10 +96,25 @@ function singleton(search: URLSearchParams, key: string): string | null | undefi
   return values.length ? values[0] : null;
 }
 
+export function normalizeWorkerEditHistoryEmployeeCode(raw: string):
+  | { ok: true; value: string | null }
+  | { ok: false; code: "WORKER_EDIT_HISTORY_QUERY_INVALID" } {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { ok: true, value: null };
+  if (trimmed.length > 64) return { ok: false, code: "WORKER_EDIT_HISTORY_QUERY_INVALID" };
+  for (const ch of trimmed) {
+    const code = ch.charCodeAt(0);
+    if (/\s/.test(ch) || code <= 0x1f || code === 0x7f) {
+      return { ok: false, code: "WORKER_EDIT_HISTORY_QUERY_INVALID" };
+    }
+  }
+  return { ok: true, value: trimmed };
+}
+
 export function parseWorkerEditHistorySearchQuery(url: URL):
   | { ok: true; value: WorkerEditHistorySearchQuery }
   | { ok: false; code: "WORKER_EDIT_HISTORY_QUERY_INVALID" } {
-  const keys = new Set(["from_date", "to_date", "action_group", "project_id", "recruiter_id", "page_size", "cursor"]);
+  const keys = new Set(["from_date", "to_date", "action_group", "project_id", "recruiter_id", "employee_code", "page_size", "cursor"]);
   if ([...url.searchParams.keys()].some((key) => !keys.has(key))) {
     return { ok: false, code: "WORKER_EDIT_HISTORY_QUERY_INVALID" };
   }
@@ -106,6 +127,9 @@ export function parseWorkerEditHistorySearchQuery(url: URL):
   const rawAction = typeof values.action_group === "string" && values.action_group !== "" ? values.action_group : null;
   const projectId = typeof values.project_id === "string" ? values.project_id.trim() : "";
   const recruiterId = typeof values.recruiter_id === "string" ? values.recruiter_id.trim() : "";
+  const parsedEmployeeCode = typeof values.employee_code === "string"
+    ? normalizeWorkerEditHistoryEmployeeCode(values.employee_code)
+    : { ok: true as const, value: null };
   const rawPageSize = typeof values.page_size === "string" ? values.page_size : "50";
   const pageSize = /^\d+$/.test(rawPageSize) ? Number(rawPageSize) : NaN;
   const cursor = typeof values.cursor === "string" && values.cursor !== "" ? values.cursor : null;
@@ -120,6 +144,7 @@ export function parseWorkerEditHistorySearchQuery(url: URL):
       (rawAction !== null && !(ACTION_GROUPS as readonly string[]).includes(rawAction)) ||
       (projectId !== "" && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(projectId)) ||
       (recruiterId !== "" && !UUID.test(recruiterId)) ||
+      !parsedEmployeeCode.ok ||
       !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100 ||
       (cursor !== null && (cursor.length > 160 || !cursorTimeValid))) {
     return { ok: false, code: "WORKER_EDIT_HISTORY_QUERY_INVALID" };
@@ -133,6 +158,7 @@ export function parseWorkerEditHistorySearchQuery(url: URL):
       action_group: rawAction as WorkerEditHistoryActionGroup | null,
       project_id: projectId || null,
       recruiter_id: recruiterId || null,
+      employee_code: parsedEmployeeCode.value,
       page_size: pageSize,
       cursor,
     },
@@ -153,6 +179,75 @@ function hasNoStorageKeys(value: unknown): boolean {
 
 function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((item) => typeof item === "string");
+}
+
+function lookupResolvedCatalogName(id: string, resolved: Record<string, string>): string | null {
+  if (Object.prototype.hasOwnProperty.call(resolved, id)) {
+    const direct = resolved[id]?.trim();
+    if (direct) return direct;
+  }
+  const lower = id.toLowerCase();
+  for (const [key, value] of Object.entries(resolved)) {
+    if (key.toLowerCase() === lower) {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return null;
+}
+
+function resolveSnapshotCatalogDisplay(
+  snapshot: Record<string, unknown> | null,
+  idKey: string,
+  nameKey: string,
+  resolved: Record<string, string>,
+  missingLabel: string,
+): string | null {
+  if (!snapshot || !isRecord(snapshot)) return null;
+  const rawId = typeof snapshot[idKey] === "string" ? snapshot[idKey].trim() : "";
+  const id = rawId !== "" ? rawId : null;
+  const rawName = typeof snapshot[nameKey] === "string" ? snapshot[nameKey].trim() : "";
+  const validSavedName =
+    rawName !== "" &&
+    (!id || rawName.toLowerCase() !== id.toLowerCase()) &&
+    !isWorkerEditHistoryUuid(rawName)
+      ? rawName
+      : null;
+
+  if (id !== null) {
+    return validSavedName ?? lookupResolvedCatalogName(id, resolved) ?? missingLabel;
+  }
+  return validSavedName;
+}
+
+export function resolveSnapshotRecruiterDisplay(
+  snapshot: Record<string, unknown> | null,
+  resolvedRecruiters: Record<string, string>,
+): string | null {
+  return resolveSnapshotCatalogDisplay(
+    snapshot,
+    "recruiter_id",
+    "recruiter_name",
+    resolvedRecruiters,
+    MISSING_RECRUITER_NAME_LABEL,
+  );
+}
+
+export function resolveSnapshotTeamDisplay(
+  snapshot: Record<string, unknown> | null,
+  resolvedTeams: Record<string, string>,
+): string | null {
+  return resolveSnapshotCatalogDisplay(
+    snapshot,
+    "team_id",
+    "team_name",
+    resolvedTeams,
+    MISSING_TEAM_NAME_LABEL,
+  );
 }
 
 function projectRow(value: unknown): WorkerEditHistoryRow | null {
@@ -187,10 +282,18 @@ export function projectWorkerEditHistoryRevision(value: unknown): WorkerEditHist
       (value.snapshot_state !== "COMPLETE" && value.snapshot_state !== "LEGACY_LIMITED") ||
       (value.before_snapshot !== null && !isRecord(value.before_snapshot)) || !isRecord(value.after_snapshot) ||
       !isRecord(value.current_snapshot) ||
+      (value.resolved_recruiters !== undefined && !isStringRecord(value.resolved_recruiters)) ||
+      (value.resolved_teams !== undefined && !isStringRecord(value.resolved_teams)) ||
       !Array.isArray(value.audit_events) || !value.audit_events.every(isRecord) ||
       !Array.isArray(value.employment_status_events) || !value.employment_status_events.every(isRecord) ||
       !Array.isArray(value.document_events) || !value.document_events.every(isRecord) || !hasNoStorageKeys(value)) return null;
-  return value as unknown as WorkerEditHistoryRevision;
+  const resolvedRecruiters = value.resolved_recruiters === undefined ? {} : value.resolved_recruiters;
+  const resolvedTeams = value.resolved_teams === undefined ? {} : value.resolved_teams;
+  return {
+    ...(value as unknown as WorkerEditHistoryRevision),
+    resolved_recruiters: resolvedRecruiters,
+    resolved_teams: resolvedTeams,
+  };
 }
 
 export function workerEditHistoryHttpStatus(code: WorkerEditHistoryError): number {

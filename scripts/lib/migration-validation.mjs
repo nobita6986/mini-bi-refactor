@@ -506,6 +506,14 @@ export const PR28_CLEANUP_RETIRED_RPC_SIGNATURES = Object.freeze([
 export const PR28_CLEANUP_ADDED_RPC_SIGNATURES = Object.freeze([
   "public.leave_management_upsert_employee_profile_admin(uuid, uuid, uuid, text, text, date, date, date, integer, integer, text, text, text)",
 ]);
+export const HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME =
+  "20261126120000_hf_worker_edit_history_names_and_employee_code.sql";
+export const HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES = Object.freeze([
+  "public.worker_edit_history_search(uuid, uuid, text, text, date, date, text, text, text, integer, text)",
+]);
+export const HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES = Object.freeze([
+  "public.worker_edit_history_search(uuid, uuid, text, text, date, date, text, text, text, integer, text, text)",
+]);
 export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME =
   "20261126130000_hf_block_move_unassign_active_team_leader.sql";
 export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES = Object.freeze([
@@ -843,6 +851,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
       PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME,
     ),
     pr28CleanupApplied: has(PR28_CLEANUP_MIGRATION_NAME),
+    hfWorkerEditHistoryNamesAndEmployeeCodeApplied: has(
+      HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME,
+    ),
     hfBlockMoveUnassignTeamLeaderApplied: has(
       HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
     ),
@@ -921,6 +932,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     pr28UnifiedUserDirectoryReaderApplied = false,
     pr28PermissionGroupsFoundationApplied = false,
     pr28CleanupApplied = false,
+    hfWorkerEditHistoryNamesAndEmployeeCodeApplied = false,
     hfBlockMoveUnassignTeamLeaderApplied = false,
   } = flags ?? {};
 
@@ -1078,10 +1090,19 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       ? PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES
       : []),
     ...(pr28CleanupApplied ? PR28_CLEANUP_ADDED_RPC_SIGNATURES : []),
+    ...(hfWorkerEditHistoryNamesAndEmployeeCodeApplied
+      ? HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES
+      : []),
     ...(hfBlockMoveUnassignTeamLeaderApplied
       ? HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES
       : []),
-  ].filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig));
+  ]
+    .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
+    .filter(
+      (sig) =>
+        !hfWorkerEditHistoryNamesAndEmployeeCodeApplied ||
+        !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig),
+    );
 }
 
 /**
