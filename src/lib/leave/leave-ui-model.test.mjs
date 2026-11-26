@@ -14,6 +14,7 @@ import {
   fetchAllLeaveAdminEmployeeOptions,
   formatHalfDayUnits,
   formatIsoDateVi,
+  formatIsoDayOfMonth,
   formatLeaveAdminAccountOptionLabel,
   formatLeaveOrgDepartmentDisplay,
   formatSignedHalfDayUnits,
@@ -200,6 +201,13 @@ test("WP2 session units and Vietnamese labels match WP1 leave contract", () => {
   );
   assert.ok(leaveFallbackReasonLabel("TEAM_WITHOUT_ACTIVE_LEADER")?.includes("Team Leader"));
   assert.equal(formatIsoDateVi("2026-03-31"), "31/03/2026");
+  assert.equal(formatIsoDayOfMonth(null), "—");
+  assert.equal(formatIsoDayOfMonth(undefined), "—");
+  assert.equal(formatIsoDayOfMonth(""), "—");
+  assert.equal(formatIsoDayOfMonth("   "), "—");
+  assert.equal(formatIsoDayOfMonth("2026-11-02"), "02");
+  assert.equal(formatIsoDayOfMonth(" 2026-11-16 "), "16");
+  assert.equal(formatIsoDayOfMonth("not-a-date"), formatIsoDateVi("not-a-date"));
 });
 
 test("WP2 decideLeavePageAccess and resolveVisibleLeaveTabs project strictly from server authority", () => {

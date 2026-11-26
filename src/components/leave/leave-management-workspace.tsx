@@ -25,6 +25,7 @@ import { OffsetPager } from "@/components/ui/offset-pager";
 import { PageHeader, PageShell } from "@/components/ui/page-shell";
 import { StatusBanner } from "@/components/ui/status-banner";
 import styles from "./leave-admin-profiles-table.module.css";
+import monthlyReportTableStyles from "./leave-monthly-report-table.module.css";
 import type { LeaveAdminAccountStatusFilter } from "@/lib/leave/leave-contract";
 import {
   LEAVE_EMPLOYMENT_STATUSES,
@@ -45,6 +46,7 @@ import {
   fetchAllLeaveAdminEmployeeOptions,
   formatHalfDayUnits,
   formatIsoDateVi,
+  formatIsoDayOfMonth,
   formatLeaveOrgDepartmentDisplay,
   formatSignedHalfDayUnits,
   halfDayUnitsToDays,
@@ -3215,6 +3217,7 @@ export function LeaveManagementWorkspace({
           ) : (
             <DataTableContainer
               dataTestId="leave-monthly-report-table"
+              className={monthlyReportTableStyles.leaveMonthlyReportTable}
               footer={
                 <OffsetPager
                   page={reportPage}
@@ -3228,16 +3231,10 @@ export function LeaveManagementWorkspace({
               <table className={DATA_TABLE_CLASS}>
                 <thead className={DATA_TABLE_HEAD_CLASS}>
                   <tr>
-                    <th className={DATA_TABLE_TH_CLASS}>Nhân sự</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Bộ phận / Team</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Trạng thái & Mốc làm việc</th>
+                    <th className={DATA_TABLE_TH_CLASS}>Nhân sự &amp; Mốc làm việc</th>
                     <th className={DATA_TABLE_TH_CLASS}>Chấm công trong tháng</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Chi tiết ngày nghỉ, loại nghỉ & buổi nghỉ</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Tổng hợp loại nghỉ (Tháng)</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Chờ duyệt (Tháng)</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Nguồn phép năm (CN / Tháng / TN)</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Đã dùng / Giữ chỗ / Hết hạn</th>
-                    <th className={DATA_TABLE_TH_CLASS}>Phép năm khả dụng cuối kỳ</th>
+                    <th className={DATA_TABLE_TH_CLASS}>Chi tiết ngày nghỉ, loại nghỉ &amp; buổi nghỉ</th>
+                    <th className={DATA_TABLE_TH_CLASS}>Quỹ phép năm</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3249,161 +3246,174 @@ export function LeaveManagementWorkspace({
                     const leaveDays = Array.isArray(row.leave_days) ? row.leave_days : [];
                     return (
                       <tr key={row.app_user_id} className={DATA_TABLE_ROW_CLASS}>
-                        <td className={DATA_TABLE_TD_CLASS} data-label="Nhân sự">
-                          <div className="font-medium text-foreground">
-                            {row.account?.display_name ?? row.account?.login_id ?? row.app_user_id}
-                          </div>
-                          <div className="text-xs text-muted">
-                            {row.account?.personnel_code
-                              ? `${row.account.personnel_code} · `
-                              : ""}
-                            {row.account?.login_id ? `@${row.account.login_id}` : ""}
-                          </div>
-                        </td>
-                        <td className={DATA_TABLE_TD_CLASS} data-label="Bộ phận / Team">
-                          <div>
-                            {formatLeaveOrgDepartmentDisplay(
-                              row.org_department,
-                              row.unit_kind,
-                            )}
-                          </div>
-                          {row.routing?.team_name ? (
-                            <div className="text-xs text-muted">{row.routing.team_name}</div>
-                          ) : null}
-                        </td>
                         <td
                           className={DATA_TABLE_TD_CLASS}
-                          data-label="Trạng thái & Mốc làm việc"
+                          data-label="Nhân sự & Mốc làm việc"
                         >
-                          <StatusBadge tone={empBadge.tone}>{empBadge.label}</StatusBadge>
-                          <div className="mt-1 text-[11px] font-mono text-muted">
-                            Vào: {formatIsoDateVi(row.work_start_date)} · CT:{" "}
-                            {formatIsoDateVi(row.official_effective_date)}
+                          <div className="min-w-0 space-y-1">
+                            <div>
+                              <div className="font-medium text-foreground">
+                                {row.account?.display_name ?? row.account?.login_id ?? row.app_user_id}
+                              </div>
+                              <div className="text-xs text-muted">
+                                {row.account?.personnel_code
+                                  ? `${row.account.personnel_code} · `
+                                  : ""}
+                                {row.account?.login_id ? `@${row.account.login_id}` : ""}
+                              </div>
+                            </div>
+                            <div className="text-xs text-foreground/90">
+                              <span>
+                                {formatLeaveOrgDepartmentDisplay(
+                                  row.org_department,
+                                  row.unit_kind,
+                                )}
+                              </span>
+                              {row.routing?.team_name ? (
+                                <span className="text-muted"> · {row.routing.team_name}</span>
+                              ) : null}
+                            </div>
+                            {row.routing?.route_kind ? (
+                              <div className="text-[11px] text-muted">
+                                {leaveRouteKindLabel(
+                                  row.routing.route_kind,
+                                  row.routing.team_name,
+                                  row.unit_kind,
+                                )}
+                              </div>
+                            ) : null}
+                            <div>
+                              <StatusBadge tone={empBadge.tone}>{empBadge.label}</StatusBadge>
+                            </div>
+                            <div className="text-[11px] font-mono text-muted">
+                              Vào: {formatIsoDateVi(row.work_start_date)} · CT:{" "}
+                              {formatIsoDateVi(row.official_effective_date)}
+                            </div>
                           </div>
                         </td>
                         <td
                           className={DATA_TABLE_TD_CLASS}
                           data-label="Chấm công trong tháng"
                         >
-                          <div className="font-mono font-semibold text-foreground">
-                            {row.attendance_day_count ?? attendanceDates.length} ngày
-                          </div>
-                          {attendanceDates.length > 0 ? (
-                            <div className="mt-1 flex max-w-xs flex-wrap gap-1">
-                              {attendanceDates.map((isoDate) => (
-                                <span
-                                  key={isoDate}
-                                  className="inline-flex rounded border border-border bg-surface-muted px-1.5 py-0.5 text-[11px] font-mono"
-                                >
-                                  {formatIsoDateVi(isoDate)}
-                                </span>
-                              ))}
+                          <div className="min-w-0">
+                            <div className="inline-flex items-center rounded border border-border bg-surface-muted/60 px-2 py-0.5 text-xs font-mono font-semibold text-foreground tabular-nums">
+                              {row.attendance_day_count ?? attendanceDates.length} ngày
                             </div>
-                          ) : (
-                            <span className="text-xs text-muted">Chưa có ngày chấm công</span>
-                          )}
+                            {attendanceDates.length > 0 ? (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {attendanceDates.map((isoDate) => (
+                                  <span
+                                    key={isoDate}
+                                    title={formatIsoDateVi(isoDate)}
+                                    className="inline-flex rounded border border-border bg-surface-muted px-1.5 py-0.5 text-[11px] font-mono tabular-nums"
+                                  >
+                                    {formatIsoDayOfMonth(isoDate)}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="mt-1 text-xs text-muted">
+                                Chưa có ngày chấm công (—)
+                              </div>
+                            )}
+                          </div>
                         </td>
                         <td
                           className={DATA_TABLE_TD_CLASS}
                           data-label="Chi tiết ngày nghỉ, loại nghỉ & buổi nghỉ"
                         >
-                          {leaveDays.length > 0 ? (
-                            <div className="flex max-w-sm flex-wrap gap-1">
-                              {leaveDays.map((ld, idx) => {
-                                const badge = leaveTypeBadge(ld.leave_type);
-                                return (
-                                  <span
-                                    key={`${ld.request_id}-${ld.leave_date}-${ld.session_code}-${idx}`}
-                                    className="inline-flex items-center gap-1 rounded border border-border bg-surface-muted px-1.5 py-0.5 text-[11px] font-mono"
-                                  >
-                                    <span>
-                                      {formatIsoDateVi(ld.leave_date)} (
-                                      {leaveSessionShortLabel(ld.session_code)})
+                          <div className="min-w-0 space-y-2">
+                            {leaveDays.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {leaveDays.map((ld, idx) => {
+                                  const badge = leaveTypeBadge(ld.leave_type);
+                                  return (
+                                    <span
+                                      key={`${ld.request_id}-${ld.leave_date}-${ld.session_code}-${idx}`}
+                                      title={formatIsoDateVi(ld.leave_date)}
+                                      className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-border bg-surface-muted px-1.5 py-0.5 text-[11px] font-mono"
+                                    >
+                                      <span>
+                                        {formatIsoDayOfMonth(ld.leave_date)} (
+                                        {leaveSessionShortLabel(ld.session_code)})
+                                      </span>
+                                      <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
                                     </span>
-                                    <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
-                                  </span>
-                                );
-                              })}
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted">Không phát sinh nghỉ (—)</span>
+                            )}
+                            <div className="space-y-0.5 border-t border-border/60 pt-1.5 text-xs font-mono">
+                              <div>
+                                Phép năm:{" "}
+                                <strong>
+                                  {formatHalfDayUnits(row.month_annual_leave_units ?? 0)}
+                                </strong>
+                              </div>
+                              {(row.month_bereavement_leave_units ?? 0) > 0 ? (
+                                <div>
+                                  Nghỉ tang:{" "}
+                                  <strong>
+                                    {formatHalfDayUnits(row.month_bereavement_leave_units)}
+                                  </strong>
+                                </div>
+                              ) : null}
+                              {(row.month_marriage_leave_units ?? 0) > 0 ? (
+                                <div>
+                                  Nghỉ cưới:{" "}
+                                  <strong>
+                                    {formatHalfDayUnits(row.month_marriage_leave_units)}
+                                  </strong>
+                                </div>
+                              ) : null}
+                              {(row.month_sick_leave_units ?? 0) > 0 ? (
+                                <div>
+                                  Nghỉ ốm:{" "}
+                                  <strong>{formatHalfDayUnits(row.month_sick_leave_units)}</strong>
+                                </div>
+                              ) : null}
+                              {(row.month_unpaid_leave_units ?? 0) > 0 ? (
+                                <div>
+                                  Nghỉ không lương:{" "}
+                                  <strong>
+                                    {formatHalfDayUnits(row.month_unpaid_leave_units)}
+                                  </strong>
+                                </div>
+                              ) : null}
+                              <div>
+                                Chờ duyệt (Tháng):{" "}
+                                <strong>{formatHalfDayUnits(row.month_pending_units)}</strong>
+                              </div>
                             </div>
-                          ) : (
-                            <span className="text-xs text-muted">Không phát sinh nghỉ</span>
-                          )}
-                        </td>
-                        <td
-                          className={DATA_TABLE_TD_CLASS}
-                          data-label="Tổng hợp loại nghỉ (Tháng)"
-                        >
-                          <div className="space-y-0.5 text-xs font-mono">
-                            <div>
-                              Phép năm:{" "}
-                              <strong>
-                                {formatHalfDayUnits(row.month_annual_leave_units ?? 0)}
-                              </strong>
-                            </div>
-                            {(row.month_bereavement_leave_units ?? 0) > 0 ? (
-                              <div>
-                                Nghỉ tang:{" "}
-                                <strong>
-                                  {formatHalfDayUnits(row.month_bereavement_leave_units)}
-                                </strong>
-                              </div>
-                            ) : null}
-                            {(row.month_marriage_leave_units ?? 0) > 0 ? (
-                              <div>
-                                Nghỉ cưới:{" "}
-                                <strong>
-                                  {formatHalfDayUnits(row.month_marriage_leave_units)}
-                                </strong>
-                              </div>
-                            ) : null}
-                            {(row.month_sick_leave_units ?? 0) > 0 ? (
-                              <div>
-                                Nghỉ ốm:{" "}
-                                <strong>{formatHalfDayUnits(row.month_sick_leave_units)}</strong>
-                              </div>
-                            ) : null}
-                            {(row.month_unpaid_leave_units ?? 0) > 0 ? (
-                              <div>
-                                Nghỉ không lương:{" "}
-                                <strong>
-                                  {formatHalfDayUnits(row.month_unpaid_leave_units)}
-                                </strong>
-                              </div>
-                            ) : null}
                           </div>
                         </td>
-                        <td className={DATA_TABLE_TD_CLASS} data-label="Chờ duyệt (Tháng)">
-                          <span className="font-mono">
-                            {formatHalfDayUnits(row.month_pending_units)}
-                          </span>
-                        </td>
-                        <td
-                          className={DATA_TABLE_TD_CLASS}
-                          data-label="Nguồn phép năm (CN / Tháng / TN)"
-                        >
-                          <span className="font-mono text-xs">
-                            {halfDayUnitsToDays(row.balance.carry_over_granted_units)} /{" "}
-                            {halfDayUnitsToDays(row.balance.monthly_accrued_units)} /{" "}
-                            {halfDayUnitsToDays(row.balance.seniority_granted_units)} ngày
-                          </span>
-                        </td>
-                        <td
-                          className={DATA_TABLE_TD_CLASS}
-                          data-label="Đã dùng / Giữ chỗ / Hết hạn"
-                        >
-                          <span className="font-mono text-xs">
-                            {halfDayUnitsToDays(row.balance.consumed_units)} /{" "}
-                            {halfDayUnitsToDays(row.balance.reserved_units)} /{" "}
-                            {halfDayUnitsToDays(row.balance.expired_units)} ngày
-                          </span>
-                        </td>
-                        <td
-                          className={DATA_TABLE_TD_CLASS}
-                          data-label="Phép năm khả dụng cuối kỳ"
-                        >
-                          <strong className="font-mono text-primary">
-                            {formatHalfDayUnits(row.balance.available_units)}
-                          </strong>
+                        <td className={DATA_TABLE_TD_CLASS} data-label="Quỹ phép năm">
+                          <div className="min-w-0 space-y-1 text-xs">
+                            <div>
+                              <span className="text-muted">Nguồn (CN / Tháng / TN): </span>
+                              <span className="font-mono">
+                                {halfDayUnitsToDays(row.balance.carry_over_granted_units)} /{" "}
+                                {halfDayUnitsToDays(row.balance.monthly_accrued_units)} /{" "}
+                                {halfDayUnitsToDays(row.balance.seniority_granted_units)} ngày
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-muted">Đã dùng / Giữ chỗ / Hết hạn: </span>
+                              <span className="font-mono">
+                                {halfDayUnitsToDays(row.balance.consumed_units)} /{" "}
+                                {halfDayUnitsToDays(row.balance.reserved_units)} /{" "}
+                                {halfDayUnitsToDays(row.balance.expired_units)} ngày
+                              </span>
+                            </div>
+                            <div className="border-t border-border/60 pt-1">
+                              <span className="text-muted">Khả dụng cuối kỳ: </span>
+                              <strong className="font-mono text-primary">
+                                {formatHalfDayUnits(row.balance.available_units)}
+                              </strong>
+                            </div>
+                          </div>
                         </td>
                       </tr>
                     );

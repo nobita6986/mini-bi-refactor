@@ -58,12 +58,15 @@ import {
   type VendorFinanceEvidenceDownloadResponse,
   type VendorFinanceEvidenceReserveResponse,
   type VendorFinanceExportVendorItem,
+  type VendorFinanceMonthlyReportResponse,
 } from "./vendor-finance-contract.ts";
 import type { VendorFinanceRepository } from "./vendor-finance-repository.ts";
 import {
   buildVendorFinanceExportXlsx,
+  buildVendorFinanceMonthlyReportExportXlsx,
   VENDOR_FINANCE_EXPORT_XLSX_CONTENT_TYPE,
   vendorFinanceExportFilename,
+  vendorFinanceMonthlyReportExportFilename,
 } from "./vendor-finance-xlsx.ts";
 
 export const MAX_VENDOR_FINANCE_MUTATION_JSON_BYTES = 8_192;
@@ -86,6 +89,7 @@ export type VendorFinanceApiDependencies = {
   repository: VendorFinanceRepository;
   storage?: VendorFinanceEvidenceStorage;
   buildExportXlsx?(vendors: readonly VendorFinanceExportVendorItem[]): Promise<Uint8Array>;
+  buildMonthlyReportExportXlsx?(report: VendorFinanceMonthlyReportResponse): Promise<Uint8Array>;
 };
 
 function vfinError(code: VendorFinanceErrorCode): Response {
@@ -988,28 +992,31 @@ export async function handlePostClassifyVendorSubLedger(
 }
 
 // -----------------------------------------------------------------------------
-// 11. GET /api/vendor-finance/reports/monthly
+// 11. GET /api/vendor-finance/reports/monthly (& /export)
 // -----------------------------------------------------------------------------
-export async function handleGetVendorFinanceMonthlyReport(
+async function fetchVendorFinanceMonthlyReport(
   request: Request,
   enabledFlag: string | undefined,
   dependencies: VendorFinanceApiDependencies,
-): Promise<Response> {
+): Promise<
+  | { ok: true; data: VendorFinanceMonthlyReportResponse; month: string }
+  | { ok: false; response: Response }
+> {
   const gate = directEntryFeatureGate(enabledFlag);
-  if (gate) return gate;
+  if (gate) return { ok: false, response: gate };
 
   if (hasDisallowedAuthorityHeaders(request)) {
-    return vfinError("CLIENT_AUTHORITY_FIELD_FORBIDDEN");
+    return { ok: false, response: vfinError("CLIENT_AUTHORITY_FIELD_FORBIDDEN") };
   }
 
   const url = parseRequestUrl(request);
-  if (!url) return vfinError("VENDOR_FINANCE_QUERY_INVALID");
+  if (!url) return { ok: false, response: vfinError("VENDOR_FINANCE_QUERY_INVALID") };
 
   const actor = await resolveVendorFinanceAuthority(dependencies, "view");
-  if (!actor.ok) return actor.response;
+  if (!actor.ok) return { ok: false, response: actor.response };
 
   const query = parseMonthlyReportQuery(url);
-  if (!query.ok) return vfinError(query.code);
+  if (!query.ok) return { ok: false, response: vfinError(query.code) };
 
   const result = await dependencies.repository.getMonthlyReport({
     auth_subject: actor.auth_subject,
@@ -1020,9 +1027,60 @@ export async function handleGetVendorFinanceMonthlyReport(
     vendor_id: query.value.vendor_id,
     contract_type: query.value.contract_type,
   });
-  if (!result.ok) return vfinError(result.code);
+  if (!result.ok) return { ok: false, response: vfinError(result.code) };
 
-  return vfinOk(result.data, 200);
+  return { ok: true, data: result.data, month: query.value.month };
+}
+
+function buildXlsxAttachmentResponse(xlsxBytes: Uint8Array, filename: string): Response {
+  const xlsxBody = xlsxBytes.buffer.slice(
+    xlsxBytes.byteOffset,
+    xlsxBytes.byteOffset + xlsxBytes.byteLength,
+  );
+  return new Response(xlsxBody as ArrayBuffer, {
+    status: 200,
+    headers: {
+      "content-type": VENDOR_FINANCE_EXPORT_XLSX_CONTENT_TYPE,
+      "content-disposition": `attachment; filename="${filename}"`,
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+export async function handleGetVendorFinanceMonthlyReport(
+  request: Request,
+  enabledFlag: string | undefined,
+  dependencies: VendorFinanceApiDependencies,
+): Promise<Response> {
+  const fetched = await fetchVendorFinanceMonthlyReport(request, enabledFlag, dependencies);
+  if (!fetched.ok) return fetched.response;
+  return vfinOk(fetched.data, 200);
+}
+
+export async function handleGetExportVendorFinanceMonthlyReport(
+  request: Request,
+  enabledFlag: string | undefined,
+  dependencies: VendorFinanceApiDependencies,
+): Promise<Response> {
+  const fetched = await fetchVendorFinanceMonthlyReport(request, enabledFlag, dependencies);
+  if (!fetched.ok) return fetched.response;
+
+  const buildXlsx =
+    dependencies.buildMonthlyReportExportXlsx ?? buildVendorFinanceMonthlyReportExportXlsx;
+  let xlsxBytes: Uint8Array;
+  try {
+    xlsxBytes = await buildXlsx(fetched.data);
+  } catch {
+    console.error("[vendor-finance] monthly report export xlsx build failed");
+    return vfinError("VENDOR_FINANCE_UNAVAILABLE");
+  }
+
+  return buildXlsxAttachmentResponse(
+    xlsxBytes,
+    vendorFinanceMonthlyReportExportFilename(fetched.month),
+  );
 }
 
 // -----------------------------------------------------------------------------
@@ -1602,20 +1660,10 @@ export async function handleGetExportVendorFinanceVendors(
     return vfinError("VENDOR_FINANCE_UNAVAILABLE");
   }
 
-  const xlsxBody = xlsxBytes.buffer.slice(
-    xlsxBytes.byteOffset,
-    xlsxBytes.byteOffset + xlsxBytes.byteLength,
+  return buildXlsxAttachmentResponse(
+    xlsxBytes,
+    vendorFinanceExportFilename(result.data.authorization_date),
   );
-  return new Response(xlsxBody as ArrayBuffer, {
-    status: 200,
-    headers: {
-      "content-type": VENDOR_FINANCE_EXPORT_XLSX_CONTENT_TYPE,
-      "content-disposition": `attachment; filename="${vendorFinanceExportFilename(result.data.authorization_date)}"`,
-      "cache-control": "private, no-store",
-      "x-content-type-options": "nosniff",
-      "referrer-policy": "no-referrer",
-    },
-  });
 }
 
 // -----------------------------------------------------------------------------

@@ -394,6 +394,7 @@ const CALENDAR_MONTH_REGEX = /^([0-9]{4})-(0[1-9]|1[0-2])$/;
 const DOCUMENT_NO_REGEX = /^VFIN-[0-9]{4}-[0-9]{6,}$/;
 const POSITIVE_DECIMAL_REGEX = /^[1-9][0-9]{0,18}$/;
 const SIGNED_DECIMAL_REGEX = /^-?(?:0|[1-9][0-9]{0,18})$/;
+const UNBOUNDED_SIGNED_DECIMAL_REGEX = /^(?:0|-?[1-9][0-9]*)$/;
 const GROUPED_THOUSANDS_INTEGER_REGEX = /^-?[1-9][0-9]{0,2}(?:([.,\s])[0-9]{3})+$/;
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
 const CURSOR_TOKEN_REGEX = /^[A-Za-z0-9_-]{4,768}$/;
@@ -549,6 +550,21 @@ export function formatVndMinor(canonical: string): string {
     return `-${groupDigitsThousands(normalized.slice(1))} ₫`;
   }
   return `${groupDigitsThousands(normalized)} ₫`;
+}
+
+/**
+ * Formats an aggregated canonical integer VND total (which may exceed single-entry PostgreSQL
+ * `bigint` limits when summing multiple valid sub-ledgers) without relaxing single-entry
+ * input or API contract `int8` bounds.
+ */
+export function formatAggregatedVndMinor(canonical: string): string {
+  if (typeof canonical !== "string" || !UNBOUNDED_SIGNED_DECIMAL_REGEX.test(canonical)) {
+    return "—";
+  }
+  if (canonical.startsWith("-")) {
+    return `-${groupDigitsThousands(canonical.slice(1))} ₫`;
+  }
+  return `${groupDigitsThousands(canonical)} ₫`;
 }
 
 /**
@@ -978,13 +994,15 @@ export function buildClassifySubLedgerUrl(vendorId: string): string {
   return `/api/vendor-finance/vendors/${encodeURIComponent(vendorId)}/classify-contract-type`;
 }
 
-export function buildMonthlyReportUrl(params: {
+type MonthlyReportUrlParams = {
   month: string;
   project_id?: string | null;
   accountant_ref?: string | null;
   vendor_id?: string | null;
   contract_type?: VendorFinanceContractTypeFilter;
-}): string {
+};
+
+function buildMonthlyReportQueryString(params: MonthlyReportUrlParams): string {
   const sp = new URLSearchParams();
   sp.set("month", params.month.trim());
   if (params.project_id && isCanonicalUiProjectId(params.project_id)) {
@@ -999,7 +1017,15 @@ export function buildMonthlyReportUrl(params: {
   if (params.contract_type && params.contract_type !== "all") {
     sp.set("contract_type", params.contract_type);
   }
-  return `/api/vendor-finance/reports/monthly?${sp.toString()}`;
+  return sp.toString();
+}
+
+export function buildMonthlyReportUrl(params: MonthlyReportUrlParams): string {
+  return `/api/vendor-finance/reports/monthly?${buildMonthlyReportQueryString(params)}`;
+}
+
+export function buildMonthlyReportExportUrl(params: MonthlyReportUrlParams): string {
+  return `/api/vendor-finance/reports/monthly/export?${buildMonthlyReportQueryString(params)}`;
 }
 
 export function buildAdminProjectAccountantsUrl(params?: {
@@ -5816,20 +5842,43 @@ export async function isUsableVendorFinanceExportBlob(
 
 const XLSX_SAFE_FILENAME_REGEX = /^[A-Za-z0-9._-]+\.xlsx$/;
 
-export function resolveVendorFinanceExportFilename(
-  contentDisposition: string | null | undefined,
-  fallbackDate?: string | null,
-): string {
+function extractSafeXlsxFilename(contentDisposition: string | null | undefined): string | null {
   const match = contentDisposition?.match(/filename="([^"]+)"/);
   const candidate = match?.[1] ?? "";
   if (XLSX_SAFE_FILENAME_REGEX.test(candidate) && !candidate.includes("..")) {
     return candidate;
+  }
+  return null;
+}
+
+export function resolveVendorFinanceExportFilename(
+  contentDisposition: string | null | undefined,
+  fallbackDate?: string | null,
+): string {
+  const extracted = extractSafeXlsxFilename(contentDisposition);
+  if (extracted) {
+    return extracted;
   }
   const safeDate =
     typeof fallbackDate === "string" && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(fallbackDate)
       ? fallbackDate
       : new Date().toISOString().slice(0, 10);
   return `danh-sach-vendor-cong-no-${safeDate}.xlsx`;
+}
+
+export function resolveVendorFinanceMonthlyReportExportFilename(
+  contentDisposition: string | null | undefined,
+  month?: string | null,
+): string {
+  const extracted = extractSafeXlsxFilename(contentDisposition);
+  if (extracted) {
+    return extracted;
+  }
+  const safeMonth =
+    typeof month === "string" && CALENDAR_MONTH_REGEX.test(month)
+      ? month
+      : new Date().toISOString().slice(0, 7);
+  return `bao-cao-cong-no-vendor-${safeMonth}.xlsx`;
 }
 
 // -----------------------------------------------------------------------------
@@ -7102,5 +7151,57 @@ export function unlockRecordEntryDialogAfterLedgerReconciliation(
       idempotency_key: nextIdempotencyKey(),
       ambiguous_retry_locked: false,
     },
+  };
+}
+
+export interface MonthlyReportOpeningTotals {
+  opening_payable_minor: string;
+  opening_advance_minor: string;
+  opening_payable_in_month_minor: string;
+  opening_advance_in_month_minor: string;
+  has_in_month_opening: boolean;
+}
+
+/**
+ * Summarizes non-netted opening balances (carried from prior months plus
+ * in-month opening entries) and in-month opening totals across visible
+ * monthly report sub-ledger rows using exact BigInt arithmetic.
+ */
+export function summarizeMonthlyReportOpeningTotals(
+  rows: readonly Pick<
+    VendorFinanceMonthlyReportRow,
+    | "balance_before_month_minor"
+    | "opening_payable_in_month_minor"
+    | "opening_advance_in_month_minor"
+  >[],
+): MonthlyReportOpeningTotals {
+  let openingPayable = BigInt(0);
+  let openingAdvance = BigInt(0);
+  let openingPayableInMonth = BigInt(0);
+  let openingAdvanceInMonth = BigInt(0);
+
+  for (const row of rows) {
+    const balanceBefore = BigInt(row.balance_before_month_minor);
+    const inMonthPayable = BigInt(row.opening_payable_in_month_minor);
+    const inMonthAdvance = BigInt(row.opening_advance_in_month_minor);
+    const effectiveOpening = balanceBefore + inMonthPayable - inMonthAdvance;
+
+    if (effectiveOpening > BigInt(0)) {
+      openingPayable += effectiveOpening;
+    } else if (effectiveOpening < BigInt(0)) {
+      openingAdvance += -effectiveOpening;
+    }
+
+    openingPayableInMonth += inMonthPayable;
+    openingAdvanceInMonth += inMonthAdvance;
+  }
+
+  return {
+    opening_payable_minor: openingPayable.toString(),
+    opening_advance_minor: openingAdvance.toString(),
+    opening_payable_in_month_minor: openingPayableInMonth.toString(),
+    opening_advance_in_month_minor: openingAdvanceInMonth.toString(),
+    has_in_month_opening:
+      openingPayableInMonth !== BigInt(0) || openingAdvanceInMonth !== BigInt(0),
   };
 }
