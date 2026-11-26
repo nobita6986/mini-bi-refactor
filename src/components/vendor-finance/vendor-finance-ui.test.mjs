@@ -423,6 +423,7 @@ test("Compact Vendor Finance UI: streamlined PageHeaders, aligned filter grids w
   // 2. Monthly report view
   assert.match(monthlyReportView, /<PageHeader\s+title="Báo cáo công nợ Vendor theo Dự án & Tháng"\s+actions=\{/);
   assert.doesNotMatch(monthlyReportView, /eyebrow="Báo cáo quản trị tài chính dự án"/);
+  assert.match(monthlyReportView, /formatAggregatedVndMinor\(/);
   assert.match(monthlyReportView, /grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5/);
   assert.doesNotMatch(monthlyReportView, /grid-cols-1 items-stretch gap-3 sm:grid-cols-2 xl:grid-cols-4/);
   assert.match(monthlyReportView, /whitespace-normal break-words/);

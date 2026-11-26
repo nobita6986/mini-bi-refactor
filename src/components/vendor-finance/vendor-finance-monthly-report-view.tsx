@@ -49,6 +49,7 @@ import {
   CONTRACT_TYPE_FILTER_LABELS_VI,
   CONTRACT_TYPE_LABELS_VI,
   ENTRY_TYPE_LABELS_VI,
+  formatAggregatedVndMinor,
   formatSignedVndDelta,
   formatVendorBalancePresentation,
   formatVietnamDateLabel,
@@ -598,7 +599,7 @@ export function VendorFinanceMonthlyReportView({
           >
             <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
             <span>
-              {openingTotals ? formatVndMinor(openingTotals.opening_payable_minor) : "—"}
+              {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_payable_minor) : "—"}
             </span>
           </p>
           <div className="space-y-0.5">
@@ -607,7 +608,7 @@ export function VendorFinanceMonthlyReportView({
               className="whitespace-nowrap font-mono text-xs tabular-nums text-muted"
             >
               Dư ứng:{" "}
-              {openingTotals ? formatVndMinor(openingTotals.opening_advance_minor) : "—"}
+              {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_advance_minor) : "—"}
             </p>
             {openingTotals?.has_in_month_opening ? (
               <p
@@ -615,11 +616,11 @@ export function VendorFinanceMonthlyReportView({
                 className="flex flex-wrap gap-x-1.5 font-mono text-[11px] leading-snug tabular-nums text-muted"
               >
                 <span className="whitespace-nowrap">
-                  Mở nợ: {formatVndMinor(openingTotals.opening_payable_in_month_minor)}
+                  Mở nợ: {formatAggregatedVndMinor(openingTotals.opening_payable_in_month_minor)}
                 </span>{" "}
                 ·{" "}
                 <span className="whitespace-nowrap">
-                  Mở ứng: {formatVndMinor(openingTotals.opening_advance_in_month_minor)}
+                  Mở ứng: {formatAggregatedVndMinor(openingTotals.opening_advance_in_month_minor)}
                 </span>
               </p>
             ) : null}

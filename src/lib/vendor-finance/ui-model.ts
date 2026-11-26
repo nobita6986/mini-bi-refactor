@@ -394,6 +394,7 @@ const CALENDAR_MONTH_REGEX = /^([0-9]{4})-(0[1-9]|1[0-2])$/;
 const DOCUMENT_NO_REGEX = /^VFIN-[0-9]{4}-[0-9]{6,}$/;
 const POSITIVE_DECIMAL_REGEX = /^[1-9][0-9]{0,18}$/;
 const SIGNED_DECIMAL_REGEX = /^-?(?:0|[1-9][0-9]{0,18})$/;
+const UNBOUNDED_SIGNED_DECIMAL_REGEX = /^(?:0|-?[1-9][0-9]*)$/;
 const GROUPED_THOUSANDS_INTEGER_REGEX = /^-?[1-9][0-9]{0,2}(?:([.,\s])[0-9]{3})+$/;
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
 const CURSOR_TOKEN_REGEX = /^[A-Za-z0-9_-]{4,768}$/;
@@ -549,6 +550,21 @@ export function formatVndMinor(canonical: string): string {
     return `-${groupDigitsThousands(normalized.slice(1))} ₫`;
   }
   return `${groupDigitsThousands(normalized)} ₫`;
+}
+
+/**
+ * Formats an aggregated canonical integer VND total (which may exceed single-entry PostgreSQL
+ * `bigint` limits when summing multiple valid sub-ledgers) without relaxing single-entry
+ * input or API contract `int8` bounds.
+ */
+export function formatAggregatedVndMinor(canonical: string): string {
+  if (typeof canonical !== "string" || !UNBOUNDED_SIGNED_DECIMAL_REGEX.test(canonical)) {
+    return "—";
+  }
+  if (canonical.startsWith("-")) {
+    return `-${groupDigitsThousands(canonical.slice(1))} ₫`;
+  }
+  return `${groupDigitsThousands(canonical)} ₫`;
 }
 
 /**

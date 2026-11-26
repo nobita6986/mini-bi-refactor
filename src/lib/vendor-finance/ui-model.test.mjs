@@ -125,6 +125,7 @@ import {
   computeReconciliationDifferencePreview,
   decideVendorFinancePageAccess,
   formatAbsoluteVndMinor,
+  formatAggregatedVndMinor,
   formatSignedVndDelta,
   formatVendorBalancePresentation,
   formatVietnamDateLabel,
@@ -143,6 +144,7 @@ import {
   parseApplySharedAdvanceOffsetEnvelope,
   parseAssignGlobalRoleEnvelope,
   parseAssignProjectAccountantEnvelope,
+  parseCanonicalSignedMoneyBigInt,
   parseClassifySubLedgerEnvelope,
   parseCreateReconciliationEnvelope,
   parseEndGlobalRoleEnvelope,
@@ -3480,28 +3482,31 @@ test("VFIN-04: Shared advance URL/request builders, redaction-aware envelope par
   assert.equal(unlockedAfterReconcile.next_state.offset_amount_input, "");
 });
 
-test("summarizeMonthlyReportOpeningTotals aggregates non-netted effective openings, REQ Nov case, flips from negative carry-in, BigInt > MAX_SAFE_INTEGER, and empty/zero cases", () => {
-  // 1. REQ Nov case totaling "6579716031"
-  assert.deepEqual(
-    summarizeMonthlyReportOpeningTotals([
-      {
-        balance_before_month_minor: "0",
-        opening_payable_in_month_minor: "4120500000",
-        opening_advance_in_month_minor: "0",
-      },
-      {
-        balance_before_month_minor: "0",
-        opening_payable_in_month_minor: "2459216031",
-        opening_advance_in_month_minor: "0",
-      },
-    ]),
+test("summarizeMonthlyReportOpeningTotals aggregates non-netted effective openings, REQ Nov case, flips from negative carry-in, BigInt > PostgreSQL int8 bounds, and empty/zero cases", () => {
+  // 1. REQ Nov UAT benchmark (Mở nợ 5.339.360.371 ₫ + Tồn trước tháng 1.240.355.660 ₫ = Đầu kỳ & mở sổ 6.579.716.031 ₫)
+  const reqOpeningTotals = summarizeMonthlyReportOpeningTotals([
     {
-      opening_payable_minor: "6579716031",
-      opening_advance_minor: "0",
-      opening_payable_in_month_minor: "6579716031",
+      balance_before_month_minor: "1240355660",
+      opening_payable_in_month_minor: "4000000000",
       opening_advance_in_month_minor: "0",
-      has_in_month_opening: true,
     },
+    {
+      balance_before_month_minor: "0",
+      opening_payable_in_month_minor: "1339360371",
+      opening_advance_in_month_minor: "0",
+    },
+  ]);
+  assert.deepEqual(reqOpeningTotals, {
+    opening_payable_minor: "6579716031",
+    opening_advance_minor: "0",
+    opening_payable_in_month_minor: "5339360371",
+    opening_advance_in_month_minor: "0",
+    has_in_month_opening: true,
+  });
+  assert.equal(formatAggregatedVndMinor(reqOpeningTotals.opening_payable_minor), "6.579.716.031 ₫");
+  assert.equal(
+    formatAggregatedVndMinor(reqOpeningTotals.opening_payable_in_month_minor),
+    "5.339.360.371 ₫",
   );
 
   // 2. Mixed payable + advance books (strictly non-netted) plus negative carry-in flipped positive by larger in-month opening payable
@@ -3535,7 +3540,7 @@ test("summarizeMonthlyReportOpeningTotals aggregates non-netted effective openin
     },
   );
 
-  // 3. Large integers above Number.MAX_SAFE_INTEGER (exact BigInt sum)
+  // 3. Large integers above Number.MAX_SAFE_INTEGER and above PostgreSQL int8 max when summed across valid ledgers
   assert.deepEqual(
     summarizeMonthlyReportOpeningTotals([
       {
@@ -3552,6 +3557,42 @@ test("summarizeMonthlyReportOpeningTotals aggregates non-netted effective openin
       has_in_month_opening: true,
     },
   );
+
+  // Two valid sub-ledgers each with 4700000000000000000 -> total 9400000000000000000 (> int8 max)
+  const aboveInt8Totals = summarizeMonthlyReportOpeningTotals([
+    {
+      balance_before_month_minor: "4700000000000000000",
+      opening_payable_in_month_minor: "0",
+      opening_advance_in_month_minor: "0",
+    },
+    {
+      balance_before_month_minor: "4700000000000000000",
+      opening_payable_in_month_minor: "0",
+      opening_advance_in_month_minor: "0",
+    },
+  ]);
+  assert.equal(aboveInt8Totals.opening_payable_minor, "9400000000000000000");
+  assert.equal(
+    formatAggregatedVndMinor(aboveInt8Totals.opening_payable_minor),
+    "9.400.000.000.000.000.000 ₫",
+  );
+  // Single-entry int8 formatters and parsers MUST keep rejecting sums beyond PostgreSQL bigint
+  assert.equal(formatVndMinor(aboveInt8Totals.opening_payable_minor), "—");
+  assert.equal(parseCanonicalSignedMoneyBigInt(aboveInt8Totals.opening_payable_minor), null);
+
+  // 20-digit sum, negative unbounded aggregate, and invalid inputs
+  assert.equal(
+    formatAggregatedVndMinor("14100000000000000000"),
+    "14.100.000.000.000.000.000 ₫",
+  );
+  assert.equal(
+    formatAggregatedVndMinor("-9400000000000000000"),
+    "-9.400.000.000.000.000.000 ₫",
+  );
+  assert.equal(formatAggregatedVndMinor("0"), "0 ₫");
+  assert.equal(formatAggregatedVndMinor("-0"), "—");
+  assert.equal(formatAggregatedVndMinor("100.5"), "—");
+  assert.equal(formatAggregatedVndMinor("0123"), "—");
 
   // 4. Zero in-month opening (carried balances only) -> has_in_month_opening: false
   assert.deepEqual(
