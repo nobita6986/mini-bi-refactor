@@ -174,6 +174,11 @@ evaluated_probes as (
            and (
              a.is_current
              or p.probe_date > ctx.authorization_date
+             or (
+               p.probe_date < ctx.authorization_date
+               and a.valid_to is not null
+               and a.valid_to <= ctx.authorization_date
+             )
            )
          ) as new_effective
     from assignments_eval a
@@ -401,6 +406,11 @@ evaluated_probes as (
            and (
              a.is_current
              or p.probe_date > ctx.authorization_date
+             or (
+               p.probe_date < ctx.authorization_date
+               and a.valid_to is not null
+               and a.valid_to <= ctx.authorization_date
+             )
            )
          ) as new_effective,
          a.matching_scope_grants,

@@ -5,16 +5,27 @@
 -- Scope (100% forward migration; zero historical migration edits):
 --   1. Fail-closed preflight DO $$ block BEFORE replacing the function:
 --      Block if ANY row in public.direct_entry_team_leader_assignments (joined
---      with active non-system team, enabled app_user, active recruiter) has
+--      with active non-system team, enabled app_user, active recruiter,
 --      not is_current, not suspended_by_account_disable, valid_from <= today,
---      valid interval (valid_to is null or valid_to > valid_from), AND all 3
---      legacy rollover conditions (scope_grants + capability_grants +
---      team_leader_revisions). Any such row would change effective status at
---      today and/or at historical dates when the rollover branch is removed.
+--      valid interval (valid_to is null or valid_to > valid_from)) would
+--      change effective status between pre-3A (old_effective) and post-3A
+--      (new_effective) at any date:
+--        - Case A (old=true -> new=false): unclosed or still-active rollover row
+--          at today (valid_to is null or valid_to > today) that satisfies all
+--          3 legacy rollover conditions (scope_grants + capability_grants +
+--          team_leader_revisions).
+--        - Case B (old=false -> new=true): closed historical assignment
+--          (valid_to is not null and valid_to <= today) missing any of the 3
+--          legacy rollover conditions (previously hidden on historical dates).
+--      Valid closed historical assignments (valid_to is not null and
+--      valid_to <= today with all 3 legacy rollover conditions) keep the same
+--      effective status on every date and are NOT blocked.
 --   2. CREATE OR REPLACE FUNCTION
 --      public.direct_entry__internal_team_leader_assignment_effective(uuid, date)
---      preserving all non-rollover guards verbatim and removing ONLY the
---      legacy rollover branch.
+--      preserving all non-rollover guards and closed-historical validity
+--      (p_as_of < authorization_date and valid_to is not null and
+--      valid_to <= authorization_date), while removing ONLY the legacy
+--      rollover branch.
 --   3. Preserve exact ACL:
 --      REVOKE ALL ... FROM public, anon, authenticated, service_role.
 --   4. Owner alignment + fail-closed postcheck verification.
@@ -28,12 +39,45 @@ declare
   v_blocked_count integer := 0;
   v_sample record;
 begin
-  with blocked_assignments as (
+  with candidate_assignments as (
     select a.assignment_id,
            a.team_id,
            a.leader_app_user_id,
            a.valid_from,
-           a.valid_to
+           a.valid_to,
+           (
+             exists (
+               select 1
+                 from public.direct_entry_scope_grants s
+                where s.app_user_id = a.leader_app_user_id
+                  and s.scope_kind = 'team'
+                  and s.team_id = a.team_id
+                  and s.valid_from <= a.valid_from
+                  and s.valid_to is not distinct from a.valid_to
+                  and (s.valid_to is null or s.valid_to > s.valid_from)
+                  and not s.is_current
+                  and not s.suspended_by_account_disable
+             )
+             and exists (
+               select 1
+                 from public.direct_entry_capability_grants g
+                where g.app_user_id = a.leader_app_user_id
+                  and g.capability = 'team_manager_assign'
+                  and g.valid_from = a.valid_from
+                  and g.valid_to is not distinct from a.valid_to
+                  and (g.valid_to is null or g.valid_to > g.valid_from)
+                  and not g.is_current
+                  and not g.suspended_by_account_disable
+             )
+             and exists (
+               select 1
+                 from public.direct_entry_team_leader_revisions rev
+                where rev.team_id = a.team_id
+                  and rev.action in ('designate', 'replace')
+                  and rev.after_snapshot->>'leader_app_user_id' = a.leader_app_user_id::text
+                  and rev.after_snapshot->>'valid_from' = a.valid_from::text
+             )
+           ) as has_legacy_rollover_trio
       from public.direct_entry_team_leader_assignments a
       join public.teams t
         on t.team_id = a.team_id
@@ -49,98 +93,37 @@ begin
        and not a.suspended_by_account_disable
        and a.valid_from <= v_today
        and (a.valid_to is null or a.valid_to > a.valid_from)
-       and exists (
-         select 1
-           from public.direct_entry_scope_grants s
-          where s.app_user_id = a.leader_app_user_id
-            and s.scope_kind = 'team'
-            and s.team_id = a.team_id
-            and s.valid_from <= a.valid_from
-            and s.valid_to is not distinct from a.valid_to
-            and (s.valid_to is null or s.valid_to > s.valid_from)
-            and not s.is_current
-            and not s.suspended_by_account_disable
-       )
-       and exists (
-         select 1
-           from public.direct_entry_capability_grants g
-          where g.app_user_id = a.leader_app_user_id
-            and g.capability = 'team_manager_assign'
-            and g.valid_from = a.valid_from
-            and g.valid_to is not distinct from a.valid_to
-            and (g.valid_to is null or g.valid_to > g.valid_from)
-            and not g.is_current
-            and not g.suspended_by_account_disable
-       )
-       and exists (
-         select 1
-           from public.direct_entry_team_leader_revisions rev
-          where rev.team_id = a.team_id
-            and rev.action in ('designate', 'replace')
-            and rev.after_snapshot->>'leader_app_user_id' = a.leader_app_user_id::text
-            and rev.after_snapshot->>'valid_from' = a.valid_from::text
-       )
+  ),
+  blocked_assignments as (
+    select c.assignment_id,
+           c.team_id,
+           c.leader_app_user_id,
+           c.valid_from,
+           c.valid_to
+      from candidate_assignments c
+     where (
+             (c.valid_to is null or c.valid_to > v_today)
+             and c.has_legacy_rollover_trio
+           )
+        or (
+             c.valid_to is not null
+             and c.valid_to <= v_today
+             and not c.has_legacy_rollover_trio
+           )
   )
-  select count(*)::integer
-    into v_blocked_count
-    from blocked_assignments;
+  select count(*) over ()::integer as blocked_count,
+         b.assignment_id,
+         b.team_id,
+         b.leader_app_user_id,
+         b.valid_from,
+         b.valid_to
+    into v_sample
+    from blocked_assignments b
+   order by b.valid_from desc, b.assignment_id asc
+   limit 1;
 
-  if v_blocked_count > 0 then
-    select a.assignment_id,
-           a.team_id,
-           a.leader_app_user_id,
-           a.valid_from,
-           a.valid_to
-      into v_sample
-      from public.direct_entry_team_leader_assignments a
-      join public.teams t
-        on t.team_id = a.team_id
-       and t.active
-       and t.code <> '__system_vendor__'
-      join public.direct_entry_app_users u
-        on u.app_user_id = a.leader_app_user_id
-       and u.enabled
-      join public.recruiters r
-        on r.recruiter_id = a.leader_recruiter_id
-       and r.active
-     where not a.is_current
-       and not a.suspended_by_account_disable
-       and a.valid_from <= v_today
-       and (a.valid_to is null or a.valid_to > a.valid_from)
-       and exists (
-         select 1
-           from public.direct_entry_scope_grants s
-          where s.app_user_id = a.leader_app_user_id
-            and s.scope_kind = 'team'
-            and s.team_id = a.team_id
-            and s.valid_from <= a.valid_from
-            and s.valid_to is not distinct from a.valid_to
-            and (s.valid_to is null or s.valid_to > s.valid_from)
-            and not s.is_current
-            and not s.suspended_by_account_disable
-       )
-       and exists (
-         select 1
-           from public.direct_entry_capability_grants g
-          where g.app_user_id = a.leader_app_user_id
-            and g.capability = 'team_manager_assign'
-            and g.valid_from = a.valid_from
-            and g.valid_to is not distinct from a.valid_to
-            and (g.valid_to is null or g.valid_to > g.valid_from)
-            and not g.is_current
-            and not g.suspended_by_account_disable
-       )
-       and exists (
-         select 1
-           from public.direct_entry_team_leader_revisions rev
-          where rev.team_id = a.team_id
-            and rev.action in ('designate', 'replace')
-            and rev.after_snapshot->>'leader_app_user_id' = a.leader_app_user_id::text
-            and rev.after_snapshot->>'valid_from' = a.valid_from::text
-       )
-     order by a.valid_from desc, a.assignment_id asc
-     limit 1;
-
+  if found then
+    v_blocked_count := v_sample.blocked_count;
     raise exception 'WP10_7_3A_PREFLIGHT_BLOCKED: % team leader assignment(s) would change effective status (sample assignment_id=%, team_id=%, leader_app_user_id=%, valid_from=%, valid_to=%)',
       v_blocked_count,
       v_sample.assignment_id,
@@ -184,6 +167,11 @@ as $function$
        and (
          a.is_current
          or p_as_of > public.direct_entry_authorization_date()
+         or (
+           p_as_of < public.direct_entry_authorization_date()
+           and a.valid_to is not null
+           and a.valid_to <= public.direct_entry_authorization_date()
+         )
        )
   )
 $function$;
