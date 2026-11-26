@@ -18,14 +18,18 @@ import {
   type WorkerEditHistoryRevision,
   type WorkerEditHistoryRow,
   type WorkerEditHistorySearch,
+  normalizeWorkerEditHistoryEmployeeCode,
   projectWorkerEditHistoryRevision,
   projectWorkerEditHistorySearch,
+  resolveSnapshotRecruiterDisplay,
+  resolveSnapshotTeamDisplay,
 } from "@/lib/admin/worker-edit-history-contract";
 import type { DraftCatalog } from "@/lib/direct-entry/write-repository";
 
 type SearchDraft = {
   fromDate: string;
   toDate: string;
+  employeeCode: string;
   projectId: string;
   recruiterId: string;
   actionGroup: WorkerEditHistoryActionGroup | "";
@@ -59,6 +63,7 @@ const FIELD_LABELS: Record<string, string> = {
   project_id: "Dự án",
   provider_type: "Nguồn tuyển",
   team_id: "Nhóm",
+  team_name: "Nhóm",
   project_name: "Dự án",
   recruiter_id: "Người tuyển",
   recruiter_name: "Người tuyển",
@@ -112,7 +117,7 @@ function errorMessage(code: unknown): string {
     case "UNAUTHENTICATED": return "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
     case "ACTOR_NOT_AVAILABLE":
     case "WORKER_EDIT_HISTORY_ACCESS_DENIED": return "Tài khoản không được cấp quyền xem lịch sử này.";
-    case "WORKER_EDIT_HISTORY_QUERY_INVALID": return "Bộ lọc lịch sử không hợp lệ. Hãy kiểm tra ngày, dự án hoặc người tuyển.";
+    case "WORKER_EDIT_HISTORY_QUERY_INVALID": return "Bộ lọc lịch sử không hợp lệ. Hãy kiểm tra khoảng ngày, mã NLĐ, dự án hoặc người tuyển.";
     case "WORKER_EDIT_HISTORY_NOT_FOUND": return "Không tìm thấy revision này.";
     default: return "Không tải được dữ liệu lịch sử. Vui lòng thử lại.";
   }
@@ -162,17 +167,38 @@ function expandChangedFields(changedFields: string[]): string[] {
     if (field === "payment") return [...PAYMENT_FIELDS].map((key) => `payment.${key}`);
     if (field === "employment_status") return [...EMPLOYMENT_STATUS_FIELDS].map((key) => `employment_status.${key}`);
     if (field === "ENTRY_VOID") return ["voided_at"];
+    if (field === "recruiter_id") return ["recruiter_name"];
+    if (field === "team_id") return ["team_name"];
     return [field];
   });
   return [...new Set(fields)];
 }
 
-function SnapshotPanel({ title, snapshot, changedFields }: {
+function snapshotFieldValue(
+  snapshot: Record<string, unknown> | null,
+  field: string,
+  resolvedRecruiters: Record<string, string>,
+  resolvedTeams: Record<string, string>,
+): unknown {
+  if (field === "recruiter_id" || field === "recruiter_name") {
+    return resolveSnapshotRecruiterDisplay(snapshot, resolvedRecruiters);
+  }
+  if (field === "team_id" || field === "team_name") {
+    return resolveSnapshotTeamDisplay(snapshot, resolvedTeams);
+  }
+  return fieldValue(snapshot, field);
+}
+
+function SnapshotPanel({ title, snapshot, changedFields, resolvedRecruiters, resolvedTeams }: {
   title: string;
   snapshot: Record<string, unknown> | null;
   changedFields: string[];
+  resolvedRecruiters: Record<string, string>;
+  resolvedTeams: Record<string, string>;
 }) {
-  const visibleFields = changedFields.length ? expandChangedFields(changedFields) : Object.keys(FIELD_LABELS);
+  const visibleFields = changedFields.length
+    ? expandChangedFields(changedFields)
+    : Object.keys(FIELD_LABELS).filter((field) => field !== "recruiter_id" && field !== "team_id");
   return (
     <section className="min-w-0 rounded-xl border border-border p-4">
       <h4 className="mb-3 text-sm font-semibold text-foreground">{title}</h4>
@@ -181,7 +207,9 @@ function SnapshotPanel({ title, snapshot, changedFields }: {
           {visibleFields.map((field) => (
             <div key={field} className="grid gap-1 border-b border-border/60 pb-2 sm:grid-cols-[minmax(8rem,0.7fr)_minmax(0,1.3fr)]">
               <dt className="text-sm text-muted">{fieldLabel(field)}</dt>
-              <dd className="min-w-0 whitespace-pre-wrap break-words text-sm text-foreground">{formatValue(fieldValue(snapshot, field))}</dd>
+              <dd className="min-w-0 whitespace-pre-wrap break-words text-sm text-foreground">
+                {formatValue(snapshotFieldValue(snapshot, field, resolvedRecruiters, resolvedTeams))}
+              </dd>
             </div>
           ))}
           {visibleFields.length === 0 ? <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(snapshot, null, 2)}</pre> : null}
@@ -226,7 +254,7 @@ function DocumentHistory({ entryId, events }: { entryId: string; events: Record<
 
 export function WorkerEditHistoryManager() {
   const today = hcmTodayDate();
-  const [draft, setDraft] = useState<SearchDraft>(() => ({ ...defaultHistoryDates(), projectId: "", recruiterId: "", actionGroup: "" }));
+  const [draft, setDraft] = useState<SearchDraft>(() => ({ ...defaultHistoryDates(), employeeCode: "", projectId: "", recruiterId: "", actionGroup: "" }));
   const [catalog, setCatalog] = useState<DraftCatalog | null>(null);
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [appliedQuery, setAppliedQuery] = useState<URLSearchParams | null>(null);
@@ -312,7 +340,14 @@ export function WorkerEditHistoryManager() {
       setListState("error");
       return;
     }
+    const parsedEmployeeCode = normalizeWorkerEditHistoryEmployeeCode(draft.employeeCode);
+    if (!parsedEmployeeCode.ok) {
+      setListError("Mã NLĐ không hợp lệ (tối đa 64 ký tự và không chứa khoảng trắng).");
+      setListState("error");
+      return;
+    }
     const query = new URLSearchParams({ page_size: "50", from_date: fromDate, to_date: toDate });
+    if (parsedEmployeeCode.value !== null) query.set("employee_code", parsedEmployeeCode.value);
     if (draft.projectId) query.set("project_id", draft.projectId);
     if (draft.recruiterId) query.set("recruiter_id", draft.recruiterId);
     if (draft.actionGroup) query.set("action_group", draft.actionGroup);
@@ -333,7 +368,7 @@ export function WorkerEditHistoryManager() {
   function clearFilters() {
     listRequest.current?.abort();
     listRequest.current = null;
-    setDraft({ ...defaultHistoryDates(), projectId: "", recruiterId: "", actionGroup: "" });
+    setDraft({ ...defaultHistoryDates(), employeeCode: "", projectId: "", recruiterId: "", actionGroup: "" });
     setAppliedQuery(null);
     setResult(null);
     setSelected(null);
@@ -384,31 +419,51 @@ export function WorkerEditHistoryManager() {
       </header>
 
       <Alert title="Phạm vi dữ liệu">
-        <p>Hiển thị các lần chỉnh sửa của mọi NLĐ trong khoảng ngày đã chọn (mặc định 30 ngày gần nhất, tối đa 93 ngày). Có thể lọc theo dự án, người tuyển và nhóm thay đổi. CCCD, tài khoản ngân hàng và các thông tin khác hiển thị nguyên giá trị.</p>
+        <p>Hiển thị các lần chỉnh sửa của mọi NLĐ trong khoảng ngày đã chọn (mặc định 30 ngày gần nhất, tối đa 93 ngày). Có thể lọc theo mã NLĐ, dự án, người tuyển và nhóm thay đổi. CCCD, tài khoản ngân hàng và các thông tin khác hiển thị nguyên giá trị.</p>
       </Alert>
 
       <Card>
         <CardHeader title="Điều kiện lọc" description="Trang không tự tải lịch sử. Chọn khoảng ngày và các bộ lọc tùy chọn, sau đó bấm Tải lịch sử." />
-        <form onSubmit={submitSearch} className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <label className="space-y-1 text-sm font-medium">Từ ngày
-            <input className={INPUT_CLASS} type="date" value={draft.fromDate} onChange={(event) => setDraft({ ...draft, fromDate: event.target.value })} />
-          </label>
-          <label className="space-y-1 text-sm font-medium">Đến ngày
-            <input className={INPUT_CLASS} type="date" value={draft.toDate} onChange={(event) => setDraft({ ...draft, toDate: event.target.value })} />
-          </label>
-          <CatalogFilterCombobox id="worker-edit-history-project" label="Dự án" allLabel="Tất cả dự án" placeholder={catalogState === "loading" ? "Đang tải danh mục…" : "Gõ tên dự án để tìm"} options={projectOptions} value={draft.projectId} disabled={catalogState !== "ready"} onChange={(projectId) => setDraft((current) => ({ ...current, projectId }))} />
-          <CatalogFilterCombobox id="worker-edit-history-recruiter" label="Người tuyển" allLabel="Tất cả người tuyển" placeholder={catalogState === "loading" ? "Đang tải danh mục…" : "Gõ tên hoặc mã người tuyển"} options={recruiterOptions} value={draft.recruiterId} disabled={catalogState !== "ready"} onChange={(recruiterId) => setDraft((current) => ({ ...current, recruiterId }))} />
-          <label className="space-y-1 text-sm font-medium">Nhóm thay đổi
-            <select className={INPUT_CLASS} value={draft.actionGroup} onChange={(event) => setDraft({ ...draft, actionGroup: event.target.value as SearchDraft["actionGroup"] })}>
-              <option value="">Tất cả nhóm</option>
-              {ACTION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <div className="flex items-end gap-2">
-            <Button type="submit" variant="primary" loading={listState === "loading"}>Tải lịch sử</Button>
-            <Button type="button" onClick={clearFilters}>Xóa lọc</Button>
-          </div>
-        </form>
+        <search>
+          <form onSubmit={submitSearch} className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <label className="space-y-1 text-sm font-medium">Từ ngày
+              <input className={INPUT_CLASS} type="date" value={draft.fromDate} onChange={(event) => setDraft({ ...draft, fromDate: event.target.value })} />
+            </label>
+            <label className="space-y-1 text-sm font-medium">Đến ngày
+              <input className={INPUT_CLASS} type="date" value={draft.toDate} onChange={(event) => setDraft({ ...draft, toDate: event.target.value })} />
+            </label>
+            <CatalogFilterCombobox id="worker-edit-history-project" label="Dự án" allLabel="Tất cả dự án" placeholder={catalogState === "loading" ? "Đang tải danh mục…" : "Gõ tên dự án để tìm"} options={projectOptions} value={draft.projectId} disabled={catalogState !== "ready"} onChange={(projectId) => setDraft((current) => ({ ...current, projectId }))} />
+            <CatalogFilterCombobox id="worker-edit-history-recruiter" label="Người tuyển" allLabel="Tất cả người tuyển" placeholder={catalogState === "loading" ? "Đang tải danh mục…" : "Gõ tên hoặc mã người tuyển"} options={recruiterOptions} value={draft.recruiterId} disabled={catalogState !== "ready"} onChange={(recruiterId) => setDraft((current) => ({ ...current, recruiterId }))} />
+            <div className="flex min-w-0 flex-col gap-1 text-sm font-medium">
+              <label htmlFor="worker-edit-history-employee-code">Mã NLĐ</label>
+              <input
+                id="worker-edit-history-employee-code"
+                name="employee_code"
+                type="text"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                enterKeyHint="search"
+                maxLength={64}
+                placeholder="Ví dụ: hrp-2026-000123"
+                className={INPUT_CLASS}
+                value={draft.employeeCode}
+                onChange={(event) => setDraft((current) => ({ ...current, employeeCode: event.target.value }))}
+              />
+            </div>
+            <label className="space-y-1 text-sm font-medium">Nhóm thay đổi
+              <select className={INPUT_CLASS} value={draft.actionGroup} onChange={(event) => setDraft({ ...draft, actionGroup: event.target.value as SearchDraft["actionGroup"] })}>
+                <option value="">Tất cả nhóm</option>
+                {ACTION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <div className="flex items-end gap-2">
+              <Button type="submit" variant="primary" loading={listState === "loading"}>Tải lịch sử</Button>
+              <Button type="button" onClick={clearFilters}>Xóa lọc</Button>
+            </div>
+          </form>
+        </search>
         {listState === "error" ? <div className="mt-4"><Alert tone="error" title={listError} /></div> : null}
       </Card>
 
@@ -448,10 +503,28 @@ export function WorkerEditHistoryManager() {
           <div className="flex flex-wrap gap-2 text-sm"><span className="rounded-full bg-muted/20 px-3 py-1">{ACTION_LABELS[selected.action_group]}</span><span className="rounded-full bg-muted/20 px-3 py-1">Người sửa: {selected.actor_display_name}</span><span className="rounded-full bg-muted/20 px-3 py-1">{currentDetail.value.snapshot_state === "COMPLETE" ? "Có snapshot đầy đủ" : "Lịch sử cũ: chỉ có dữ liệu giới hạn"}</span></div>
           {selected.reason_text ? <Alert title="Lý do">{selected.reason_text}</Alert> : null}
           {currentDetail.value.snapshot_state === "LEGACY_LIMITED" ? <Alert tone="warning" title="Revision cũ chưa có snapshot đầy đủ">Hệ thống chỉ hiển thị được dữ liệu revision và audit còn lưu từ trước khi bật lịch sử mới.</Alert> : null}
-          <SnapshotPanel title="Thông tin hiện tại của NLĐ" snapshot={currentDetail.value.current_snapshot} changedFields={CURRENT_WORKER_FIELDS} />
+          <SnapshotPanel
+            title="Thông tin hiện tại của NLĐ"
+            snapshot={currentDetail.value.current_snapshot}
+            changedFields={CURRENT_WORKER_FIELDS}
+            resolvedRecruiters={currentDetail.value.resolved_recruiters}
+            resolvedTeams={currentDetail.value.resolved_teams}
+          />
           <div className="grid gap-4 xl:grid-cols-2">
-            <SnapshotPanel title="Trước thay đổi" snapshot={currentDetail.value.before_snapshot} changedFields={selected.changed_fields} />
-            <SnapshotPanel title="Sau thay đổi" snapshot={currentDetail.value.after_snapshot} changedFields={selected.changed_fields} />
+            <SnapshotPanel
+              title="Trước thay đổi"
+              snapshot={currentDetail.value.before_snapshot}
+              changedFields={selected.changed_fields}
+              resolvedRecruiters={currentDetail.value.resolved_recruiters}
+              resolvedTeams={currentDetail.value.resolved_teams}
+            />
+            <SnapshotPanel
+              title="Sau thay đổi"
+              snapshot={currentDetail.value.after_snapshot}
+              changedFields={selected.changed_fields}
+              resolvedRecruiters={currentDetail.value.resolved_recruiters}
+              resolvedTeams={currentDetail.value.resolved_teams}
+            />
           </div>
           <section className="space-y-3"><h3 className="font-semibold">Trạng thái làm việc</h3>{currentDetail.value.employment_status_events.length ? currentDetail.value.employment_status_events.map((event, index) => <div key={`${String(event.event_id)}-${index}`} className="rounded-lg border border-border p-3 text-sm">{formatValue(event.status)} · hiệu lực {formatValue(event.effective_date)} · người thực hiện {formatValue(event.actor_display_name)} · {formatValue(event.reason_text)}</div>) : <p className="text-sm text-muted">Không có sự kiện trạng thái gắn với revision này.</p>}</section>
           <section className="space-y-3"><h3 className="font-semibold">Hồ sơ / ảnh và người tải</h3><DocumentHistory entryId={currentDetail.value.entry_id} events={currentDetail.value.document_events} /></section>

@@ -50,6 +50,7 @@ export function createWorkerEditHistoryRepository(rpc?: Rpc): WorkerEditHistoryR
           p_action_group: input.action_group,
           p_project_query: input.project_id,
           p_recruiter_query: input.recruiter_id,
+          p_employee_code: input.employee_code,
           p_page_size: input.page_size,
           p_cursor: input.cursor,
         });
