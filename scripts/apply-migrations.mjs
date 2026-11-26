@@ -14,6 +14,9 @@
  *     --verify-wp10-7-2b-archive <csvPath> \
  *     --wp10-7-2b-expected-count <n> \
  *     --wp10-7-2b-expected-sha256 <hex>
+ *   node scripts/apply-migrations.mjs \
+ *     --wp10-7-3d-archive-manifest <manifestPath> \
+ *     [--wp10-7-3d-expected-bundle-sha256 <hex>]
  *   SUPABASE_CONFIG_FILE=<path> node scripts/apply-migrations.mjs
  */
 import path from "node:path";
@@ -22,8 +25,12 @@ import pg from "pg";
 
 import { loadSupabaseConfig } from "./lib/load-supabase-config.mjs";
 import {
+  composeBeforeApplyMigrationGuards,
   createWp1072bArchiveGuard,
   createWp1072bMissingArchiveGuard,
+  createWp1073dArchiveGuard,
+  createWp1073dMissingArchiveGuard,
+  loadAndVerifyWp1073dArchiveManifest,
   loadLeaveProfileUnitKindArchiveCsv,
   runMigrationApply,
   runMigrationValidation,
@@ -40,6 +47,8 @@ function parseCliArgs(argv) {
   let archiveCsvPath = null;
   let expectedCountRaw = null;
   let expectedSha256Raw = null;
+  let wp1073dManifestPath = null;
+  let wp1073dExpectedBundleShaRaw = null;
 
   const takeValue = (args, index, flagName, inlineValue) => {
     if (inlineValue !== null) {
@@ -102,6 +111,24 @@ function parseCliArgs(argv) {
       i = parsed.nextIndex;
       continue;
     }
+    if (flag === "--wp10-7-3d-archive-manifest") {
+      if (wp1073dManifestPath !== null) {
+        throw new Error(`Tham số ${flag} bị lặp lại`);
+      }
+      const parsed = takeValue(argv, i, flag, inline);
+      wp1073dManifestPath = parsed.value;
+      i = parsed.nextIndex;
+      continue;
+    }
+    if (flag === "--wp10-7-3d-expected-bundle-sha256") {
+      if (wp1073dExpectedBundleShaRaw !== null) {
+        throw new Error(`Tham số ${flag} bị lặp lại`);
+      }
+      const parsed = takeValue(argv, i, flag, inline);
+      wp1073dExpectedBundleShaRaw = parsed.value;
+      i = parsed.nextIndex;
+      continue;
+    }
 
     throw new Error(`Tham số không hợp lệ: ${arg}`);
   }
@@ -110,59 +137,92 @@ function parseCliArgs(argv) {
     throw new Error("Không thể dùng đồng thời --dry-run và --offline");
   }
 
-  const archiveFlagsPresent = [
+  const archive2bFlagsPresent = [
     archiveCsvPath !== null,
     expectedCountRaw !== null,
     expectedSha256Raw !== null,
   ];
-  const anyArchiveFlag = archiveFlagsPresent.some(Boolean);
-  const allArchiveFlags = archiveFlagsPresent.every(Boolean);
+  const any2bArchiveFlag = archive2bFlagsPresent.some(Boolean);
+  const all2bArchiveFlags = archive2bFlagsPresent.every(Boolean);
 
-  if (anyArchiveFlag && (offline || dryRun)) {
+  if (any2bArchiveFlag && (offline || dryRun)) {
     throw new Error(
       "Không thể dùng --verify-wp10-7-2b-archive / --wp10-7-2b-expected-* cùng với --offline hoặc --dry-run",
     );
   }
-  if (anyArchiveFlag && !allArchiveFlags) {
+  if (any2bArchiveFlag && !all2bArchiveFlags) {
     throw new Error(
       "Khi kiểm tra archive WP10-7-2B phải truyền đủ bộ 3 tham số: --verify-wp10-7-2b-archive, --wp10-7-2b-expected-count, --wp10-7-2b-expected-sha256",
     );
   }
 
-  if (!anyArchiveFlag) {
-    return { dryRun, offline, wp1072bArchive: null };
+  const any3dArchiveFlag =
+    wp1073dManifestPath !== null || wp1073dExpectedBundleShaRaw !== null;
+  if (any3dArchiveFlag && (offline || dryRun)) {
+    throw new Error(
+      "Không thể dùng --wp10-7-3d-archive-manifest / --wp10-7-3d-expected-bundle-sha256 cùng với --offline hoặc --dry-run",
+    );
+  }
+  if (wp1073dExpectedBundleShaRaw !== null && wp1073dManifestPath === null) {
+    throw new Error(
+      "Tham số --wp10-7-3d-expected-bundle-sha256 yêu cầu đi kèm --wp10-7-3d-archive-manifest",
+    );
   }
 
-  if (!NON_NEG_INT_RE.test(expectedCountRaw)) {
-    throw new Error(
-      `Giá trị --wp10-7-2b-expected-count không hợp lệ: ${expectedCountRaw}`,
-    );
+  let wp1072bArchive = null;
+  if (any2bArchiveFlag) {
+    if (!NON_NEG_INT_RE.test(expectedCountRaw)) {
+      throw new Error(
+        `Giá trị --wp10-7-2b-expected-count không hợp lệ: ${expectedCountRaw}`,
+      );
+    }
+    const expectedRowCount = Number(expectedCountRaw);
+    if (!Number.isSafeInteger(expectedRowCount) || expectedRowCount < 0) {
+      throw new Error(
+        `Giá trị --wp10-7-2b-expected-count vượt giới hạn: ${expectedCountRaw}`,
+      );
+    }
+    if (!SHA256_HEX_RE.test(expectedSha256Raw)) {
+      throw new Error(
+        `Giá trị --wp10-7-2b-expected-sha256 không hợp lệ (cần 64 ký tự hex): ${expectedSha256Raw}`,
+      );
+    }
+    wp1072bArchive = {
+      csvPath: archiveCsvPath,
+      expectedRowCount,
+      expectedCanonicalSha256: expectedSha256Raw.toLowerCase(),
+    };
   }
-  const expectedRowCount = Number(expectedCountRaw);
-  if (!Number.isSafeInteger(expectedRowCount) || expectedRowCount < 0) {
-    throw new Error(
-      `Giá trị --wp10-7-2b-expected-count vượt giới hạn: ${expectedCountRaw}`,
-    );
-  }
-  if (!SHA256_HEX_RE.test(expectedSha256Raw)) {
-    throw new Error(
-      `Giá trị --wp10-7-2b-expected-sha256 không hợp lệ (cần 64 ký tự hex): ${expectedSha256Raw}`,
-    );
+
+  let wp1073dArchive = null;
+  if (wp1073dManifestPath !== null) {
+    let expectedBundleSha256 = null;
+    if (wp1073dExpectedBundleShaRaw !== null) {
+      if (!SHA256_HEX_RE.test(wp1073dExpectedBundleShaRaw)) {
+        throw new Error(
+          `Giá trị --wp10-7-3d-expected-bundle-sha256 không hợp lệ (cần 64 ký tự hex): ${wp1073dExpectedBundleShaRaw}`,
+        );
+      }
+      expectedBundleSha256 = wp1073dExpectedBundleShaRaw.toLowerCase();
+    }
+    wp1073dArchive = {
+      manifestPath: wp1073dManifestPath,
+      expectedBundleSha256,
+    };
   }
 
   return {
     dryRun,
     offline,
-    wp1072bArchive: {
-      csvPath: archiveCsvPath,
-      expectedRowCount,
-      expectedCanonicalSha256: expectedSha256Raw.toLowerCase(),
-    },
+    wp1072bArchive,
+    wp1073dArchive,
   };
 }
 
 async function main() {
-  const { dryRun, offline, wp1072bArchive } = parseCliArgs(process.argv.slice(2));
+  const { dryRun, offline, wp1072bArchive, wp1073dArchive } = parseCliArgs(
+    process.argv.slice(2),
+  );
 
   if (offline || dryRun) {
     const result = await runMigrationValidation({
@@ -184,7 +244,7 @@ async function main() {
     return;
   }
 
-  let beforeApplyMigration = null;
+  let wp1072bGuard = null;
   if (wp1072bArchive) {
     const parsedArchive = await loadLeaveProfileUnitKindArchiveCsv(
       wp1072bArchive.csvPath,
@@ -199,13 +259,39 @@ async function main() {
           `expected=(row_count=${wp1072bArchive.expectedRowCount}, canonical_sha256=${wp1072bArchive.expectedCanonicalSha256})`,
       );
     }
-    beforeApplyMigration = createWp1072bArchiveGuard({
+    wp1072bGuard = createWp1072bArchiveGuard({
       expectedRowCount: wp1072bArchive.expectedRowCount,
       expectedCanonicalSha256: wp1072bArchive.expectedCanonicalSha256,
     });
   } else {
-    beforeApplyMigration = createWp1072bMissingArchiveGuard();
+    wp1072bGuard = createWp1072bMissingArchiveGuard();
   }
+
+  let wp1073dGuard = null;
+  if (wp1073dArchive) {
+    const loadedManifest = await loadAndVerifyWp1073dArchiveManifest(
+      wp1073dArchive.manifestPath,
+    );
+    if (
+      wp1073dArchive.expectedBundleSha256 !== null &&
+      loadedManifest.expectedBundle.canonical_sha256 !==
+        wp1073dArchive.expectedBundleSha256
+    ) {
+      throw new Error(
+        `WP10-7-3D archive manifest không khớp --wp10-7-3d-expected-bundle-sha256: ` +
+          `manifest=${loadedManifest.expectedBundle.canonical_sha256}, ` +
+          `expected=${wp1073dArchive.expectedBundleSha256}`,
+      );
+    }
+    wp1073dGuard = createWp1073dArchiveGuard(loadedManifest);
+  } else {
+    wp1073dGuard = createWp1073dMissingArchiveGuard();
+  }
+
+  const beforeApplyMigration = composeBeforeApplyMigrationGuards(
+    wp1072bGuard,
+    wp1073dGuard,
+  );
 
   await runMigrationApply({
     directory: MIGRATIONS_DIR,
