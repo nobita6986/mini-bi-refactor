@@ -313,6 +313,11 @@ begin
            and a.valid_to is null
            and a.valid_from <= v_today
            and coalesce(v_subject.active, false)
+           and public.org_department__internal_recruiter_org_allows_recruitment_team(
+             a.leader_recruiter_id,
+             a.leader_app_user_id,
+             pg_catalog.clock_timestamp()
+           )
            and exists (
              select 1
                from public.teams tl_team
@@ -326,6 +331,21 @@ begin
               where tl_rec.recruiter_id = a.leader_recruiter_id
                 and tl_rec.active = true
            )
+           and (
+             select count(*)::int
+               from public.recruiter_provider_memberships rpm
+              where rpm.recruiter_id = a.leader_recruiter_id
+                and rpm.provider_type = 'hrp'
+                and rpm.vendor_id is null
+                and public.direct_entry__internal_recruiter_provider_membership_effective(rpm.membership_id, v_today)
+           ) = 1
+           and (
+             select count(*)::int
+               from public.recruiter_team_memberships rtm
+              where rtm.recruiter_id = a.leader_recruiter_id
+                and rtm.team_id = a.team_id
+                and public.direct_entry__internal_recruiter_team_membership_effective(rtm.membership_id, v_today)
+           ) = 1
            and exists (
              select 1
                from public.direct_entry_app_user_recruiter_links rl
@@ -751,6 +771,11 @@ begin
            and a.valid_to is null
            and a.valid_from <= v_today
            and coalesce(v_subject.active, false)
+           and public.org_department__internal_recruiter_org_allows_recruitment_team(
+             a.leader_recruiter_id,
+             a.leader_app_user_id,
+             pg_catalog.clock_timestamp()
+           )
            and exists (
              select 1
                from public.teams tl_team
@@ -764,6 +789,21 @@ begin
               where tl_rec.recruiter_id = a.leader_recruiter_id
                 and tl_rec.active = true
            )
+           and (
+             select count(*)::int
+               from public.recruiter_provider_memberships rpm
+              where rpm.recruiter_id = a.leader_recruiter_id
+                and rpm.provider_type = 'hrp'
+                and rpm.vendor_id is null
+                and public.direct_entry__internal_recruiter_provider_membership_effective(rpm.membership_id, v_today)
+           ) = 1
+           and (
+             select count(*)::int
+               from public.recruiter_team_memberships rtm
+              where rtm.recruiter_id = a.leader_recruiter_id
+                and rtm.team_id = a.team_id
+                and public.direct_entry__internal_recruiter_team_membership_effective(rtm.membership_id, v_today)
+           ) = 1
            and exists (
              select 1
                from public.direct_entry_app_user_recruiter_links rl
@@ -899,6 +939,93 @@ begin
 end;
 $function$;
 
+create or replace function public.direct_entry_list_team_leaders_suspended(
+  p_auth_subject uuid,
+  p_app_user_id uuid,
+  p_team_id uuid default null,
+  p_search text default null,
+  p_page integer default 1,
+  p_page_size integer default 25
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_today date := public.direct_entry_authorization_date();
+  v_effective_team_id uuid := public.direct_entry_assert_team_leader_read_authority(p_auth_subject, p_app_user_id, p_team_id);
+  v_search text;
+  v_page integer := coalesce(p_page, 1);
+  v_page_size integer := coalesce(p_page_size, 25);
+  v_total integer;
+  v_leaders jsonb;
+begin
+  if p_search is not null and length(btrim(p_search)) > 256 then
+    raise exception 'invalid team leader search' using errcode = '22023';
+  end if;
+  v_search := nullif(btrim(coalesce(p_search, '')), '');
+  if v_page < 1 or v_page > 1000 then
+    raise exception 'invalid page' using errcode = '22023';
+  end if;
+  if v_page_size < 1 or v_page_size > 100 then
+    raise exception 'invalid page size' using errcode = '22023';
+  end if;
+
+  select count(*)::int into v_total
+    from public.direct_entry_team_leader_assignments a
+    join public.teams t on t.team_id = a.team_id
+    join public.recruiters r on r.recruiter_id = a.leader_recruiter_id
+   where t.code <> '__system_vendor__'
+     and a.suspended_by_account_disable = true
+     and not a.is_current
+     and a.valid_to is null
+     and a.valid_from <= v_today
+     and (v_effective_team_id is null or a.team_id = v_effective_team_id)
+     and (p_team_id is null or a.team_id = p_team_id)
+     and (
+       v_search is null
+       or t.display_name ilike '%' || v_search || '%'
+       or t.code ilike '%' || v_search || '%'
+       or r.display_name ilike '%' || v_search || '%'
+     );
+
+  select coalesce(jsonb_agg(entry.projection), '[]'::jsonb) into v_leaders
+    from (
+      select (
+        public.direct_entry_team_leader_projection(a, t.display_name, r.display_name)
+        || jsonb_build_object('state', 'SUSPENDED')
+      ) as projection
+        from public.direct_entry_team_leader_assignments a
+        join public.teams t on t.team_id = a.team_id
+        join public.recruiters r on r.recruiter_id = a.leader_recruiter_id
+       where t.code <> '__system_vendor__'
+         and a.suspended_by_account_disable = true
+         and not a.is_current
+         and a.valid_to is null
+         and a.valid_from <= v_today
+         and (v_effective_team_id is null or a.team_id = v_effective_team_id)
+         and (p_team_id is null or a.team_id = p_team_id)
+         and (
+           v_search is null
+           or t.display_name ilike '%' || v_search || '%'
+           or t.code ilike '%' || v_search || '%'
+           or r.display_name ilike '%' || v_search || '%'
+         )
+       order by t.display_name, a.assignment_id
+       limit v_page_size offset (v_page - 1) * v_page_size
+    ) entry;
+
+  return jsonb_build_object(
+    'authorization_date', v_today,
+    'page', v_page,
+    'page_size', v_page_size,
+    'total', v_total,
+    'leaders', v_leaders
+  );
+end;
+$function$;
+
 revoke all on function public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text)
   from public, anon, authenticated, service_role;
 grant execute on function public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text)
@@ -909,13 +1036,24 @@ revoke all on function public.direct_entry_unassign_team_membership(uuid, uuid, 
 grant execute on function public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text)
   to service_role;
 
+revoke all on function public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)
+  from public, anon, authenticated, service_role;
+grant execute on function public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)
+  to service_role;
+
 do $align_and_check_hf_block_move_unassign_tl$
 declare
   v_fn_names text[] := array[
     'direct_entry_move_team_membership',
-    'direct_entry_unassign_team_membership'
+    'direct_entry_unassign_team_membership',
+    'direct_entry_list_team_leaders_suspended'
   ];
   v_service_rpcs text[] := array[
+    'public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text)',
+    'public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text)',
+    'public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)'
+  ];
+  v_guard_rpcs text[] := array[
     'public.direct_entry_move_team_membership(uuid, uuid, uuid, uuid, date, integer, text, text)',
     'public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text)'
   ];
@@ -988,9 +1126,11 @@ begin
       raise exception 'HF TL guard check failed: RPC ACL invalid on %', v_sig using errcode = '55000';
     end if;
 
-    if v_rec.prosrc !~ 'recruiter holds active or restorable team leader assignment'
-       or v_rec.prosrc !~ 'PT409'
-       or v_rec.prosrc ~ 'TEAM_LEADER' then
+    if v_sig = any(v_guard_rpcs) and (
+         v_rec.prosrc !~ 'recruiter holds active or restorable team leader assignment'
+         or v_rec.prosrc !~ 'PT409'
+         or v_rec.prosrc ~ 'TEAM_LEADER'
+       ) then
       raise exception 'HF TL guard check failed: expected TL guard contract missing on %', v_sig using errcode = '55000';
     end if;
   end loop;

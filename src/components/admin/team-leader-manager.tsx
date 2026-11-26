@@ -48,6 +48,7 @@ type Workflow = {
 const STATES: readonly TeamLeaderState[] = ["CURRENT", "SCHEDULED", "HISTORY"];
 const INITIAL_LISTS: LeaderLists = {
   CURRENT: { kind: "loading" },
+  SUSPENDED: { kind: "loading" },
   SCHEDULED: { kind: "loading" },
   HISTORY: { kind: "loading" },
 };
@@ -55,6 +56,7 @@ const INITIAL_WORKFLOW: Workflow = { phase: "idle", intent: null, message: null 
 
 function stateLabel(state: TeamLeaderState): string {
   if (state === "CURRENT") return "Hiện tại";
+  if (state === "SUSPENDED") return "Đang tạm treo";
   if (state === "SCHEDULED") return "Đã lên lịch";
   return "Lịch sử";
 }
@@ -125,8 +127,12 @@ export function TeamLeaderManager({
   const teamId = team?.team_id ?? null;
   const [listTeamId, setListTeamId] = useState<string | null>(null);
   const [lists, setLists] = useState<LeaderLists>(INITIAL_LISTS);
+  const [suspendedSnapshot, setSuspendedSnapshot] = useState<{
+    teamId: string;
+    state: ReadState<TeamLeaderList>;
+  } | null>(null);
   const [pages, setPages] = useState<Record<TeamLeaderState, number>>({
-    CURRENT: 1, SCHEDULED: 1, HISTORY: 1,
+    CURRENT: 1, SUSPENDED: 1, SCHEDULED: 1, HISTORY: 1,
   });
   const [selectedState, setActiveState] = useState<TeamLeaderState>("CURRENT");
   const [candidateSnapshot, setCandidateSnapshot] = useState<{
@@ -144,6 +150,8 @@ export function TeamLeaderManager({
   const notify = useNotify();
   const generation = useRef(0);
   const visibleLists = listTeamId === teamId ? lists : INITIAL_LISTS;
+  const visibleSuspended: ReadState<TeamLeaderList> =
+    suspendedSnapshot?.teamId === teamId ? suspendedSnapshot.state : { kind: "loading" };
   const workflow = teamId ? workflows.get(teamId) ?? INITIAL_WORKFLOW : INITIAL_WORKFLOW;
   const candidateEnabled = form !== null && form.kind !== "revoke";
   const candidateQuery = teamId && candidateEnabled
@@ -158,6 +166,9 @@ export function TeamLeaderManager({
         ? candidateSnapshot.state : { kind: "loading" };
   const currentList = visibleLists.CURRENT.kind === "loaded" ? visibleLists.CURRENT.value : null;
   const currentLeaders = currentList?.leaders ?? [];
+  const suspendedList = visibleSuspended.kind === "loaded" ? visibleSuspended.value : null;
+  const suspendedLeaders = suspendedList?.leaders ?? [];
+  const hasReplaceableLeader = currentLeaders.length > 0 || suspendedLeaders.length > 0;
   const scheduledList = visibleLists.SCHEDULED.kind === "loaded" ? visibleLists.SCHEDULED.value : null;
   const hasScheduledLeaders = (scheduledList?.leaders.length ?? 0) > 0;
   const showScheduledState = hasScheduledLeaders
@@ -184,14 +195,18 @@ export function TeamLeaderManager({
     if (!teamId) return;
     const requestGeneration = ++generation.current;
     const controller = new AbortController();
-    void Promise.all(STATES.map((state) => readLeaderList(teamId, state, 1, controller.signal)))
-      .then((results) => {
+    void Promise.all([
+      Promise.all(STATES.map((state) => readLeaderList(teamId, state, 1, controller.signal))),
+      readLeaderList(teamId, "SUSPENDED", 1, controller.signal),
+    ])
+      .then(([results, suspendedResult]) => {
         if (generation.current !== requestGeneration || controller.signal.aborted) return;
         setListTeamId(teamId);
         setLists({
-          CURRENT: results[0]!, SCHEDULED: results[1]!, HISTORY: results[2]!,
+          CURRENT: results[0]!, SUSPENDED: suspendedResult, SCHEDULED: results[1]!, HISTORY: results[2]!,
         });
-        setPages({ CURRENT: 1, SCHEDULED: 1, HISTORY: 1 });
+        setSuspendedSnapshot({ teamId, state: suspendedResult });
+        setPages({ CURRENT: 1, SUSPENDED: 1, SCHEDULED: 1, HISTORY: 1 });
         setActiveState("CURRENT");
       });
     return () => {
@@ -240,11 +255,12 @@ export function TeamLeaderManager({
     });
     setBusyTeam(id);
     try {
-      const [teamResponse, current, scheduled, history] = await Promise.all([
+      const [teamResponse, current, scheduled, history, suspended] = await Promise.all([
         fetch(`/api/admin/catalog/teams/${encodeURIComponent(id)}`, {
           method: "GET", cache: "no-store", headers: { Accept: "application/json" },
         }),
         ...STATES.map((state) => readLeaderList(id, state, 1)),
+        readLeaderList(id, "SUSPENDED", 1),
       ]);
       if (teamResponse.status === 404) {
         updateWorkflow(id, { phase: "idle", intent: null, message: null });
@@ -254,7 +270,7 @@ export function TeamLeaderManager({
         notify.warning({ title: "Nhóm không còn tồn tại hoặc không còn khả dụng." });
         return;
       }
-      if (teamResponse.status !== 200) throw new Error("reload");
+      if (teamResponse.status !== 200 || suspended.kind !== "loaded") throw new Error("reload");
       const snapshot = projectTeamLeaderSnapshot(id, await teamResponse.json(), {
         CURRENT: current.kind === "loaded" ? { ok: true, list: current.value } : null,
         SCHEDULED: scheduled.kind === "loaded" ? { ok: true, list: scheduled.value } : null,
@@ -265,10 +281,12 @@ export function TeamLeaderManager({
       setListTeamId(id);
       setLists({
         CURRENT: { kind: "loaded", value: snapshot.lists.CURRENT },
+        SUSPENDED: suspended,
         SCHEDULED: { kind: "loaded", value: snapshot.lists.SCHEDULED },
         HISTORY: { kind: "loaded", value: snapshot.lists.HISTORY },
       });
-      setPages({ CURRENT: 1, SCHEDULED: 1, HISTORY: 1 });
+      setSuspendedSnapshot({ teamId: id, state: suspended });
+      setPages({ CURRENT: 1, SUSPENDED: 1, SCHEDULED: 1, HISTORY: 1 });
       updateWorkflow(id, { phase: "idle", intent: null, message: null });
       if (successMessage === "Đã lưu thay đổi và xác nhận dữ liệu mới nhất.") {
         notify.success({ title: successMessage });
@@ -348,10 +366,20 @@ export function TeamLeaderManager({
     setBusyTeam(null);
   }, [notify, onLockChange, reloadAuthoritative, updateWorkflow]);
 
+  const loadSuspended = useCallback(async () => {
+    if (!teamId) return;
+    const requestGeneration = generation.current;
+    setSuspendedSnapshot({ teamId, state: { kind: "loading" } });
+    const result = await readLeaderList(teamId, "SUSPENDED", 1);
+    if (generation.current === requestGeneration) {
+      setSuspendedSnapshot({ teamId, state: result });
+    }
+  }, [teamId]);
+
   const startDesignation = () => {
     if (!canManageLeaders || !team?.active || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked) return;
     setForm({
-      kind: currentLeaders.length ? "replace" : "designate",
+      kind: hasReplaceableLeader ? "replace" : "designate",
       appUserId: "",
       reason: "",
     });
@@ -402,7 +430,9 @@ export function TeamLeaderManager({
     void reloadAuthoritative(teamId, workflow.intent);
   };
 
-  const readReady = STATES.every((state) => visibleLists[state].kind === "loaded");
+  const readReady =
+    STATES.every((state) => visibleLists[state].kind === "loaded")
+    && visibleSuspended.kind === "loaded";
   const pageCount = activeList
     ? Math.max(1, Math.ceil(activeList.total / activeList.page_size))
     : 1;
@@ -475,10 +505,53 @@ export function TeamLeaderManager({
                   <button type="button" onClick={startDesignation}
                     disabled={!team.active || !readReady || hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}
                     className="min-h-11 whitespace-nowrap shrink-0 rounded-md bg-primary px-4 text-sm font-medium text-on-primary disabled:opacity-50">
-                    {currentLeaders.length ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
+                    {hasReplaceableLeader ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
                   </button>
                 ) : null}
               </div>
+
+              {visibleSuspended.kind !== "loading" && visibleSuspended.kind !== "loaded" ? (
+                <Alert tone={visibleSuspended.kind === "denied" ? "error" : "warning"}
+                  role={visibleSuspended.kind === "denied" ? "alert" : "status"}
+                  title="Không thể tải trạng thái phân công Trưởng nhóm đang tạm treo">
+                  {readFailureMessage(visibleSuspended.kind)}
+                  <button type="button" onClick={() => void loadSuspended()}
+                    className="mt-2 min-h-10 rounded-md border border-current px-3">Thử tải lại</button>
+                </Alert>
+              ) : null}
+
+              {suspendedLeaders.length > 0 ? (
+                <Alert tone="warning" role="status" title="Phân công Trưởng nhóm đang tạm treo (tài khoản bị khóa)">
+                  <p>
+                    Phân công dưới đây đang tạm treo do tài khoản bị khóa (không còn hiệu lực điều hành).
+                    Bạn có thể thu hồi phân công đang treo ngay cả khi chưa có người thay thế; tài khoản vẫn giữ nguyên trạng thái khóa.
+                  </p>
+                  <ul className="mt-2 space-y-2">
+                    {suspendedLeaders.map((leader) => (
+                      <li key={leader.assignment_id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">{leader.leader_display_name}</span>
+                          <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-900">
+                            Đang tạm treo
+                          </span>
+                          <span className="text-xs text-muted font-mono tabular-nums">
+                            Từ ngày {formatDate(leader.valid_from)}
+                          </span>
+                        </div>
+                        {canManageLeaders ? (
+                          <button type="button"
+                            disabled={hasScheduledLeaders || workflow.phase !== "idle" || teamOperationLocked}
+                            onClick={() => startRevocation()}
+                            className="min-h-11 md:min-h-8 whitespace-nowrap shrink-0 rounded-md border border-border bg-surface px-3 text-xs font-medium hover:bg-surface-muted disabled:opacity-50">
+                            Thu hồi phân công đang treo
+                          </button>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </Alert>
+              ) : null}
 
               {hasScheduledLeaders ? (
                 <Alert tone="warning" title="Lịch trưởng nhóm tương lai cũ đang cản thao tác gán hoặc thu hồi ngay">
@@ -565,8 +638,11 @@ export function TeamLeaderManager({
               {form ? (
                 <Card className="space-y-4 p-4">
                   <h3 className="font-semibold">
-                    {form.kind === "revoke" ? "Thu hồi trưởng nhóm" :
-                      form.kind === "replace" ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
+                    {form.kind === "revoke"
+                      ? currentLeaders.length === 0 && suspendedLeaders.length > 0
+                        ? "Thu hồi phân công trưởng nhóm đang treo"
+                        : "Thu hồi trưởng nhóm"
+                      : form.kind === "replace" ? "Thay thế trưởng nhóm" : "Chỉ định trưởng nhóm"}
                   </h3>
                   <form onSubmit={submitMutation} className="space-y-4">
                     {form.kind !== "revoke" ? (

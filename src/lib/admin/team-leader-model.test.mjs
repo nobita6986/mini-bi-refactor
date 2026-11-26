@@ -216,6 +216,14 @@ test("authoritative reload requires the matching team and all three strict leade
   }), null);
 });
 
+test("leader list queries support SUSPENDED state and strict projection", () => {
+  const query = buildTeamLeaderListQuery(TEAM_ID, "SUSPENDED", 1);
+  assert.equal(query?.get("state"), "suspended");
+  assert.equal(query?.get("team_id"), TEAM_ID);
+  assert.ok(projectTeamLeaderList(list("SUSPENDED"), { teamId: TEAM_ID, state: "SUSPENDED", page: 1 }));
+  assert.equal(projectTeamLeaderList(list("CURRENT"), { teamId: TEAM_ID, state: "SUSPENDED", page: 1 }), null);
+});
+
 test("entity-scoped lock leaves other teams available until the matching reload completes", () => {
   const locks = setTeamConflictLock(setTeamConflictLock(new Set(), TEAM_ID, true), OTHER_TEAM_ID, true);
   const afterTeamReload = setTeamConflictLock(locks, TEAM_ID, false);

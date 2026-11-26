@@ -42,6 +42,8 @@ test("repository makes exactly one canonical RPC call per operation and projects
   });
   assert.equal((await repo.listLeaders({ ...ACTOR, state: "CURRENT", team_id: TEAM,
     search: null, page: 1, page_size: 25 })).ok, true);
+  assert.equal((await repo.listLeaders({ ...ACTOR, state: "SUSPENDED", team_id: TEAM,
+    search: null, page: 1, page_size: 25 })).ok, true);
   assert.equal((await repo.listLeaders({ ...ACTOR, state: "SCHEDULED", team_id: null,
     search: null, page: 1, page_size: 25 })).ok, true);
   assert.equal((await repo.listLeaders({ ...ACTOR, state: "HISTORY", team_id: null,
@@ -54,19 +56,20 @@ test("repository makes exactly one canonical RPC call per operation and projects
     effective_date: DAY, expected_version: 1, reason: "reason", idempotency_key: TARGET })).ok, true);
   assert.deepEqual(calls.map(({ name }) => name), [
     "direct_entry_list_team_leaders_current",
+    "direct_entry_list_team_leaders_suspended",
     "direct_entry_list_team_leaders_scheduled",
     "direct_entry_list_team_leader_history",
     "direct_entry_list_team_leader_candidates",
     "direct_entry_designate_team_leader",
     "direct_entry_revoke_team_leader",
   ]);
-  assert.equal(calls.length, 6);
-  assert.deepEqual(calls[4].args, {
+  assert.equal(calls.length, 7);
+  assert.deepEqual(calls[5].args, {
     p_auth_subject: ACTOR.auth_subject, p_app_user_id: ACTOR.app_user_id, p_team_id: TEAM,
     p_leader_app_user_id: TARGET, p_effective_date: DAY, p_expected_version: 1,
     p_reason: "reason", p_idempotency_key: TARGET,
   });
-  assert.equal(Object.hasOwn(calls[5].args, "p_leader_app_user_id"), false);
+  assert.equal(Object.hasOwn(calls[6].args, "p_leader_app_user_id"), false);
 
   const malformed = createTeamLeaderRepository(async () => ({
     data: { ...CANDIDATE_LIST, candidates: [{ ...CANDIDATE_LIST.candidates[0], recruiter_id: RECRUITER }] },

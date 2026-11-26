@@ -1074,6 +1074,11 @@ test("HF [4/4]: RPC ACL / owner / SECURITY DEFINER / search_path / single-overlo
         sig: "public.direct_entry_unassign_team_membership(uuid, uuid, uuid, date, integer, text, text)",
         dummyCall: "select public.direct_entry_unassign_team_membership(null, null, null, null, null, null, null)",
       },
+      {
+        name: "direct_entry_list_team_leaders_suspended",
+        sig: "public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)",
+        dummyCall: "select public.direct_entry_list_team_leaders_suspended(null, null, null, null, 1, 25)",
+      },
     ];
 
     for (const item of expectedSigs) {
@@ -1125,6 +1130,361 @@ test("HF [4/4]: RPC ACL / owner / SECURITY DEFINER / search_path / single-overlo
         );
       }
     }
+  } finally {
+    await db.close();
+  }
+});
+
+test("HF [5/6]: Suspended TL flow: disable -> Move/Unassign blocked -> list suspended (current unchanged) -> revoke without replacement (account stays disabled) -> Move & Unassign succeed", async () => {
+  const db = await createFullDb();
+  try {
+    const { rows: [recDept] } = await db.query(
+      "select department_id from public.organization_departments where system_key = 'RECRUITMENT'",
+    );
+    const { rows: [{ today }] } = await db.query(
+      "select public.direct_entry_authorization_date()::text as today",
+    );
+    const t1 = await seedTeam(db, "HF_S1", "Suspended Flow Team 1");
+    const t2 = await seedTeam(db, "HF_S2", "Suspended Flow Team 2");
+    const uMove = await seedRecruitmentUser(db, recDept.department_id, "sus_move", { teamId: t1 });
+    const uUnassign = await seedRecruitmentUser(db, recDept.department_id, "sus_unassign", { teamId: t2 });
+    const uUnauthorized = await seedRecruitmentUser(db, recDept.department_id, "sus_unauth", { teamId: t1 });
+
+    // Non-same-day TL designated before today, then disabled -> Move blocked -> revoke without replacement -> Move succeeds, account stays disabled
+    await db.exec(`
+      update public.recruiter_provider_memberships set valid_from = ('${today}'::date - 14) where recruiter_id = '${uMove.recruiterId}';
+      update public.recruiter_team_memberships set valid_from = ('${today}'::date - 14) where recruiter_id = '${uMove.recruiterId}';
+      insert into public.direct_entry_team_leader_assignments
+        (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, suspended_by_account_disable)
+      values
+        ('${t1}', '${uMove.app}', '${uMove.recruiterId}', ('${today}'::date - 7), null, true, false);
+      insert into public.direct_entry_scope_grants
+        (app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable)
+      values
+        ('${uMove.app}', 'team', '${t1}', ('${today}'::date - 7), null, true, false);
+      insert into public.direct_entry_capability_grants
+        (app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable)
+      values
+        ('${uMove.app}', 'team_manager_assign', ('${today}'::date - 7), null, true, false);
+    `);
+
+    const { rows: [uMoveAccVer] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [uMove.app],
+    );
+    await serviceRpc(
+      db,
+      "direct_entry_disable_app_user",
+      [OWNER.auth, OWNER.app, uMove.app, uMoveAccVer.version, "Lock leader account uMove", nextKey("dis_umove")],
+      ["uuid", "uuid", "uuid", "int", "text", "text"],
+    );
+
+    const unauthErr = await serviceRpcError(
+      db,
+      "direct_entry_list_team_leaders_suspended",
+      [uUnauthorized.auth, uUnauthorized.app, t1, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(unauthErr.code, "42501");
+
+    const curBeforeRevoke = await serviceRpc(
+      db,
+      "direct_entry_list_team_leaders_current",
+      [OWNER.auth, OWNER.app, t1, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(curBeforeRevoke.total, 0, "CURRENT leaders list remains empty when TL is suspended");
+
+    const susBeforeRevoke = await serviceRpc(
+      db,
+      "direct_entry_list_team_leaders_suspended",
+      [OWNER.auth, OWNER.app, t1, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(susBeforeRevoke.total, 1);
+    assert.equal(susBeforeRevoke.leaders[0].state, "SUSPENDED");
+    assert.equal(susBeforeRevoke.leaders[0].leader_app_user_id, uMove.app);
+    assert.equal(susBeforeRevoke.leaders[0].valid_to, null);
+
+    const { rows: [recVerMove] } = await db.query(
+      "select version from public.recruiters where recruiter_id = $1::uuid",
+      [uMove.recruiterId],
+    );
+    const blockedMove = await serviceRpcError(
+      db,
+      "direct_entry_move_team_membership",
+      [OWNER.auth, OWNER.app, uMove.recruiterId, t2, today, recVerMove.version, "Move blocked by suspended TL", nextKey("mv_sus_blk")],
+      ["uuid", "uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(blockedMove.code, "PT409");
+    assert.equal(blockedMove.message, EXPECTED_TL_GUARD_MSG);
+
+    // Revoke suspended TL without replacement using existing direct_entry_revoke_team_leader
+    const { rows: [t1Ver] } = await db.query("select version from public.teams where team_id = $1::uuid", [t1]);
+    const revoked = await serviceRpc(
+      db,
+      "direct_entry_revoke_team_leader",
+      [OWNER.auth, OWNER.app, t1, null, t1Ver.version, "Revoke suspended TL without replacement", nextKey("rev_sus_t1")],
+      ["uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(revoked.change, "revoke");
+    assert.equal(revoked.valid_to, today);
+
+    const { rows: [uMoveAcc] } = await db.query(
+      "select enabled from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [uMove.app],
+    );
+    assert.equal(uMoveAcc.enabled, false, "Disabled account MUST remain disabled after revoking suspended TL");
+
+    const susAfterRevoke = await serviceRpc(
+      db,
+      "direct_entry_list_team_leaders_suspended",
+      [OWNER.auth, OWNER.app, t1, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(susAfterRevoke.total, 0);
+
+    const curAfterRevoke = await serviceRpc(
+      db,
+      "direct_entry_list_team_leaders_current",
+      [OWNER.auth, OWNER.app, t1, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(curAfterRevoke.total, 0);
+
+    const histAfterRevoke = await serviceRpc(
+      db,
+      "direct_entry_list_team_leader_history",
+      [OWNER.auth, OWNER.app, t1, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(histAfterRevoke.total, 1);
+    assert.equal(histAfterRevoke.leaders[0].valid_to, today);
+
+    // Retry Move -> succeeds cleanly while account stays disabled
+    const movedAfterRevoke = await serviceRpc(
+      db,
+      "direct_entry_move_team_membership",
+      [OWNER.auth, OWNER.app, uMove.recruiterId, t2, today, recVerMove.version, "Move after suspended TL revoke", nextKey("mv_sus_ok")],
+      ["uuid", "uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(movedAfterRevoke.change, "MOVE");
+    assert.equal(movedAfterRevoke.team_id, t2);
+
+    // Same-day designate -> disable -> Unassign blocked -> revoke without replacement -> Unassign succeeds, account stays disabled
+    const { rows: [t2Ver] } = await db.query("select version from public.teams where team_id = $1::uuid", [t2]);
+    await serviceRpc(
+      db,
+      "direct_entry_designate_team_leader",
+      [OWNER.auth, OWNER.app, t2, uUnassign.app, today, t2Ver.version, "Designate same-day TL on T2", nextKey("des_sus_t2")],
+      ["uuid", "uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    const { rows: [uUnassignAccVer] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [uUnassign.app],
+    );
+    await serviceRpc(
+      db,
+      "direct_entry_disable_app_user",
+      [OWNER.auth, OWNER.app, uUnassign.app, uUnassignAccVer.version, "Lock leader account uUnassign", nextKey("dis_uunassign")],
+      ["uuid", "uuid", "uuid", "int", "text", "text"],
+    );
+
+    const susT2 = await serviceRpc(
+      db,
+      "direct_entry_list_team_leaders_suspended",
+      [OWNER.auth, OWNER.app, t2, null, 1, 25],
+      ["uuid", "uuid", "uuid", "text", "int", "int"],
+    );
+    assert.equal(susT2.total, 1);
+    assert.equal(susT2.leaders[0].leader_app_user_id, uUnassign.app);
+
+    const { rows: [recVerUn] } = await db.query(
+      "select version from public.recruiters where recruiter_id = $1::uuid",
+      [uUnassign.recruiterId],
+    );
+    const blockedUnassign = await serviceRpcError(
+      db,
+      "direct_entry_unassign_team_membership",
+      [OWNER.auth, OWNER.app, uUnassign.recruiterId, today, recVerUn.version, "Unassign blocked by suspended TL", nextKey("un_sus_blk")],
+      ["uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(blockedUnassign.code, "PT409");
+    assert.equal(blockedUnassign.message, EXPECTED_TL_GUARD_MSG);
+
+    await serviceRpc(
+      db,
+      "direct_entry_revoke_team_leader",
+      [OWNER.auth, OWNER.app, t2, null, t2Ver.version + 1, "Revoke same-day suspended TL on T2", nextKey("rev_sus_t2")],
+      ["uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+
+    const { rows: [uUnassignAcc] } = await db.query(
+      "select enabled from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [uUnassign.app],
+    );
+    assert.equal(uUnassignAcc.enabled, false, "uUnassign MUST stay disabled after revoke");
+
+    const unassignedAfterRevoke = await serviceRpc(
+      db,
+      "direct_entry_unassign_team_membership",
+      [OWNER.auth, OWNER.app, uUnassign.recruiterId, today, recVerUn.version, "Unassign after suspended TL revoke", nextKey("un_sus_ok")],
+      ["uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(unassignedAfterRevoke.team_id, t2);
+  } finally {
+    await db.close();
+  }
+});
+
+test("HF [6/6]: Drifted suspended TL on Team A while effective membership is on Team B does NOT block Unassign(B)/Move(B->C) and re-enable does NOT restore A", async () => {
+  const db = await createFullDb();
+  try {
+    const { rows: [recDept] } = await db.query(
+      "select department_id from public.organization_departments where system_key = 'RECRUITMENT'",
+    );
+    const { rows: [{ today }] } = await db.query(
+      "select public.direct_entry_authorization_date()::text as today",
+    );
+    const teamA = await seedTeam(db, "HF_DR_A", "Drift Team A");
+    const teamA2 = await seedTeam(db, "HF_DR_A2", "Drift Team A2");
+    const teamB = await seedTeam(db, "HF_DR_B", "Drift Team B");
+    const teamC = await seedTeam(db, "HF_DR_C", "Drift Team C");
+
+    const uDrift = await seedRecruitmentUser(db, recDept.department_id, "drift_un", { teamId: teamA });
+    const uDriftMove = await seedRecruitmentUser(db, recDept.department_id, "drift_mv", { teamId: teamA2 });
+
+    await db.exec(`
+      update public.recruiter_provider_memberships
+         set valid_from = ('${today}'::date - 14)
+       where recruiter_id in ('${uDrift.recruiterId}', '${uDriftMove.recruiterId}');
+      update public.recruiter_team_memberships
+         set valid_from = ('${today}'::date - 14)
+       where recruiter_id in ('${uDrift.recruiterId}', '${uDriftMove.recruiterId}');
+
+      insert into public.direct_entry_team_leader_assignments
+        (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, suspended_by_account_disable)
+      values
+        ('${teamA}', '${uDrift.app}', '${uDrift.recruiterId}', ('${today}'::date - 7), null, true, false),
+        ('${teamA2}', '${uDriftMove.app}', '${uDriftMove.recruiterId}', ('${today}'::date - 7), null, true, false);
+      insert into public.direct_entry_scope_grants
+        (app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable)
+      values
+        ('${uDrift.app}', 'team', '${teamA}', ('${today}'::date - 7), null, true, false),
+        ('${uDriftMove.app}', 'team', '${teamA2}', ('${today}'::date - 7), null, true, false);
+      insert into public.direct_entry_capability_grants
+        (app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable)
+      values
+        ('${uDrift.app}', 'team_manager_assign', ('${today}'::date - 7), null, true, false),
+        ('${uDriftMove.app}', 'team_manager_assign', ('${today}'::date - 7), null, true, false);
+    `);
+
+    // Disable both accounts (TL assignments on A / A2 become suspended_by_account_disable=true), then simulate historical drift: memberships now in Team B
+    for (const u of [uDrift, uDriftMove]) {
+      const { rows: [uVer] } = await db.query(
+        "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+        [u.app],
+      );
+      await serviceRpc(
+        db,
+        "direct_entry_disable_app_user",
+        [OWNER.auth, OWNER.app, u.app, uVer.version, "Lock drifted TL account", nextKey("dis_drift")],
+        ["uuid", "uuid", "uuid", "int", "text", "text"],
+      );
+      await db.exec(`
+        update public.recruiter_team_memberships
+           set valid_to = ('${today}'::date - 1), is_current = false
+         where recruiter_id = '${u.recruiterId}' and is_current = true;
+        insert into public.recruiter_team_memberships (recruiter_id, team_id, valid_from, valid_to, is_current)
+        values ('${u.recruiterId}', '${teamB}', ('${today}'::date - 1), null, true);
+      `);
+    }
+
+    // Drifted suspended TL on Team A MUST NOT block Unassign from Team B
+    const { rows: [recDriftVer] } = await db.query(
+      "select version from public.recruiters where recruiter_id = $1::uuid",
+      [uDrift.recruiterId],
+    );
+    const unassignDriftRes = await serviceRpc(
+      db,
+      "direct_entry_unassign_team_membership",
+      [OWNER.auth, OWNER.app, uDrift.recruiterId, today, recDriftVer.version, "Unassign B despite drifted suspended TL on A", nextKey("un_drift_b")],
+      ["uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(unassignDriftRes.team_id, teamB);
+    assert.equal(unassignDriftRes.valid_to, today);
+
+    // Re-enable uDrift -> MUST NOT restore TL assignment / scope / capability on Team A
+    const { rows: [uDriftAccVer] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [uDrift.app],
+    );
+    await serviceRpc(
+      db,
+      "direct_entry_enable_app_user",
+      [OWNER.auth, OWNER.app, uDrift.app, uDriftAccVer.version, "Re-enable drifted account", nextKey("en_drift")],
+      ["uuid", "uuid", "uuid", "int", "text", "text"],
+    );
+
+    const { rows: [tlaAfterEnable] } = await db.query(
+      `select is_current, suspended_by_account_disable, valid_to::text
+         from public.direct_entry_team_leader_assignments
+        where leader_app_user_id = $1::uuid and team_id = $2::uuid`,
+      [uDrift.app, teamA],
+    );
+    assert.equal(tlaAfterEnable.is_current, false);
+    assert.equal(tlaAfterEnable.suspended_by_account_disable, false);
+    assert.equal(tlaAfterEnable.valid_to, today);
+
+    const { rows: [{ ctx: uDriftCtx }] } = await db.query(
+      "select public.direct_entry_resolve_actor_context($1::uuid) as ctx",
+      [uDrift.auth],
+    );
+    assert.equal(uDriftCtx.app_user_id, uDrift.app);
+    assert.equal(
+      uDriftCtx.team_scope_grants.some((s) => s.team_id === teamA),
+      false,
+      "Re-enable MUST NOT restore Team A scope for drifted account",
+    );
+    assert.equal(
+      uDriftCtx.capabilities.includes("team_manager_assign"),
+      false,
+      "Re-enable MUST NOT restore team_manager_assign capability for drifted account",
+    );
+
+    // Drifted suspended TL on Team A2 MUST NOT block Move(B -> C), and re-enable afterwards still does NOT restore A2
+    const { rows: [recDriftMvVer] } = await db.query(
+      "select version from public.recruiters where recruiter_id = $1::uuid",
+      [uDriftMove.recruiterId],
+    );
+    const moveDriftRes = await serviceRpc(
+      db,
+      "direct_entry_move_team_membership",
+      [OWNER.auth, OWNER.app, uDriftMove.recruiterId, teamC, today, recDriftMvVer.version, "Move B->C despite drifted suspended TL on A2", nextKey("mv_drift_bc")],
+      ["uuid", "uuid", "uuid", "uuid", "date", "int", "text", "text"],
+    );
+    assert.equal(moveDriftRes.change, "MOVE");
+    assert.equal(moveDriftRes.team_id, teamC);
+
+    const { rows: [uDriftMvAccVer] } = await db.query(
+      "select version from public.direct_entry_app_users where app_user_id = $1::uuid",
+      [uDriftMove.app],
+    );
+    await serviceRpc(
+      db,
+      "direct_entry_enable_app_user",
+      [OWNER.auth, OWNER.app, uDriftMove.app, uDriftMvAccVer.version, "Re-enable drifted move account", nextKey("en_drift_mv")],
+      ["uuid", "uuid", "uuid", "int", "text", "text"],
+    );
+    const { rows: [tlaMvAfterEnable] } = await db.query(
+      `select is_current, suspended_by_account_disable, valid_to::text
+         from public.direct_entry_team_leader_assignments
+        where leader_app_user_id = $1::uuid and team_id = $2::uuid`,
+      [uDriftMove.app, teamA2],
+    );
+    assert.equal(tlaMvAfterEnable.is_current, false);
+    assert.equal(tlaMvAfterEnable.suspended_by_account_disable, false);
+    assert.equal(tlaMvAfterEnable.valid_to, today);
   } finally {
     await db.close();
   }
