@@ -2170,15 +2170,13 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
 
           await client.query("insert into auth.users (id) values ($1)", [authSub]);
           await client.query(
-            "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name) values ($1, $2, true, 'WF01 Probe Actor')",
+            "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, authz_managed, display_name) values ($1, $2, true, true, 'WF01 Probe Actor')",
             [appUser, authSub],
           );
           await client.query(
-            "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1, 'all', null, '2020-01-01', true)",
-            [appUser],
-          );
-          await client.query(
-            "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1, 'entry_admin', '2020-01-01', true)",
+            `insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason)
+             select g.group_id, $1::uuid, 'ADMIN_ASSIGNMENT', 'WF01 runtime read probe'
+               from public.authz_user_groups g where g.code = 'SYSTEM_ADMIN'`,
             [appUser],
           );
           await client.query(

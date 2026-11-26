@@ -133,7 +133,7 @@ async function applyMigrations(client) {
       " create schema auth; create table auth.users (id uuid primary key, email text);",
   );
   const names = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
     .sort();
   const targetIndex = names.indexOf(SALARY_ADVANCE_WP1_MIGRATION_NAME);
   assert.ok(

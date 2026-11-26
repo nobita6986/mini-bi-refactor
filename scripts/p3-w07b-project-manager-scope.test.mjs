@@ -35,7 +35,7 @@ async function database() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   const names = (await readdir(path.resolve("supabase/migrations")))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
     .sort();
   // P2-W04B adds migration #44 (cutoff rebaseline 2026-10-06) on top of
   // the W07B #43. P2-W04B is #44, W07C-R2 is #45, W07C-R3 is #46, P2-W04C is

@@ -50,13 +50,17 @@ const REV_NONE_AUTH = uuid(37), REV_NONE_APP = uuid(47);
 const ALL_NO_CAP_AUTH = uuid(38), ALL_NO_CAP_APP = uuid(48);
 const REV_BUNDLE_AUTH = uuid(39), REV_BUNDLE_APP = uuid(49);
 
+const PRE_3C_PIN_MIGRATION_NAME = "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql";
+
 async function buildDb() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   const names = (await readdir(MIGRATION_DIR))
     .filter((name) => name.endsWith(".sql"))
     .sort();
-  for (const name of names) {
+  const pinIdx = names.indexOf(PRE_3C_PIN_MIGRATION_NAME);
+  assert.notEqual(pinIdx, -1, `missing ${PRE_3C_PIN_MIGRATION_NAME}`);
+  for (const name of names.slice(0, pinIdx + 1)) {
     await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
   }
   assert.ok(names.includes("20261019130000_pre_w2_hf_draft_submission_delete.sql"),

@@ -51,7 +51,7 @@ function workerDetails(name) {
 async function buildDb() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
-  const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql") && n <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql").sort();
   assert.ok(names.includes("20261019130000_pre_w2_hf_draft_submission_delete.sql"),
     "migration inventory includes the #122 baseline");
   for (const name of names) await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));

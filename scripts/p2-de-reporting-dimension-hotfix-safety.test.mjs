@@ -120,6 +120,13 @@ test("P2-DE-dim repair: audit carries the actor, capability and a real reason", 
     "the reason must come from the existing restricted-reason mechanism");
   assert.equal(moduleSource.includes("(auth_subject, app_user_id, action, capability, resource_ref, outcome, reason_id, changed_fields)"), true);
   assert.equal(moduleSource.includes("a.enabled"), true, "the actor must be an enabled account");
+  assert.equal(moduleSource.includes("a.authz_managed"), true, "the actor must be authz_managed");
+  assert.equal(moduleSource.includes("direct_entry_authz__internal_resolve_effective_grants(a.app_user_id)"), true,
+    "actor capability resolution must use canonical effective grants");
+  assert.equal(moduleSource.includes("direct_entry_capability_grants"), false,
+    "actor resolution must not query legacy capability grants");
+  assert.equal(moduleSource.includes("direct_entry_scope_grants"), false,
+    "actor resolution must not query legacy scope grants");
   assert.equal(moduleSource.includes("REPAIR_CAPABILITIES"), true);
 });
 

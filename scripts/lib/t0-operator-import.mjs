@@ -430,30 +430,53 @@ const ACCOUNT_SQL = "select u.app_user_id::text as app_user_id, u.auth_subject::
   " where u.enabled and (lower(coalesce(a.email, '')) = lower($1)" +
   " or u.app_user_id::text = $1 or u.auth_subject::text = $1)";
 
-const GRANTS_SQL = "select" +
-  " coalesce((select array_agg(distinct c.capability) from public.direct_entry_capability_grants c" +
-  "   where c.app_user_id = $1::uuid and c.is_current), '{}')" +
-  "   as capabilities," +
-  " coalesce((select array_agg(distinct s.scope_kind) from public.direct_entry_scope_grants s" +
-  "   where s.app_user_id = $1::uuid and s.is_current), '{}')" +
-  "   as scopes";
+const GRANTS_SQL = "with effective as (" +
+  "  select g.capability, g.scope_kind, g.scope_id" +
+  "    from pg_catalog.jsonb_to_recordset(" +
+  "      public.direct_entry_authz__internal_resolve_effective_grants($1::uuid)" +
+  "    ) as g(capability text, scope_kind text, scope_id text)" +
+  ")" +
+  " select" +
+  " coalesce((select array_agg(distinct e.capability) from effective e" +
+  "   where e.capability is not null), '{}') as capabilities," +
+  " coalesce((select array_agg(distinct lower(e.scope_kind)) from effective e" +
+  "   where e.scope_kind is not null), '{}') as scopes," +
+  " exists (select 1 from effective e" +
+  "   where e.capability = 'entry_admin'" +
+  "     and upper(coalesce(e.scope_kind, '')) = 'ALL'" +
+  "     and nullif(btrim(coalesce(e.scope_id, '')), '') is null) as has_entry_admin_all";
+
+function publicAccount(record) {
+  return {
+    app_user_id: record.app_user_id,
+    auth_subject: record.auth_subject,
+    capabilities: record.capabilities,
+    scopes: record.scopes,
+  };
+}
 
 async function resolveAccount(client, login) {
   const result = await client.query(ACCOUNT_SQL, [login]);
   if (result.rows.length !== 1) return null;
   const grants = await client.query(GRANTS_SQL, [result.rows[0].app_user_id]);
-  return { app_user_id: result.rows[0].app_user_id, auth_subject: result.rows[0].auth_subject,
-    capabilities: grants.rows[0].capabilities ?? [], scopes: grants.rows[0].scopes ?? [] };
+  const row = grants.rows[0] ?? {};
+  return {
+    app_user_id: result.rows[0].app_user_id,
+    auth_subject: result.rows[0].auth_subject,
+    capabilities: row.capabilities ?? [],
+    scopes: row.scopes ?? [],
+    hasEntryAdminAll: row.has_entry_admin_all === true,
+  };
 }
 
 /** Technical operator: mapping hop le + entry_admin + hieu luc all scope. */
 export async function resolveOperator(client, operatorLogin) {
   const account = await resolveAccount(client, operatorLogin);
   if (account === null) return { ok: false, code: "OPERATOR_NOT_FOUND" };
-  if (!account.capabilities.includes("entry_admin") || !account.scopes.includes("all")) {
+  if (!account.hasEntryAdminAll) {
     return { ok: false, code: "OPERATOR_NOT_AUTHORIZED" };
   }
-  return { ok: true, operator: account };
+  return { ok: true, operator: publicAccount(account) };
 }
 
 export async function resolveUploaders(client, rows) {
@@ -467,7 +490,7 @@ export async function resolveUploaders(client, rows) {
       }
       continue;
     }
-    uploaders.set(login, account);
+    uploaders.set(login, publicAccount(account));
   }
   return { uploaders, errors };
 }

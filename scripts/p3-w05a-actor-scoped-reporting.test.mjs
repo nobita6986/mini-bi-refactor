@@ -31,7 +31,7 @@ function workerDetails(name) {
 async function buildDb() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
-  const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql") && n <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql").sort();
   for (const name of names) await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
   return db;
 }

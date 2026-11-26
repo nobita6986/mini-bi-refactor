@@ -48,7 +48,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -646,6 +646,7 @@ describe("WP10-7 Slice 3B (PG18): Team Leader authz_managed cutover, lifecycle, 
   let files = [];
   let wp1073bSql = "";
   let wp1073bIdx = -1;
+  let staged3bMigrationsDir = "";
 
   let todayStr = "";
   let yesterdayVn = "";
@@ -1004,6 +1005,11 @@ describe("WP10-7 Slice 3B (PG18): Team Leader authz_managed cutover, lifecycle, 
     assert.ok(wp1073bIdx > wp1072bIdx, "WP10-7 Slice 3B migration #252 must follow #251");
 
     wp1073bSql = await readFile(path.join(MIGRATION_DIR, WP10_7_3B_MIGRATION_NAME), "utf8");
+    staged3bMigrationsDir = path.join(tmpDir, "staged-3b", "supabase", "migrations");
+    await mkdir(staged3bMigrationsDir, { recursive: true });
+    for (const fname of files.slice(0, wp1073bIdx + 1)) {
+      await copyFile(path.join(MIGRATION_DIR, fname), path.join(staged3bMigrationsDir, fname));
+    }
 
     for (let i = 0; i < groupsIdx; i += 1) {
       await setup.query(await readFile(path.join(MIGRATION_DIR, files[i]), "utf8"));
@@ -1319,7 +1325,7 @@ describe("WP10-7 Slice 3B (PG18): Team Leader authz_managed cutover, lifecycle, 
 
     // 1d. Upgrade #251 -> #252 via runMigrationApply
     const applyRes = await runMigrationApply({
-      directory: MIGRATION_DIR,
+      directory: staged3bMigrationsDir,
       loadConfig: async () => ({
         databaseUrl: `postgresql://postgres@127.0.0.1:${port}/postgres`,
         projectRef: "local",
@@ -1333,7 +1339,7 @@ describe("WP10-7 Slice 3B (PG18): Team Leader authz_managed cutover, lifecycle, 
       log: () => {},
       errorLog: () => {},
     });
-    assert.equal(applyRes.appliedCount, files.length - wp1073bIdx);
+    assert.equal(applyRes.appliedCount, 1);
 
     const post3bSnapshot = await captureTargetFunctionCatalog(observer);
     assert.deepEqual(

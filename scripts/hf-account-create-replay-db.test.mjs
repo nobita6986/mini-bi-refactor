@@ -35,7 +35,6 @@ const ADMIN_B = {
   email: "admin.b@hrpartner.vn",
   display_name: "Admin B",
 };
-const FULL_ADMIN_CAPS = ["entry_admin", "recruiter_master_manage", "team_master_manage"];
 const SECRET_PASSWORD = "SecretReplayPass!2026#XYZ";
 
 const RPC_SPECS = {
@@ -199,17 +198,13 @@ function makeRequest(body) {
 async function seedAdmin(db, admin) {
   await db.query("insert into auth.users (id, email) values ($1, $2)", [admin.auth_subject, admin.email]);
   await db.query(
-    "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name) values ($1, $2, true, $3)",
+    "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, authz_managed, display_name) values ($1, $2, true, true, $3)",
     [admin.app_user_id, admin.auth_subject, admin.display_name],
   );
-  for (const capability of FULL_ADMIN_CAPS) {
-    await db.query(
-      "insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current) values ($1, $2, '2020-01-01', true)",
-      [admin.app_user_id, capability],
-    );
-  }
   await db.query(
-    "insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current) values ($1, 'all', null, '2020-01-01', true)",
+    `insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason)
+     select g.group_id, $1::uuid, 'ADMIN_ASSIGNMENT', 'Account replay test admin'
+       from public.authz_user_groups g where g.code = 'SYSTEM_ADMIN'`,
     [admin.app_user_id],
   );
 }
