@@ -67,13 +67,15 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
         select 1 from information_schema.tables
          where table_schema = 'public'
            and table_name = 'authz_legacy_direct_grant_migrations'
-      ) as has_direct_grant_migrations
+      ) as has_direct_grant_migrations,
+      (pg_catalog.to_regclass('public.leave_department_approvers') is not null) as has_leave_department_approvers
   `);
 
   const hasAccountType = Boolean(colChecks[0]?.has_account_type);
   const hasIsSharedFlag = Boolean(colChecks[0]?.has_is_shared_flag);
   const hasGroupMembers = Boolean(colChecks[0]?.has_group_members);
   const hasDirectGrantMigrations = Boolean(colChecks[0]?.has_direct_grant_migrations);
+  const hasLeaveDepartmentApprovers = Boolean(colChecks[0]?.has_leave_department_approvers);
 
   // Discover all active FK columns pointing to public.direct_entry_app_users or auth.users
   const { rows: fkRows } = await client.query(`
@@ -187,7 +189,9 @@ export async function buildLegacyTechnicalIdentityManifest(client, bindings = {}
          (select count(*)::int from public.direct_entry_app_user_recruiter_links where app_user_id = $1::uuid) as recruiter_link_total,
          (select count(*)::int from public.direct_entry_team_leader_assignments where leader_app_user_id = $1::uuid) as team_leader_total,
          (select count(*)::int from public.vendor_finance_project_accountants where accountant_user_id = $1::uuid) as project_accountant_total,
-         (select count(*)::int from public.leave_department_approvers where approver_app_user_id = $1::uuid) as leave_approver_total,
+         ${hasLeaveDepartmentApprovers
+           ? "(select count(*)::int from public.leave_department_approvers where approver_app_user_id = $1::uuid)"
+           : "0::int"} as leave_approver_total,
          (select count(*)::int from public.organization_department_memberships where app_user_id = $1::uuid) as dept_membership_total,
          (select count(*)::int from public.authz_account_role_assignments where app_user_id = $1::uuid and ended_at is null) as open_role_assignments,
          (select count(*)::int from public.authz_direct_capability_grants where app_user_id = $1::uuid and ended_at is null) as open_direct_grants,
