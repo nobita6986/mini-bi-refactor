@@ -2960,3 +2960,61 @@ test("POST /api/attendance/check-in accepts iOS 9-key and partial 10-key DEVICE_
   assert.equal(r2.commands.filter((c) => c.op === "put").length, putsAfterCreates);
   assert.equal(repo.calls.length, callsAfterCreates);
 });
+
+test("VPSTTT secret reuse is rejected (503 ATTENDANCE_CONFIG_REQUIRED) and missing VPSTTT endpoint fails closed (503 ATTENDANCE_UNAVAILABLE) without R2 fallback", async () => {
+  const vpstttSecret = "vpsttt-secret-key-synthetic-0123456789";
+  const vpstttAccessKey = "VPSTTTSYNTHETICACCESSKEY0123456789";
+  for (const reused of [vpstttSecret, vpstttAccessKey]) {
+    const reuseEnv = {
+      ...VALID_ENV,
+      DOCUMENT_STORAGE_PROVIDER: "vpsttt",
+      VPSTTT_STORAGE_ENDPOINT: "https://s3.synthetic.test:9000",
+      VPSTTT_STORAGE_REGION: "ap-southeast-1",
+      VPSTTT_STORAGE_BUCKET: "vpsttt-preview-bucket",
+      VPSTTT_STORAGE_ACCESS_KEY_ID: vpstttAccessKey,
+      VPSTTT_STORAGE_SECRET_ACCESS_KEY: vpstttSecret,
+      ATTENDANCE_TIME_TOKEN_SECRET: reused,
+    };
+    const timeRes = await getAttendanceTime(
+      new Request("https://bi.example.test/api/attendance/time"),
+      reuseEnv,
+      { resolveSession: activeSession() },
+    );
+    assert.equal(timeRes.status, 503);
+    assert.deepEqual(await timeRes.json(), { ok: false, code: "ATTENDANCE_CONFIG_REQUIRED" });
+
+    const r2 = createFakeR2Harness(VALID_ENV);
+    const repo = createInMemoryCheckInRepo();
+    const checkInRes = await postAttendanceCheckIn(
+      new Request("https://bi.example.test/api/attendance/check-in", { method: "POST" }),
+      reuseEnv,
+      { resolveSession: activeSession(), repository: repo.repository, storage: r2.storage },
+    );
+    assert.equal(checkInRes.status, 503);
+    assert.deepEqual(await checkInRes.json(), { ok: false, code: "ATTENDANCE_CONFIG_REQUIRED" });
+  }
+
+  // Valid R2_* vars must not be used when DOCUMENT_STORAGE_PROVIDER=vpsttt is missing endpoint.
+  const missingEndpointEnv = {
+    ...VALID_ENV,
+    DOCUMENT_STORAGE_PROVIDER: "vpsttt",
+    VPSTTT_STORAGE_REGION: "ap-southeast-1",
+    VPSTTT_STORAGE_BUCKET: "vpsttt-preview-bucket",
+    VPSTTT_STORAGE_ACCESS_KEY_ID: vpstttAccessKey,
+    VPSTTT_STORAGE_SECRET_ACCESS_KEY: vpstttSecret,
+  };
+  const vpstttStorage = createR2AttendanceStorage(missingEndpointEnv);
+  assert.equal(vpstttStorage.available(), false);
+  const jpeg = await realJpegA();
+  const repo = createInMemoryCheckInRepo();
+  const res = await postAttendanceCheckIn(
+    buildMultipartCheckInRequest({
+      metadataObj: buildMetadata({ photo_sha256: sha256Hex(jpeg) }),
+      photoBytes: jpeg,
+    }),
+    missingEndpointEnv,
+    { resolveSession: activeSession(), repository: repo.repository, storage: vpstttStorage },
+  );
+  assert.equal(res.status, 503);
+  assert.deepEqual(await res.json(), { ok: false, code: "ATTENDANCE_UNAVAILABLE" });
+});

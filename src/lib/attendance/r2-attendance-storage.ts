@@ -7,14 +7,13 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
-  S3Client,
 } from "@aws-sdk/client-s3";
 import {
   DOCUMENT_MAX_UPLOAD_BYTES,
   sha256Hex,
   type DocumentEnvironment,
 } from "../direct-entry/document-r2-contract.ts";
-import { loadR2Config } from "../direct-entry/r2-document-storage.ts";
+import { createR2S3Client, loadR2Config } from "../direct-entry/r2-document-storage.ts";
 import { isUuid } from "../http/direct-entry-api-guard.ts";
 
 const SHA256_LOWER_HEX = /^[0-9a-f]{64}$/;
@@ -125,16 +124,7 @@ export function createR2AttendanceStorage(
 
   let client: S3CommandSender | undefined = dependencies.client;
   const getClient = (): S3CommandSender => {
-    client ??= new S3Client({
-      region: "auto",
-      endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-      },
-      requestChecksumCalculation: "WHEN_REQUIRED",
-      responseChecksumValidation: "WHEN_REQUIRED",
-    }) as unknown as S3CommandSender;
+    client ??= createR2S3Client(config) as unknown as S3CommandSender;
     return client;
   };
 

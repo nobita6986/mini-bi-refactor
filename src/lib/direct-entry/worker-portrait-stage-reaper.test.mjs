@@ -33,6 +33,52 @@ test("reaper configuration accepts only the isolated staging Supabase project an
   }), false);
 });
 
+test("reaper configuration supports VPSTTT staging only with explicit preview env and confirmed Preview bucket", () => {
+  const vpstttStaging = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://oyykqfxkyqhxgrfntokl.supabase.co",
+    DOCUMENT_STORAGE_ENVIRONMENT: "preview",
+    DOCUMENT_STORAGE_PROVIDER: "vpsttt",
+    VPSTTT_STORAGE_ENDPOINT: "https://s3.synthetic.test:9000",
+    VPSTTT_STORAGE_REGION: "ap-southeast-1",
+    VPSTTT_STORAGE_BUCKET: "hrp-bi-preview",
+    VPSTTT_STORAGE_ACCESS_KEY_ID: "VP5TT",
+    VPSTTT_STORAGE_SECRET_ACCESS_KEY: "vpsttt-synthetic-secret-key-0123456789",
+  };
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment(vpstttStaging), true);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    VPSTTT_STORAGE_BUCKET: "vpsttt-staging-bucket",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    VPSTTT_STORAGE_BUCKET: "vpsttt-clone-bucket",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    VPSTTT_STORAGE_BUCKET: "hrp-bi-product",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    VPSTTT_STORAGE_ENDPOINT: undefined,
+    R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+    R2_BUCKET_NAME: "hrp-bi-preview",
+    R2_ACCESS_KEY_ID: "SYNTHETICACCESSKEY01",
+    R2_SECRET_ACCESS_KEY: "synthetic-secret-value-0001",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    DOCUMENT_STORAGE_ENVIRONMENT: undefined,
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    DOCUMENT_STORAGE_ENVIRONMENT: "production",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    DOCUMENT_STORAGE_PROVIDER: "unknown-provider",
+  }), false);
+});
+
 function dependencies({ deleteFailure } = {}) {
   const calls = [];
   return {
@@ -162,4 +208,18 @@ test("submission cleanup deletes the matching object type and leaves failed item
       cleanup_id: "c1000000-0000-4000-8000-000000000003", claim_token: TOKEN,
     }],
   ]);
+});
+
+test("reaper refuses to claim or delete when storage reports production/* objects in the target bucket", async () => {
+  const d = dependencies();
+  d.storage.hasProductionObjects = async () => true;
+
+  await assert.rejects(
+    runWorkerPortraitStageReaper({
+      ...d,
+      createClaimToken: () => TOKEN,
+    }),
+    /PORTRAIT_STAGE_REAPER_PRODUCTION_BUCKET_BLOCKED/,
+  );
+  assert.deepEqual(d.calls, []);
 });
