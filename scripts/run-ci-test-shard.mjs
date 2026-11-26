@@ -56,6 +56,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp10-7-2a-retire-leave-unit-kind-db.test.mjs",
   "scripts/wp10-7-2b-drop-leave-profile-unit-kind-db.test.mjs",
   "scripts/wp10-7-3a-tl-effective-rollover-db.test.mjs",
+  "scripts/hf-direct-entry-catalog-privileged-edit-db.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -162,6 +163,7 @@ const TEST_WEIGHTS = {
   "test:wp10-2-immediate-org-assignment": 20.0,
   "test:hf-block-move-unassign-team-leader": 18.0,
   "test:wp10-6-pause-windows": 12.0,
+  "test:hf-direct-entry-catalog-privileged-edit": 14.0,
 };
 
 const target = process.argv[2];
