@@ -58,10 +58,12 @@ function idempotencyHeaderMatches(request: Request, key: string): boolean {
 function projectCreate(value: unknown): Omit<AssignmentCreateInput, keyof WorkReportActorRef> | null {
   if (!isRecord(value) || !validateClientBusinessPayload(value).ok) return null;
   const requiredKeys = ["template_id", "target_kind", "target_user_id", "target_team_id", "target_user_ids", "frequency",
-    "is_mandatory", "due_day_offset", "due_time_local", "exclude_sundays", "effective_from", "effective_to", "idempotency_key"];
-  const allowedKeys = [...requiredKeys, "target_group_id"];
+    "is_mandatory", "due_day_offset", "due_time_local", "exclude_sundays", "idempotency_key"];
+  const allowedKeys = [...requiredKeys, "target_group_id", "effective_from", "effective_to"];
   if (Object.keys(value).some((key) => !allowedKeys.includes(key)) || requiredKeys.some((key) => !(key in value))) return null;
   const targetGroup = "target_group_id" in value ? value.target_group_id : null;
+  const effectiveFrom = "effective_from" in value ? value.effective_from : null;
+  const effectiveTo = "effective_to" in value ? value.effective_to : null;
   if (!(targetGroup === null || (typeof targetGroup === "string" && UUID.test(targetGroup)))) return null;
   if (typeof value.template_id !== "string" || !UUID.test(value.template_id) ||
       !["USER", "TEAM", "USER_SET", "GROUP"].includes(String(value.target_kind)) ||
@@ -69,9 +71,11 @@ function projectCreate(value: unknown): Omit<AssignmentCreateInput, keyof WorkRe
       typeof value.is_mandatory !== "boolean" || !Number.isInteger(value.due_day_offset) ||
       Number(value.due_day_offset) < 0 || Number(value.due_day_offset) > 31 ||
       typeof value.due_time_local !== "string" || !TIME.test(value.due_time_local) ||
-      typeof value.exclude_sundays !== "boolean" || !isRealCalendarDate(value.effective_from) ||
-      !(value.effective_to === null || isRealCalendarDate(value.effective_to)) ||
-      (value.effective_to !== null && String(value.effective_to) < String(value.effective_from)) ||
+      typeof value.exclude_sundays !== "boolean" ||
+      !(effectiveFrom === null || isRealCalendarDate(effectiveFrom)) ||
+      !(effectiveTo === null || isRealCalendarDate(effectiveTo)) ||
+      (effectiveFrom === null && effectiveTo !== null) ||
+      (effectiveTo !== null && String(effectiveTo) < String(effectiveFrom)) ||
       typeof value.idempotency_key !== "string" || !KEY.test(value.idempotency_key) ||
       !Array.isArray(value.target_user_ids) || value.target_user_ids.some((id) => typeof id !== "string" || !UUID.test(id))) return null;
   const kind = value.target_kind;
@@ -83,8 +87,10 @@ function projectCreate(value: unknown): Omit<AssignmentCreateInput, keyof WorkRe
       new Set(value.target_user_ids).size !== value.target_user_ids.length)) return null;
   if (kind === "GROUP" && (typeof targetGroup !== "string" || !UUID.test(targetGroup) || targetUser !== null || targetTeam !== null || value.target_user_ids.length !== 0)) return null;
   return {
-    ...(value as Omit<AssignmentCreateInput, keyof WorkReportActorRef | "target_group_id">),
+    ...(value as Omit<AssignmentCreateInput, keyof WorkReportActorRef | "target_group_id" | "effective_from" | "effective_to">),
     target_group_id: targetGroup,
+    effective_from: effectiveFrom as string | null,
+    effective_to: effectiveTo as string | null,
   };
 }
 

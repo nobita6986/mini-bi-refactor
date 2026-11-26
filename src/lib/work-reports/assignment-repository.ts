@@ -19,12 +19,13 @@ export type AssignmentCreateInput = WorkReportActorRef & {
   due_day_offset: number;
   due_time_local: string;
   exclude_sundays: boolean;
-  effective_from: string;
-  effective_to: string | null;
+  effective_from?: string | null;
+  effective_to?: string | null;
   idempotency_key: string;
 };
 
 export type WorkReportInvalidReasonCode =
+  | "WORK_REPORT_ASSIGNMENT_INVALID"
   | "WORK_REPORT_GROUP_MEMBER_INELIGIBLE"
   | "WORK_REPORT_GROUP_INACTIVE"
   | "WORK_REPORT_TEMPLATE_NOT_ACTIVE";
@@ -204,6 +205,7 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 const KNOWN_INVALID_REASON_CODES: readonly WorkReportInvalidReasonCode[] = [
+  "WORK_REPORT_ASSIGNMENT_INVALID",
   "WORK_REPORT_GROUP_MEMBER_INELIGIBLE",
   "WORK_REPORT_GROUP_INACTIVE",
   "WORK_REPORT_TEMPLATE_NOT_ACTIVE",
@@ -507,8 +509,8 @@ export function createAssignmentRepository(rpc?: Rpc): AssignmentRepository {
               p_due_day_offset: input.due_day_offset,
               p_due_time_local: input.due_time_local,
               p_exclude_sundays: input.exclude_sundays,
-              p_effective_from: input.effective_from,
-              p_effective_to: input.effective_to,
+              p_effective_from: input.effective_from ?? null,
+              p_effective_to: input.effective_to ?? null,
               p_idempotency_key: input.idempotency_key,
             })
           : await invoke("work_report_create_assignment", {
@@ -518,8 +520,8 @@ export function createAssignmentRepository(rpc?: Rpc): AssignmentRepository {
               p_target_user_ids: input.target_user_ids.length ? input.target_user_ids : null,
               p_frequency: input.frequency, p_is_mandatory: input.is_mandatory,
               p_due_day_offset: input.due_day_offset, p_due_time_local: input.due_time_local,
-              p_exclude_sundays: input.exclude_sundays, p_effective_from: input.effective_from,
-              p_effective_to: input.effective_to, p_idempotency_key: input.idempotency_key,
+              p_exclude_sundays: input.exclude_sundays, p_effective_from: input.effective_from ?? null,
+              p_effective_to: input.effective_to ?? null, p_idempotency_key: input.idempotency_key,
             });
         return outcome(data, error, (value): value is { assignment_id: string; version: number } =>
           record(value) && typeof value.assignment_id === "string" && UUID.test(value.assignment_id) && value.version === 1);

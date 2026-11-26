@@ -211,4 +211,78 @@ test("assignment repository preserves specific 22023 domain error codes when pre
     }),
     { ok: false, kind: "invalid", code: "WORK_REPORT_GROUP_INACTIVE" },
   );
+
+  const assignmentInvalidRepo = createAssignmentRepository(async () => ({
+    data: null,
+    error: { code: "22023", message: "WORK_REPORT_ASSIGNMENT_INVALID" },
+  }));
+  assert.deepEqual(
+    await assignmentInvalidRepo.create({
+      ...actor,
+      template_id: template,
+      target_kind: "USER",
+      target_user_id: "11111111-1111-4111-8111-111111111111",
+      target_team_id: null,
+      target_user_ids: [],
+      frequency: "DAILY",
+      is_mandatory: true,
+      due_day_offset: 0,
+      due_time_local: "23:59:59",
+      exclude_sundays: false,
+      effective_from: "2026-10-20",
+      effective_to: null,
+      idempotency_key: "asg-invalid-date",
+    }),
+    { ok: false, kind: "invalid", code: "WORK_REPORT_ASSIGNMENT_INVALID" },
+  );
+});
+
+test("assignment repository passes null dates when omitted across both assignment and group create RPCs", async () => {
+  const calls = [];
+  const repository = createAssignmentRepository(async (name, args) => {
+    calls.push({ name, args });
+    return {
+      data: { assignment_id: "99999999-9999-4999-8999-999999999999", version: 1 },
+      error: null,
+    };
+  });
+
+  await repository.create({
+    ...actor,
+    template_id: template,
+    target_kind: "USER_SET",
+    target_user_id: null,
+    target_team_id: null,
+    target_user_ids: ["11111111-1111-4111-8111-111111111111"],
+    frequency: "DAILY",
+    is_mandatory: true,
+    due_day_offset: 0,
+    due_time_local: "23:59:59",
+    exclude_sundays: false,
+    idempotency_key: "dateless-user-set",
+  });
+
+  await repository.create({
+    ...actor,
+    template_id: template,
+    target_kind: "GROUP",
+    target_user_id: null,
+    target_team_id: null,
+    target_group_id: "12121212-1212-4212-8212-121212121212",
+    target_user_ids: [],
+    frequency: "WEEKLY",
+    is_mandatory: true,
+    due_day_offset: 1,
+    due_time_local: "18:00:00",
+    exclude_sundays: false,
+    idempotency_key: "dateless-group",
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].name, "work_report_create_assignment");
+  assert.equal(calls[0].args.p_effective_from, null);
+  assert.equal(calls[0].args.p_effective_to, null);
+  assert.equal(calls[1].name, "work_report_create_group_assignment");
+  assert.equal(calls[1].args.p_effective_from, null);
+  assert.equal(calls[1].args.p_effective_to, null);
 });
