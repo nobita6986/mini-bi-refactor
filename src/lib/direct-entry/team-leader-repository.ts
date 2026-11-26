@@ -44,6 +44,7 @@ export type TeamLeaderRepository = {
 
 const READ_RPC: Readonly<Record<TeamLeaderState, string>> = {
   CURRENT: "direct_entry_list_team_leaders_current",
+  SUSPENDED: "direct_entry_list_team_leaders_suspended",
   SCHEDULED: "direct_entry_list_team_leaders_scheduled",
   HISTORY: "direct_entry_list_team_leader_history",
 };

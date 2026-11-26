@@ -49,6 +49,18 @@ test("designation, replacement and revoke preserve canonical team path, effectiv
   assert.match(component, /change: form\.kind/);
 });
 
+test("suspended team leader assignments render clear suspended status and allow direct revoke without replacement while preserving CURRENT list", () => {
+  assert.match(component, /readLeaderList\(teamId, "SUSPENDED", 1, controller\.signal\)/);
+  assert.match(component, /readLeaderList\(id, "SUSPENDED", 1\)/);
+  assert.match(component, /Phân công Trưởng nhóm đang tạm treo \(tài khoản bị khóa\)/);
+  assert.match(component, /Đang tạm treo/);
+  assert.match(component, /Thu hồi phân công đang treo/);
+  assert.match(component, /hasReplaceableLeader = currentLeaders\.length > 0 \|\| suspendedLeaders\.length > 0/);
+  assert.match(component, /kind:\s*hasReplaceableLeader \? "replace" : "designate"/);
+  assert.match(component, /team\.active \|\| !readReady \|\| hasScheduledLeaders/);
+  assert.doesNotMatch(component, /disabled=\{[^}]*!team\.active[^}]*\}\s+onClick=\{\(\) => startRevocation\(\)\}/);
+});
+
 test("applied and conflicted writes remain entity-locked until team and all leader projections reload", () => {
   const sendOutcome = component.indexOf('if (outcome.kind === "applied" || outcome.kind === "conflict")');
   const reloadCall = component.indexOf("await reloadAuthoritative(intent.teamId, intent, successMessage)", sendOutcome);

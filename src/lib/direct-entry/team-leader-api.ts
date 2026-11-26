@@ -16,7 +16,7 @@ const AUTHORITY_KEYS = new Set([
   "auth_subject", "app_user_id",
 ]);
 const STATE_MAP: Readonly<Record<string, TeamLeaderState>> = {
-  current: "CURRENT", scheduled: "SCHEDULED", history: "HISTORY",
+  current: "CURRENT", suspended: "SUSPENDED", scheduled: "SCHEDULED", history: "HISTORY",
 };
 const REASON_MAX = 4000;
 const SEARCH_MAX = 256;

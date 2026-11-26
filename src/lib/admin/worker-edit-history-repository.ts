@@ -40,7 +40,11 @@ export function createWorkerEditHistoryRepository(rpc?: Rpc): WorkerEditHistoryR
   return {
     async search(input) {
       try {
-        const result = await invoke("worker_edit_history_search", {
+        const normalizedEmployeeCode =
+          typeof input.employee_code === "string" && input.employee_code.trim() !== ""
+            ? input.employee_code.trim()
+            : null;
+        const rpcArgs: Record<string, unknown> = {
           p_auth_subject: input.auth_subject,
           p_app_user_id: input.app_user_id,
           p_national_id: null,
@@ -52,7 +56,9 @@ export function createWorkerEditHistoryRepository(rpc?: Rpc): WorkerEditHistoryR
           p_recruiter_query: input.recruiter_id,
           p_page_size: input.page_size,
           p_cursor: input.cursor,
-        });
+          ...(normalizedEmployeeCode !== null ? { p_employee_code: normalizedEmployeeCode } : {}),
+        };
+        const result = await invoke("worker_edit_history_search", rpcArgs);
         if (result.error) return { ok: false, code: mapRpcError(result.error) };
         const value = projectWorkerEditHistorySearch(result.data);
         return value ? { ok: true, value } : { ok: false, code: "WORKER_EDIT_HISTORY_UNAVAILABLE" };
