@@ -177,16 +177,35 @@ async function loadSqlTemplates() {
 
 /**
  * Fail-closed schema-compatibility preflight for WP2A standalone shadow SQLs.
- * WP2A shadow queries target the historical schema (<= #244 / < 20261121160000)
- * where public.leave_department_approvers exists.
+ * WP2A shadow queries target a pre-PR28 historical schema
+ * (< 20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql)
+ * where both public.leave_employee_profiles.is_shared_non_employee and
+ * public.leave_department_approvers exist.
  */
 export async function assertWp2aShadowSchemaCompatible(executor) {
-  const { rows } = await executor.query(
-    `select pg_catalog.to_regclass('public.leave_department_approvers') is not null as has_leave_department_approvers`
-  );
-  if (!rows[0]?.has_leave_department_approvers) {
+  const { rows } = await executor.query(`
+    select
+      pg_catalog.to_regclass('public.leave_department_approvers') is not null as has_leave_department_approvers,
+      exists (
+        select 1
+          from pg_catalog.pg_attribute a
+         where a.attrelid = pg_catalog.to_regclass('public.leave_employee_profiles')
+           and a.attname = 'is_shared_non_employee'
+           and a.attnum > 0
+           and not a.attisdropped
+      ) as has_is_shared_non_employee
+  `);
+  const row = rows[0] ?? {};
+  const missing = [];
+  if (!row.has_is_shared_non_employee) {
+    missing.push("public.leave_employee_profiles.is_shared_non_employee");
+  }
+  if (!row.has_leave_department_approvers) {
+    missing.push("public.leave_department_approvers");
+  }
+  if (missing.length > 0) {
     throw new Error(
-      "WP2A shadow comparator requires historical schema <= #244 (< 20261121160000) where public.leave_department_approvers exists; public.leave_department_approvers is absent on this target (>= #245). Use --pglite (historical cutoff) or a pre-#245 database restore."
+      `WP2A shadow comparator requires a pre-PR28 historical schema (< ${WP2A_HISTORICAL_CUTOFF_MIGRATION}) where both public.leave_employee_profiles.is_shared_non_employee and public.leave_department_approvers exist; missing on target: ${missing.join(", ")}. Use --pglite (historical fixture) or a pre-PR28 database restore.`
     );
   }
 }

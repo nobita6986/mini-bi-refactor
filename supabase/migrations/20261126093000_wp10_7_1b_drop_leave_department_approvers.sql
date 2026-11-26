@@ -3,7 +3,7 @@
 --
 -- Scope (100% forward migration; zero historical migration edits):
 --   1. Fail-closed pre-drop gate verifying:
---      (a) 0 public functions/procedures in pg_proc reference
+--      (a) 0 non-system application functions/procedures in pg_proc reference
 --          leave_department_approvers in prosrc.
 --      (b) 0 external foreign keys in pg_constraint reference
 --          public.leave_department_approvers.
@@ -39,15 +39,27 @@ begin
   end if;
 
   select count(*)::integer,
-         pg_catalog.string_agg(p.oid::pg_catalog.regprocedure::text, ', ' order by p.proname)
+         pg_catalog.string_agg(
+           n.nspname || '.' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
+           ', '
+           order by n.nspname, p.proname
+         )
     into v_proc_count, v_procs
     from pg_catalog.pg_proc p
-   where p.pronamespace = 'public'::pg_catalog.regnamespace
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+   where n.nspname <> 'pg_catalog'
+     and n.nspname <> 'information_schema'
+     and n.nspname not like 'pg\_%' escape '\'
+     and n.nspname not in (
+       'auth', 'storage', 'realtime', 'extensions', 'graphql', 'graphql_public',
+       'vault', 'pgsodium', 'pgsodium_masks', 'supabase_functions',
+       'supabase_migrations', 'net', 'pgtle', 'cron', 'pgbouncer'
+     )
      and p.prokind in ('f', 'p')
      and p.prosrc ~* 'leave_department_approvers';
 
   if v_proc_count > 0 then
-    raise exception 'WP10-7-1B precheck failed: % public routine(s) still reference leave_department_approvers: %',
+    raise exception 'WP10-7-1B precheck failed: % non-system routine(s) still reference leave_department_approvers: %',
       v_proc_count, coalesce(v_procs, '<unknown>')
       using errcode = '55000';
   end if;

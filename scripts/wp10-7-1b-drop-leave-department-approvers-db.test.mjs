@@ -62,6 +62,8 @@ import { runWp5Cutover } from "./wp5-cutover-role-access.mjs";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
+const WP2A_HISTORICAL_CUTOFF_MIGRATION =
+  "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql";
 const WP10_7_1B_MIGRATION_NAME = "20261126093000_wp10_7_1b_drop_leave_department_approvers.sql";
 const LEGACY_APPROVER_STUB_SIG =
   "public.leave_management_set_department_approver_admin(uuid, uuid, text, uuid, date, integer, text, text, text)";
@@ -488,11 +490,17 @@ async function snapshotLeaveDeptApproversSchemaAndRows(engine) {
        and tablename = 'leave_department_approvers'
      order by indexname
   `);
-  const { rows: [rls] } = await engine.query(`
-    select relrowsecurity,
-           relforcerowsecurity
-      from pg_catalog.pg_class
-     where oid = 'public.leave_department_approvers'::pg_catalog.regclass
+  const { rows: [tblMeta] } = await engine.query(`
+    select pg_catalog.pg_get_userbyid(c.relowner) as owner,
+           coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))::text as acl,
+           c.relrowsecurity,
+           c.relforcerowsecurity,
+           pg_catalog.has_table_privilege('public', c.oid, 'SELECT') as pub_sel,
+           pg_catalog.has_table_privilege('anon', c.oid, 'SELECT') as anon_sel,
+           pg_catalog.has_table_privilege('authenticated', c.oid, 'SELECT') as auth_sel,
+           pg_catalog.has_table_privilege('service_role', c.oid, 'SELECT') as svc_sel
+      from pg_catalog.pg_class c
+     where c.oid = 'public.leave_department_approvers'::pg_catalog.regclass
   `);
   const { rows: dataRows } = await engine.query(`
     select approver_assignment_id::text as approver_assignment_id,
@@ -514,11 +522,60 @@ async function snapshotLeaveDeptApproversSchemaAndRows(engine) {
     columns,
     constraints,
     indexes,
-    rls,
+    owner: tblMeta.owner,
+    acl: tblMeta.acl,
+    privs: {
+      pub_sel: tblMeta.pub_sel,
+      anon_sel: tblMeta.anon_sel,
+      auth_sel: tblMeta.auth_sel,
+      svc_sel: tblMeta.svc_sel,
+    },
+    rls: {
+      relrowsecurity: tblMeta.relrowsecurity,
+      relforcerowsecurity: tblMeta.relforcerowsecurity,
+    },
     rowCount: dataRows.length,
     rows: dataRows,
     sha256: sha256(canonicalJson),
   };
+}
+
+async function assertNonPublicSchemaRoutineBlocksDrop(engine, migrationSql, expectedRowCount) {
+  await engine.exec(`
+    create schema app_internal;
+    create function app_internal.probe_legacy_dept_approvers()
+    returns integer
+    language plpgsql
+    as $fn$
+    declare
+      v_cnt integer;
+    begin
+      select count(*)::integer into v_cnt from public.leave_department_approvers;
+      return v_cnt;
+    end;
+    $fn$;
+  `);
+
+  await assert.rejects(
+    () => engine.exec(migrationSql),
+    (err) =>
+      err?.code === "55000" &&
+      String(err?.message).includes("app_internal.probe_legacy_dept_approvers"),
+    "Migration #245 must fail closed with SQLSTATE 55000 naming non-public routine app_internal.probe_legacy_dept_approvers",
+  );
+  await engine.exec("rollback;").catch(() => {});
+
+  const { rows: [afterBlocked] } = await engine.query(`
+    select pg_catalog.to_regclass('public.leave_department_approvers') as tbl,
+           (select count(*)::int from public.leave_department_approvers) as cnt
+  `);
+  assert.ok(afterBlocked.tbl !== null, "Blocked #245 must keep public.leave_department_approvers intact");
+  assert.equal(afterBlocked.cnt, expectedRowCount, "Blocked #245 must preserve all seeded rows");
+
+  await engine.exec(`
+    drop function app_internal.probe_legacy_dept_approvers();
+    drop schema app_internal;
+  `);
 }
 
 async function assertPost245CatalogInvariants(engine) {
@@ -530,13 +587,21 @@ async function assertPost245CatalogInvariants(engine) {
   assert.equal(reg.idx, null, "leave_department_approvers_current_uidx must be dropped");
 
   const { rows: procRefs } = await engine.query(`
-    select p.oid::pg_catalog.regprocedure::text as sig
+    select n.nspname || '.' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' as sig
       from pg_catalog.pg_proc p
-     where p.pronamespace = 'public'::pg_catalog.regnamespace
+      join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+     where n.nspname <> 'pg_catalog'
+       and n.nspname <> 'information_schema'
+       and n.nspname not like 'pg_%'
+       and n.nspname not in (
+         'auth', 'storage', 'realtime', 'extensions', 'graphql', 'graphql_public',
+         'vault', 'pgsodium', 'pgsodium_masks', 'supabase_functions',
+         'supabase_migrations', 'net', 'pgtle', 'cron', 'pgbouncer'
+       )
        and p.prokind in ('f', 'p')
        and p.prosrc ~* 'leave_department_approvers'
   `);
-  assert.deepEqual(procRefs, [], "0 public routines may reference leave_department_approvers after #245");
+  assert.deepEqual(procRefs, [], "0 non-system application routines may reference leave_department_approvers after #245");
 
   const stub = await inspectLegacyApproverStub(engine);
   assert.equal(stub.overload_count, 1);
@@ -733,15 +798,27 @@ async function runPost245FunctionalMatrix(engine, { mode, onPre245Ready = null }
     assert.equal(svcCandidate244.human_contamination.leave_approver_total, 1, "On #244 manifest must return real leave_approver_total = 1");
     assert.equal(svcCandidate244.classification, "BLOCKED_HUMAN_OR_OWNER_CONFLICT");
 
-    // WP2A shadow preflight passes on #244 while leave_department_approvers still exists
-    await assertWp2aShadowSchemaCompatible(engine);
+    // WP2A shadow preflight fails closed on #244 citing missing is_shared_non_employee (while leave_department_approvers exists)
+    await assert.rejects(
+      () => assertWp2aShadowSchemaCompatible(engine),
+      (err) => {
+        const msg = String(err?.message);
+        return (
+          msg.includes("public.leave_employee_profiles.is_shared_non_employee") &&
+          !msg.includes("missing on target: public.leave_department_approvers") &&
+          !msg.includes(", public.leave_department_approvers.")
+        );
+      },
+      "WP2A shadow preflight must fail closed on #244 citing only missing is_shared_non_employee",
+    );
 
+    const dropSql = await readFile(path.join(MIGRATION_DIR, WP10_7_1B_MIGRATION_NAME), "utf8");
     if (onPre245Ready) {
-      await onPre245Ready({ engine, dates });
+      await onPre245Ready({ engine, dates, dropSql });
     }
 
     // Apply #245
-    await engine.exec(await readFile(path.join(MIGRATION_DIR, WP10_7_1B_MIGRATION_NAME), "utf8"));
+    await engine.exec(dropSql);
 
     // Check operational manifest helper on #245 projects leave_approver_total = 0 cleanly
     const manifest245 = await engine.readOnly((c) =>
@@ -758,11 +835,17 @@ async function runPost245FunctionalMatrix(engine, { mode, onPre245Ready = null }
     histLeaveForAdminCancel = await createApprovedNullDeptLeave(dates.leaveDays[1], "fresh-adm");
   }
 
-  // WP2A shadow preflight must fail closed cleanly on #245
+  // WP2A shadow preflight must fail closed cleanly on #245 citing BOTH missing objects
   await assert.rejects(
     () => assertWp2aShadowSchemaCompatible(engine),
-    (err) => String(err?.message).includes("public.leave_department_approvers is absent on this target"),
-    "WP2A shadow preflight must fail closed cleanly after #245",
+    (err) => {
+      const msg = String(err?.message);
+      return (
+        msg.includes("public.leave_employee_profiles.is_shared_non_employee") &&
+        msg.includes("public.leave_department_approvers")
+      );
+    },
+    "WP2A shadow preflight must fail closed cleanly after #245 citing both missing objects",
   );
 
   // Assert post-#245 catalog invariants
@@ -1137,6 +1220,9 @@ test("WP10-7-1B #1 (PGlite): Migration #245 hygiene, atomic rollback zero drift,
     assert.equal(afterRollback.cnt, 1, "Atomic rollback must preserve rows");
     assert.deepEqual(await inspectLegacyApproverStub(engine), preStub, "Atomic rollback must keep stub unchanged");
 
+    // Non-public application schema routine referencing leave_department_approvers must block #245
+    await assertNonPublicSchemaRoutineBlocksDrop(engine, sql, 1);
+
     // Apply #245 cleanly
     await engine.exec(sql);
     const postFlags = new Map([...preFlags, [WP10_7_1B_MIGRATION_NAME, true]]);
@@ -1221,24 +1307,31 @@ test("WP10-7-1B #4 (Real PG18): Upgrade + Fresh Install + Archive/Restore Drill 
     let preDropSnapshot = null;
     await runPost245FunctionalMatrix(upgradeEngine, {
       mode: "upgrade",
-      onPre245Ready: async ({ engine }) => {
+      onPre245Ready: async ({ engine, dropSql }) => {
+        // Non-public application schema routine referencing leave_department_approvers blocks #245 on Real PG18
+        await assertNonPublicSchemaRoutineBlocksDrop(engine, dropSql, 4);
+
         preDropSnapshot = await snapshotLeaveDeptApproversSchemaAndRows(engine);
         assert.equal(preDropSnapshot.rowCount, 4, "Must snapshot 4 seeded rows before #245");
         assert.equal(preDropSnapshot.columns.length, 11, "Must capture all 11 columns");
+        assert.equal(
+          preDropSnapshot.constraints.filter((c) => c.contype !== "n").length,
+          6,
+          "Must capture all 6 PK/CHECK/FK constraints",
+        );
         assert.equal(preDropSnapshot.indexes.length, 2, "Must capture PK + current_uidx indexes");
+        assert.equal(preDropSnapshot.owner, "postgres", "Pre-drop table owner must be postgres");
+        assert.ok(preDropSnapshot.acl, "Pre-drop relacl must be captured");
         assert.equal(preDropSnapshot.rls.relrowsecurity, true);
         assert.equal(preDropSnapshot.rls.relforcerowsecurity, true);
 
-        // Dump table DDL, constraints, indexes, RLS, and rows via pg_dump
+        // Execute exact canonical runbook dump command (NO --no-owner, NO --no-privileges)
         runBin(pgDump, [
-          "-h", "127.0.0.1",
-          "-p", String(port),
-          "-U", "postgres",
-          "-d", "postgres",
+          `--dbname=postgresql://postgres@127.0.0.1:${port}/postgres`,
           "--table=public.leave_department_approvers",
-          "--no-owner",
-          "--no-privileges",
-          "-f", archiveSqlPath,
+          "--format=plain",
+          "--column-inserts",
+          `--file=${archiveSqlPath}`,
         ]);
       },
     });
@@ -1265,11 +1358,10 @@ test("WP10-7-1B #4 (Real PG18): Upgrade + Fresh Install + Archive/Restore Drill 
       [fkUserIds],
     );
 
+    // Execute exact canonical runbook restore command as postgres
     runBin(psqlBin, [
-      "-h", "127.0.0.1",
-      "-p", String(port),
-      "-U", "postgres",
-      "-d", "wp10_7_1b_restore_drill",
+      `postgresql://postgres@127.0.0.1:${port}/wp10_7_1b_restore_drill`,
+      "-X",
       "-v", "ON_ERROR_STOP=1",
       "-f", archiveSqlPath,
     ]);
@@ -1277,9 +1369,12 @@ test("WP10-7-1B #4 (Real PG18): Upgrade + Fresh Install + Archive/Restore Drill 
     const restoreEngine = wrapPgClient(restoreClient, "PG18-restore-drill");
     const restoredSnapshot = await snapshotLeaveDeptApproversSchemaAndRows(restoreEngine);
 
-    assert.deepEqual(restoredSnapshot.columns, preDropSnapshot.columns, "Restored columns must match 100%");
-    assert.deepEqual(restoredSnapshot.constraints, preDropSnapshot.constraints, "Restored constraints must match 100%");
-    assert.deepEqual(restoredSnapshot.indexes, preDropSnapshot.indexes, "Restored indexes must match 100%");
+    assert.deepEqual(restoredSnapshot.columns, preDropSnapshot.columns, "Restored columns (11) must match 100%");
+    assert.deepEqual(restoredSnapshot.constraints, preDropSnapshot.constraints, "Restored constraints (6) must match 100%");
+    assert.deepEqual(restoredSnapshot.indexes, preDropSnapshot.indexes, "Restored indexes (2) must match 100%");
+    assert.equal(restoredSnapshot.owner, preDropSnapshot.owner, "Restored owner (postgres) must match 100%");
+    assert.equal(restoredSnapshot.acl, preDropSnapshot.acl, "Restored effective relacl must match 100%");
+    assert.deepEqual(restoredSnapshot.privs, preDropSnapshot.privs, "Restored table privileges must match 100%");
     assert.deepEqual(restoredSnapshot.rls, preDropSnapshot.rls, "Restored RLS flags must match 100%");
     assert.equal(restoredSnapshot.rowCount, preDropSnapshot.rowCount, "Restored row count must match 100%");
     assert.equal(restoredSnapshot.sha256, preDropSnapshot.sha256, "Restored canonical SHA-256 checksum must match 100%");
@@ -1298,5 +1393,58 @@ test("WP10-7-1B #4 (Real PG18): Upgrade + Fresh Install + Archive/Restore Drill 
       spawnSync(pgCtl, ["-D", pgData, "-m", "immediate", "stop"], { stdio: "ignore", windowsHide: true });
     }
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+// =============================================================================
+// TEST 5 (PGlite): WP2A 3-milestone schema compatibility (pre-PR28 PASS, #244 FAIL, #245 FAIL)
+// =============================================================================
+test("WP10-7-1B #5 (PGlite): WP2A 3-milestone schema compatibility (pre-PR28 PASS, #244 FAIL, #245 FAIL)", async () => {
+  const engine = await createPgliteEngine();
+  try {
+    await engine.exec(ROLE_PREAMBLE);
+    const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const pr28CleanupIdx = files.indexOf(WP2A_HISTORICAL_CUTOFF_MIGRATION);
+    const dropIdx = files.indexOf(WP10_7_1B_MIGRATION_NAME);
+    assert.ok(pr28CleanupIdx > 0 && dropIdx > pr28CleanupIdx);
+
+    // Milestone 1: Pre-PR28 (< 20261121160000) -> PASSES
+    for (let i = 0; i < pr28CleanupIdx; i += 1) {
+      await engine.exec(await readFile(path.join(MIGRATION_DIR, files[i]), "utf8"));
+    }
+    await assertWp2aShadowSchemaCompatible(engine);
+
+    // Milestone 2: #244 (leave_department_approvers exists, is_shared_non_employee absent) -> FAILS citing is_shared_non_employee
+    for (let i = pr28CleanupIdx; i < dropIdx; i += 1) {
+      await engine.exec(await readFile(path.join(MIGRATION_DIR, files[i]), "utf8"));
+    }
+    await assert.rejects(
+      () => assertWp2aShadowSchemaCompatible(engine),
+      (err) => {
+        const msg = String(err?.message);
+        return (
+          msg.includes("public.leave_employee_profiles.is_shared_non_employee") &&
+          !msg.includes("missing on target: public.leave_department_approvers") &&
+          !msg.includes(", public.leave_department_approvers.")
+        );
+      },
+      "#244 must fail citing only public.leave_employee_profiles.is_shared_non_employee",
+    );
+
+    // Milestone 3: #245 (both absent) -> FAILS citing BOTH is_shared_non_employee AND leave_department_approvers
+    await engine.exec(await readFile(path.join(MIGRATION_DIR, files[dropIdx]), "utf8"));
+    await assert.rejects(
+      () => assertWp2aShadowSchemaCompatible(engine),
+      (err) => {
+        const msg = String(err?.message);
+        return (
+          msg.includes("public.leave_employee_profiles.is_shared_non_employee") &&
+          msg.includes("public.leave_department_approvers")
+        );
+      },
+      "#245 must fail citing both is_shared_non_employee and leave_department_approvers",
+    );
+  } finally {
+    await engine.close();
   }
 });
