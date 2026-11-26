@@ -1,9 +1,6 @@
 -- HF Worker Edit History: snapshot/detail recruiter & team name resolution + employee_code exact filter.
 begin;
 
-create index if not exists direct_entries_employee_code_lower_idx
-  on public.direct_entries ((pg_catalog.lower(employee_code)));
-
 create or replace function public.worker_edit_history_snapshot(p_entry_id uuid)
 returns jsonb
 language sql
@@ -646,11 +643,6 @@ begin
 
   if v_base_owner_oid is null or v_base_owner is null then
     raise exception 'HF worker edit history check failed: base owner missing' using errcode = '55000';
-  end if;
-
-  if to_regclass('public.direct_entries_employee_code_lower_idx') is null then
-    raise exception 'HF worker edit history check failed: missing direct_entries_employee_code_lower_idx'
-      using errcode = '55000';
   end if;
 
   if pg_catalog.to_regprocedure('public.worker_edit_history_search(uuid,uuid,text,text,date,date,text,text,text,integer,text)') is not null then

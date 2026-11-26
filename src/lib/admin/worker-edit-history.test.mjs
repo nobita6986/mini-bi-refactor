@@ -399,14 +399,53 @@ test("repository & API: forwards p_employee_code, projects resolved maps, and pr
   );
   assert.equal(spoofRes.status, 400);
 
+  // 200 search without employee_code omits p_employee_code key completely
+  const noCodeRes = await getWorkerEditHistory(
+    new Request("https://app.example/api/admin/worker-edit-history?from_date=2026-10-01&to_date=2026-10-31"),
+    { resolveSession: validSession, repository },
+  );
+  assert.equal(noCodeRes.status, 200);
+  const noCodeCall = rpcCalls.at(-1);
+  assert.equal(noCodeCall?.name, "worker_edit_history_search");
+  assert.equal("p_employee_code" in noCodeCall.args, false);
+
+  // 200 search with whitespace-only employee_code omits p_employee_code key completely
+  const blankCodeRes = await getWorkerEditHistory(
+    new Request("https://app.example/api/admin/worker-edit-history?from_date=2026-10-01&to_date=2026-10-31&employee_code=%20%20"),
+    { resolveSession: validSession, repository },
+  );
+  assert.equal(blankCodeRes.status, 200);
+  const blankCodeCall = rpcCalls.at(-1);
+  assert.equal(blankCodeCall?.name, "worker_edit_history_search");
+  assert.equal("p_employee_code" in blankCodeCall.args, false);
+
+  // Direct repository.search with employee_code: null omits p_employee_code key completely
+  const directNullResult = await repository.search({
+    auth_subject: AUTH_SUB,
+    app_user_id: USER_ID,
+    from_date: "2026-10-01",
+    to_date: "2026-10-31",
+    action_group: null,
+    project_id: null,
+    recruiter_id: null,
+    employee_code: null,
+    page_size: 50,
+    cursor: null,
+  });
+  assert.equal(directNullResult.ok, true);
+  const directNullCall = rpcCalls.at(-1);
+  assert.equal(directNullCall?.name, "worker_edit_history_search");
+  assert.equal("p_employee_code" in directNullCall.args, false);
+
   // 200 search with trimmed employee_code forwards p_employee_code
   const okSearchRes = await getWorkerEditHistory(
     new Request("https://app.example/api/admin/worker-edit-history?from_date=2026-10-01&to_date=2026-10-31&employee_code=%20%20HRP-2026-000123%20%20"),
     { resolveSession: validSession, repository },
   );
   assert.equal(okSearchRes.status, 200);
-  const searchCall = rpcCalls.find((call) => call.name === "worker_edit_history_search");
-  assert.ok(searchCall);
+  const searchCall = rpcCalls.at(-1);
+  assert.equal(searchCall?.name, "worker_edit_history_search");
+  assert.equal("p_employee_code" in searchCall.args, true);
   assert.equal(searchCall.args.p_employee_code, "HRP-2026-000123");
 
   // 200 revision detail includes resolved_recruiters and resolved_teams

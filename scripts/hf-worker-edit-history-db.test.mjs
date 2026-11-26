@@ -235,10 +235,15 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
   const postconditions = await verifyS0T1CSecurityPostconditions(db, s0Sql, appliedMap);
   assert.equal(postconditions.ok, true, `S0-T1-C postconditions failed: ${postconditions.reason}`);
 
-  const { rows: idxRows } = await db.query(
+  const { rows: existingUidxRows } = await db.query(
+    "select indexname from pg_indexes where schemaname = 'public' and tablename = 'direct_entries' and indexname = 'direct_entries_employee_code_lower_uidx'",
+  );
+  assert.equal(existingUidxRows.length, 1, "direct_entries_employee_code_lower_uidx must exist on public.direct_entries");
+
+  const { rows: redundantIdxRows } = await db.query(
     "select indexname from pg_indexes where schemaname = 'public' and tablename = 'direct_entries' and indexname = 'direct_entries_employee_code_lower_idx'",
   );
-  assert.equal(idxRows.length, 1, "direct_entries_employee_code_lower_idx must exist");
+  assert.equal(redundantIdxRows.length, 0, "redundant direct_entries_employee_code_lower_idx must not exist");
 
   for (const retiredSig of HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES) {
     const { rows } = await db.query("select pg_catalog.to_regprocedure($1)::text as sig", [retiredSig]);
