@@ -37,6 +37,7 @@ COPY scripts/apply-migrations.mjs ./scripts/apply-migrations.mjs
 COPY scripts/lib/load-supabase-config.mjs ./scripts/lib/load-supabase-config.mjs
 COPY scripts/lib/migration-validation.mjs ./scripts/lib/migration-validation.mjs
 COPY scripts/lib/supabase-tls.mjs ./scripts/lib/supabase-tls.mjs
+COPY scripts/lib/wp10-7-3d-legacy-grants-archive.mjs ./scripts/lib/wp10-7-3d-legacy-grants-archive.mjs
 COPY supabase/migrations ./supabase/migrations
 COPY supabase/certs ./supabase/certs
 ENTRYPOINT ["node", "scripts/apply-migrations.mjs"]

@@ -231,10 +231,17 @@ test("loadR2Config validates VPSTTT config with decoupled bucket, rejects invali
   assert.equal(valid.bucket, "vpsttt-clone-bucket");
   assert.equal(valid.forcePathStyle, true);
 
+  assert.equal(loadR2Config(vpstttEnv({ VPSTTT_STORAGE_ACCESS_KEY_ID: "VP5TT" }))?.accessKeyId, "VP5TT",
+    "5-char synthetic VPSTTT access key is accepted");
+  assert.equal(loadR2Config(env({ R2_ACCESS_KEY_ID: "VP5TT" })), null,
+    "Cloudflare R2 access key validator remains >= 16 chars");
+
   const pathStyleOff = loadR2Config(vpstttEnv({ VPSTTT_STORAGE_FORCE_PATH_STYLE: "false" }));
   assert.equal(pathStyleOff?.forcePathStyle, false);
 
   for (const bad of [
+    { DOCUMENT_STORAGE_ENVIRONMENT: undefined },
+    { DOCUMENT_STORAGE_ENVIRONMENT: undefined, VERCEL_ENV: "production" },
     { VPSTTT_STORAGE_ENDPOINT: undefined },
     { VPSTTT_STORAGE_ENDPOINT: "http://s3.synthetic.test:9000" },
     { VPSTTT_STORAGE_ENDPOINT: "https://s3.synthetic.test?foo=1" },
@@ -243,6 +250,7 @@ test("loadR2Config validates VPSTTT config with decoupled bucket, rejects invali
     { VPSTTT_STORAGE_BUCKET: "a..b" },
     { VPSTTT_STORAGE_BUCKET: "127.0.0.1" },
     { VPSTTT_STORAGE_BUCKET: "UPPER_CASE" },
+    { VPSTTT_STORAGE_ACCESS_KEY_ID: "VP5T" },
     { VPSTTT_STORAGE_ACCESS_KEY_ID: "<access-key>" },
     { VPSTTT_STORAGE_SECRET_ACCESS_KEY: "<secret-key>" },
     { VPSTTT_STORAGE_FORCE_PATH_STYLE: "invalid" },

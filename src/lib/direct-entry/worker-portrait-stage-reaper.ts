@@ -22,17 +22,17 @@ export function isW2S1PortraitStageReaperStagingEnvironment(
   if (
     url.protocol !== "https:" ||
     url.hostname !== `${W2S1_STAGING_SUPABASE_REF}.supabase.co` ||
-    env.DOCUMENT_STORAGE_ENVIRONMENT !== "preview"
+    env.DOCUMENT_STORAGE_ENVIRONMENT?.trim() !== "preview"
   ) {
     return false;
   }
   const provider = resolveDocumentStorageProvider(env);
   if (provider === "cloudflare_r2") {
-    return env.R2_BUCKET_NAME === DOCUMENT_BUCKETS.preview;
+    return env.R2_BUCKET_NAME?.trim() === DOCUMENT_BUCKETS.preview;
   }
   if (provider === "vpsttt") {
     const config = loadR2Config(env);
-    return config?.provider === "vpsttt" && config.bucket !== DOCUMENT_BUCKETS.production;
+    return config?.provider === "vpsttt" && config.bucket === DOCUMENT_BUCKETS.preview;
   }
   return false;
 }
@@ -61,9 +61,16 @@ export const PORTRAIT_STAGE_REAPER_BATCH_SIZE = 50;
 export async function runWorkerPortraitStageReaper(input: {
   repository: CleanupRepository;
   storage: Pick<DocumentObjectStorage,
-    "deleteEnrollmentPortraitStage" | "deleteStaged" | "deleteFinal">;
+    "deleteEnrollmentPortraitStage" | "deleteStaged" | "deleteFinal"> &
+    Partial<Pick<DocumentObjectStorage, "hasProductionObjects">>;
   createClaimToken?: () => string;
 }): Promise<{ claimed: number; deleted: number; failed: number }> {
+  if (typeof input.storage.hasProductionObjects === "function") {
+    const hasProd = await input.storage.hasProductionObjects();
+    if (hasProd) {
+      throw new Error("PORTRAIT_STAGE_REAPER_PRODUCTION_BUCKET_BLOCKED");
+    }
+  }
   const claimToken = (input.createClaimToken ?? randomUUID)();
   const claimed = await input.repository.claimExpiredCleanup({
     claim_token: claimToken,

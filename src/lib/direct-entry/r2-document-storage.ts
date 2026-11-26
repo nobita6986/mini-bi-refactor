@@ -5,6 +5,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
@@ -83,6 +84,7 @@ export type DocumentObjectStorage = {
   }): Promise<void>;
   deleteStaged(storageKey: string): Promise<void>;
   deleteFinal(storageKey: string): Promise<void>;
+  hasProductionObjects(): Promise<boolean>;
   createDownloadUrl(input: {
     storage_key: string;
     mime_type: DocumentMimeType;
@@ -110,7 +112,7 @@ const SECRET_ACCESS_KEY = /^[A-Za-z0-9/+=_-]{16,256}$/;
 const VPSTTT_REGION = /^[a-z0-9][a-z0-9-]{0,62}$/i;
 const VPSTTT_BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 const IPV4_HOST = /^\d+\.\d+\.\d+\.\d+$/;
-const VPSTTT_ACCESS_KEY_ID = /^[A-Za-z0-9._-]{8,128}$/;
+const VPSTTT_ACCESS_KEY_ID = /^[A-Za-z0-9._-]{5,128}$/;
 const VPSTTT_SECRET_ACCESS_KEY = /^[\x21-\x7e]{16,256}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -119,14 +121,21 @@ function enrollmentPortraitStageKey(environment: DocumentEnvironment, stageId: s
   return `${environment}/enrollment-staging/${stageId}`;
 }
 
-export function resolveDocumentEnvironment(
+export function resolveExplicitDocumentEnvironment(
   env: Record<string, string | undefined>,
 ): DocumentEnvironment | null {
   const configured = env.DOCUMENT_STORAGE_ENVIRONMENT;
-  if (configured !== undefined) {
-    const value = configured.trim();
-    if (value === "preview" || value === "production") return value;
-    return null;
+  if (configured === undefined) return null;
+  const value = configured.trim();
+  if (value === "preview" || value === "production") return value;
+  return null;
+}
+
+export function resolveDocumentEnvironment(
+  env: Record<string, string | undefined>,
+): DocumentEnvironment | null {
+  if (env.DOCUMENT_STORAGE_ENVIRONMENT !== undefined) {
+    return resolveExplicitDocumentEnvironment(env);
   }
   return env.VERCEL_ENV === "production" ? "production" : "preview";
 }
@@ -261,12 +270,14 @@ function loadVpstttConfig(
 }
 
 export function loadR2Config(env: Record<string, string | undefined>): R2Config | null {
-  const environment = resolveDocumentEnvironment(env);
   const provider = resolveDocumentStorageProvider(env);
-  if (!environment || !provider) return null;
-  return provider === "vpsttt"
-    ? loadVpstttConfig(env, environment)
-    : loadCloudflareR2Config(env, environment);
+  if (!provider) return null;
+  if (provider === "vpsttt") {
+    const environment = resolveExplicitDocumentEnvironment(env);
+    return environment ? loadVpstttConfig(env, environment) : null;
+  }
+  const environment = resolveDocumentEnvironment(env);
+  return environment ? loadCloudflareR2Config(env, environment) : null;
 }
 
 export function buildR2S3ClientConfig(config: R2Config): S3ClientConfig {
@@ -301,6 +312,7 @@ export const unavailableDocumentObjectStorage: DocumentObjectStorage = {
   async promote() { throw new Error("DOCUMENT_STORAGE_UNAVAILABLE"); },
   async deleteStaged() { throw new Error("DOCUMENT_STORAGE_UNAVAILABLE"); },
   async deleteFinal() { throw new Error("DOCUMENT_STORAGE_UNAVAILABLE"); },
+  async hasProductionObjects() { throw new Error("DOCUMENT_STORAGE_UNAVAILABLE"); },
   async createDownloadUrl() { throw new Error("DOCUMENT_STORAGE_UNAVAILABLE"); },
 };
 
@@ -505,6 +517,14 @@ export function createR2DocumentStorage(
         Bucket: config.bucket,
         Key: finalObjectKey(config.environment, storageKey),
       }));
+    },
+    async hasProductionObjects() {
+      const result = await getClient().send(new ListObjectsV2Command({
+        Bucket: config.bucket,
+        Prefix: "production/",
+        MaxKeys: 1,
+      })) as { KeyCount?: number; Contents?: unknown[] };
+      return (result.KeyCount ?? 0) > 0 || (result.Contents?.length ?? 0) > 0;
     },
     async createDownloadUrl(input) {
       const fileName = genericDownloadName(input.document_type, input.version, input.mime_type);

@@ -32,7 +32,11 @@ import {
   createR2DocumentStorage,
   loadR2Config,
 } from "./r2-document-storage.ts";
-import { runWorkerPortraitStageReaper } from "./worker-portrait-stage-reaper.ts";
+import {
+  isW2S1PortraitStageReaperStagingEnvironment,
+  runWorkerPortraitStageReaper,
+  W2S1_STAGING_SUPABASE_REF,
+} from "./worker-portrait-stage-reaper.ts";
 
 const APP_ORIGIN = "https://bi2.hrpartner.vn";
 const FOREIGN_ORIGIN = "https://evil.example";
@@ -245,7 +249,10 @@ function xmlError(code, message) {
   return `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${message}</Message></Error>`;
 }
 
-async function createMockVpstttServer() {
+async function createMockVpstttServer(serverConfig = {}) {
+  const expectedBucket = serverConfig.bucket ?? VPSTTT_BUCKET;
+  const expectedAccessKey = serverConfig.accessKeyId ?? VPSTTT_ACCESS_KEY;
+  const expectedSecretKey = serverConfig.secretAccessKey ?? VPSTTT_SECRET_KEY;
   const { certPem, keyPem } = generateSelfSignedCert();
   const objects = new Map();
   const requests = [];
@@ -302,21 +309,25 @@ async function createMockVpstttServer() {
       return;
     }
 
-    // Enforce path-style routing: /<bucket>/<key> and never virtual-hosted <bucket>.<host>
-    if (host.startsWith(`${VPSTTT_BUCKET}.`)) {
+    // Enforce path-style routing: /<bucket>/<key> or ListObjectsV2 /<bucket>?list-type=2
+    if (host.startsWith(`${expectedBucket}.`)) {
       res.writeHead(400, { ...corsHeaders, "Content-Type": "application/xml" });
       res.end(xmlError("InvalidRequest", "Virtual-hosted style is disallowed"));
       return;
     }
 
     const decodedPath = decodeURIComponent(rawPathname);
-    const prefix = `/${VPSTTT_BUCKET}/`;
-    if (!decodedPath.startsWith(prefix) || decodedPath.length <= prefix.length) {
+    const isListObjects =
+      req.method === "GET" &&
+      queryMap.get("list-type") === "2" &&
+      (decodedPath === `/${expectedBucket}` || decodedPath === `/${expectedBucket}/`);
+    const prefix = `/${expectedBucket}/`;
+    if (!isListObjects && (!decodedPath.startsWith(prefix) || decodedPath.length <= prefix.length)) {
       res.writeHead(404, { ...corsHeaders, "Content-Type": "application/xml" });
       res.end(xmlError("NoSuchBucket", "Bucket or key missing"));
       return;
     }
-    const key = decodedPath.slice(prefix.length);
+    const key = isListObjects ? "" : decodedPath.slice(prefix.length);
 
     const auth = verifySigV4({
       method: req.method,
@@ -324,14 +335,39 @@ async function createMockVpstttServer() {
       rawQuery,
       headers: req.headers,
       body,
-      accessKeyId: VPSTTT_ACCESS_KEY,
-      secretAccessKey: VPSTTT_SECRET_KEY,
+      accessKeyId: expectedAccessKey,
+      secretAccessKey: expectedSecretKey,
       region: VPSTTT_REGION,
       nowMs: Date.now() + nowOffsetMs,
     });
     if (!auth.ok) {
       res.writeHead(403, { ...corsHeaders, "Content-Type": "application/xml" });
       res.end(xmlError("AccessDenied", auth.reason));
+      return;
+    }
+
+    if (isListObjects) {
+      const listPrefix = queryMap.get("prefix") ?? "";
+      const maxKeys = Number(queryMap.get("max-keys") ?? "1000");
+      const matched = [...objects.keys()]
+        .filter((k) => k.startsWith(listPrefix))
+        .sort()
+        .slice(0, Number.isSafeInteger(maxKeys) && maxKeys > 0 ? maxKeys : 1000);
+      const escapeXml = (s) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      const contentsXml = matched
+        .map((k) => `<Contents><Key>${escapeXml(k)}</Key><Size>${objects.get(k).bytes.byteLength}</Size></Contents>`)
+        .join("");
+      res.writeHead(200, { ...corsHeaders, "Content-Type": "application/xml" });
+      res.end(
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+          `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+          `<Name>${escapeXml(expectedBucket)}</Name>` +
+          `<Prefix>${escapeXml(listPrefix)}</Prefix>` +
+          `<KeyCount>${matched.length}</KeyCount>` +
+          `<MaxKeys>${Number.isSafeInteger(maxKeys) && maxKeys > 0 ? maxKeys : 1000}</MaxKeys>` +
+          `<IsTruncated>false</IsTruncated>` +
+          `${contentsXml}</ListBucketResult>`,
+      );
       return;
     }
 
@@ -342,7 +378,7 @@ async function createMockVpstttServer() {
         const slash = cleaned.indexOf("/");
         const srcBucket = slash === -1 ? "" : cleaned.slice(0, slash);
         const srcKey = slash === -1 ? "" : cleaned.slice(slash + 1);
-        const srcObj = srcBucket === VPSTTT_BUCKET ? objects.get(srcKey) : undefined;
+        const srcObj = srcBucket === expectedBucket ? objects.get(srcKey) : undefined;
         if (!srcObj) {
           res.writeHead(404, { ...corsHeaders, "Content-Type": "application/xml" });
           res.end(xmlError("NoSuchKey", "Copy source missing"));
@@ -1150,7 +1186,7 @@ test("full upload -> staging -> finalize -> reopen lifecycle across Direct Entry
     assert.equal(expiredPutRes.status, 403);
     srv.setNowOffsetMs(0);
 
-    // 2) Enrollment portrait stage + reaper cleanup on VPSTTT.
+    // 2) Enrollment portrait stage write/read on production VPSTTT + reaper blocked on production & allowed only on confirmed Preview bucket.
     const stageId = randomUUID();
     const stagedDocKey = `p1.6/${entryId}/CCCD_FRONT/8/${randomUUID()}`;
     const finalDocKey = `p1.6/${entryId}/CCCD_FRONT/9/${randomUUID()}`;
@@ -1160,27 +1196,47 @@ test("full upload -> staging -> finalize -> reopen lifecycle across Direct Entry
     await docStorage.writeStaged({ storage_key: finalDocKey, mime_type: "image/png", bytes: PNG_BYTES });
     await docStorage.promote({ storage_key: finalDocKey, mime_type: "image/png" });
 
-    const reaperResult = await runWorkerPortraitStageReaper({
-      storage: docStorage,
-      repository: {
-        async claimExpiredCleanup() { return { ok: true, data: [stageId] }; },
-        async completeCleanup() { return { ok: true, data: true }; },
-        async claimSubmissionObjectCleanup() {
-          return {
-            ok: true,
-            data: [
-              { cleanup_id: randomUUID(), object_kind: "DOCUMENT_STAGED", stage_id: null, storage_key: stagedDocKey },
-              { cleanup_id: randomUUID(), object_kind: "DOCUMENT_FINAL", stage_id: null, storage_key: finalDocKey },
-            ],
-          };
-        },
-        async completeSubmissionObjectCleanup() { return { ok: true, data: true }; },
+    const reaperRepo = {
+      async claimExpiredCleanup() { return { ok: true, data: [stageId] }; },
+      async completeCleanup() { return { ok: true, data: true }; },
+      async claimSubmissionObjectCleanup() {
+        return {
+          ok: true,
+          data: [
+            { cleanup_id: randomUUID(), object_kind: "DOCUMENT_STAGED", stage_id: null, storage_key: stagedDocKey },
+            { cleanup_id: randomUUID(), object_kind: "DOCUMENT_FINAL", stage_id: null, storage_key: finalDocKey },
+          ],
+        };
       },
-    });
-    assert.deepEqual(reaperResult, { claimed: 3, deleted: 3, failed: 0 });
-    assert.equal(srv.objects.has(`production/enrollment-staging/${stageId}`), false);
-    assert.equal(srv.objects.has(`production/staging/${stagedDocKey}`), false);
-    assert.equal(srv.objects.has(`production/final/${finalDocKey}`), false);
+      async completeSubmissionObjectCleanup() { return { ok: true, data: true }; },
+    };
+    await assert.rejects(
+      runWorkerPortraitStageReaper({ storage: docStorage, repository: reaperRepo }),
+      /PORTRAIT_STAGE_REAPER_PRODUCTION_BUCKET_BLOCKED/,
+    );
+
+    const previewSrv = await createMockVpstttServer({ bucket: DOCUMENT_BUCKETS.preview });
+    try {
+      const previewEnv = makeVpstttEnv(previewSrv.endpoint, {
+        DOCUMENT_STORAGE_ENVIRONMENT: "preview",
+        VPSTTT_STORAGE_BUCKET: DOCUMENT_BUCKETS.preview,
+      });
+      const previewStorage = createR2DocumentStorage(previewEnv, {
+        client: createTestS3Client(previewEnv, previewSrv.certPem, outboundSpy),
+      });
+      await previewStorage.writeEnrollmentPortraitStage({ stage_id: stageId, mime_type: "image/png", bytes: PNG_BYTES });
+      await previewStorage.writeStaged({ storage_key: stagedDocKey, mime_type: "image/png", bytes: PNG_BYTES });
+      await previewStorage.writeStaged({ storage_key: finalDocKey, mime_type: "image/png", bytes: PNG_BYTES });
+      await previewStorage.promote({ storage_key: finalDocKey, mime_type: "image/png" });
+
+      const reaperResult = await runWorkerPortraitStageReaper({ storage: previewStorage, repository: reaperRepo });
+      assert.deepEqual(reaperResult, { claimed: 3, deleted: 3, failed: 0 });
+      assert.equal(previewSrv.objects.has(`preview/enrollment-staging/${stageId}`), false);
+      assert.equal(previewSrv.objects.has(`preview/staging/${stagedDocKey}`), false);
+      assert.equal(previewSrv.objects.has(`preview/final/${finalDocKey}`), false);
+    } finally {
+      await previewSrv.close();
+    }
 
     // 3) Vendor Finance lifecycle on VPSTTT.
     const vfinKey = `vfin-01/entry/${entryId}/${randomUUID()}`;
@@ -1357,10 +1413,13 @@ test("misconfigured VPSTTT fails closed across all 4 adapters & APIs with zero C
   try {
     const validBase = makeVpstttEnv(srv.endpoint);
     const badConfigs = [
+      { ...validBase, DOCUMENT_STORAGE_ENVIRONMENT: undefined },
+      { ...validBase, DOCUMENT_STORAGE_ENVIRONMENT: undefined, VERCEL_ENV: "production" },
       { ...validBase, VPSTTT_STORAGE_ENDPOINT: undefined },
       { ...validBase, VPSTTT_STORAGE_ENDPOINT: "http://127.0.0.1:9000" },
       { ...validBase, VPSTTT_STORAGE_BUCKET: "INVALID_BUCKET" },
       { ...validBase, VPSTTT_STORAGE_REGION: undefined },
+      { ...validBase, VPSTTT_STORAGE_ACCESS_KEY_ID: "VP5T" },
       { ...validBase, VPSTTT_STORAGE_ACCESS_KEY_ID: "<vpsttt-access-key>" },
       { ...validBase, VPSTTT_STORAGE_FORCE_PATH_STYLE: "yes" },
     ];
@@ -1503,4 +1562,93 @@ test("Cloudflare R2 backwards compatibility holds when provider is omitted or cl
     assert.equal(s3Cfg.forcePathStyle, false);
   }
   assert.equal(loadR2Config({ ...baseR2, R2_BUCKET_NAME: "vpsttt-clone-bucket" }), null);
+});
+
+test("VPSTTT accepts 5-char synthetic access key and blocks preview reaper against buckets containing production objects", async () => {
+  const shortAccessKey = "VP5TT";
+  const srv = await createMockVpstttServer({
+    bucket: DOCUMENT_BUCKETS.preview,
+    accessKeyId: shortAccessKey,
+    secretAccessKey: VPSTTT_SECRET_KEY,
+  });
+  const outboundSpy = [];
+  try {
+    const prodCloneKey = `production/final/p1.6/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/CCCD_FRONT/1/${randomUUID()}`;
+    const stageId = randomUUID();
+    const previewStageKey = `preview/enrollment-staging/${stageId}`;
+    srv.seedObject(prodCloneKey, PNG_BYTES, { contentType: "image/png" });
+    srv.seedObject(previewStageKey, PNG_BYTES, { contentType: "image/png" });
+
+    // 1) Wrong bucket pointing to clone bucket must fail static reaper staging guard even under preview.
+    const mispointedPreviewEnv = makeVpstttEnv(srv.endpoint, {
+      NEXT_PUBLIC_SUPABASE_URL: `https://${W2S1_STAGING_SUPABASE_REF}.supabase.co`,
+      DOCUMENT_STORAGE_ENVIRONMENT: "preview",
+      VPSTTT_STORAGE_BUCKET: VPSTTT_BUCKET,
+      VPSTTT_STORAGE_ACCESS_KEY_ID: shortAccessKey,
+    });
+    assert.equal(isW2S1PortraitStageReaperStagingEnvironment(mispointedPreviewEnv), false);
+
+    // 2) Confirmed Preview bucket name still succeeds with 5-char key when empty of production/*,
+    //    but MUST fail closed without claiming or deleting when bucket holds any production/* object.
+    const confirmedPreviewEnv = makeVpstttEnv(srv.endpoint, {
+      NEXT_PUBLIC_SUPABASE_URL: `https://${W2S1_STAGING_SUPABASE_REF}.supabase.co`,
+      DOCUMENT_STORAGE_ENVIRONMENT: "preview",
+      VPSTTT_STORAGE_BUCKET: DOCUMENT_BUCKETS.preview,
+      VPSTTT_STORAGE_ACCESS_KEY_ID: shortAccessKey,
+    });
+    assert.equal(isW2S1PortraitStageReaperStagingEnvironment(confirmedPreviewEnv), true);
+
+    // 5-char synthetic access key works for real SigV4 HTTPS read on VPSTTT.
+    const prodWithShortKeyEnv = makeVpstttEnv(srv.endpoint, {
+      DOCUMENT_STORAGE_ENVIRONMENT: "production",
+      VPSTTT_STORAGE_BUCKET: DOCUMENT_BUCKETS.preview,
+      VPSTTT_STORAGE_ACCESS_KEY_ID: shortAccessKey,
+    });
+    const prodStorage = createR2DocumentStorage(prodWithShortKeyEnv, {
+      client: createTestS3Client(prodWithShortKeyEnv, srv.certPem, outboundSpy),
+    });
+    assert.deepEqual(
+      await prodStorage.readFinal(prodCloneKey.replace(/^production\/final\//, "")),
+      PNG_BYTES,
+    );
+
+    const previewStorage = createR2DocumentStorage(confirmedPreviewEnv, {
+      client: createTestS3Client(confirmedPreviewEnv, srv.certPem, outboundSpy),
+    });
+    let claimedCount = 0;
+    const repo = {
+      async claimExpiredCleanup() {
+        claimedCount += 1;
+        return { ok: true, data: [stageId] };
+      },
+      async completeCleanup() {
+        return { ok: true, data: true };
+      },
+      async claimSubmissionObjectCleanup() {
+        claimedCount += 1;
+        return { ok: true, data: [] };
+      },
+      async completeSubmissionObjectCleanup() {
+        return { ok: true, data: true };
+      },
+    };
+
+    const reqCountBefore = srv.requests.length;
+    await assert.rejects(
+      runWorkerPortraitStageReaper({ storage: previewStorage, repository: repo }),
+      /PORTRAIT_STAGE_REAPER_PRODUCTION_BUCKET_BLOCKED/,
+    );
+    assert.equal(claimedCount, 0);
+    assert.equal(srv.requests.slice(reqCountBefore).some((r) => r.method === "DELETE"), false);
+    assert.equal(srv.objects.has(prodCloneKey), true);
+    assert.equal(srv.objects.has(previewStageKey), true);
+
+    // Remove the production object: reaper now succeeds on the confirmed preview-only bucket.
+    srv.objects.delete(prodCloneKey);
+    const cleaned = await runWorkerPortraitStageReaper({ storage: previewStorage, repository: repo });
+    assert.deepEqual(cleaned, { claimed: 1, deleted: 1, failed: 0 });
+    assert.equal(srv.objects.has(previewStageKey), false);
+  } finally {
+    await srv.close();
+  }
 });
