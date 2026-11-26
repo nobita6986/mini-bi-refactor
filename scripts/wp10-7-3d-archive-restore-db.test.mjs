@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -868,10 +868,11 @@ function binary(name) {
   return result.error ? null : candidate;
 }
 
-function runBin(file, args, { ignoreOutput = false, input = undefined } = {}) {
+function runBin(file, args, { ignoreOutput = false, input = undefined, cwd = undefined } = {}) {
   const result = spawnSync(file, args, {
     encoding: "utf8",
     windowsHide: true,
+    ...(cwd !== undefined ? { cwd } : {}),
     ...(input !== undefined ? { input } : {}),
     ...(ignoreOutput ? { stdio: "ignore" } : {}),
   });
@@ -1585,7 +1586,6 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
   const pgLog = path.join(tmpDir, "postgres.log");
   const fakeWorkspace = path.join(tmpDir, "fake-workspace");
   const fakeMigrationsDir = path.join(fakeWorkspace, "supabase", "migrations");
-  const archiveDir = path.join(tmpDir, "wp10-7-3d-archive");
   const port = await freePort();
   let started = false;
   const clients = [];
@@ -1986,12 +1986,124 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     await assertAll3TablesIntact("Requirement 1 (default CLI without archive)", preFingerprints);
 
     // -------------------------------------------------------------------------
-    // REQUIREMENT 2: Export verified archive + Post-archive data drift abort (ALL 3 TABLES!)
+    // REQUIREMENT 2: Export verified archive to dirA -> relocate to dirB & delete dirA
+    //                + Hardened negative archive-gate checks (before DDL & ledger write)
+    //                + Post-archive data drift abort (ALL 3 TABLES!)
     // -------------------------------------------------------------------------
-    const exported = await exportWp1073dLegacyGrantsArchive(observer, archiveDir);
-    const verifiedArchive = await loadAndVerifyWp1073dArchiveManifest(exported.manifestPath);
+    const archiveDirA = path.join(tmpDir, "wp10-7-3d-archive-dirA");
+    const archiveDirB = path.join(tmpDir, "wp10-7-3d-archive-dirB-relocated");
+    const exported = await exportWp1073dLegacyGrantsArchive(observer, archiveDirA);
+
+    // Verify restore.sql uses strictly portable relative CSV filenames (zero absolute paths!)
+    const exportedRestoreSql = await readFile(exported.restoreSqlPath, "utf8");
+    assert.equal(
+      exportedRestoreSql.includes(archiveDirA.replaceAll("\\", "/")),
+      false,
+      "restore.sql must NEVER embed absolute export directory path",
+    );
+    assert.equal(
+      exportedRestoreSql.includes(tmpDir.replaceAll("\\", "/")),
+      false,
+      "restore.sql must NEVER embed temporary directory prefix",
+    );
+    assert.equal(
+      /FROM\s+'(?:\/|[a-zA-Z]:|\\)/i.test(exportedRestoreSql),
+      false,
+      "restore.sql \\copy FROM clauses must use relative filenames only",
+    );
+    assert.match(
+      exportedRestoreSql,
+      /\\copy public\.direct_entry_capability_grants .* FROM 'direct_entry_capability_grants\.archive\.csv'/,
+    );
+    assert.match(
+      exportedRestoreSql,
+      /\\copy public\.direct_entry_scope_grants .* FROM 'direct_entry_scope_grants\.archive\.csv'/,
+    );
+    assert.match(
+      exportedRestoreSql,
+      /\\copy public\.work_report_team_leader_capability_grants .* FROM 'work_report_team_leader_capability_grants\.archive\.csv'/,
+    );
+
+    // Relocate entire archive directory from dirA -> dirB and DELETE dirA completely!
+    await cp(archiveDirA, archiveDirB, { recursive: true });
+    await rm(archiveDirA, { recursive: true, force: true });
+    await assert.rejects(() => stat(archiveDirA), (err) => err?.code === "ENOENT");
+
+    const relocatedManifestPath = path.join(archiveDirB, "manifest.json");
+    const relocatedRestoreSqlPath = path.join(archiveDirB, "restore.sql");
+    const verifiedArchive = await loadAndVerifyWp1073dArchiveManifest(relocatedManifestPath);
     assert.equal(verifiedArchive.expectedBundle.row_count, preFingerprints.bundle.row_count);
     assert.equal(verifiedArchive.expectedBundle.canonical_sha256, preFingerprints.bundle.canonical_sha256);
+    assert.equal(path.resolve(verifiedArchive.restoreSqlPath), path.resolve(relocatedRestoreSqlPath));
+    assert.equal(verifiedArchive.restoreSqlSha256, exported.manifest.restore_sql_sha256);
+
+    // Negative archive-gate tests (ALL 3 T0 review cases): real CLI MUST block BEFORE DDL & ledger write!
+    const runNegativeArchiveCase = async (label, mutateDir, expectedPattern) => {
+      const badDir = path.join(tmpDir, `bad-arc-${seq++}`);
+      await cp(archiveDirB, badDir, { recursive: true });
+      try {
+        await mutateDir(badDir);
+        const badManifestPath = path.join(badDir, "manifest.json");
+        const cliRes = runApplyCli(["--wp10-7-3d-archive-manifest", badManifestPath]);
+        assert.notEqual(cliRes.status, 0, `${label}: CLI must fail closed BEFORE DDL`);
+        assert.match(cliRes.stderr, expectedPattern, `${label}: stderr mismatch`);
+        await assertAll3TablesIntact(`Negative archive gate (${label})`, preFingerprints);
+      } finally {
+        await rm(badDir, { recursive: true, force: true });
+      }
+    };
+
+    await runNegativeArchiveCase(
+      "missing catalog_snapshot",
+      async (dir) => {
+        const m = JSON.parse(await readFile(path.join(dir, "manifest.json"), "utf8"));
+        delete m.catalog_snapshot;
+        await writeFile(path.join(dir, "manifest.json"), JSON.stringify(m, null, 2), "utf8");
+      },
+      /catalog_snapshot/i,
+    );
+    await runNegativeArchiveCase(
+      "incomplete catalog_snapshot",
+      async (dir) => {
+        const m = JSON.parse(await readFile(path.join(dir, "manifest.json"), "utf8"));
+        delete m.catalog_snapshot.tables.direct_entry_scope_grants;
+        await writeFile(path.join(dir, "manifest.json"), JSON.stringify(m, null, 2), "utf8");
+      },
+      /catalog_snapshot/i,
+    );
+    await runNegativeArchiveCase(
+      "missing restore_sql_file in manifest",
+      async (dir) => {
+        const m = JSON.parse(await readFile(path.join(dir, "manifest.json"), "utf8"));
+        delete m.restore_sql_file;
+        await writeFile(path.join(dir, "manifest.json"), JSON.stringify(m, null, 2), "utf8");
+      },
+      /restore_sql_file/i,
+    );
+    await runNegativeArchiveCase(
+      "missing restore.sql on disk",
+      async (dir) => {
+        await rm(path.join(dir, "restore.sql"), { force: true });
+      },
+      /ENOENT|restore\.sql/i,
+    );
+    await runNegativeArchiveCase(
+      "tampered restore.sql content on disk",
+      async (dir) => {
+        const prev = await readFile(path.join(dir, "restore.sql"), "utf8");
+        await writeFile(path.join(dir, "restore.sql"), `${prev}-- tampered\n`, "utf8");
+      },
+      /restore\.sql.*digest|checksum|mismatch/i,
+    );
+    await runNegativeArchiveCase(
+      "mismatched restore_sql_sha256 in manifest",
+      async (dir) => {
+        const m = JSON.parse(await readFile(path.join(dir, "manifest.json"), "utf8"));
+        m.restore_sql_sha256 = m.restore_sql_sha256 === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64);
+        await writeFile(path.join(dir, "manifest.json"), JSON.stringify(m, null, 2), "utf8");
+      },
+      /restore\.sql.*digest|checksum|mismatch/i,
+    );
 
     // Drift 2a: direct_entry_capability_grants (+1 row after export)
     const driftCapId = nextUuid();
@@ -2000,7 +2112,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
        values ($1::uuid, $2::uuid, 'worker_edit_history_view', $3::date, true)`,
       [driftCapId, HR_OP.app, todayStr],
     );
-    const driftCapCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const driftCapCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(driftCapCli.status, 0, "Drift on direct_entry_capability_grants MUST abort before DDL");
     assert.match(driftCapCli.stderr, /WP10-7-3D archive parity check failed in transaction:.*direct_entry_capability_grants/);
     await assertAll3TablesIntact("Requirement 2a (cap_grants drift)", null);
@@ -2013,7 +2125,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
        values ($1::uuid, $2::uuid, 'team', $3::uuid, $4::date, false)`,
       [driftScopeId, SUSPENDED_USER.app, TEAM_A, tomorrowStr],
     );
-    const driftScopeCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const driftScopeCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(driftScopeCli.status, 0, "Drift on direct_entry_scope_grants MUST abort before DDL");
     assert.match(driftScopeCli.stderr, /WP10-7-3D archive parity check failed in transaction:.*direct_entry_scope_grants/);
     await assertAll3TablesIntact("Requirement 2b (scope_grants drift)", null);
@@ -2027,7 +2139,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
       "delete from public.work_report_team_leader_capability_grants where leader_assignment_id = $1::uuid and capability = $2",
       [origBridgeRow.leader_assignment_id, origBridgeRow.capability],
     );
-    const driftBridgeCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const driftBridgeCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(driftBridgeCli.status, 0, "Drift on work_report_team_leader_capability_grants MUST abort before DDL");
     assert.match(driftBridgeCli.stderr, /WP10-7-3D archive parity check failed in transaction:.*work_report_team_leader_capability_grants/);
     await assertAll3TablesIntact("Requirement 2c (bridge drift)", null);
@@ -2065,7 +2177,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
       concatPrecheck.blockingDynamicExecuteProcs[0].signature,
       "app_custom.roadmap_l437_concat_probe()",
     );
-    const concatCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const concatCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(concatCli.status, 0, "Roadmap L437 dynamic EXECUTE concat probe MUST block 3D apply");
     assert.match(concatCli.stderr, /non-allowlisted dynamic EXECUTE.*app_custom\.roadmap_l437_concat_probe\(\)/);
     await assertAll3TablesIntact("Requirement 3a (dynamic EXECUTE concat)", preFingerprints);
@@ -2081,7 +2193,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     const fkPrecheck = await runWp1073dPrecheck(observer);
     assert.equal(fkPrecheck.ready, false);
     assert.equal(fkPrecheck.summary.incoming_external_fks, 1);
-    const fkCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const fkCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(fkCli.status, 0, "4th-table incoming FK MUST block 3D apply before DDL");
     assert.match(fkCli.stderr, /incoming foreign key\(s\) from external table\(s\).*app_custom\.sneaky_fk_child/);
     await assertAll3TablesIntact("Requirement 3b (4th-table incoming FK)", preFingerprints);
@@ -2101,7 +2213,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     const deadFnPrecheck = await runWp1073dPrecheck(observer);
     assert.equal(deadFnPrecheck.ready, false);
     assert.equal(deadFnPrecheck.summary.blocking_static_procs, 1);
-    const deadFnCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const deadFnCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(deadFnCli.status, 0, "Dead-function caller MUST block 3D apply before DDL");
     assert.match(deadFnCli.stderr, /app_custom\.probe_dead_fn_caller\(\)/);
     await assertAll3TablesIntact("Requirement 3c (dead-fn caller)", preFingerprints);
@@ -2116,7 +2228,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     assert.equal(unmPrecheck.ready, false);
     assert.equal(unmPrecheck.summary.unmanaged_accounts, 1);
     assert.equal(unmPrecheck.summary.disabled_unmanaged_accounts, 1);
-    const unmCli = runApplyCli(["--wp10-7-3d-archive-manifest", exported.manifestPath]);
+    const unmCli = runApplyCli(["--wp10-7-3d-archive-manifest", relocatedManifestPath]);
     assert.notEqual(unmCli.status, 0, "Disabled authz_managed=false account MUST block 3D apply before DDL");
     assert.match(unmCli.stderr, /authz_managed=false account\(s\) still exist/);
     await assertAll3TablesIntact("Requirement 3d (disabled unmanaged account)", preFingerprints);
@@ -2129,7 +2241,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     // -------------------------------------------------------------------------
     const guardedApplyCli = runApplyCli([
       "--wp10-7-3d-archive-manifest",
-      exported.manifestPath,
+      relocatedManifestPath,
       "--wp10-7-3d-expected-bundle-sha256",
       exported.manifest.bundle.canonical_sha256,
     ]);
@@ -2419,11 +2531,11 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     await mutClient.end();
 
     // -------------------------------------------------------------------------
-    // REQUIREMENT 6: Full 8-Dimension Restore Parity Drill
+    // REQUIREMENT 6: Full 8-Dimension Restore Parity Drill FROM RELOCATED dirB (dirA DELETED!)
     //   (6A) Engine API: restoreWp1073dLegacyGrantsArchive + verifyWp1073dRestoreParity on `postgres`
-    //   (6B) Standalone `psql -f restore.sql` bundle on `wp1073d_postdrop_psql_restore`
+    //   (6B) Standalone `psql -X -v ON_ERROR_STOP=1 -f restore.sql` (cwd: dirB) on cloned post-drop DB
     // -------------------------------------------------------------------------
-    const engineRestore = await restoreWp1073dLegacyGrantsArchive(setup, exported.manifestPath, {
+    const engineRestore = await restoreWp1073dLegacyGrantsArchive(setup, relocatedManifestPath, {
       verifyParity: true,
     });
     assert.equal(engineRestore.restored, true);
@@ -2478,18 +2590,22 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
       "Must restore RLS policy direct_entry_catalog_bootstrap_capability_read",
     );
 
-    // 6B. Standalone `psql -X -v ON_ERROR_STOP=1 -f restore.sql` on cloned post-drop DB!
-    runBin(psqlBin, [
-      `postgresql://postgres@127.0.0.1:${port}/wp1073d_postdrop_psql_restore`,
-      "-X",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-f",
-      exported.restoreSqlPath,
-    ]);
+    // 6B. Standalone `psql -X -v ON_ERROR_STOP=1 -f restore.sql` (cwd: relocated archiveDirB, dirA deleted!)
+    runBin(
+      psqlBin,
+      [
+        `postgresql://postgres@127.0.0.1:${port}/wp1073d_postdrop_psql_restore`,
+        "-X",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        "restore.sql",
+      ],
+      { cwd: archiveDirB },
+    );
     const psqlObserver = await connect(port, "wp10-7-3d-psql-restore-obs", "wp1073d_postdrop_psql_restore");
     clients.push(psqlObserver);
-    const psqlParity = await verifyWp1073dRestoreParity(psqlObserver, exported.manifestPath, {
+    const psqlParity = await verifyWp1073dRestoreParity(psqlObserver, relocatedManifestPath, {
       throwOnMismatch: true,
     });
     assert.equal(psqlParity.ok, true);

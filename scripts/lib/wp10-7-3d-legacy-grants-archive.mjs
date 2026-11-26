@@ -189,6 +189,7 @@ const VALID_BRIDGE_CAPABILITIES = new Set([
   "report_review",
 ]);
 const VALID_BOOLEANS = new Set(["true", "false"]);
+const VALID_CONSTRAINT_TYPES = new Set(["c", "f", "p", "u"]);
 const PG_TABLE_PRIVILEGE_MAP = Object.freeze({
   r: "SELECT",
   a: "INSERT",
@@ -1035,16 +1036,252 @@ function buildPostDataSchemaStatements(catalogSnapshot) {
   return stmts;
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function assertNonEmptyString(value, label) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`WP10-7-3D catalog_snapshot invalid: ${label} must be a non-empty string`);
+  }
+}
+
+function assertStringArray(value, label, { nonEmptyItems = false } = {}) {
+  if (!Array.isArray(value)) {
+    throw new Error(`WP10-7-3D catalog_snapshot invalid: ${label} must be an array`);
+  }
+  for (let i = 0; i < value.length; i += 1) {
+    if (
+      typeof value[i] !== "string" ||
+      (nonEmptyItems && value[i].trim() === "")
+    ) {
+      throw new Error(
+        `WP10-7-3D catalog_snapshot invalid: ${label}[${i}] must be a ${nonEmptyItems ? "non-empty " : ""}string`,
+      );
+    }
+  }
+}
+
+/**
+ * Fail-closed structural validator for the 8-dimension `catalog_snapshot`
+ * embedded in WP10-7-3D archive manifests.
+ */
+export function assertValidWp1073dCatalogSnapshot(catalogSnapshot) {
+  if (!isPlainObject(catalogSnapshot)) {
+    throw new Error(
+      "WP10-7-3D catalog_snapshot invalid: catalog_snapshot must be a non-null object",
+    );
+  }
+  if (!isPlainObject(catalogSnapshot.tables)) {
+    throw new Error(
+      "WP10-7-3D catalog_snapshot invalid: tables must be a non-null object",
+    );
+  }
+
+  for (const tableName of WP10_7_3D_CANONICAL_TABLE_ORDER) {
+    const tbl = catalogSnapshot.tables[tableName];
+    const prefix = `tables.${tableName}`;
+    if (!isPlainObject(tbl)) {
+      throw new Error(
+        `WP10-7-3D catalog_snapshot invalid: missing ${prefix}`,
+      );
+    }
+    assertNonEmptyString(tbl.owner, `${prefix}.owner`);
+    if (typeof tbl.relrowsecurity !== "boolean") {
+      throw new Error(
+        `WP10-7-3D catalog_snapshot invalid: ${prefix}.relrowsecurity must be a boolean`,
+      );
+    }
+    if (typeof tbl.relforcerowsecurity !== "boolean") {
+      throw new Error(
+        `WP10-7-3D catalog_snapshot invalid: ${prefix}.relforcerowsecurity must be a boolean`,
+      );
+    }
+    assertStringArray(tbl.relacl, `${prefix}.relacl`);
+
+    if (!Array.isArray(tbl.cols) || tbl.cols.length === 0) {
+      throw new Error(
+        `WP10-7-3D catalog_snapshot invalid: ${prefix}.cols must be a non-empty array`,
+      );
+    }
+    for (let i = 0; i < tbl.cols.length; i += 1) {
+      const col = tbl.cols[i];
+      const colLabel = `${prefix}.cols[${i}]`;
+      if (!isPlainObject(col)) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${colLabel} must be an object`);
+      }
+      if (!Number.isInteger(col.attnum) || col.attnum <= 0) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${colLabel}.attnum must be a positive integer`);
+      }
+      assertNonEmptyString(col.attname, `${colLabel}.attname`);
+      assertNonEmptyString(col.typ, `${colLabel}.typ`);
+      if (typeof col.attnotnull !== "boolean") {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${colLabel}.attnotnull must be a boolean`);
+      }
+      if (col.defval !== null && typeof col.defval !== "string") {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${colLabel}.defval must be string or null`);
+      }
+    }
+
+    if (!Array.isArray(tbl.cons)) {
+      throw new Error(`WP10-7-3D catalog_snapshot invalid: ${prefix}.cons must be an array`);
+    }
+    let hasPk = false;
+    for (let i = 0; i < tbl.cons.length; i += 1) {
+      const con = tbl.cons[i];
+      const conLabel = `${prefix}.cons[${i}]`;
+      if (!isPlainObject(con)) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${conLabel} must be an object`);
+      }
+      assertNonEmptyString(con.conname, `${conLabel}.conname`);
+      if (typeof con.contype !== "string" || !VALID_CONSTRAINT_TYPES.has(con.contype)) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${conLabel}.contype must be one of c,f,p,u`);
+      }
+      assertNonEmptyString(con.condef, `${conLabel}.condef`);
+      if (con.contype === "p") hasPk = true;
+    }
+    if (!hasPk) {
+      throw new Error(
+        `WP10-7-3D catalog_snapshot invalid: ${prefix}.cons must contain at least one primary key (contype="p")`,
+      );
+    }
+
+    if (!Array.isArray(tbl.idxs)) {
+      throw new Error(`WP10-7-3D catalog_snapshot invalid: ${prefix}.idxs must be an array`);
+    }
+    for (let i = 0; i < tbl.idxs.length; i += 1) {
+      const ix = tbl.idxs[i];
+      const ixLabel = `${prefix}.idxs[${i}]`;
+      if (!isPlainObject(ix)) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${ixLabel} must be an object`);
+      }
+      assertNonEmptyString(ix.idx, `${ixLabel}.idx`);
+      if (typeof ix.is_primary !== "boolean") {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${ixLabel}.is_primary must be a boolean`);
+      }
+      assertNonEmptyString(ix.idxdef, `${ixLabel}.idxdef`);
+    }
+
+    if (!Array.isArray(tbl.trgs)) {
+      throw new Error(`WP10-7-3D catalog_snapshot invalid: ${prefix}.trgs must be an array`);
+    }
+    for (let i = 0; i < tbl.trgs.length; i += 1) {
+      const trg = tbl.trgs[i];
+      const trgLabel = `${prefix}.trgs[${i}]`;
+      if (!isPlainObject(trg)) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${trgLabel} must be an object`);
+      }
+      assertNonEmptyString(trg.tgname, `${trgLabel}.tgname`);
+      assertNonEmptyString(trg.fn_sig, `${trgLabel}.fn_sig`);
+      assertNonEmptyString(trg.tgdef, `${trgLabel}.tgdef`);
+    }
+
+    if (!Array.isArray(tbl.pols)) {
+      throw new Error(`WP10-7-3D catalog_snapshot invalid: ${prefix}.pols must be an array`);
+    }
+    for (let i = 0; i < tbl.pols.length; i += 1) {
+      const pol = tbl.pols[i];
+      const polLabel = `${prefix}.pols[${i}]`;
+      if (!isPlainObject(pol)) {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${polLabel} must be an object`);
+      }
+      assertNonEmptyString(pol.polname, `${polLabel}.polname`);
+      assertNonEmptyString(pol.polcmd, `${polLabel}.polcmd`);
+      if (typeof pol.polpermissive !== "boolean") {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${polLabel}.polpermissive must be a boolean`);
+      }
+      if (pol.qual !== null && typeof pol.qual !== "string") {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${polLabel}.qual must be string or null`);
+      }
+      if (pol.withcheck !== null && typeof pol.withcheck !== "string") {
+        throw new Error(`WP10-7-3D catalog_snapshot invalid: ${polLabel}.withcheck must be string or null`);
+      }
+      assertStringArray(pol.roles, `${polLabel}.roles`, { nonEmptyItems: true });
+    }
+  }
+
+  if (!Array.isArray(catalogSnapshot.external_bridge_triggers)) {
+    throw new Error(
+      "WP10-7-3D catalog_snapshot invalid: external_bridge_triggers must be an array",
+    );
+  }
+  for (let i = 0; i < catalogSnapshot.external_bridge_triggers.length; i += 1) {
+    const ext = catalogSnapshot.external_bridge_triggers[i];
+    const extLabel = `external_bridge_triggers[${i}]`;
+    if (!isPlainObject(ext)) {
+      throw new Error(`WP10-7-3D catalog_snapshot invalid: ${extLabel} must be an object`);
+    }
+    assertNonEmptyString(ext.table_name, `${extLabel}.table_name`);
+    assertNonEmptyString(ext.tgname, `${extLabel}.tgname`);
+    assertNonEmptyString(ext.fn_sig, `${extLabel}.fn_sig`);
+    assertNonEmptyString(ext.tgdef, `${extLabel}.tgdef`);
+  }
+
+  if (!isPlainObject(catalogSnapshot.functions)) {
+    throw new Error(
+      "WP10-7-3D catalog_snapshot invalid: functions must be a non-null object",
+    );
+  }
+  for (const [sig, fnSnap] of Object.entries(catalogSnapshot.functions)) {
+    const fnLabel = `functions[${sig}]`;
+    assertNonEmptyString(sig, "functions key");
+    if (!isPlainObject(fnSnap)) {
+      throw new Error(`WP10-7-3D catalog_snapshot invalid: ${fnLabel} must be an object`);
+    }
+    assertNonEmptyString(fnSnap.canonical_sig, `${fnLabel}.canonical_sig`);
+    assertNonEmptyString(fnSnap.def, `${fnLabel}.def`);
+    assertNonEmptyString(fnSnap.owner, `${fnLabel}.owner`);
+    assertStringArray(fnSnap.proacl, `${fnLabel}.proacl`);
+  }
+
+  return catalogSnapshot;
+}
+
+function assertPortableRelativePath(rawPath, label) {
+  if (typeof rawPath !== "string" || rawPath.trim() === "") {
+    throw new Error(`WP10-7-3D archive missing portable relative path for ${label}`);
+  }
+  if (/['\r\n]/.test(rawPath)) {
+    throw new Error(
+      `WP10-7-3D archive invalid characters in path for ${label}: ${rawPath}`,
+    );
+  }
+  if (
+    path.isAbsolute(rawPath) ||
+    path.posix.isAbsolute(rawPath) ||
+    path.win32.isAbsolute(rawPath) ||
+    /^[a-zA-Z]:/.test(rawPath) ||
+    rawPath.startsWith("\\")
+  ) {
+    throw new Error(
+      `WP10-7-3D archive requires portable relative path (absolute path rejected for ${label}): ${rawPath}`,
+    );
+  }
+  const normalized = rawPath.replaceAll("\\", "/");
+  if (normalized.split("/").some((segment) => segment === "..")) {
+    throw new Error(
+      `WP10-7-3D archive path traversal rejected for ${label}: ${rawPath}`,
+    );
+  }
+  return normalized;
+}
+
 /**
  * Build deterministic standalone `psql` restore SQL bundle that handles all 3 runbook traps:
  *   1. Data load BEFORE attaching triggers (`set_current_on_insert` & `marker_guard`)
  *   2. CSV `\copy ... WITH (FORMAT csv, HEADER true, NULL '', FORCE_NULL (...))`
  *   3. `LANGUAGE sql` callees recreated BEFORE callers
+ *
+ * Enforces portable relative CSV filenames (zero hardcoded absolute paths).
  */
-export function buildWp1073dRestoreSql({ catalogSnapshot, csvPaths }) {
+export function buildWp1073dRestoreSql({ catalogSnapshot, csvPaths = null }) {
+  assertValidWp1073dCatalogSnapshot(catalogSnapshot);
+
   const lines = [
     "-- =============================================================================",
     "-- WP10-7 Slice 3D — Deterministic Legacy Grants Restore Bundle",
+    "-- Portable execution (cwd MUST be the archive directory containing the CSVs):",
+    "--   psql \"$DATABASE_URL\" -X -v ON_ERROR_STOP=1 -f restore.sql",
     "-- Handles all 3 Runbook Traps:",
     "--   1. Loads archived CSVs BEFORE attaching set_current_on_insert / marker_guard triggers",
     "--   2. Uses explicit NULL '' + FORCE_NULL on nullable columns (valid_to, team_id)",
@@ -1065,13 +1302,16 @@ export function buildWp1073dRestoreSql({ catalogSnapshot, csvPaths }) {
   );
   for (const tableName of WP10_7_3D_CANONICAL_TABLE_ORDER) {
     const spec = WP10_7_3D_TABLE_SPECS[tableName];
-    const csvPath = String(csvPaths[tableName]).replaceAll("\\", "/");
+    const csvRelPath = assertPortableRelativePath(
+      csvPaths?.[tableName] ?? spec.csvFile,
+      `csvPaths.${tableName}`,
+    );
     const forceNullClause =
       spec.nullableColumns.length > 0
         ? `, FORCE_NULL (${spec.nullableColumns.join(", ")})`
         : "";
     lines.push(
-      `\\copy public.${tableName} (${spec.tableColumns.join(", ")}) FROM '${csvPath}' WITH (FORMAT csv, HEADER true, NULL ''${forceNullClause})`,
+      `\\copy public.${tableName} (${spec.tableColumns.join(", ")}) FROM '${csvRelPath}' WITH (FORMAT csv, HEADER true, NULL ''${forceNullClause})`,
     );
   }
   lines.push("");
@@ -1208,7 +1448,7 @@ export async function exportWp1073dLegacyGrantsArchive(
     await writeFile(csvPath, csvText, "utf8");
     await writeFile(jsonPath, jsonText, "utf8");
 
-    csvPaths[tableName] = csvPath;
+    csvPaths[tableName] = spec.csvFile;
     files[tableName] = { csvPath, jsonPath };
     tablesManifest[tableName] = {
       row_count: canonical.rowCount,
@@ -1263,6 +1503,17 @@ function resolveArchiveRelativePath(archiveDir, relFile, label) {
   if (typeof relFile !== "string" || relFile.trim() === "") {
     throw new Error(`WP10-7-3D archive manifest missing ${label}`);
   }
+  if (
+    path.isAbsolute(relFile) ||
+    path.posix.isAbsolute(relFile) ||
+    path.win32.isAbsolute(relFile) ||
+    /^[a-zA-Z]:/.test(relFile) ||
+    relFile.startsWith("\\")
+  ) {
+    throw new Error(
+      `WP10-7-3D archive manifest absolute path rejected for ${label}: ${relFile}`,
+    );
+  }
   const resolved = path.resolve(archiveDir, relFile);
   const relCheck = path.relative(archiveDir, resolved);
   if (relCheck.startsWith("..") || path.isAbsolute(relCheck)) {
@@ -1274,9 +1525,67 @@ function resolveArchiveRelativePath(archiveDir, relFile, label) {
 }
 
 /**
- * Normalize expected 3-table + bundle manifest fingerprints fail-closed.
+ * Verify that a loaded archive expectation carries a complete validated
+ * `catalog_snapshot`, relative `restore_sql_file`, valid `restore_sql_sha256`,
+ * and matching verified `restoreSqlSha256`.
  */
-export function normalizeWp1073dArchiveExpectation(expected) {
+export function assertWp1073dVerifiedArchiveArtifacts(expectedArchive) {
+  const manifest = expectedArchive?.manifest ?? expectedArchive;
+  if (!isPlainObject(manifest)) {
+    throw new Error(
+      "WP10-7-3D archive verification failed: missing manifest object",
+    );
+  }
+  assertValidWp1073dCatalogSnapshot(manifest.catalog_snapshot);
+
+  const restoreSqlFile = assertPortableRelativePath(
+    manifest.restore_sql_file,
+    "manifest.restore_sql_file",
+  );
+  if (
+    typeof manifest.restore_sql_sha256 !== "string" ||
+    !SHA256_HEX_RE.test(manifest.restore_sql_sha256)
+  ) {
+    throw new Error(
+      `WP10-7-3D archive manifest invalid restore_sql_sha256: ${String(manifest.restore_sql_sha256)}`,
+    );
+  }
+  const expectedRestoreSha = manifest.restore_sql_sha256.toLowerCase();
+  const verifiedRestoreSha = expectedArchive?.restoreSqlSha256;
+  if (
+    typeof verifiedRestoreSha !== "string" ||
+    !SHA256_HEX_RE.test(verifiedRestoreSha)
+  ) {
+    throw new Error(
+      "WP10-7-3D archive guard requires disk-verified restore.sql SHA-256 (load via loadAndVerifyWp1073dArchiveManifest)",
+    );
+  }
+  if (verifiedRestoreSha.toLowerCase() !== expectedRestoreSha) {
+    throw new Error(
+      `WP10-7-3D archive restore.sql SHA-256 mismatch: verified=${verifiedRestoreSha.toLowerCase()}, manifest=${expectedRestoreSha}`,
+    );
+  }
+
+  return {
+    restoreSqlFile,
+    restoreSqlSha256: expectedRestoreSha,
+    restoreSqlPath:
+      typeof expectedArchive?.restoreSqlPath === "string" &&
+      expectedArchive.restoreSqlPath.trim() !== ""
+        ? expectedArchive.restoreSqlPath
+        : null,
+  };
+}
+
+/**
+ * Normalize expected 3-table + bundle manifest fingerprints fail-closed.
+ * When `requireFullArchiveArtifacts` is true, also enforces validated
+ * `catalog_snapshot`, `restore_sql_file`, `restore_sql_sha256`, and verified `restoreSqlSha256`.
+ */
+export function normalizeWp1073dArchiveExpectation(
+  expected,
+  { requireFullArchiveArtifacts = false } = {},
+) {
   const source = expected?.manifest ?? expected ?? {};
   const rawTables = source.expectedTables ?? source.tables;
   if (!rawTables || typeof rawTables !== "object") {
@@ -1316,12 +1625,23 @@ export function normalizeWp1073dArchiveExpectation(expected) {
       );
     }
   }
+
+  if (requireFullArchiveArtifacts) {
+    const verifiedArtifacts = assertWp1073dVerifiedArchiveArtifacts(expected);
+    return {
+      tables,
+      bundle: computedBundle,
+      ...verifiedArtifacts,
+    };
+  }
+
   return { tables, bundle: computedBundle };
 }
 
 /**
  * Load a WP10-7-3D archive `manifest.json` from disk and verify ALL 3 CSV files,
- * optional JSON files, file SHA-256 digests, and the combined bundle fingerprint.
+ * optional JSON files, file SHA-256 digests, combined bundle fingerprint,
+ * `restore.sql` existence & SHA-256, and complete `catalog_snapshot`.
  */
 export async function loadAndVerifyWp1073dArchiveManifest(manifestPath) {
   if (typeof manifestPath !== "string" || manifestPath.trim() === "") {
@@ -1411,6 +1731,39 @@ export async function loadAndVerifyWp1073dArchiveManifest(manifestPath) {
     parsedTables[tableName] = parsedCsv;
   }
 
+  // Fail-closed restore.sql existence & SHA-256 verification
+  const restoreSqlPath = resolveArchiveRelativePath(
+    archiveDir,
+    manifest.restore_sql_file,
+    "restore_sql_file",
+  );
+  if (
+    typeof manifest.restore_sql_sha256 !== "string" ||
+    !SHA256_HEX_RE.test(manifest.restore_sql_sha256)
+  ) {
+    throw new Error(
+      `WP10-7-3D archive manifest missing or invalid restore_sql_sha256: ${String(manifest.restore_sql_sha256)}`,
+    );
+  }
+  let restoreSqlText;
+  try {
+    restoreSqlText = await readFile(restoreSqlPath, "utf8");
+  } catch (error) {
+    throw new Error(
+      `WP10-7-3D archive missing or unreadable restore.sql (${restoreSqlPath}): ${error.message}`,
+    );
+  }
+  const actualRestoreSqlSha = sha256Utf8(restoreSqlText);
+  const expectedRestoreSqlSha = manifest.restore_sql_sha256.toLowerCase();
+  if (actualRestoreSqlSha !== expectedRestoreSqlSha) {
+    throw new Error(
+      `WP10-7-3D archive restore.sql SHA-256 mismatch: expected ${expectedRestoreSqlSha}, actual ${actualRestoreSqlSha}`,
+    );
+  }
+
+  // Fail-closed catalog_snapshot validation
+  assertValidWp1073dCatalogSnapshot(manifest.catalog_snapshot);
+
   return {
     manifestPath: resolvedManifestPath,
     archiveDir,
@@ -1418,7 +1771,33 @@ export async function loadAndVerifyWp1073dArchiveManifest(manifestPath) {
     expectedTables: normalized.tables,
     expectedBundle: normalized.bundle,
     parsedTables,
+    restoreSqlPath,
+    restoreSqlSha256: actualRestoreSqlSha,
   };
+}
+
+/**
+ * Re-verify an already-resolved `restore.sql` on disk immediately before DDL.
+ */
+export async function verifyWp1073dRestoreSqlOnDisk(
+  restoreSqlPath,
+  expectedRestoreSqlSha256,
+) {
+  let restoreSqlText;
+  try {
+    restoreSqlText = await readFile(restoreSqlPath, "utf8");
+  } catch (error) {
+    throw new Error(
+      `WP10-7-3D archive missing or unreadable restore.sql (${restoreSqlPath}): ${error.message}`,
+    );
+  }
+  const actualSha = sha256Utf8(restoreSqlText);
+  const expectedSha = String(expectedRestoreSqlSha256 ?? "").toLowerCase();
+  if (actualSha !== expectedSha) {
+    throw new Error(
+      `WP10-7-3D archive restore.sql SHA-256 mismatch: expected ${expectedSha}, actual ${actualSha}`,
+    );
+  }
 }
 
 /**
@@ -1859,12 +2238,9 @@ export async function restoreWp1073dLegacyGrantsArchive(
       ? await loadAndVerifyWp1073dArchiveManifest(archiveSource)
       : archiveSource;
 
-  const catalogSnapshot = loaded?.manifest?.catalog_snapshot;
-  if (!catalogSnapshot?.tables) {
-    throw new Error(
-      "WP10-7-3D restore requires a verified archive manifest containing catalog_snapshot",
-    );
-  }
+  const catalogSnapshot = assertValidWp1073dCatalogSnapshot(
+    loaded?.manifest?.catalog_snapshot,
+  );
   const parsedTables = loaded?.parsedTables;
   if (!parsedTables) {
     throw new Error(
@@ -1939,12 +2315,9 @@ export async function verifyWp1073dRestoreParity(
       : expectedArchive;
 
   const normalized = normalizeWp1073dArchiveExpectation(loaded);
-  const expectedSnap = loaded?.manifest?.catalog_snapshot;
-  if (!expectedSnap?.tables) {
-    throw new Error(
-      "WP10-7-3D restore parity check requires manifest.catalog_snapshot",
-    );
-  }
+  const expectedSnap = assertValidWp1073dCatalogSnapshot(
+    loaded?.manifest?.catalog_snapshot,
+  );
 
   const liveFingerprints = await computeWp1073dLiveFingerprintsInTx(client);
   const liveCatalogSnapshot = await captureWp1073dCatalogSnapshot(client);

@@ -2751,3 +2751,212 @@ test("createServiceAttendanceRepository maps SQL errors without leaking details 
     code: "ATTENDANCE_UNAVAILABLE",
   });
 });
+
+test("POST /api/attendance/check-in accepts iOS 9-key and partial 10-key DEVICE_CLOCK_UNVERIFIED payloads, rejects invalid combinations, and enforces cross-format idempotency", async () => {
+  const jpegA = await realJpegA();
+  const shaA = sha256Hex(jpegA);
+  const r2 = createFakeR2Harness();
+  const repo = createInMemoryCheckInRepo();
+  const deps = {
+    resolveSession: activeSession(ACTOR_A),
+    repository: repo.repository,
+    storage: r2.storage,
+    now: () => FIXED_NOW_MS,
+  };
+
+  const buildOfflineCore = (idempotencyKey, overrides = {}) => ({
+    latitude: 21.0285,
+    longitude: 105.8542,
+    accuracy_meters: 12.5,
+    address_hint: "Hà Nội",
+    client_captured_at: "2026-10-21T07:45:00.000+07:00",
+    note: "iOS offline check-in",
+    idempotency_key: idempotencyKey,
+    photo_sha256: shaA,
+    time_source: "DEVICE_CLOCK_UNVERIFIED",
+    ...overrides,
+  });
+
+  const omitKey = (obj, keyToOmit) => {
+    const copy = { ...obj };
+    delete copy[keyToOmit];
+    return copy;
+  };
+
+  // 1. Accepted offline shapes: iOS 9-key, Android 11-key, and partial 10-key payloads
+  const keyIos9 = "f1000000-0000-4000-8000-000000000001";
+  const keyAndroid11 = "f1000000-0000-4000-8000-000000000002";
+  const keyPartialTokenOnly = "f1000000-0000-4000-8000-000000000003";
+  const keyPartialElapsedOnly = "f1000000-0000-4000-8000-000000000004";
+
+  const acceptedPayloads = [
+    {
+      label: "iOS 9-key offline payload",
+      key: keyIos9,
+      meta: buildOfflineCore(keyIos9),
+    },
+    {
+      label: "Android 11-key offline payload",
+      key: keyAndroid11,
+      meta: buildOfflineCore(keyAndroid11, {
+        time_token: null,
+        elapsed_since_anchor_ms: null,
+      }),
+    },
+    {
+      label: "Partial 10-key offline payload (time_token: null, elapsed omitted)",
+      key: keyPartialTokenOnly,
+      meta: buildOfflineCore(keyPartialTokenOnly, { time_token: null }),
+    },
+    {
+      label: "Partial 10-key offline payload (elapsed_since_anchor_ms: null, token omitted)",
+      key: keyPartialElapsedOnly,
+      meta: buildOfflineCore(keyPartialElapsedOnly, { elapsed_since_anchor_ms: null }),
+    },
+  ];
+
+  const createdByKey = new Map();
+  for (const [idx, entry] of acceptedPayloads.entries()) {
+    const res = await postAttendanceCheckIn(
+      buildMultipartCheckInRequest({
+        idempotencyHeader: entry.key,
+        metadataObj: entry.meta,
+        photoBytes: jpegA,
+      }),
+      VALID_ENV,
+      deps,
+    );
+    assert.equal(res.status, 201, entry.label);
+    const body = await res.json();
+    assert.equal(body.ok, true, entry.label);
+    assert.equal(body.checkin.time_source, "DEVICE_CLOCK_UNVERIFIED", entry.label);
+    assert.equal(body.checkin.replayed, false, entry.label);
+    assert.equal(repo.calls[idx].time_source, "DEVICE_CLOCK_UNVERIFIED", entry.label);
+    assert.equal(repo.calls[idx].time_token_digest, null, entry.label);
+    assert.equal(repo.calls[idx].elapsed_since_anchor_ms, null, entry.label);
+    createdByKey.set(entry.key, body.checkin.checkin_id);
+  }
+
+  const putsAfterCreates = r2.commands.filter((c) => c.op === "put").length;
+  const callsAfterCreates = repo.calls.length;
+  const objectsAfterCreates = r2.objects.size;
+
+  // 2. Negative cases: 400 ATTENDANCE_REQUEST_INVALID without touching R2 or DB
+  const keyInvalid = "f1000000-0000-4000-8000-000000000099";
+  const serverMeta = buildMetadata({ idempotency_key: keyInvalid, photo_sha256: shaA });
+  const invalidCases = [
+    {
+      label: "DEVICE_CLOCK_UNVERIFIED with non-empty time_token",
+      meta: buildOfflineCore(keyInvalid, { time_token: "tok" }),
+    },
+    {
+      label: "DEVICE_CLOCK_UNVERIFIED with empty-string time_token",
+      meta: buildOfflineCore(keyInvalid, { time_token: "" }),
+    },
+    {
+      label: "DEVICE_CLOCK_UNVERIFIED with zero elapsed_since_anchor_ms",
+      meta: buildOfflineCore(keyInvalid, { elapsed_since_anchor_ms: 0 }),
+    },
+    {
+      label: "DEVICE_CLOCK_UNVERIFIED with positive elapsed_since_anchor_ms",
+      meta: buildOfflineCore(keyInvalid, { elapsed_since_anchor_ms: 120 }),
+    },
+    {
+      label: "missing core key (note)",
+      meta: omitKey(buildOfflineCore(keyInvalid), "note"),
+    },
+    {
+      label: "extra unknown key (platform)",
+      meta: buildOfflineCore(keyInvalid, { platform: "ios" }),
+    },
+    {
+      label: "SERVER_ANCHORED omitting time_token",
+      meta: omitKey(serverMeta, "time_token"),
+    },
+    {
+      label: "SERVER_ANCHORED omitting elapsed_since_anchor_ms",
+      meta: omitKey(serverMeta, "elapsed_since_anchor_ms"),
+    },
+  ];
+
+  for (const invalidCase of invalidCases) {
+    const res = await postAttendanceCheckIn(
+      buildMultipartCheckInRequest({
+        idempotencyHeader: keyInvalid,
+        metadataObj: invalidCase.meta,
+        photoBytes: jpegA,
+      }),
+      VALID_ENV,
+      deps,
+    );
+    assert.equal(res.status, 400, invalidCase.label);
+    assert.deepEqual(
+      await res.json(),
+      { ok: false, code: "ATTENDANCE_REQUEST_INVALID" },
+      invalidCase.label,
+    );
+  }
+  assert.equal(r2.objects.size, objectsAfterCreates);
+  assert.equal(r2.commands.filter((c) => c.op === "put").length, putsAfterCreates);
+  assert.equal(repo.calls.length, callsAfterCreates);
+
+  // 3. Cross-format idempotency:
+  //    - 9-key iOS -> 11-key Android with same key & fields => 200 replayed: true, same checkin_id
+  const replayAndroidRes = await postAttendanceCheckIn(
+    buildMultipartCheckInRequest({
+      idempotencyHeader: keyIos9,
+      metadataObj: buildOfflineCore(keyIos9, {
+        time_token: null,
+        elapsed_since_anchor_ms: null,
+      }),
+      photoBytes: jpegA,
+    }),
+    VALID_ENV,
+    deps,
+  );
+  assert.equal(replayAndroidRes.status, 200);
+  const replayAndroidBody = await replayAndroidRes.json();
+  assert.equal(replayAndroidBody.ok, true);
+  assert.equal(replayAndroidBody.checkin.replayed, true);
+  assert.equal(replayAndroidBody.checkin.checkin_id, createdByKey.get(keyIos9));
+
+  //    - Reverse: 11-key Android -> 9-key iOS with same key & fields => 200 replayed: true, same checkin_id
+  const replayIosRes = await postAttendanceCheckIn(
+    buildMultipartCheckInRequest({
+      idempotencyHeader: keyAndroid11,
+      metadataObj: buildOfflineCore(keyAndroid11),
+      photoBytes: jpegA,
+    }),
+    VALID_ENV,
+    deps,
+  );
+  assert.equal(replayIosRes.status, 200);
+  const replayIosBody = await replayIosRes.json();
+  assert.equal(replayIosBody.ok, true);
+  assert.equal(replayIosBody.checkin.replayed, true);
+  assert.equal(replayIosBody.checkin.checkin_id, createdByKey.get(keyAndroid11));
+
+  //    - 9-key iOS -> 11-key Android with same key & different note => 409 IDEMPOTENCY_CONFLICT
+  const crossConflictRes = await postAttendanceCheckIn(
+    buildMultipartCheckInRequest({
+      idempotencyHeader: keyIos9,
+      metadataObj: buildOfflineCore(keyIos9, {
+        note: "Changed note on retry",
+        time_token: null,
+        elapsed_since_anchor_ms: null,
+      }),
+      photoBytes: jpegA,
+    }),
+    VALID_ENV,
+    deps,
+  );
+  assert.equal(crossConflictRes.status, 409);
+  assert.deepEqual(await crossConflictRes.json(), {
+    ok: false,
+    code: "IDEMPOTENCY_CONFLICT",
+  });
+
+  assert.equal(r2.objects.size, objectsAfterCreates);
+  assert.equal(r2.commands.filter((c) => c.op === "put").length, putsAfterCreates);
+  assert.equal(repo.calls.length, callsAfterCreates);
+});

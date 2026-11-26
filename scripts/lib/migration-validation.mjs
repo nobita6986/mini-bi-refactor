@@ -3,16 +3,21 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  assertValidWp1073dCatalogSnapshot,
+  assertWp1073dVerifiedArchiveArtifacts,
   isWp1073dMigrationName,
   loadAndVerifyWp1073dArchiveManifest,
   normalizeWp1073dArchiveExpectation,
   verifyWp1073dArchiveInTransaction,
+  verifyWp1073dRestoreSqlOnDisk,
   WP10_7_3D_LOCK_ORDER_SQL,
   WP10_7_3D_MIGRATION_PATTERN,
   WP10_7_3D_MIGRATION_SUFFIX,
 } from "./wp10-7-3d-legacy-grants-archive.mjs";
 
 export {
+  assertValidWp1073dCatalogSnapshot,
+  assertWp1073dVerifiedArchiveArtifacts,
   isWp1073dMigrationName,
   loadAndVerifyWp1073dArchiveManifest,
   verifyWp1073dArchiveInTransaction,
@@ -1722,18 +1727,28 @@ async function assertDirectWp1072bApplyAllowedInTx(client) {
 }
 
 /**
- * Create a `beforeApplyMigration` hook that enforces live 3-table + bundle archive
- * parity under ACCESS EXCLUSIVE locks inside the same transaction immediately before
- * applying any migration matching `*_wp10_7_3d_drop_direct_entry_legacy_grants.sql`.
+ * Create a `beforeApplyMigration` hook that enforces full archive artifact
+ * verification (`catalog_snapshot`, `restore_sql_file`, `restore_sql_sha256`,
+ * disk-verified `restore.sql` SHA-256) and live 3-table + bundle archive
+ * parity under ACCESS EXCLUSIVE locks inside the same transaction immediately
+ * before applying any migration matching `*_wp10_7_3d_drop_direct_entry_legacy_grants.sql`.
  */
 export function createWp1073dArchiveGuard(expectedArchive) {
-  const normalized = normalizeWp1073dArchiveExpectation(expectedArchive);
+  const normalized = normalizeWp1073dArchiveExpectation(expectedArchive, {
+    requireFullArchiveArtifacts: true,
+  });
   return async function verifyWp1073dArchiveBeforeApply({
     client,
     migration,
   }) {
     if (!isWp1073dMigrationName(migration?.name)) {
       return;
+    }
+    if (normalized.restoreSqlPath) {
+      await verifyWp1073dRestoreSqlOnDisk(
+        normalized.restoreSqlPath,
+        normalized.restoreSqlSha256,
+      );
     }
     await verifyWp1073dArchiveInTransaction(client, normalized);
   };
