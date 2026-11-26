@@ -1,6 +1,6 @@
 /**
  * WP10-7 Slice 3C — Retire Legacy Grant Mirror Writes & `not authz_managed` Fallback Reads
- * Real Isolated PostgreSQL 18 Upgrade (0..3B -> #254), Failure Gates, Before/After Parity,
+ * Real Isolated PostgreSQL 18 Upgrade (0..3B -> 3C), Failure Gates, Before/After Parity,
  * Full-Row Legacy Immutability, #47/#42/Ops-Scripts Verification, and Concurrency Barriers.
  *
  * Pure ESM (runs under `node --conditions=react-server --test`) against an isolated
@@ -1287,7 +1287,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
     wp1073cIdx = files.indexOf(WP10_7_3C_MIGRATION_NAME);
     assert.ok(groupsIdx > 0, "PR28 permission groups migration must exist");
     assert.ok(wp1073bIdx > groupsIdx, "WP10-7 Slice 3B migration must exist");
-    assert.ok(wp1073cIdx > wp1073bIdx, "WP10-7 Slice 3C migration #254 must follow #253");
+    assert.ok(wp1073cIdx > wp1073bIdx, "WP10-7 Slice 3C migration must follow 3B");
 
     wp1073cSql = await readFile(path.join(MIGRATION_DIR, WP10_7_3C_MIGRATION_NAME), "utf8");
     wp1073cStrippedSql = stripOuterBeginCommit(wp1073cSql);
@@ -1636,14 +1636,14 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
   });
 
   it("1. Hygiene, pre-3C baseline parity capture, atomic rollback zero drift, pre-DDL block gates, and clean 0..3B -> 3C apply", async () => {
-    // 1a. Hygiene checks on #254
-    assert.equal(wp1073cSql.includes("\r\n"), false, "Migration #254 must use LF line endings");
-    assert.equal(wp1073cSql.includes("@"), false, "Migration #254 must contain zero '@' characters");
-    assert.equal(/\bsavepoint\b/i.test(wp1073cSql), false, "Migration #254 must contain zero SAVEPOINT");
-    assert.equal(/'40001'/.test(wp1073cSql), false, "Migration #254 must contain zero '40001'");
-    assert.equal(/alter\s+default\s+privileges/i.test(wp1073cSql), false, "Migration #254 must contain zero ALTER DEFAULT PRIVILEGES");
+    // 1a. Hygiene checks on 3C migration
+    assert.equal(wp1073cSql.includes("\r\n"), false, "3C migration must use LF line endings");
+    assert.equal(wp1073cSql.includes("@"), false, "3C migration must contain zero '@' characters");
+    assert.equal(/\bsavepoint\b/i.test(wp1073cSql), false, "3C migration must contain zero SAVEPOINT");
+    assert.equal(/'40001'/.test(wp1073cSql), false, "3C migration must contain zero '40001'");
+    assert.equal(/alter\s+default\s+privileges/i.test(wp1073cSql), false, "3C migration must contain zero ALTER DEFAULT PRIVILEGES");
 
-    // 1b. Capture BEFORE_3C parity snapshot (on real 0..253 with mirror ON & legacy fallback intact)
+    // 1b. Capture BEFORE_3C parity snapshot (on real pre-3C schema with mirror ON & legacy fallback intact)
     before3CSnap = await runParityProfilesScenario("BEFORE_3C");
 
     // 1c. Capture pre-3C catalog snapshot & test atomic rollback zero drift
@@ -1656,7 +1656,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
     await setup.query("rollback");
 
     const afterRollbackSnap = await captureTargetFunctionCatalog(observer);
-    assert.deepEqual(afterRollbackSnap, pre3cCatalogSnap, "Atomic rollback of #254 must leave zero catalog drift");
+    assert.deepEqual(afterRollbackSnap, pre3cCatalogSnap, "Atomic rollback of 3C migration must leave zero catalog drift");
     const { rows: migRowsAfterRb } = await observer.query(
       "select 1 from public.schema_migrations where version = $1",
       [WP10_7_3C_MIGRATION_NAME],
@@ -1747,7 +1747,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
     assert.deepEqual(
       post3cCatalogSnap.serviceRoleSignatures,
       pre3cCatalogSnap.serviceRoleSignatures,
-      "Migration #254 must add +0 net service_role RPCs",
+      "3C migration must add +0 net service_role RPCs",
     );
     assert.equal(post3cCatalogSnap.serviceRoleSignatures.length, 310);
 
@@ -2012,7 +2012,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
     assert.deepEqual(after3CSnap.profile5_tl.legacy_after_designate, { cap: 0, scope: 0, bridge: 0 });
     assert.deepEqual(after3CSnap.profile5_tl.legacy_after_reenable, { cap: 0, scope: 0, bridge: 0 });
 
-    // 3f. PR #49 unscoped catalog + catalog bootstrap + fail-closed hypothetical authz_managed=false
+    // 3f. PR #49 unscoped catalog read gate (post-20261127020000), catalog bootstrap & fail-closed authz_managed=false
     const unscopedCatRpc = await serviceRpc(
       "direct_entry_input_catalog",
       [UPLOADER.auth, UPLOADER.app, todayStr],
@@ -2029,15 +2029,180 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
     const bootPlan = await serviceRpc("direct_entry_catalog_bootstrap_plan", [OWNER.auth, OWNER.app], ["uuid", "uuid"]);
     assert.equal(bootPlan.catalog_empty, false);
 
+    const expectUnscopedSqlError = async (authSubject, appUserId, effectiveDate, expectedCode) => {
+      await setup.query("savepoint sp_unscoped_err");
+      try {
+        await assert.rejects(
+          () => setup.query(
+            "select public.direct_entry_input_catalog_unscoped_v42($1::uuid, $2::uuid, $3::date)",
+            [authSubject, appUserId, effectiveDate],
+          ),
+          (err) => err?.code === expectedCode,
+        );
+      } finally {
+        await setup.query("rollback to savepoint sp_unscoped_err; release savepoint sp_unscoped_err");
+      }
+    };
+
+    const assertCatalogReadable = async (actor, expectedOuterProjectIds, label) => {
+      const outerCat = await serviceRpc(
+        "direct_entry_input_catalog",
+        [actor.auth, actor.app, todayStr],
+        ["uuid", "uuid", "date"],
+      );
+      assert.ok(Array.isArray(outerCat.recruiters), `${label}: outer catalog recruiters missing`);
+      assert.ok(Array.isArray(outerCat.banks), `${label}: outer catalog banks missing`);
+      assert.ok(Array.isArray(outerCat.labor_types), `${label}: outer catalog labor_types missing`);
+      assert.deepEqual(
+        (outerCat.projects ?? []).map((p) => p.project_id).sort(),
+        [...expectedOuterProjectIds].sort(),
+        `${label}: outer catalog projects mismatch`,
+      );
+      const { rows: [{ cat: innerCat }] } = await setup.query(
+        "select public.direct_entry_input_catalog_unscoped_v42($1::uuid, $2::uuid, $3::date) as cat",
+        [actor.auth, actor.app, todayStr],
+      );
+      assert.ok(Array.isArray(innerCat.projects) && innerCat.projects.length >= 1, `${label}: inner unscoped catalog projects missing`);
+      assert.ok(Array.isArray(innerCat.recruiters), `${label}: inner unscoped catalog recruiters missing`);
+    };
+
+    const assertCatalogDenied = async (actor, label) => {
+      const res = await tryServiceRpc(
+        "direct_entry_input_catalog",
+        [actor.auth, actor.app, todayStr],
+        ["uuid", "uuid", "date"],
+      );
+      assert.equal(res.ok, false, `${label}: direct_entry_input_catalog must be denied`);
+      assert.equal(res.code, "42501", `${label}: expected 42501`);
+      await expectUnscopedSqlError(actor.auth, actor.app, todayStr, "42501");
+    };
+
     await beginOuterTx();
     try {
+      // Null p_effective_date -> 22023 on both outer and unscoped_v42
+      const nullDateErr = await tryServiceRpc(
+        "direct_entry_input_catalog",
+        [CTX_PM.auth, CTX_PM.app, null],
+        ["uuid", "uuid", "date"],
+      );
+      assert.equal(nullDateErr.ok, false);
+      assert.equal(nullDateErr.code, "22023");
+      await expectUnscopedSqlError(CTX_PM.auth, CTX_PM.app, null, "22023");
+
+      // Seed a second active project PRJ_2 outside CTX_PM scope to verify PM scoping & write restriction
+      const prj2 = "wp10-7-3c-prj-2";
+      await setup.query(
+        `insert into public.direct_entry_projects (project_id, display_name, active, version)
+         values ($1, 'Dự án WP10-7 3C Phụ', true, 1)`,
+        [prj2],
+      );
+      await setup.query(
+        `insert into public.direct_entry_project_team_scopes
+           (project_id, team_id, valid_from, is_current, version, granted_by_user_id)
+         values ($1, $2::uuid, '2026-01-01', true, 1, $3::uuid)`,
+        [prj2, TEAM_B, OWNER.app],
+      );
+
+      // Pure active CTX_PM (0 groups, project_admin on PRJ_1 only) & pure active CTX_TL (0 groups)
+      await assertCatalogReadable(CTX_PM, [PRJ_1], "pure CTX_PM");
+      await setup.query("savepoint sp_pm_create_auth");
+      await assert.rejects(
+        () => setup.query(
+          "select public.direct_entry_create_authority($1::uuid, $2::uuid, $3, $4::date)",
+          [CTX_PM.auth, CTX_PM.app, prj2, todayStr],
+        ),
+        (err) => err?.code === "42501",
+      );
+      await setup.query("rollback to savepoint sp_pm_create_auth; release savepoint sp_pm_create_auth");
+
+      await apiToggleAccount(CTX_PM.app, "disable", "Disable CTX_PM for PR49 catalog gate");
+      await assertCatalogDenied(CTX_PM, "disabled CTX_PM");
+      await apiToggleAccount(CTX_PM.app, "enable", "Re-enable CTX_PM after PR49 catalog gate");
+      await assertCatalogReadable(CTX_PM, [PRJ_1], "re-enabled CTX_PM");
+
+      const tvB = await getTeamVersion(TEAM_B);
+      await serviceRpc(
+        "direct_entry_designate_team_leader",
+        [OWNER.auth, OWNER.app, TEAM_B, CTX_TL.app, todayStr, tvB, "PR49 catalog check CTX_TL", nextKey("pr49_tl")],
+        ["uuid", "uuid", "uuid", "uuid", "date", "integer", "text", "text"],
+      );
+      await assertCatalogReadable(CTX_TL, [], "pure CTX_TL");
+      await apiToggleAccount(CTX_TL.app, "disable", "Disable CTX_TL for PR49 catalog gate");
+      await assertCatalogDenied(CTX_TL, "disabled CTX_TL");
+
+      // Denied real-table actors without catalog capabilities
+      await assertCatalogDenied(HR_OP, "HR_OP");
+      await assertCatalogDenied(PA_USER, "PA_USER");
+
+      // Pure entry_privileged_edit (ALL / OWN / active non-__system_vendor__ CONTEXT_TEAM) & pure Full Admin (0 entry_create/entry_own),
+      // plus rejected scopes (CONTEXT_DEPARTMENT, inactive team, __system_vendor__)
+      const privAll = await seedAccount("pr49.priv.all.3c", "PR49 Priv ALL");
+      const privOwn = await seedAccount("pr49.priv.own.3c", "PR49 Priv OWN");
+      const privTeam = await seedAccount("pr49.priv.team.3c", "PR49 Priv TEAM_A");
+      const pureFullAdmin = await seedAccount("pr49.pure.admin.3c", "PR49 Pure Full Admin");
+      const privDept = await seedAccount("pr49.priv.dept.3c", "PR49 Priv Dept");
+      const privInact = await seedAccount("pr49.priv.inact.3c", "PR49 Priv Inactive Team");
+      const privSysVen = await seedAccount("pr49.priv.sysven.3c", "PR49 Priv System Vendor");
+
+      const inactTeamId = nextUuid();
+      await setup.query(
+        "insert into public.teams (team_id, code, display_name, active, version) values ($1::uuid, 'team_3c_inact', 'Đội 3C Inactive', false, 1)",
+        [inactTeamId],
+      );
+      const { rows: [sysVenRow] } = await setup.query(
+        "select public.direct_entry_system_vendor_team_id() as team_id",
+      );
+      assert.ok(sysVenRow?.team_id, "__system_vendor__ team id must exist");
+
+      await setup.query(`
+        create or replace function public.direct_entry_authz__internal_resolve_effective_grants(p_app_user_id uuid)
+        returns jsonb
+        language sql
+        stable
+        security definer
+        set search_path = pg_catalog, public
+        as $function$
+          select case
+            when not exists (
+              select 1 from public.direct_entry_app_users u
+               where u.app_user_id = p_app_user_id and u.enabled and coalesce(u.authz_managed, false)
+            ) then '[]'::jsonb
+            when p_app_user_id = '${privAll.app}'::uuid then
+              '[{"capability":"entry_privileged_edit","scope_kind":"ALL","scope_id":null}]'::jsonb
+            when p_app_user_id = '${privOwn.app}'::uuid then
+              '[{"capability":"entry_privileged_edit","scope_kind":"OWN","scope_id":null}]'::jsonb
+            when p_app_user_id = '${privTeam.app}'::uuid then
+              '[{"capability":"entry_privileged_edit","scope_kind":"CONTEXT_TEAM","scope_id":"${TEAM_A}"}]'::jsonb
+            when p_app_user_id = '${pureFullAdmin.app}'::uuid then
+              '[{"capability":"entry_admin","scope_kind":"ALL","scope_id":null},{"capability":"recruiter_master_manage","scope_kind":"ALL","scope_id":null},{"capability":"team_master_manage","scope_kind":"ALL","scope_id":null}]'::jsonb
+            when p_app_user_id = '${privDept.app}'::uuid then
+              '[{"capability":"entry_privileged_edit","scope_kind":"CONTEXT_DEPARTMENT","scope_id":"${deptByKey.RECRUITMENT}"}]'::jsonb
+            when p_app_user_id = '${privInact.app}'::uuid then
+              '[{"capability":"entry_privileged_edit","scope_kind":"CONTEXT_TEAM","scope_id":"${inactTeamId}"}]'::jsonb
+            when p_app_user_id = '${privSysVen.app}'::uuid then
+              '[{"capability":"entry_privileged_edit","scope_kind":"CONTEXT_TEAM","scope_id":"${sysVenRow.team_id}"}]'::jsonb
+            else '[]'::jsonb
+          end
+        $function$
+      `);
+
+      await assertCatalogReadable(privAll, [], "pure entry_privileged_edit ALL");
+      await assertCatalogReadable(privOwn, [], "pure entry_privileged_edit OWN");
+      await assertCatalogReadable(privTeam, [], "pure entry_privileged_edit active CONTEXT_TEAM");
+      await assertCatalogReadable(pureFullAdmin, [PRJ_1, prj2], "pure Full Admin");
+
+      await assertCatalogDenied(privDept, "CONTEXT_DEPARTMENT entry_privileged_edit");
+      await assertCatalogDenied(privInact, "inactive team CONTEXT_TEAM entry_privileged_edit");
+      await assertCatalogDenied(privSysVen, "__system_vendor__ CONTEXT_TEAM entry_privileged_edit");
+
+      // Hypothetical authz_managed=false with full legacy grants (incl. entry_privileged_edit) MUST stay fail-closed 42501
       const legacyOnly = await seedAccount("hypo.unmanaged.3c", "Hypothetical Unmanaged", { authzManaged: false, enabled: true });
       await setup.query(
         `insert into public.direct_entry_scope_grants (app_user_id, scope_kind, team_id, valid_from, is_current)
          values ($1::uuid, 'all', null, '2026-01-01', true)`,
         [legacyOnly.app],
       );
-      for (const cap of ["entry_admin", "entry_create", "recruiter_master_manage", "team_master_manage", "report_review"]) {
+      for (const cap of ["entry_admin", "entry_create", "entry_privileged_edit", "recruiter_master_manage", "team_master_manage", "report_review"]) {
         await setup.query(
           `insert into public.direct_entry_capability_grants (app_user_id, capability, valid_from, is_current)
            values ($1::uuid, $2, '2026-01-01', true)`,
@@ -2055,16 +2220,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
         (err) => err?.code === "42501",
       );
 
-      const unCatErr = await tryServiceRpc("direct_entry_input_catalog", [legacyOnly.auth, legacyOnly.app, todayStr], ["uuid", "uuid", "date"]);
-      assert.equal(unCatErr.ok, false);
-      assert.equal(unCatErr.code, "42501");
-
-      await setup.query("savepoint sp_unscoped_err");
-      await assert.rejects(
-        () => setup.query("select public.direct_entry_input_catalog_unscoped_v42($1::uuid, $2::uuid, $3::date)", [legacyOnly.auth, legacyOnly.app, todayStr]),
-        (err) => err?.code === "42501",
-      );
-      await setup.query("rollback to savepoint sp_unscoped_err; release savepoint sp_unscoped_err");
+      await assertCatalogDenied(legacyOnly, "hypothetical authz_managed=false");
 
       const bootErr = await tryServiceRpc("direct_entry_catalog_bootstrap_plan", [legacyOnly.auth, legacyOnly.app], ["uuid", "uuid"]);
       assert.equal(bootErr.ok, false);

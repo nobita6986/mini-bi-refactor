@@ -4520,6 +4520,7 @@ set search_path = pg_catalog, public
 as $function$
 declare
   v_authz_managed boolean := false;
+  v_can_read_catalog boolean := false;
   v_result jsonb;
 begin
   if p_effective_date is null then
@@ -4536,11 +4537,70 @@ begin
     raise exception 'actor capability denied' using errcode = '42501';
   end if;
 
-  if not (
-    public.direct_entry_authz__internal_has_paired_capability(p_app_user_id, 'entry_create', 'OWN', null)
-    or public.direct_entry_authz__internal_has_paired_capability(p_app_user_id, 'entry_create', 'ALL', null)
-    or public.direct_entry_authz__internal_has_paired_capability(p_app_user_id, 'entry_own', 'OWN', null)
-  ) then
+  -- Authorization uses CURRENT actor state only; p_effective_date applies strictly to catalog lookups below.
+  select exists (
+    select 1
+      from pg_catalog.jsonb_to_recordset(
+        public.direct_entry_authz__internal_resolve_effective_grants(p_app_user_id)
+      ) as g(capability text, scope_kind text, scope_id text)
+     where (
+       g.capability = 'entry_create'
+       and g.scope_kind in ('OWN', 'ALL')
+       and nullif(pg_catalog.btrim(coalesce(g.scope_id, '')), '') is null
+     )
+        or (
+       g.capability = 'entry_own'
+       and g.scope_kind = 'OWN'
+       and nullif(pg_catalog.btrim(coalesce(g.scope_id, '')), '') is null
+     )
+        or (
+       g.capability = 'entry_privileged_edit'
+       and (
+         (
+           g.scope_kind in ('ALL', 'OWN')
+           and nullif(pg_catalog.btrim(coalesce(g.scope_id, '')), '') is null
+         )
+         or (
+           g.scope_kind = 'CONTEXT_TEAM'
+           and nullif(pg_catalog.btrim(coalesce(g.scope_id, '')), '') is not null
+           and exists (
+             select 1
+               from public.teams t
+              where t.team_id::text = g.scope_id
+                and t.active
+                and t.code <> '__system_vendor__'
+           )
+         )
+       )
+     )
+  )
+    into v_can_read_catalog;
+
+  if not coalesce(v_can_read_catalog, false) then
+    begin
+      perform public.direct_entry_assert_actor_app_user_admin(p_auth_subject, p_app_user_id);
+      v_can_read_catalog := true;
+    exception
+      when insufficient_privilege then
+        v_can_read_catalog := false;
+    end;
+  end if;
+
+  if not coalesce(v_can_read_catalog, false) then
+    begin
+      v_can_read_catalog :=
+        public.direct_entry_assert_team_leader_current_team(p_auth_subject, p_app_user_id, null) is not null;
+    exception
+      when insufficient_privilege then
+        v_can_read_catalog := false;
+    end;
+  end if;
+
+  if not coalesce(v_can_read_catalog, false) then
+    v_can_read_catalog := coalesce(public.direct_entry_actor_has_project_assignment(p_app_user_id), false);
+  end if;
+
+  if not coalesce(v_can_read_catalog, false) then
     raise exception 'actor capability denied' using errcode = '42501';
   end if;
 
@@ -4631,6 +4691,9 @@ begin
   return v_result;
 end;
 $function$;
+
+revoke all on function public.direct_entry_input_catalog_unscoped_v42(uuid, uuid, date)
+  from public, anon, authenticated, service_role;
 
 do $wp10_7_3c_executor_setup$
 declare
