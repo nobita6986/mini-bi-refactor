@@ -744,3 +744,16 @@ test("scripts/apply-migrations.mjs CLI rejects invalid archive verification flag
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("scripts/apply-migrations.mjs CLI accepts pnpm '--' separator with --offline", () => {
+  const res = spawnSync(
+    process.execPath,
+    ["scripts/apply-migrations.mjs", "--", "--offline"],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  assert.match(res.stdout, /OFFLINE VALIDATION/);
+});

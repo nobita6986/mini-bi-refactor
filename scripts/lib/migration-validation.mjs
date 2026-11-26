@@ -1671,6 +1671,17 @@ export function createWp1072bArchiveGuard(expected) {
   };
 }
 
+async function defaultRunMigrationInTransaction(client, runMigrationBody) {
+  await client.query("begin");
+  try {
+    await runMigrationBody();
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  }
+}
+
 export async function runMigrationApply({
   directory,
   loadConfig,
@@ -1678,6 +1689,7 @@ export async function runMigrationApply({
   log = console.log,
   errorLog = console.error,
   beforeApplyMigration = null,
+  runInTransaction = null,
 }) {
   const migrations = await readMigrations(directory);
   const { databaseUrl, projectRef = "local", usesPooler = false } = await loadConfig();
@@ -1740,26 +1752,27 @@ export async function runMigrationApply({
       continue;
     }
 
+    const txRunner =
+      typeof runInTransaction === "function"
+        ? runInTransaction
+        : defaultRunMigrationInTransaction;
+
     try {
-      await client.query("begin");
-      if (typeof beforeApplyMigration === "function") {
-        await beforeApplyMigration({ client, migration });
-      }
-      await client.query(migrationSqlForTransaction(migration.sql));
-      await client.query(
-        "insert into public.schema_migrations (version, checksum) values ($1, $2)",
-        [migration.name, migration.checksum],
-      );
-      await client.query("commit");
+      await txRunner(client, async () => {
+        if (typeof beforeApplyMigration === "function") {
+          await beforeApplyMigration({ client, migration });
+        }
+        await client.query(migrationSqlForTransaction(migration.sql));
+        await client.query(
+          "insert into public.schema_migrations (version, checksum) values ($1, $2)",
+          [migration.name, migration.checksum],
+        );
+      });
       appliedMap.set(migration.name, migration.checksum);
       log(`APPLY   ${migration.name}`);
       appliedCount += 1;
     } catch (error) {
-      try {
-        await client.query("rollback");
-      } finally {
-        await client.end();
-      }
+      await client.end();
       errorLog(`FAILED  ${migration.name}: ${error.message}`);
       throw error;
     }

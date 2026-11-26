@@ -56,6 +56,9 @@ function parseCliArgs(argv) {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === "--") {
+      continue;
+    }
     if (arg === "--dry-run") {
       if (dryRun) throw new Error("Tham số --dry-run bị lặp lại");
       dryRun = true;
@@ -207,6 +210,16 @@ async function main() {
     createClient: (databaseUrl) =>
       new pg.Client({ connectionString: databaseUrl, ssl: buildSslOptions() }),
     beforeApplyMigration,
+    runInTransaction: async (client, runMigrationBody) => {
+      await client.query("begin");
+      try {
+        await runMigrationBody();
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      }
+    },
   });
 }
 
