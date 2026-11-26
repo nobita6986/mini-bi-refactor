@@ -11198,7 +11198,7 @@ begin
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public'
      and p.prokind in ('f', 'p')
-     and p.proname !~ '^s0_t1c_'
+     and p.proname ~ '^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)'
      and not exists (
        select 1 from pg_catalog.pg_depend d
         where d.classid = 'pg_catalog.pg_proc'::regclass
