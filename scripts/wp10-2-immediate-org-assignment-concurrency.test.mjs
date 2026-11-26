@@ -1021,17 +1021,15 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
       assert.equal(st.deptA, "ACCOUNTING");
       assert.equal(st.tlaRows.find((r) => r.uid === c5a1.metaA.acc.app)?.is_current, true);
       assert.deepEqual(st.tlaRows.find((r) => r.uid === c5a1.metaB.acc.app)?.valid_to, "2026-11-24");
-      assert.equal(st.sgRows.find((r) => r.uid === c5a1.metaA.acc.app)?.is_current, true);
-      assert.equal(st.sgRows.find((r) => r.uid === c5a1.metaB.acc.app)?.is_current, false);
-      assert.equal(st.cgRows.find((r) => r.uid === c5a1.metaA.acc.app)?.is_current, true);
-      assert.equal(st.cgRows.find((r) => r.uid === c5a1.metaB.acc.app)?.is_current, false);
+      assert.equal(st.sgRows.length, 0);
+      assert.equal(st.cgRows.length, 0);
       console.log(
-        `[PG18 C5a Order 1 revoke_first] wait=${JSON.stringify(waitInfo)} winner=REVOKE(v_restore=true, A+SG+CG restored, B closed 0-len) transfer=FULFILLED(deptA=ACCOUNTING)`,
+        `[PG18 C5a Order 1 revoke_first] wait=${JSON.stringify(waitInfo)} winner=REVOKE(v_restore=true, A restored, B closed 0-len, 0 legacy TL grants) transfer=FULFILLED(deptA=ACCOUNTING)`,
       );
     }
 
     {
-      // C5a Order 2: transfer(pA, ACCOUNTING) succeeds upfront, then revoke(B) commits restoring A+SG+CG cleanly!
+      // C5a Order 2: transfer(pA, ACCOUNTING) succeeds upfront, then revoke(B) commits restoring A cleanly!
       const c5a2 = await setupC5Team("5A2");
       await serviceQuery(setup, TRANSFER_MEMBER_SQL, [
         OWNER.auth,
@@ -1053,9 +1051,9 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
       const st = await inspectC5State(c5a2.tId, c5a2.metaA.acc.app, c5a2.metaB.acc.app, c5a2.metaA.person.person_id);
       assert.equal(st.deptA, "ACCOUNTING");
       assert.equal(st.tlaRows.find((r) => r.uid === c5a2.metaA.acc.app)?.is_current, true);
-      assert.equal(st.sgRows.find((r) => r.uid === c5a2.metaA.acc.app)?.is_current, true);
-      assert.equal(st.cgRows.find((r) => r.uid === c5a2.metaA.acc.app)?.is_current, true);
-      console.log("[PG18 C5a Order 2 transfer_first_cross_dept] transfer=FULFILLED(deptA=ACCOUNTING) followUp=REVOKE(v_restore=true, A+SG+CG restored)");
+      assert.equal(st.sgRows.length, 0);
+      assert.equal(st.cgRows.length, 0);
+      console.log("[PG18 C5a Order 2 transfer_first_cross_dept] transfer=FULFILLED(deptA=ACCOUNTING) followUp=REVOKE(v_restore=true, A restored)");
     }
 
     // Genuine 2-order Lock wait on C5a: revoke(B) vs unassign_team_membership(recA)
@@ -1078,8 +1076,8 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         const st = await inspectC5State(c5au.tId, c5au.metaA.acc.app, c5au.metaB.acc.app, c5au.metaA.person.person_id);
         assert.equal(st.tlaRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, true);
         assert.equal(st.tlaRows.find((r) => r.uid === c5au.metaB.acc.app)?.valid_to, "2026-11-24");
-        assert.equal(st.sgRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, true);
-        assert.equal(st.cgRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, true);
+        assert.equal(st.sgRows.length, 0);
+        assert.equal(st.cgRows.length, 0);
         const { rows: memRows } = await observer.query(
           `select team_id::text as team_id, is_current, valid_to
              from public.recruiter_team_memberships
@@ -1090,7 +1088,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         assert.equal(memRows[0].team_id, c5au.tId);
         assert.equal(memRows[0].is_current, true);
         assert.equal(memRows[0].valid_to, null);
-        console.log(`[PG18 C5a-unassign ${order}] wait=${JSON.stringify(waitInfo)} winner=REVOKE(A+SG+CG restored, B closed 0-len) unassign=REJECTED(PT409 active TL, G1 intact, 0 40P01)`);
+        console.log(`[PG18 C5a-unassign ${order}] wait=${JSON.stringify(waitInfo)} winner=REVOKE(A restored, B closed 0-len) unassign=REJECTED(PT409 active TL, G1 intact, 0 40P01)`);
       } else {
         await w1.query(UNASSIGN_TEAM_SQL, unassignParams);
         await beginServiceTx(w2);
@@ -1103,11 +1101,9 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         const st = await inspectC5State(c5au.tId, c5au.metaA.acc.app, c5au.metaB.acc.app, c5au.metaA.person.person_id);
         assert.equal(st.tlaRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, false);
         assert.equal(st.tlaRows.find((r) => r.uid === c5au.metaB.acc.app)?.is_current, false);
-        assert.equal(st.sgRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, false);
-        assert.equal(st.sgRows.find((r) => r.uid === c5au.metaB.acc.app)?.is_current, false);
-        assert.equal(st.cgRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, false);
-        assert.equal(st.cgRows.find((r) => r.uid === c5au.metaB.acc.app)?.is_current, false);
-        console.log(`[PG18 C5a-unassign ${order}] wait=${JSON.stringify(waitInfo)} winner=UNASSIGN revoke=SUCCEEDED(v_restore=false, both A & B+grants closed)`);
+        assert.equal(st.sgRows.length, 0);
+        assert.equal(st.cgRows.length, 0);
+        console.log(`[PG18 C5a-unassign ${order}] wait=${JSON.stringify(waitInfo)} winner=UNASSIGN revoke=SUCCEEDED(v_restore=false, both A & B closed)`);
       }
     }
 
@@ -1160,11 +1156,9 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
       assert.equal(st.deptA, "ACCOUNTING");
       assert.equal(st.tlaRows.find((r) => r.uid === c5b.metaA.acc.app)?.is_current, false);
       assert.equal(st.tlaRows.find((r) => r.uid === c5b.metaB.acc.app)?.is_current, false);
-      assert.equal(st.sgRows.find((r) => r.uid === c5b.metaA.acc.app)?.is_current, false);
-      assert.equal(st.sgRows.find((r) => r.uid === c5b.metaB.acc.app)?.is_current, false);
-      assert.equal(st.cgRows.find((r) => r.uid === c5b.metaA.acc.app)?.is_current, false);
-      assert.equal(st.cgRows.find((r) => r.uid === c5b.metaB.acc.app)?.is_current, false);
-      console.log(`[PG18 C5b pure-API ${order}] wait=${JSON.stringify(waitInfo)} outcome=(deptA=ACCOUNTING, v_restore=false, both A & B + grants closed)`);
+      assert.equal(st.sgRows.length, 0);
+      assert.equal(st.cgRows.length, 0);
+      console.log(`[PG18 C5b pure-API ${order}] wait=${JSON.stringify(waitInfo)} outcome=(deptA=ACCOUNTING, v_restore=false, both A & B closed)`);
     }
 
     // Defensive drift Lock-wait proof (distinct from pure API tests):
@@ -1191,12 +1185,10 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
       assert.equal(st.tlaRows.find((r) => r.uid === c5bDrift.metaA.acc.app)?.is_current, false);
       assert.equal(st.tlaRows.find((r) => r.uid === c5bDrift.metaB.acc.app)?.is_current, false);
       assert.equal(st.tlaRows.find((r) => r.uid === c5bDrift.metaB.acc.app)?.valid_to, "2026-11-24");
-      assert.equal(st.sgRows.find((r) => r.uid === c5bDrift.metaA.acc.app)?.is_current, false);
-      assert.equal(st.sgRows.find((r) => r.uid === c5bDrift.metaB.acc.app)?.is_current, false);
-      assert.equal(st.cgRows.find((r) => r.uid === c5bDrift.metaA.acc.app)?.is_current, false);
-      assert.equal(st.cgRows.find((r) => r.uid === c5bDrift.metaB.acc.app)?.is_current, false);
+      assert.equal(st.sgRows.length, 0);
+      assert.equal(st.cgRows.length, 0);
       console.log(
-        `[PG18 C5b defensive-drift] wait=${JSON.stringify(waitInfo)} outcome=REVOKE_SUCCEEDED(v_restore=false, A+SG+CG stay closed, B closed 0-len+grants closed)`,
+        `[PG18 C5b defensive-drift] wait=${JSON.stringify(waitInfo)} outcome=REVOKE_SUCCEEDED(v_restore=false, A stays closed, B closed 0-len)`,
       );
     }
 
@@ -1333,13 +1325,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
           where team_id = $1::uuid and scope_kind = 'team' and is_current = true`,
         [pair.teamId],
       );
-      assert.equal(sgRows.length, 1);
-      assert.deepEqual(sgRows[0], {
-        uid: pair.B.app,
-        scope_kind: "team",
-        tid: pair.teamId,
-        is_current: true,
-      });
+      assert.equal(sgRows.length, 0);
 
       const { rows: cgRows } = await observer.query(
         `select app_user_id::text as uid, capability, is_current
@@ -1347,12 +1333,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
           where app_user_id = $1::uuid and capability = 'team_manager_assign' and is_current = true`,
         [pair.B.app],
       );
-      assert.equal(cgRows.length, 1);
-      assert.deepEqual(cgRows[0], {
-        uid: pair.B.app,
-        capability: "team_manager_assign",
-        is_current: true,
-      });
+      assert.equal(cgRows.length, 0);
     }
 
     // P2 Barrier 1 (Direct RPC-vs-RPC race, A.app < B.app)
@@ -1895,8 +1876,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
           order by created_at asc`,
         [teamF01Link],
       );
-      assert.equal(sgF01Rows.find((r) => r.uid === adminA.acc.app)?.is_current, false);
-      assert.equal(sgF01Rows.find((r) => r.uid === B.app)?.is_current, true);
+      assert.equal(sgF01Rows.length, 0);
       const { rows: cgF01Rows } = await observer.query(
         `select app_user_id::text as uid, is_current
            from public.direct_entry_capability_grants
@@ -1904,8 +1884,7 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
           order by created_at asc`,
         [[adminA.acc.app, B.app]],
       );
-      assert.equal(cgF01Rows.find((r) => r.uid === adminA.acc.app)?.is_current, false);
-      assert.equal(cgF01Rows.find((r) => r.uid === B.app)?.is_current, true);
+      assert.equal(cgF01Rows.length, 0);
 
       const { rows: bLinksPost } = await observer.query(
         `select recruiter_id::text as rid, verified, is_current

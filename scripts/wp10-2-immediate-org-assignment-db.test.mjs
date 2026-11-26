@@ -1150,13 +1150,10 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
     const rowBValid = d3Valid.assigns.find((a) => a.uid === d3Valid.userB.app);
     assert.deepEqual(rowAValid, { uid: d3Valid.userA.app, valid_from: "2026-11-23", valid_to: null, is_current: true });
     assert.deepEqual(rowBValid, { uid: d3Valid.userB.app, valid_from: "2026-11-24", valid_to: "2026-11-24", is_current: false });
-    assert.equal(d3Valid.scopeGrants.find((g) => g.uid === d3Valid.userA.app)?.is_current, true);
-    assert.equal(d3Valid.scopeGrants.find((g) => g.uid === d3Valid.userA.app)?.valid_to, null);
-    assert.equal(d3Valid.scopeGrants.find((g) => g.uid === d3Valid.userB.app)?.is_current, false);
-    assert.equal(d3Valid.capGrants.find((g) => g.uid === d3Valid.userA.app)?.is_current, true);
-    assert.equal(d3Valid.capGrants.find((g) => g.uid === d3Valid.userB.app)?.is_current, false);
+    assert.equal(d3Valid.scopeGrants.length, 0);
+    assert.equal(d3Valid.capGrants.length, 0);
 
-    // D3 Branch 2: A's Org drifted (INACTIVE) -> B still closes with 0-length cancel marker, A & grants STAY CLOSED!
+    // D3 Branch 2: A's Org drifted (INACTIVE) -> B still closes with 0-length cancel marker, A stays closed with 0 legacy grants!
     const d3Drifted = await setupLeaderPairForD3("DRIFT", true);
     assert.equal(d3Drifted.revokeRes.valid_from, "2026-11-24");
     assert.equal(d3Drifted.revokeRes.valid_to, "2026-11-24");
@@ -1174,11 +1171,8 @@ test("WP10-2 DB: ACL postconditions, bidirectional guards, custom dept (system_k
       valid_to: "2026-11-24",
       is_current: false,
     });
-    assert.equal(d3Drifted.scopeGrants.find((g) => g.uid === d3Drifted.userA.app)?.is_current, false);
-    assert.equal(d3Drifted.scopeGrants.find((g) => g.uid === d3Drifted.userA.app)?.valid_to, "2026-11-24");
-    assert.equal(d3Drifted.scopeGrants.find((g) => g.uid === d3Drifted.userB.app)?.is_current, false);
-    assert.equal(d3Drifted.capGrants.find((g) => g.uid === d3Drifted.userA.app)?.is_current, false);
-    assert.equal(d3Drifted.capGrants.find((g) => g.uid === d3Drifted.userB.app)?.is_current, false);
+    assert.equal(d3Drifted.scopeGrants.length, 0);
+    assert.equal(d3Drifted.capGrants.length, 0);
   } finally {
     await db.close();
   }
