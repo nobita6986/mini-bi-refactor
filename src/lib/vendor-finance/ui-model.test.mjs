@@ -94,6 +94,7 @@ import {
   buildFinalizeEvidenceUrl,
   buildFundSharedAdvanceRequest,
   buildFundVendorSharedAdvanceUrl,
+  buildMonthlyReportExportUrl,
   buildMonthlyReportUrl,
   buildOpeningApplyRequest,
   buildOpeningApplyUrl,
@@ -124,6 +125,7 @@ import {
   computeReconciliationDifferencePreview,
   decideVendorFinancePageAccess,
   formatAbsoluteVndMinor,
+  formatAggregatedVndMinor,
   formatSignedVndDelta,
   formatVendorBalancePresentation,
   formatVietnamDateLabel,
@@ -142,6 +144,7 @@ import {
   parseApplySharedAdvanceOffsetEnvelope,
   parseAssignGlobalRoleEnvelope,
   parseAssignProjectAccountantEnvelope,
+  parseCanonicalSignedMoneyBigInt,
   parseClassifySubLedgerEnvelope,
   parseCreateReconciliationEnvelope,
   parseEndGlobalRoleEnvelope,
@@ -169,7 +172,9 @@ import {
   reloadLedgerForAmbiguousRetryVerification,
   resolveActiveProjectSubLedgerForRecord,
   resolveVendorFinanceExportFilename,
+  resolveVendorFinanceMonthlyReportExportFilename,
   shouldCommitSharedAdvanceLoadMore,
+  summarizeMonthlyReportOpeningTotals,
   unlockRecordEntryDialogAfterLedgerReconciliation,
   uploadEvidenceForCommittedTarget,
   validateEvidenceFilePreflight,
@@ -801,6 +806,32 @@ test("URL and request builders round-trip cleanly through canonical VFIN-02 back
       contract_type: "SEASONAL",
     },
   });
+
+  const reportExportUrl = buildMonthlyReportExportUrl({
+    month: "2026-11",
+    project_id: PROJECT_ID,
+    accountant_ref: ACCOUNTANT_A_REF,
+    vendor_id: "VND-001",
+    contract_type: "OFFICIAL",
+  });
+  assert.equal(
+    reportExportUrl.startsWith("/api/vendor-finance/reports/monthly/export?"),
+    true,
+  );
+  assert.deepEqual(parseMonthlyReportQuery(new URL(`http://localhost${reportExportUrl}`)), {
+    ok: true,
+    value: {
+      month: "2026-11",
+      project_id: PROJECT_ID,
+      accountant_ref: ACCOUNTANT_A_REF,
+      vendor_id: "VND-001",
+      contract_type: "OFFICIAL",
+    },
+  });
+  assert.equal(
+    buildMonthlyReportExportUrl({ month: "2026-11", contract_type: "all" }),
+    "/api/vendor-finance/reports/monthly/export?month=2026-11",
+  );
 
   assert.equal(buildVendorFinanceContextUrl(), "/api/vendor-finance/context");
   assert.equal(buildVendorDetailUrl("VND-001"), "/api/vendor-finance/vendors/VND-001");
@@ -2822,6 +2853,24 @@ test("VFIN-04: Shared advance URL/request builders, redaction-aware envelope par
     resolveVendorFinanceExportFilename(null, "2026-10-25"),
     "danh-sach-vendor-cong-no-2026-10-25.xlsx",
   );
+  assert.equal(
+    resolveVendorFinanceMonthlyReportExportFilename(
+      'attachment; filename="bao-cao-cong-no-vendor-2026-11.xlsx"',
+      "2026-10",
+    ),
+    "bao-cao-cong-no-vendor-2026-11.xlsx",
+  );
+  assert.equal(
+    resolveVendorFinanceMonthlyReportExportFilename(
+      'attachment; filename="../secret.xlsx"',
+      "2026-11",
+    ),
+    "bao-cao-cong-no-vendor-2026-11.xlsx",
+  );
+  assert.equal(
+    resolveVendorFinanceMonthlyReportExportFilename(null, "2026-11"),
+    "bao-cao-cong-no-vendor-2026-11.xlsx",
+  );
 
   // 6. VFIN-05 Combined Payment + Shared Advance Offset request builder & envelope parser
   assert.equal(
@@ -3431,4 +3480,149 @@ test("VFIN-04: Shared advance URL/request builders, redaction-aware envelope par
   );
   assert.equal(unlockedAfterReconcile.next_state.amount_input, "");
   assert.equal(unlockedAfterReconcile.next_state.offset_amount_input, "");
+});
+
+test("summarizeMonthlyReportOpeningTotals aggregates non-netted effective openings, REQ Nov case, flips from negative carry-in, BigInt > PostgreSQL int8 bounds, and empty/zero cases", () => {
+  // 1. REQ Nov UAT benchmark (Mở nợ 5.339.360.371 ₫ + Tồn trước tháng 1.240.355.660 ₫ = Đầu kỳ & mở sổ 6.579.716.031 ₫)
+  const reqOpeningTotals = summarizeMonthlyReportOpeningTotals([
+    {
+      balance_before_month_minor: "1240355660",
+      opening_payable_in_month_minor: "4000000000",
+      opening_advance_in_month_minor: "0",
+    },
+    {
+      balance_before_month_minor: "0",
+      opening_payable_in_month_minor: "1339360371",
+      opening_advance_in_month_minor: "0",
+    },
+  ]);
+  assert.deepEqual(reqOpeningTotals, {
+    opening_payable_minor: "6579716031",
+    opening_advance_minor: "0",
+    opening_payable_in_month_minor: "5339360371",
+    opening_advance_in_month_minor: "0",
+    has_in_month_opening: true,
+  });
+  assert.equal(formatAggregatedVndMinor(reqOpeningTotals.opening_payable_minor), "6.579.716.031 ₫");
+  assert.equal(
+    formatAggregatedVndMinor(reqOpeningTotals.opening_payable_in_month_minor),
+    "5.339.360.371 ₫",
+  );
+
+  // 2. Mixed payable + advance books (strictly non-netted) plus negative carry-in flipped positive by larger in-month opening payable
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        // -300_000 + 1_000_000 - 0 = +700_000 (payable)
+        balance_before_month_minor: "-300000",
+        opening_payable_in_month_minor: "1000000",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        // +500_000 + 0 - 0 = +500_000 (payable)
+        balance_before_month_minor: "500000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        // -200_000 + 0 - 400_000 = -600_000 (advance)
+        balance_before_month_minor: "-200000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "400000",
+      },
+    ]),
+    {
+      opening_payable_minor: "1200000",
+      opening_advance_minor: "600000",
+      opening_payable_in_month_minor: "1000000",
+      opening_advance_in_month_minor: "400000",
+      has_in_month_opening: true,
+    },
+  );
+
+  // 3. Large integers above Number.MAX_SAFE_INTEGER and above PostgreSQL int8 max when summed across valid ledgers
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        balance_before_month_minor: "9007199254740993",
+        opening_payable_in_month_minor: "1000000000000001",
+        opening_advance_in_month_minor: "0",
+      },
+    ]),
+    {
+      opening_payable_minor: "10007199254740994",
+      opening_advance_minor: "0",
+      opening_payable_in_month_minor: "1000000000000001",
+      opening_advance_in_month_minor: "0",
+      has_in_month_opening: true,
+    },
+  );
+
+  // Two valid sub-ledgers each with 4700000000000000000 -> total 9400000000000000000 (> int8 max)
+  const aboveInt8Totals = summarizeMonthlyReportOpeningTotals([
+    {
+      balance_before_month_minor: "4700000000000000000",
+      opening_payable_in_month_minor: "0",
+      opening_advance_in_month_minor: "0",
+    },
+    {
+      balance_before_month_minor: "4700000000000000000",
+      opening_payable_in_month_minor: "0",
+      opening_advance_in_month_minor: "0",
+    },
+  ]);
+  assert.equal(aboveInt8Totals.opening_payable_minor, "9400000000000000000");
+  assert.equal(
+    formatAggregatedVndMinor(aboveInt8Totals.opening_payable_minor),
+    "9.400.000.000.000.000.000 ₫",
+  );
+  // Single-entry int8 formatters and parsers MUST keep rejecting sums beyond PostgreSQL bigint
+  assert.equal(formatVndMinor(aboveInt8Totals.opening_payable_minor), "—");
+  assert.equal(parseCanonicalSignedMoneyBigInt(aboveInt8Totals.opening_payable_minor), null);
+
+  // 20-digit sum, negative unbounded aggregate, and invalid inputs
+  assert.equal(
+    formatAggregatedVndMinor("14100000000000000000"),
+    "14.100.000.000.000.000.000 ₫",
+  );
+  assert.equal(
+    formatAggregatedVndMinor("-9400000000000000000"),
+    "-9.400.000.000.000.000.000 ₫",
+  );
+  assert.equal(formatAggregatedVndMinor("0"), "0 ₫");
+  assert.equal(formatAggregatedVndMinor("-0"), "—");
+  assert.equal(formatAggregatedVndMinor("100.5"), "—");
+  assert.equal(formatAggregatedVndMinor("0123"), "—");
+
+  // 4. Zero in-month opening (carried balances only) -> has_in_month_opening: false
+  assert.deepEqual(
+    summarizeMonthlyReportOpeningTotals([
+      {
+        balance_before_month_minor: "1500000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "0",
+      },
+      {
+        balance_before_month_minor: "-250000",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "0",
+      },
+    ]),
+    {
+      opening_payable_minor: "1500000",
+      opening_advance_minor: "250000",
+      opening_payable_in_month_minor: "0",
+      opening_advance_in_month_minor: "0",
+      has_in_month_opening: false,
+    },
+  );
+
+  // 5. Empty rows array
+  assert.deepEqual(summarizeMonthlyReportOpeningTotals([]), {
+    opening_payable_minor: "0",
+    opening_advance_minor: "0",
+    opening_payable_in_month_minor: "0",
+    opening_advance_in_month_minor: "0",
+    has_in_month_opening: false,
+  });
 });

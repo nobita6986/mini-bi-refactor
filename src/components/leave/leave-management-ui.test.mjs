@@ -10,6 +10,10 @@ const adminProfilesTableCss = readFileSync(
   new URL("./leave-admin-profiles-table.module.css", import.meta.url),
   "utf8",
 );
+const monthlyReportTableCss = readFileSync(
+  new URL("./leave-monthly-report-table.module.css", import.meta.url),
+  "utf8",
+);
 const pageSource = readFileSync(
   new URL("../../app/leave/page.tsx", import.meta.url),
   "utf8",
@@ -195,4 +199,44 @@ test("T1A UI Polish Task 1: leave-admin-profiles-table adds +1px top and top-rig
   assert.match(adminProfilesTableCss, /border-top-color:\s*inherit/);
   assert.match(adminProfilesTableCss, /border-right-color:\s*inherit/);
   assert.match(adminProfilesTableCss, /pointer-events:\s*none/);
+});
+
+test("Hotfix 2: leave-monthly-report-table regroups into 4 balanced columns, uses formatIsoDayOfMonth for monthly chips while preserving full dd/MM/yyyy tenure dates, and scopes responsive CSS", () => {
+  assert.match(
+    workspaceSource,
+    /import monthlyReportTableStyles from "\.\/leave-monthly-report-table\.module\.css";/,
+  );
+  assert.match(
+    workspaceSource,
+    /<DataTableContainer\s+dataTestId="leave-monthly-report-table"\s+className=\{monthlyReportTableStyles\.leaveMonthlyReportTable\}/,
+  );
+
+  const reportTableStart = workspaceSource.indexOf('dataTestId="leave-monthly-report-table"');
+  const reportTableEnd = workspaceSource.indexOf("</DataTableContainer>", reportTableStart);
+  assert.ok(reportTableStart > 0 && reportTableEnd > reportTableStart);
+  const reportTableBlock = workspaceSource.slice(reportTableStart, reportTableEnd);
+
+  // 4 balanced column headers
+  const thMatches = reportTableBlock.match(/<th className=\{DATA_TABLE_TH_CLASS\}>/g) ?? [];
+  assert.equal(thMatches.length, 4);
+  assert.ok(reportTableBlock.includes("Nhân sự &amp; Mốc làm việc"));
+  assert.ok(reportTableBlock.includes("Chấm công trong tháng"));
+  assert.ok(reportTableBlock.includes("Chi tiết ngày nghỉ, loại nghỉ &amp; buổi nghỉ"));
+  assert.ok(reportTableBlock.includes("Quỹ phép năm"));
+
+  // Preserve full dd/MM/yyyy dates for tenure milestones while using formatIsoDayOfMonth for monthly chips
+  assert.ok(reportTableBlock.includes("formatIsoDateVi(row.work_start_date)"));
+  assert.ok(reportTableBlock.includes("formatIsoDateVi(row.official_effective_date)"));
+  assert.ok(reportTableBlock.includes("formatIsoDayOfMonth(isoDate)"));
+  assert.ok(reportTableBlock.includes("title={formatIsoDateVi(isoDate)}"));
+  assert.ok(reportTableBlock.includes("formatIsoDayOfMonth(ld.leave_date)"));
+  assert.ok(reportTableBlock.includes("title={formatIsoDateVi(ld.leave_date)}"));
+  assert.ok(reportTableBlock.includes("Chờ duyệt (Tháng)"));
+
+  // Scoped CSS rules for desktop fixed 4-col layout and mobile vertical card stacking
+  assert.match(monthlyReportTableCss, /@media\s*\(\s*min-width:\s*768px\s*\)/);
+  assert.match(monthlyReportTableCss, /\.leaveMonthlyReportTable\s+table\s*\{/);
+  assert.match(monthlyReportTableCss, /table-layout:\s*fixed/);
+  assert.match(monthlyReportTableCss, /@media\s*\(\s*max-width:\s*767px\s*\)/);
+  assert.match(monthlyReportTableCss, /flex-direction:\s*column/);
 });

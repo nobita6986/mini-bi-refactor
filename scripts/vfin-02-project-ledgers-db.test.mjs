@@ -51,6 +51,7 @@ import {
   computeReverseEntryFingerprint,
 } from "../src/lib/vendor-finance/vendor-finance-contract.ts";
 import { createVendorFinanceRepository } from "../src/lib/vendor-finance/vendor-finance-repository.ts";
+import { parseMonthlyReportEnvelope } from "../src/lib/vendor-finance/ui-model.ts";
 import {
   VFIN_02_PROJECT_LEDGERS_MIGRATION_NAME,
   VFIN_03_CONTRACT_TYPE_LEDGERS_MIGRATION_NAME,
@@ -2858,6 +2859,506 @@ test("(#3) Full VFIN-03 acceptance: contract-type sub-ledgers (SEASONAL vs OFFIC
       sameBatchAfterSecond[0].contract_type,
       "SEASONAL",
       "Homogeneous legacy opening batch must update to SEASONAL once all entries in the batch are SEASONAL",
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test("(#4) Monthly Debt Report obligations_in_month_minor reconciliation: active in-month obligations (> 0), valid business zero (0), and PROJECT_SCOPED accountant authority", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(
+      "create role anon; create role authenticated; create role service_role;" +
+        " create schema auth; create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);",
+    );
+    const allNames = (await readdir(MIGRATION_DIR))
+      .filter((n) => n.endsWith(".sql"))
+      .sort();
+    for (const name of allNames) {
+      await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+    }
+
+    const repo = createPgliteVfinRepo(db);
+
+    await db.query(
+      `insert into public.teams (team_id, code, display_name, active)
+       values ('99500000-0000-4000-8000-00000000000f'::uuid, '__system_vendor__', 'System Vendor Internal', true)
+       on conflict (code) do nothing`,
+    );
+
+    for (const actor of [
+      { ...FULL_ADMIN, email: "fulladmin.m4@hrpartner.vn" },
+      { ...ACCT_A, email: "accta.m4@hrpartner.vn" },
+      { ...ACCT_B, email: "acctb.m4@hrpartner.vn" },
+      { ...BOD_VIEWER, email: "bodviewer.m4@hrpartner.vn" },
+    ]) {
+      await db.query("insert into auth.users (id, email) values ($1::uuid, $2)", [
+        actor.auth,
+        actor.email,
+      ]);
+      await db.query(
+        `insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, display_name)
+         values ($1::uuid, $2::uuid, true, $3)`,
+        [actor.app, actor.auth, actor.name],
+      );
+    }
+
+    // Grant FULL_ADMIN via canonical SYSTEM_ADMIN permission group
+    const {
+      rows: [sysAdminGrp],
+    } = await db.query(
+      `select group_id::text as id from public.authz_user_groups where code = 'SYSTEM_ADMIN' limit 1`,
+    );
+    assert.ok(sysAdminGrp?.id, "SYSTEM_ADMIN group must exist");
+    await db.query(
+      `insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason, assigned_by_app_user_id)
+       values ($1::uuid, $2::uuid, 'ADMIN_ASSIGNMENT', 'Seed FULL_ADMIN for monthly report test', $2::uuid)`,
+      [sysAdminGrp.id, FULL_ADMIN.app],
+    );
+
+    // Grant BOD_VIEWER via a canonical group with vendor_finance/GLOBAL_VIEWER module role
+    const {
+      rows: [bodDept],
+    } = await db.query(
+      `select department_id::text as id from public.organization_departments where system_key = 'MANAGEMENT_BOD' limit 1`,
+    );
+    const {
+      rows: [acctDept],
+    } = await db.query(
+      `select department_id::text as id from public.organization_departments where system_key = 'ACCOUNTING' limit 1`,
+    );
+    assert.ok(bodDept?.id && acctDept?.id);
+
+    const {
+      rows: [bodViewerGrp],
+    } = await db.query(
+      `insert into public.authz_user_groups (code, name, description, department_id, team_id, is_system_admin, active)
+       values ('TEST_BOD_VFIN_VIEWER', 'BoD Viewer Test', 'Test group for monthly report', $1::uuid, null, false, true)
+       returning group_id::text as id`,
+      [bodDept.id],
+    );
+    await db.query(
+      `insert into public.authz_user_group_module_roles (group_id, module_code, role_code, reason, granted_by_app_user_id)
+       values ($1::uuid, 'vendor_finance', 'GLOBAL_VIEWER', 'Seed GLOBAL_VIEWER for test', $2::uuid)`,
+      [bodViewerGrp.id, FULL_ADMIN.app],
+    );
+    await db.query(
+      `insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason, assigned_by_app_user_id)
+       values ($1::uuid, $2::uuid, 'ADMIN_ASSIGNMENT', 'Assign BOD_VIEWER', $3::uuid)`,
+      [bodViewerGrp.id, BOD_VIEWER.app, FULL_ADMIN.app],
+    );
+
+    // Seed ACCT_A and ACCT_B as active ACCOUNTING department persons
+    for (const [idx, acct] of [ACCT_A, ACCT_B].entries()) {
+      const {
+        rows: [uRow],
+      } = await db.query(
+        `select version from public.direct_entry_app_users where app_user_id = $1::uuid`,
+        [acct.app],
+      );
+      const createKey = nextUuid();
+      await db.query(
+        `select public.org_department_create_person_admin(
+           $1::uuid, $2::uuid, $3::text, $4::text, '2026-01-01'::date,
+           $5::uuid, $6::uuid, $7::integer, null::uuid, 'Seed accounting person', $8::uuid, $9::text
+         )`,
+        [
+          FULL_ADMIN.auth,
+          FULL_ADMIN.app,
+          `M4-ACC-${idx + 1}`,
+          acct.name,
+          acctDept.id,
+          acct.app,
+          uRow.version,
+          createKey,
+          "a".repeat(64),
+        ],
+      );
+    }
+
+    // Seed projects and vendors
+    await db.query(
+      `insert into public.direct_entry_projects (project_id, display_name, active, version)
+       values ($1, 'Dự Án Miền Bắc (PRJ-1)', true, 1),
+              ($2, 'Dự Án Miền Nam (PRJ-2)', true, 1)`,
+      [PRJ_1, PRJ_2],
+    );
+
+    for (const [vid, vname] of [
+      ["VND_M4_ALPHA", "Công ty Alpha Phát Sinh"],
+      ["VND_M4_BETA", "Công ty Beta Điều Chỉnh"],
+      ["VND_M4_GAMMA", "Công ty Gamma Đầu Kỳ & Thanh Toán"],
+      ["VND_M4_DELTA", "Công ty Delta Kỳ 10 Không Phát Sinh"],
+    ]) {
+      await db.query(
+        `select public.direct_entry_create_vendor(
+           $1::uuid, $2::uuid, 0, $3::text, $4::text, '2026-01-01'::date, 'Tạo NCC test M4', $5::text
+         )`,
+        [FULL_ADMIN.auth, FULL_ADMIN.app, vid, vname, nextUuid()],
+      );
+    }
+
+    const adminAccess = await repo.getActorAccess({
+      auth_subject: FULL_ADMIN.auth,
+      app_user_id: FULL_ADMIN.app,
+    });
+    assert.equal(adminAccess.ok, true);
+    const todayDate = adminAccess.data.authorization_date;
+
+    for (const [prj, acct] of [
+      [PRJ_1, ACCT_A],
+      [PRJ_2, ACCT_B],
+    ]) {
+      const reason = `Phân công ${acct.name} phụ trách ${prj}`;
+      const assignRes = await repo.assignProjectAccountantAdmin({
+        auth_subject: FULL_ADMIN.auth,
+        app_user_id: FULL_ADMIN.app,
+        project_id: prj,
+        accountant_ref: acct.app,
+        expected_version: 0,
+        valid_from: todayDate,
+        reason,
+        idempotency_key: nextUuid(),
+        request_fingerprint: computeAssignProjectAccountantFingerprint({
+          project_id: prj,
+          accountant_ref: acct.app,
+          valid_from: todayDate,
+          expected_version: 0,
+          reason,
+        }),
+      });
+      assert.equal(assignRes.ok, true, JSON.stringify(assignRes));
+    }
+
+    const recordM4 = async (actor, payload) => {
+      const res = await repo.recordEntry({
+        auth_subject: actor.auth,
+        app_user_id: actor.app,
+        ...payload,
+        idempotency_key: nextUuid(),
+        request_fingerprint: computeRecordEntryFingerprint(payload),
+      });
+      assert.equal(res.ok, true, JSON.stringify(res));
+      return res.data.entry;
+    };
+
+    const reverseM4 = async (actor, entryId, effectiveDate, reason) => {
+      const res = await repo.reverseEntry({
+        auth_subject: actor.auth,
+        app_user_id: actor.app,
+        entry_id: entryId,
+        effective_date: effectiveDate,
+        reason,
+        idempotency_key: nextUuid(),
+        request_fingerprint: computeReverseEntryFingerprint({
+          entry_id: entryId,
+          effective_date: effectiveDate,
+          reason,
+        }),
+      });
+      assert.equal(res.ok, true, JSON.stringify(res));
+      return res.data.reversal_entry;
+    };
+
+    const applyOpeningM4 = async (actor, projectId, contractType, cutoffDate, items, reason) => {
+      const res = await repo.applyOpeningBatch({
+        auth_subject: actor.auth,
+        app_user_id: actor.app,
+        project_id: projectId,
+        contract_type: contractType,
+        cutoff_date: cutoffDate,
+        items,
+        reason,
+        idempotency_key: nextUuid(),
+        request_fingerprint: computeApplyOpeningBatchFingerprint({
+          project_id: projectId,
+          contract_type: contractType,
+          cutoff_date: cutoffDate,
+          items,
+          reason,
+        }),
+      });
+      assert.equal(res.ok, true, JSON.stringify(res));
+      return res.data;
+    };
+
+    // -------------------------------------------------------------------------
+    // Seed entries for Case A (month 2026-11) & Case B (2026-10 and VND_M4_GAMMA)
+    // -------------------------------------------------------------------------
+    // 1) VND_M4_ALPHA on PRJ_1 / SEASONAL (ACCT_A):
+    //    - Prior month 2026-10 DEBT_RECORDED: 15,000,000 (must stay in balance_before_month_minor for 2026-11)
+    //    - In-month 2026-11 DEBT_RECORDED: 12,000,000 (active -> counts in 2026-11 obligations)
+    //    - In-month 2026-11 DEBT_RECORDED: 5,000,000 REVERSED in 2026-11 (excluded from obligations)
+    await recordM4(ACCT_A, {
+      vendor_id: "VND_M4_ALPHA",
+      project_id: PRJ_1,
+      contract_type: "SEASONAL",
+      entry_type: "DEBT_RECORDED",
+      amount_minor: "15000000",
+      effective_date: "2026-10-20",
+      reason: "Công nợ kỳ trước 2026-10 của VND_M4_ALPHA",
+    });
+    await recordM4(ACCT_A, {
+      vendor_id: "VND_M4_ALPHA",
+      project_id: PRJ_1,
+      contract_type: "SEASONAL",
+      entry_type: "DEBT_RECORDED",
+      amount_minor: "12000000",
+      effective_date: "2026-11-05",
+      reason: "Công nợ phát sinh tháng 11 của VND_M4_ALPHA",
+    });
+    const revTargetAlpha = await recordM4(ACCT_A, {
+      vendor_id: "VND_M4_ALPHA",
+      project_id: PRJ_1,
+      contract_type: "SEASONAL",
+      entry_type: "DEBT_RECORDED",
+      amount_minor: "5000000",
+      effective_date: "2026-11-06",
+      reason: "Công nợ ghi nhầm cần đảo của VND_M4_ALPHA",
+    });
+    await reverseM4(ACCT_A, revTargetAlpha.entry_id, "2026-11-07", "Đảo bút toán ghi nhầm 5tr");
+
+    // 2) VND_M4_ALPHA on PRJ_1 / OFFICIAL (ACCT_A):
+    //    - In-month 2026-11 PAYROLL_RECORDED: 8,000,000 (active -> counts in 2026-11 obligations)
+    await recordM4(ACCT_A, {
+      vendor_id: "VND_M4_ALPHA",
+      project_id: PRJ_1,
+      contract_type: "OFFICIAL",
+      entry_type: "PAYROLL_RECORDED",
+      amount_minor: "8000000",
+      effective_date: "2026-11-08",
+      reason: "Lương chính thức tháng 11 của VND_M4_ALPHA",
+    });
+
+    // 3) VND_M4_BETA on PRJ_2 / SEASONAL (ACCT_B):
+    //    - In-month 2026-11 ADJUSTMENT_INCREASE: 3,000,000 (active -> counts in 2026-11 obligations)
+    await recordM4(ACCT_B, {
+      vendor_id: "VND_M4_BETA",
+      project_id: PRJ_2,
+      contract_type: "SEASONAL",
+      entry_type: "ADJUSTMENT_INCREASE",
+      amount_minor: "3000000",
+      effective_date: "2026-11-10",
+      reason: "Điều chỉnh tăng tháng 11 của VND_M4_BETA",
+    });
+
+    // 4) VND_M4_GAMMA on PRJ_1 / SEASONAL (ACCT_A):
+    //    - In-month 2026-11 OPENING_PAYABLE: 20,000,000 (opening balance, NOT obligations)
+    //    - In-month 2026-11 DEBT_RECORDED: 2,500,000 REVERSED in 2026-11 (excluded from obligations)
+    //    - In-month 2026-11 PAYMENT_RECORDED: 4,000,000 (payment, NOT obligations)
+    await applyOpeningM4(
+      ACCT_A,
+      PRJ_1,
+      "SEASONAL",
+      "2026-11-01",
+      [{ vendor_id: "VND_M4_GAMMA", entry_type: "OPENING_PAYABLE", amount_minor: "20000000" }],
+      "Mở dư nợ đầu kỳ tháng 11 cho VND_M4_GAMMA",
+    );
+    const revTargetGamma = await recordM4(ACCT_A, {
+      vendor_id: "VND_M4_GAMMA",
+      project_id: PRJ_1,
+      contract_type: "SEASONAL",
+      entry_type: "DEBT_RECORDED",
+      amount_minor: "2500000",
+      effective_date: "2026-11-09",
+      reason: "Công nợ nhập nhầm trên VND_M4_GAMMA",
+    });
+    await reverseM4(ACCT_A, revTargetGamma.entry_id, "2026-11-10", "Đảo bút toán nhập nhầm VND_M4_GAMMA");
+    await recordM4(ACCT_A, {
+      vendor_id: "VND_M4_GAMMA",
+      project_id: PRJ_1,
+      contract_type: "SEASONAL",
+      entry_type: "PAYMENT_RECORDED",
+      amount_minor: "4000000",
+      effective_date: "2026-11-12",
+      reason: "Thanh toán một phần dư nợ đầu kỳ cho VND_M4_GAMMA",
+    });
+
+    // 5) VND_M4_DELTA on PRJ_2 / OFFICIAL (ACCT_B) for separate period 2026-10 (ONLY opening + payment + reversed debt):
+    await applyOpeningM4(
+      ACCT_B,
+      PRJ_2,
+      "OFFICIAL",
+      "2026-10-01",
+      [{ vendor_id: "VND_M4_DELTA", entry_type: "OPENING_PAYABLE", amount_minor: "9000000" }],
+      "Mở dư nợ đầu kỳ tháng 10 cho VND_M4_DELTA",
+    );
+    const revTargetDelta = await recordM4(ACCT_B, {
+      vendor_id: "VND_M4_DELTA",
+      project_id: PRJ_2,
+      contract_type: "OFFICIAL",
+      entry_type: "DEBT_RECORDED",
+      amount_minor: "6000000",
+      effective_date: "2026-10-12",
+      reason: "Công nợ nhập nhầm tháng 10 của VND_M4_DELTA",
+    });
+    await reverseM4(ACCT_B, revTargetDelta.entry_id, "2026-10-13", "Đảo bút toán nhập nhầm VND_M4_DELTA");
+    await recordM4(ACCT_B, {
+      vendor_id: "VND_M4_DELTA",
+      project_id: PRJ_2,
+      contract_type: "OFFICIAL",
+      entry_type: "PAYMENT_RECORDED",
+      amount_minor: "3000000",
+      effective_date: "2026-10-15",
+      reason: "Thanh toán tháng 10 của VND_M4_DELTA",
+    });
+
+    // -------------------------------------------------------------------------
+    // Case A — Active in-month obligations (> 0) for month 2026-11 (BOD_VIEWER)
+    // Expected obligations = 12,000,000 + 8,000,000 + 3,000,000 = 23,000,000
+    // -------------------------------------------------------------------------
+    const reportCaseA = await repo.getMonthlyReport({
+      auth_subject: BOD_VIEWER.auth,
+      app_user_id: BOD_VIEWER.app,
+      month: "2026-11",
+      project_id: null,
+      accountant_ref: null,
+      vendor_id: null,
+      contract_type: "all",
+    });
+    assert.equal(reportCaseA.ok, true, JSON.stringify(reportCaseA));
+    assert.ok(
+      parseMonthlyReportEnvelope({ ok: true, data: reportCaseA.data }),
+      "parseMonthlyReportEnvelope must accept Case A live DB output",
+    );
+    assert.equal(reportCaseA.data.totals.project_revenue_status, "MISSING_CANONICAL_SOURCE");
+    assert.equal(reportCaseA.data.totals.project_revenue_minor, null);
+    assert.equal(reportCaseA.data.totals.obligations_in_month_minor, "23000000");
+
+    const sumSummaryObligationsA = reportCaseA.data.project_accountant_summaries.reduce(
+      (acc, s) => acc + BigInt(s.obligations_in_month_minor),
+      0n,
+    );
+    const sumRowObligationsA = reportCaseA.data.rows.reduce(
+      (acc, r) => acc + BigInt(r.obligations_in_month_minor),
+      0n,
+    );
+    assert.equal(sumSummaryObligationsA, 23000000n);
+    assert.equal(sumRowObligationsA, 23000000n);
+
+    const alphaSeasonalRow = reportCaseA.data.rows.find(
+      (r) => r.vendor_id === "VND_M4_ALPHA" && r.contract_type === "SEASONAL",
+    );
+    assert.ok(alphaSeasonalRow);
+    assert.equal(alphaSeasonalRow.balance_before_month_minor, "15000000");
+    assert.equal(alphaSeasonalRow.obligations_in_month_minor, "12000000");
+    assert.equal(alphaSeasonalRow.closing_balance_minor, "27000000");
+
+    const gammaRow = reportCaseA.data.rows.find((r) => r.vendor_id === "VND_M4_GAMMA");
+    assert.ok(gammaRow);
+    assert.equal(gammaRow.opening_payable_in_month_minor, "20000000");
+    assert.equal(gammaRow.obligations_in_month_minor, "0");
+    assert.equal(gammaRow.paid_in_month_minor, "4000000");
+    assert.equal(gammaRow.closing_payable_minor, "16000000");
+
+    // -------------------------------------------------------------------------
+    // Case B — Valid business 0 (`obligations_in_month_minor === "0"`)
+    // B1: Filtered vendor VND_M4_GAMMA in 2026-11 (OPENING_PAYABLE + PAYMENT + reversed DEBT)
+    // B2: Separate period 2026-10 on PRJ_2 (VND_M4_DELTA: OPENING_PAYABLE + PAYMENT + reversed DEBT)
+    // -------------------------------------------------------------------------
+    const reportCaseB1 = await repo.getMonthlyReport({
+      auth_subject: BOD_VIEWER.auth,
+      app_user_id: BOD_VIEWER.app,
+      month: "2026-11",
+      project_id: null,
+      accountant_ref: null,
+      vendor_id: "VND_M4_GAMMA",
+      contract_type: "all",
+    });
+    assert.equal(reportCaseB1.ok, true, JSON.stringify(reportCaseB1));
+    assert.equal(reportCaseB1.data.totals.obligations_in_month_minor, "0");
+    assert.equal(reportCaseB1.data.totals.paid_in_month_minor, "4000000");
+    assert.equal(reportCaseB1.data.totals.closing_payable_minor, "16000000");
+    assert.equal(reportCaseB1.data.project_accountant_summaries.length, 1);
+    assert.equal(reportCaseB1.data.project_accountant_summaries[0].obligations_in_month_minor, "0");
+    assert.equal(reportCaseB1.data.project_accountant_summaries[0].paid_in_month_minor, "4000000");
+    assert.equal(reportCaseB1.data.project_accountant_summaries[0].closing_payable_minor, "16000000");
+    assert.equal(reportCaseB1.data.rows.length, 1);
+    assert.equal(reportCaseB1.data.rows[0].obligations_in_month_minor, "0");
+    assert.equal(reportCaseB1.data.rows[0].opening_payable_in_month_minor, "20000000");
+    assert.equal(reportCaseB1.data.rows[0].paid_in_month_minor, "4000000");
+    assert.equal(reportCaseB1.data.rows[0].closing_payable_minor, "16000000");
+
+    const reportCaseB2 = await repo.getMonthlyReport({
+      auth_subject: BOD_VIEWER.auth,
+      app_user_id: BOD_VIEWER.app,
+      month: "2026-10",
+      project_id: PRJ_2,
+      accountant_ref: null,
+      vendor_id: null,
+      contract_type: "all",
+    });
+    assert.equal(reportCaseB2.ok, true, JSON.stringify(reportCaseB2));
+    assert.equal(reportCaseB2.data.totals.obligations_in_month_minor, "0");
+    assert.equal(reportCaseB2.data.totals.paid_in_month_minor, "3000000");
+    assert.equal(reportCaseB2.data.totals.closing_payable_minor, "6000000");
+    assert.equal(reportCaseB2.data.project_accountant_summaries.length, 2);
+    for (const s of reportCaseB2.data.project_accountant_summaries) {
+      assert.equal(s.obligations_in_month_minor, "0");
+    }
+    assert.equal(reportCaseB2.data.rows.length, 2);
+    for (const r of reportCaseB2.data.rows) {
+      assert.equal(r.obligations_in_month_minor, "0");
+    }
+    const deltaRowB2 = reportCaseB2.data.rows.find((r) => r.vendor_id === "VND_M4_DELTA");
+    assert.ok(deltaRowB2);
+    assert.equal(deltaRowB2.obligations_in_month_minor, "0");
+    assert.equal(deltaRowB2.opening_payable_in_month_minor, "9000000");
+    assert.equal(deltaRowB2.paid_in_month_minor, "3000000");
+    assert.equal(deltaRowB2.closing_payable_minor, "6000000");
+
+    // -------------------------------------------------------------------------
+    // Case C — PROJECT_SCOPED accountant authority (ACCT_A assigned only to PRJ_1)
+    // -------------------------------------------------------------------------
+    const reportCaseCAllowed = await repo.getMonthlyReport({
+      auth_subject: ACCT_A.auth,
+      app_user_id: ACCT_A.app,
+      month: "2026-11",
+      project_id: null,
+      accountant_ref: null,
+      vendor_id: null,
+      contract_type: "all",
+    });
+    assert.equal(reportCaseCAllowed.ok, true, JSON.stringify(reportCaseCAllowed));
+    assert.equal(reportCaseCAllowed.data.allowed_actions.visibility_scope, "PROJECT_SCOPED");
+    assert.equal(reportCaseCAllowed.data.totals.obligations_in_month_minor, "20000000");
+    assert.ok(reportCaseCAllowed.data.rows.length > 0);
+    for (const s of reportCaseCAllowed.data.project_accountant_summaries) {
+      assert.equal(s.project_id, PRJ_1);
+      assert.equal(s.accountant_ref, ACCT_A.app);
+    }
+    for (const r of reportCaseCAllowed.data.rows) {
+      assert.equal(r.project_id, PRJ_1);
+      assert.equal(r.accountant_ref, ACCT_A.app);
+    }
+
+    const reportCaseCDeniedRepo = await repo.getMonthlyReport({
+      auth_subject: ACCT_A.auth,
+      app_user_id: ACCT_A.app,
+      month: "2026-11",
+      project_id: PRJ_2,
+      accountant_ref: null,
+      vendor_id: null,
+      contract_type: "all",
+    });
+    assert.equal(reportCaseCDeniedRepo.ok, false);
+    assert.equal(reportCaseCDeniedRepo.code, "VENDOR_FINANCE_PROJECT_ACCESS_DENIED");
+
+    await assert.rejects(
+      () =>
+        callVfinRpc(db, "vendor_finance_get_monthly_report", {
+          p_auth_subject: ACCT_A.auth,
+          p_app_user_id: ACCT_A.app,
+          p_month: "2026-11",
+          p_project_id: PRJ_2,
+          p_accountant_user_id: null,
+          p_vendor_id: null,
+          p_contract_type: "all",
+        }),
+      (err) =>
+        err.code === "42501" &&
+        String(err.message ?? "").includes("VENDOR_FINANCE_PROJECT_ACCESS_DENIED"),
     );
   } finally {
     await db.close();

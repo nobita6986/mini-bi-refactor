@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronUp,
+  Download,
   ExternalLink,
   Printer,
   RefreshCw,
@@ -39,6 +40,7 @@ import type {
   VendorFinanceMonthlyReportRow,
 } from "@/lib/vendor-finance/vendor-finance-contract";
 import {
+  buildMonthlyReportExportUrl,
   buildMonthlyReportUrl,
   buildVendorEntriesUrl,
   buildVendorFinanceContextUrl,
@@ -47,18 +49,20 @@ import {
   CONTRACT_TYPE_FILTER_LABELS_VI,
   CONTRACT_TYPE_LABELS_VI,
   ENTRY_TYPE_LABELS_VI,
+  formatAggregatedVndMinor,
   formatSignedVndDelta,
   formatVendorBalancePresentation,
   formatVietnamDateLabel,
   formatVndMinor,
   isCanonicalUiProjectId,
   isCanonicalUiVendorId,
+  isUsableVendorFinanceExportBlob,
   isUuidString,
   parseMonthlyReportEnvelope,
   parseVendorEntriesPageEnvelope,
   parseVendorFinanceContextEnvelope,
-  PROJECT_REVENUE_MISSING_SOURCE_LABEL_VI,
-  PROJECT_REVENUE_MISSING_SOURCE_NOTE_VI,
+  resolveVendorFinanceMonthlyReportExportFilename,
+  summarizeMonthlyReportOpeningTotals,
   validateUiCalendarMonth,
   VFIN_UI_CONTRACT_TYPE_FILTERS,
   VFIN_UI_REFERENCE_TOTAL_LABEL_VI,
@@ -133,6 +137,11 @@ export function VendorFinanceMonthlyReportView({
   const [reportData, setReportData] = useState<VendorFinanceMonthlyReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportBanner, setExportBanner] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
 
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [drilldowns, setDrilldowns] = useState<Record<string, DrilldownState>>({});
@@ -423,6 +432,9 @@ export function VendorFinanceMonthlyReportView({
     ? reportData.allowed_actions.can_manage_project_assignments
     : initialCanManageProjectAssignments;
   const totals = reportData?.totals ?? null;
+  const openingTotals = reportData
+    ? summarizeMonthlyReportOpeningTotals(reportData.rows)
+    : null;
   const projectFilterOptions = useMemo<CatalogFilterOption[]>(
     () =>
       (contextData?.projects ?? []).map((proj) => ({
@@ -438,6 +450,75 @@ export function VendorFinanceMonthlyReportView({
     accountantFilter !== "" ||
     vendorFilter !== "" ||
     contractTypeFilter !== "all";
+
+  const handleExportExcel = async () => {
+    if (exporting || !reportData) return;
+    setExporting(true);
+    setExportBanner(null);
+
+    try {
+      const exportUrl = buildMonthlyReportExportUrl({
+        month: reportData.filters.month,
+        project_id: reportData.filters.project_id,
+        accountant_ref: reportData.filters.accountant_ref,
+        vendor_id: reportData.filters.vendor_id,
+        contract_type: reportData.filters.contract_type,
+      });
+
+      const res = await fetch(exportUrl, {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        const json: unknown = await res.json().catch(() => null);
+        const classified = classifyVendorFinanceError(json, res.status);
+        setExportBanner({ tone: "error", message: classified.message });
+        return;
+      }
+
+      const contentType = res.headers.get("content-type");
+      const blob = await res.blob();
+      const usable = await isUsableVendorFinanceExportBlob(blob, contentType);
+      if (!usable) {
+        setExportBanner({
+          tone: "error",
+          message:
+            "Tệp Excel trả về không hợp lệ hoặc bị hỏng. Không có tệp nào được tải xuống; vui lòng thử lại.",
+        });
+        return;
+      }
+
+      const filename = resolveVendorFinanceMonthlyReportExportFilename(
+        res.headers.get("content-disposition"),
+        reportData.filters.month,
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = filename;
+        link.rel = "noopener";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+
+      setExportBanner({
+        tone: "success",
+        message: `Đã xuất tệp Excel "${filename}" theo báo cáo công nợ tháng ${reportData.filters.month}.`,
+      });
+    } catch {
+      setExportBanner({
+        tone: "error",
+        message: "Không thể xuất báo cáo công nợ tháng Excel do lỗi kết nối mạng. Vui lòng thử lại.",
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <PageShell dataTestId="vfin-monthly-report-page">
@@ -463,67 +544,113 @@ export function VendorFinanceMonthlyReportView({
       <PageHeader
         title="Báo cáo công nợ Vendor theo Dự án & Tháng"
         actions={
-          <Button
-            variant="secondary"
-            disabled={loading}
-            onClick={() => setReloadNonce((n) => n + 1)}
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden />
-            Làm mới báo cáo
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              disabled={loading}
+              onClick={() => setReloadNonce((n) => n + 1)}
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden />
+              Làm mới báo cáo
+            </Button>
+            <Button
+              variant="secondary"
+              data-testid="vfin-monthly-export-excel-btn"
+              disabled={loading || exporting || !reportData}
+              loading={exporting}
+              onClick={() => void handleExportExcel()}
+            >
+              <Download className="h-4 w-4" aria-hidden />
+              {exporting ? "Đang xuất Excel…" : "Xuất Excel"}
+            </Button>
+          </>
         }
       />
 
-      {/* Explicit Canonical Project Revenue Disclosure */}
-      <Alert
-        tone="info"
-        title={`Doanh thu dự án: ${PROJECT_REVENUE_MISSING_SOURCE_LABEL_VI}`}
-      >
-        <p data-testid="vfin-project-revenue-missing-note">
-          {PROJECT_REVENUE_MISSING_SOURCE_NOTE_VI}
-        </p>
-      </Alert>
+      {exportBanner ? (
+        <div data-testid="vfin-monthly-export-feedback-banner">
+          <Alert
+            tone={exportBanner.tone === "error" ? "error" : "info"}
+            role={exportBanner.tone === "error" ? "alert" : "status"}
+            title={
+              exportBanner.tone === "error"
+                ? "Không thể xuất báo cáo công nợ tháng Excel"
+                : "Xuất báo cáo công nợ tháng Excel thành công"
+            }
+          >
+            <p>{exportBanner.message}</p>
+          </Alert>
+        </div>
+      ) : null}
 
       {/* Non-Netted Monthly KPI Summary */}
       <section
         aria-label="Chỉ số tổng tham khảo công nợ tháng theo phạm vi lọc (không thay thế số dư riêng từng sổ)"
-        className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5"
+        className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
         data-testid="vfin-monthly-kpis"
       >
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Doanh thu dự án trong tháng</p>
-          <div className="mt-2">
-            <StatusBadge tone="neutral" dataTestId="vfin-kpi-revenue-missing">
-              {PROJECT_REVENUE_MISSING_SOURCE_LABEL_VI}
-            </StatusBadge>
-          </div>
-          <p className="mt-1.5 text-xs text-muted">
-            {totals
-              ? `${totals.project_accountant_book_count} sổ dự án · ${totals.sub_ledger_count} dòng Vendor`
-              : "Đang tải…"}
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+          <p className="text-xs font-medium leading-snug text-muted">
+            Đầu kỳ & mở sổ
           </p>
+          <p
+            data-testid="vfin-monthly-kpi-opening-payable"
+            className="flex flex-wrap items-baseline gap-x-1.5 font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+          >
+            <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
+            <span>
+              {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_payable_minor) : "—"}
+            </span>
+          </p>
+          <div className="space-y-0.5">
+            <p
+              data-testid="vfin-monthly-kpi-opening-advance"
+              className="whitespace-nowrap font-mono text-xs tabular-nums text-muted"
+            >
+              Dư ứng:{" "}
+              {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_advance_minor) : "—"}
+            </p>
+            {openingTotals?.has_in_month_opening ? (
+              <p
+                data-testid="vfin-monthly-kpi-opening-in-month"
+                className="flex flex-wrap gap-x-1.5 font-mono text-[11px] leading-snug tabular-nums text-muted"
+              >
+                <span className="whitespace-nowrap">
+                  Mở nợ: {formatAggregatedVndMinor(openingTotals.opening_payable_in_month_minor)}
+                </span>{" "}
+                ·{" "}
+                <span className="whitespace-nowrap">
+                  Mở ứng: {formatAggregatedVndMinor(openingTotals.opening_advance_in_month_minor)}
+                </span>
+              </p>
+            ) : null}
+          </div>
         </Card>
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Tổng phải trả phát sinh trong tháng</p>
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+          <p className="text-xs font-medium leading-snug text-muted">
+            Tổng phải trả phát sinh trong tháng
+          </p>
           <p
             data-testid="vfin-monthly-kpi-obligations"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.obligations_in_month_minor) : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">Công nợ, lương & điều chỉnh tăng (+)</p>
+          <p className="text-xs text-muted">Công nợ, lương & điều chỉnh tăng (+)</p>
         </Card>
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Đã thanh toán & tạm ứng trong tháng</p>
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+          <p className="text-xs font-medium leading-snug text-muted">
+            Đã thanh toán & tạm ứng trong tháng
+          </p>
           <p
             data-testid="vfin-monthly-kpi-paid-advanced"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.paid_and_advanced_in_month_minor) : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">
+          <p className="text-xs text-muted">
             {totals ? (
               <>
                 <span className="whitespace-nowrap">
@@ -540,28 +667,31 @@ export function VendorFinanceMonthlyReportView({
           </p>
         </Card>
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Khấu trừ ứng trong tháng</p>
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+          <p className="text-xs font-medium leading-snug text-muted">
+            Khấu trừ ứng trong tháng
+          </p>
           <p
             data-testid="vfin-monthly-kpi-advance-offset"
-            className="mt-1.5 whitespace-nowrap font-mono text-xl font-semibold tabular-nums text-foreground"
+            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.advance_offset_in_month_minor) : "—"}
           </p>
-          <p className="mt-1 text-xs text-muted">Khấu trừ từ số dư ứng (-)</p>
+          <p className="text-xs text-muted">Khấu trừ từ số dư ứng (-)</p>
         </Card>
 
-        <Card className="p-4">
-          <p className="text-xs font-medium text-muted">Số dư cuối tháng</p>
+        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+          <p className="text-xs font-medium leading-snug text-muted">Số dư cuối tháng</p>
           <p
             data-testid="vfin-monthly-kpi-closing-payable"
-            className="mt-1 whitespace-nowrap font-mono text-base font-semibold tabular-nums text-foreground"
+            className="flex flex-wrap items-baseline gap-x-1.5 font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
           >
-            Còn nợ: {totals ? formatVndMinor(totals.closing_payable_minor) : "—"}
+            <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
+            <span>{totals ? formatVndMinor(totals.closing_payable_minor) : "—"}</span>
           </p>
           <p
             data-testid="vfin-monthly-kpi-closing-advance"
-            className="mt-0.5 whitespace-nowrap font-mono text-xs tabular-nums text-muted"
+            className="whitespace-nowrap font-mono text-xs tabular-nums text-muted"
           >
             Dư ứng: {totals ? formatVndMinor(totals.closing_advance_minor) : "—"}
           </p>
@@ -606,11 +736,11 @@ export function VendorFinanceMonthlyReportView({
           ) : null
         }
       >
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          <div className="space-y-1.5">
+        <div className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          <div className="flex min-w-0 flex-col justify-between gap-1.5">
             <label
               htmlFor={monthInputId}
-              className="block text-xs sm:text-sm font-semibold text-foreground"
+              className="block text-xs sm:text-sm font-semibold leading-snug text-foreground"
             >
               Tháng báo cáo (YYYY-MM)
             </label>
@@ -619,7 +749,7 @@ export function VendorFinanceMonthlyReportView({
               type="month"
               value={month}
               onChange={(e) => setMonth(e.target.value)}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="h-11 sm:h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             />
           </div>
 
@@ -630,16 +760,16 @@ export function VendorFinanceMonthlyReportView({
             placeholder="Gõ tên hoặc mã dự án"
             options={projectFilterOptions}
             value={projectFilter}
-            containerClassName="relative space-y-1.5"
-            labelClassName="block text-xs sm:text-sm font-semibold text-foreground"
-            inputClassName="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            containerClassName="relative flex min-w-0 flex-col justify-between gap-1.5"
+            labelClassName="block text-xs sm:text-sm font-semibold leading-snug text-foreground"
+            inputClassName="h-11 sm:h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             onChange={(nextValue) => setProjectFilter(nextValue)}
           />
 
-          <div className="space-y-1.5">
+          <div className="flex min-w-0 flex-col justify-between gap-1.5">
             <label
               htmlFor={accountantSelectId}
-              className="block text-xs sm:text-sm font-semibold text-foreground"
+              className="block text-xs sm:text-sm font-semibold leading-snug text-foreground"
             >
               Lọc theo Kế toán phụ trách sổ
             </label>
@@ -647,7 +777,7 @@ export function VendorFinanceMonthlyReportView({
               id={accountantSelectId}
               value={accountantFilter}
               onChange={(e) => setAccountantFilter(e.target.value)}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="h-11 sm:h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <option value="">Tất cả kế toán phụ trách</option>
               {(contextData?.accountants ?? []).map((acc) => (
@@ -658,10 +788,10 @@ export function VendorFinanceMonthlyReportView({
             </select>
           </div>
 
-          <div className="space-y-1.5">
+          <div className="flex min-w-0 flex-col justify-between gap-1.5">
             <label
               htmlFor={vendorSelectId}
-              className="block text-xs sm:text-sm font-semibold text-foreground"
+              className="block text-xs sm:text-sm font-semibold leading-snug text-foreground"
             >
               Lọc theo Vendor
             </label>
@@ -669,7 +799,7 @@ export function VendorFinanceMonthlyReportView({
               id={vendorSelectId}
               value={vendorFilter}
               onChange={(e) => setVendorFilter(e.target.value)}
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="h-11 sm:h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <option value="">Tất cả Vendor</option>
               {vendorOptions.map(([vId, vName]) => (
@@ -680,12 +810,12 @@ export function VendorFinanceMonthlyReportView({
             </select>
           </div>
 
-          <div className="space-y-1.5">
+          <div className="flex min-w-0 flex-col justify-between gap-1.5">
             <label
               htmlFor={contractTypeSelectId}
-              className="block text-xs sm:text-sm font-semibold text-foreground"
+              className="block text-xs sm:text-sm font-semibold leading-snug text-foreground"
             >
-              Lọc theo Loại hợp đồng (Sổ riêng)
+              Lọc theo Loại hợp đồng
             </label>
             <select
               id={contractTypeSelectId}
@@ -694,7 +824,7 @@ export function VendorFinanceMonthlyReportView({
               onChange={(e) =>
                 setContractTypeFilter(e.target.value as VendorFinanceContractTypeFilter)
               }
-              className="min-h-11 sm:min-h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="h-11 sm:h-10 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               {VFIN_UI_CONTRACT_TYPE_FILTERS.map((opt) => (
                 <option key={opt} value={opt}>
@@ -747,9 +877,6 @@ export function VendorFinanceMonthlyReportView({
                       </th>
                       <th scope="col" className={REPORT_TH_CLASS}>
                         Kế toán phụ trách
-                      </th>
-                      <th scope="col" className={REPORT_TH_CLASS}>
-                        Doanh thu dự án
                       </th>
                       <th scope="col" className={`${REPORT_TH_CLASS} text-right whitespace-nowrap`}>
                         Phát sinh tháng
@@ -810,11 +937,6 @@ export function VendorFinanceMonthlyReportView({
                               {sum.is_currently_assigned ? "Đang phụ trách" : "Sổ kỳ trước"}
                             </StatusBadge>
                           </div>
-                        </td>
-                        <td data-label="Doanh thu dự án" className={REPORT_TD_CLASS}>
-                          <StatusBadge tone="neutral" className="whitespace-nowrap">
-                            {PROJECT_REVENUE_MISSING_SOURCE_LABEL_VI}
-                          </StatusBadge>
                         </td>
                         <td
                           data-label="Phát sinh tháng"
@@ -973,11 +1095,31 @@ export function VendorFinanceMonthlyReportView({
 
                             <td
                               data-label="Đầu tháng"
-                              className={`${REPORT_TD_CLASS} text-right font-mono tabular-nums whitespace-nowrap`}
+                              className={`${REPORT_TD_CLASS} text-right font-mono tabular-nums`}
                             >
-                              <span className="whitespace-nowrap">
-                                {formatSignedVndDelta(row.balance_before_month_minor)}
-                              </span>
+                              <div className="space-y-0.5">
+                                <p className="whitespace-nowrap">
+                                  {formatSignedVndDelta(row.balance_before_month_minor)}
+                                </p>
+                                {row.opening_payable_in_month_minor !== "0" ||
+                                row.opening_advance_in_month_minor !== "0" ? (
+                                  <p
+                                    data-testid="vfin-monthly-row-opening-in-month"
+                                    className="mt-0.5 text-[11px] text-muted whitespace-normal"
+                                  >
+                                    {[
+                                      row.opening_payable_in_month_minor !== "0"
+                                        ? `Mở nợ: +${formatVndMinor(row.opening_payable_in_month_minor)}`
+                                        : null,
+                                      row.opening_advance_in_month_minor !== "0"
+                                        ? `Mở ứng: -${formatVndMinor(row.opening_advance_in_month_minor)}`
+                                        : null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </p>
+                                ) : null}
+                              </div>
                             </td>
 
                             <td
