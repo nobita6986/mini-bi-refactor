@@ -630,7 +630,7 @@ test("assignments, obligations, snapshot_team_id immutability, deadline/reopen/e
     db.query(
       `select public.work_report_create_assignment(
          $1::uuid, $2::uuid, $3::uuid, 'USER_SET', null, null, $4::uuid[],
-         'DAILY', true, 0, '23:59:59'::time, false, '2026-10-01'::date, null, $5
+         'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
        )`,
       [
         LEADER_A.auth,
@@ -652,7 +652,7 @@ test("assignments, obligations, snapshot_team_id immutability, deadline/reopen/e
   const { rows: assignRows } = await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'USER_SET', null, null, $4::uuid[],
-       'DAILY', true, 0, '23:59:59'::time, false, '2026-01-01'::date, null, $5
+       'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
     [
       LEADER_A.auth,
@@ -664,6 +664,10 @@ test("assignments, obligations, snapshot_team_id immutability, deadline/reopen/e
   );
   const assignmentId = assignRows[0].result.assignment_id;
   assert.ok(assignmentId);
+  await db.query(
+    "update public.work_report_assignments set effective_from = '2026-01-01'::date where assignment_id = $1::uuid",
+    [assignmentId],
+  );
 
   const { rows: targetRows } = await db.query(
     `select target_user_id from public.work_report_assignment_targets
@@ -1189,12 +1193,19 @@ test("F2 review, delegation, effective_report_review_scopes and finality lifecyc
   }
 
   // 3) Create assignment on TEAM_A and materialize for 2099-11-02
-  await db.query(
+  const { rows: f2AsgRows } = await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null,
-       'DAILY', true, 0, '23:59:00'::time, false, '2099-11-01'::date, '2099-11-05'::date, $5
-     )`,
+       'DAILY', true, 0, '23:59:00'::time, false, null::date, null::date, $5
+     ) as result`,
     [LEADER_A.auth, LEADER_A.app, tplId, TEAM_A, KEY("f2_assign_a")],
+  );
+  await db.query(
+    `update public.work_report_assignments
+        set effective_from = '2099-11-01'::date,
+            effective_to = '2099-11-05'::date
+      where assignment_id = $1::uuid`,
+    [f2AsgRows[0].result.assignment_id],
   );
   await db.query(
     `select public.work_report_ensure_obligations_for_window($1::uuid, $2::uuid, '2099-11-02'::date)`,
@@ -1473,7 +1484,7 @@ test("HF: multi-team custom report groups, multi-line labels, deduplication, his
   await assert.rejects(
     db.query(
       `select public.work_report_create_group_assignment(
-         $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'DAILY', true, 0, '23:59:59'::time, false, '2099-12-01'::date, null, $5
+         $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
        )`,
       [LEADER_A.auth, LEADER_A.app, hfTplId, crossGroupId, KEY("hf_grp_leader_assign_denied")],
     ),
@@ -1483,7 +1494,7 @@ test("HF: multi-team custom report groups, multi-line labels, deduplication, his
   // 4) Assign template to crossGroupId AND create overlapping USER assignment for STAFF_A1 -> deduplicate obligations!
   const { rows: crossAssignRows } = await db.query(
     `select public.work_report_create_group_assignment(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'DAILY', true, 0, '23:59:59'::time, false, '2099-12-01'::date, null, $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
     [ADMIN.auth, ADMIN.app, hfTplId, crossGroupId, KEY("hf_grp_assign_ok")],
   );
@@ -1492,7 +1503,7 @@ test("HF: multi-team custom report groups, multi-line labels, deduplication, his
   await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null,
-       'DAILY', true, 0, '23:59:59'::time, false, '2099-12-01'::date, null, $5
+       'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
      )`,
     [LEADER_A.auth, LEADER_A.app, hfTplId, STAFF_A1.app, KEY("hf_overlap_user_a1")],
   );
@@ -1629,7 +1640,7 @@ test("HF: multi-team custom report groups, multi-line labels, deduplication, his
 
   const { rows: leaderGroupAssignRows } = await db.query(
     `select public.work_report_create_group_assignment(
-       $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'DAILY', true, 0, '23:59:59'::time, false, '2099-12-04'::date, null, $5
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
     [LEADER_A.auth, LEADER_A.app, hfTpl2Id, teamAGroupId, KEY("hf_teama_grp_assign")],
   );
@@ -1759,13 +1770,13 @@ test("Android sync: auto-materialize on create/reactivate, 7-day per-actor backf
   const todayStr = todayRows[0].today;
   const fourDaysAgoStr = todayRows[0].four_days_ago;
 
-  // 1) Creating an assignment effective 4 days ago immediately materializes today's obligation for STAFF_B1
+  // 1) Creating an immediate assignment immediately materializes today's obligation for STAFF_B1
   const { rows: createAsgRows } = await db.query(
     `select public.work_report_create_assignment(
        $1::uuid, $2::uuid, $3::uuid, 'USER', $4::uuid, null, null,
-       'DAILY', true, 1, '23:59:59'::time, false, $5::date, null, $6
+       'DAILY', true, 1, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
-    [ADMIN.auth, ADMIN.app, syncTplId, STAFF_B1.app, fourDaysAgoStr, KEY("android_asg_create")],
+    [ADMIN.auth, ADMIN.app, syncTplId, STAFF_B1.app, KEY("android_asg_create")],
   );
   const syncAsgId = createAsgRows[0].result.assignment_id;
 
@@ -1778,6 +1789,12 @@ test("Android sync: auto-materialize on create/reactivate, 7-day per-actor backf
     immediateObs.map((r) => r.period_key),
     [todayStr],
     "creating an assignment effective today immediately materializes today's period without manual ensure",
+  );
+
+  // Backdate effective_from to today-4 to verify 7-day actor lookback backfill
+  await db.query(
+    "update public.work_report_assignments set effective_from = $2::date where assignment_id = $1::uuid",
+    [syncAsgId, fourDaysAgoStr],
   );
 
   // 2) STAFF_B1 opening work_report_list_my_obligations backfills missing obligations in the 7-day window (5 days total: today-4..today)
@@ -2047,7 +2064,7 @@ test("Custom group assignment succeeds when a historical member was later deacti
   const { rows: asgRows } = await db.query(
     `select public.work_report_create_group_assignment(
        $1::uuid, $2::uuid, $3::uuid, $4::uuid,
-       'DAILY', true, 0, '23:59:59'::time, false, '2026-11-04'::date, null, $5
+       'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
      ) as result`,
     [ADMIN.auth, ADMIN.app, tplId, grpId, KEY("hf_dis_grp_assign_ok")],
   );
@@ -2111,7 +2128,7 @@ test("Custom group assignment succeeds when a historical member was later deacti
     db.query(
       `select public.work_report_create_group_assignment(
          $1::uuid, $2::uuid, $3::uuid, $4::uuid,
-         'DAILY', true, 0, '23:59:59'::time, false, '2026-11-04'::date, null, $5
+         'DAILY', true, 0, '23:59:59'::time, false, null::date, null::date, $5
        )`,
       [ADMIN.auth, ADMIN.app, tplId, allDisabledGrpId, KEY("hf_all_dis_grp_assign_fail")],
     ),

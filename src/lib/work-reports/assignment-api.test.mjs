@@ -350,3 +350,76 @@ test("custom report group APIs enforce feature gate, CSRF, client-authority bans
     assert.match(src, /process\.env\.WORK_REPORTS_API_ENABLED !== "true"/);
   }
 });
+
+test("assignment creation allows omitted or null dates, validates legacy date shapes, and propagates WORK_REPORT_ASSIGNMENT_INVALID", async () => {
+  const datelessBody = assignment();
+  delete datelessBody.effective_from;
+  delete datelessBody.effective_to;
+
+  let forwardedDateless;
+  const datelessRes = await createWorkReportAssignment(
+    request("/api/work-reports/assignments", datelessBody),
+    "true",
+    deps({
+      create: async (val) => {
+        forwardedDateless = val;
+        return { ok: true, data: { assignment_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", version: 1 } };
+      },
+    }),
+  );
+  assert.equal(datelessRes.status, 200);
+  assert.equal(forwardedDateless.effective_from, null);
+  assert.equal(forwardedDateless.effective_to, null);
+
+  let forwardedLegacy;
+  const legacyWithEndDate = {
+    ...assignment(),
+    effective_from: "2026-10-20",
+    effective_to: "2026-10-31",
+  };
+  const legacyForwardRes = await createWorkReportAssignment(
+    request("/api/work-reports/assignments", legacyWithEndDate),
+    "true",
+    deps({
+      create: async (val) => {
+        forwardedLegacy = val;
+        return { ok: false, kind: "invalid", code: "WORK_REPORT_ASSIGNMENT_INVALID" };
+      },
+    }),
+  );
+  assert.equal(forwardedLegacy.effective_from, "2026-10-20");
+  assert.equal(forwardedLegacy.effective_to, "2026-10-31");
+  assert.equal(legacyForwardRes.status, 400);
+  assert.deepEqual(await legacyForwardRes.json(), {
+    ok: false,
+    code: "WORK_REPORT_ASSIGNMENT_INVALID",
+  });
+
+  // Invalid date combinations fail closed at HTTP validation before hitting repository
+  let repoCalled = false;
+  const failRepo = deps({
+    create: async () => {
+      repoCalled = true;
+      return { ok: true, data: { assignment_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", version: 1 } };
+    },
+  });
+  for (const invalidBody of [
+    { ...datelessBody, effective_to: "2026-10-31" },
+    { ...datelessBody, effective_from: null, effective_to: "2026-10-31" },
+    { ...assignment(), effective_from: "2026-10-21", effective_to: "2026-10-20" },
+    { ...assignment(), effective_from: "2026-02-30", effective_to: null },
+    { ...assignment(), effective_from: "2026-10-21", effective_to: "2026-02-30" },
+  ]) {
+    const res = await createWorkReportAssignment(
+      request("/api/work-reports/assignments", invalidBody),
+      "true",
+      failRepo,
+    );
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), {
+      ok: false,
+      code: "WORK_REPORT_ASSIGNMENT_INVALID",
+    });
+  }
+  assert.equal(repoCalled, false);
+});

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useRouter as readNextAppRouter,
   useSearchParams,
@@ -11,6 +11,10 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
 import { StatusBanner } from "@/components/ui/status-banner";
+import {
+  resolveAssignmentCreateAttempt,
+  type PendingAssignmentCreateAttempt,
+} from "@/lib/work-reports/assignment-create-idempotency";
 import {
   buildWorkReportAssignmentTabHref,
   parseWorkReportAssignmentTab,
@@ -97,15 +101,19 @@ export function AssignmentManager({
   const [frequency, setFrequency] = useState("DAILY");
   const [dueDayOffset, setDueDayOffset] = useState("0");
   const [dueTime, setDueTime] = useState("23:59:59");
-  const [effectiveFrom, setEffectiveFrom] = useState(() =>
-    new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Ho_Chi_Minh" }),
-  );
+  const pendingCreateAttemptRef = useRef<PendingAssignmentCreateAttempt | null>(null);
+  const createInFlightRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trackingLoadedTeamId, setTrackingLoadedTeamId] = useState<string | null>(null);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   const [trackingBusy, setTrackingBusy] = useState(false);
   const templatesLoaded = loadedTeamId === teamId;
+
+  function resetCreateConfirmation() {
+    if (busy || createInFlightRef.current) return;
+    setConfirmingCreate(false);
+  }
 
   function switchSubView(next: WorkReportAssignmentSubTab) {
     if (next === activeSubView) return;
@@ -610,38 +618,39 @@ export function AssignmentManager({
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || createInFlightRef.current) return;
     if (!validateCreateFields()) return;
     if (!confirmingCreate) {
       setConfirmingCreate(true);
       return;
     }
+    createInFlightRef.current = true;
     setBusy(true);
     setError(null);
     const ids = targetKind === "USER_SET" ? targetUsers : [];
+    const attempt = resolveAssignmentCreateAttempt(pendingCreateAttemptRef.current, {
+      template_id: templateId,
+      target_kind: targetKind,
+      target_user_id: targetKind === "USER" ? targetId : null,
+      target_team_id: targetKind === "TEAM" ? teamId : null,
+      target_group_id: targetKind === "GROUP" ? targetGroupId : null,
+      target_user_ids: ids,
+      frequency,
+      is_mandatory: true,
+      due_day_offset: Number(dueDayOffset),
+      due_time_local: dueTime,
+      exclude_sundays: false,
+    });
+    pendingCreateAttemptRef.current = attempt;
     try {
-      const idempotency_key = crypto.randomUUID();
       const response = await fetch("/api/work-reports/assignments", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotency_key },
-        body: JSON.stringify({
-          template_id: templateId,
-          target_kind: targetKind,
-          target_user_id: targetKind === "USER" ? targetId : null,
-          target_team_id: targetKind === "TEAM" ? teamId : null,
-          target_group_id: targetKind === "GROUP" ? targetGroupId : null,
-          target_user_ids: ids,
-          frequency,
-          is_mandatory: true,
-          due_day_offset: Number(dueDayOffset),
-          due_time_local: dueTime,
-          exclude_sundays: false,
-          effective_from: effectiveFrom,
-          effective_to: null,
-          idempotency_key,
-        }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": attempt.idempotency_key },
+        body: JSON.stringify(attempt.payload),
       });
       const result = await response.json().catch(() => null);
       if (!response.ok || result?.ok !== true) throw new Error(result?.code ?? "WORK_REPORT_UNAVAILABLE");
+      pendingCreateAttemptRef.current = null;
       notify.success({
         title: "Đã tạo đợt giao báo cáo và phát sinh nghĩa vụ kỳ hiện hành.",
         dedupeKey: "work-report-assignment-create",
@@ -666,7 +675,9 @@ export function AssignmentManager({
                 ? "Nhóm nhận báo cáo đang ngừng sử dụng. Hãy kích hoạt lại nhóm hoặc chọn nhóm khác."
                 : code === "WORK_REPORT_TEMPLATE_NOT_ACTIVE"
                   ? "Mẫu báo cáo đã chọn không còn ở trạng thái phát hành. Hãy tải lại trang và chọn mẫu khác."
-                  : "Không tạo được đợt giao. Vui lòng kiểm tra thông tin hoặc thử lại.";
+                  : code === "WORK_REPORT_ASSIGNMENT_INVALID"
+                    ? "Thông tin đợt giao không hợp lệ hoặc ngày hiệu lực không được hỗ trợ. Ngày bắt đầu luôn được máy chủ tính theo ngày Việt Nam khi lưu."
+                    : "Không tạo được đợt giao. Vui lòng kiểm tra thông tin hoặc thử lại.";
       setError(msg);
       if (code === "WORK_REPORT_VERSION_CONFLICT") {
         notify.warning({ title: msg, dedupeKey: "work-report-assignment-create", countBurst: false });
@@ -674,6 +685,7 @@ export function AssignmentManager({
         notify.error({ title: msg, dedupeKey: "work-report-assignment-create", countBurst: false });
       }
     } finally {
+      createInFlightRef.current = false;
       setBusy(false);
     }
   }
@@ -707,7 +719,9 @@ export function AssignmentManager({
             <Button
               type="button"
               variant="primary"
+              disabled={busy}
               onClick={() => {
+                if (busy || createInFlightRef.current) return;
                 setShowCreateForm((prev) => !prev);
                 setConfirmingCreate(false);
               }}
@@ -732,300 +746,301 @@ export function AssignmentManager({
           />
 
           <form onSubmit={(event) => void create(event)} className="space-y-5">
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-1.5">
-                <label htmlFor="team" className="text-sm font-medium">
-                  {targetKind === "GROUP" ? "Lọc theo Team hành chính (tùy chọn)" : "Team trong phạm vi được giao"}
-                </label>
-                <select
-                  id="team"
-                  required={targetKind !== "GROUP"}
-                  value={teamId}
-                  onChange={(event) => {
-                    setTeamId(event.target.value);
-                    setTargetId("");
-                    setTargetUsers([]);
-                    setConfirmingCreate(false);
-                  }}
-                  className={controlClass}
-                >
-                  <option value="">
-                    {targetKind === "GROUP" ? "Tất cả Team trong phạm vi" : "Chọn nhóm"}
-                  </option>
-                  {teams.map((team) => (
-                    <option key={team.team_id} value={team.team_id}>
-                      {team.display_name} ({team.code})
+            <fieldset disabled={busy} className="m-0 min-w-0 space-y-5 border-0 p-0">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <label htmlFor="team" className="text-sm font-medium">
+                    {targetKind === "GROUP" ? "Lọc theo Team hành chính (tùy chọn)" : "Team trong phạm vi được giao"}
+                  </label>
+                  <select
+                    id="team"
+                    disabled={busy}
+                    required={targetKind !== "GROUP"}
+                    value={teamId}
+                    onChange={(event) => {
+                      setTeamId(event.target.value);
+                      setTargetId("");
+                      setTargetUsers([]);
+                      resetCreateConfirmation();
+                    }}
+                    className={controlClass}
+                  >
+                    <option value="">
+                      {targetKind === "GROUP" ? "Tất cả Team trong phạm vi" : "Chọn nhóm"}
                     </option>
-                  ))}
-                </select>
-              </div>
+                    {teams.map((team) => (
+                      <option key={team.team_id} value={team.team_id}>
+                        {team.display_name} ({team.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-              <div className="space-y-1.5">
-                <label htmlFor="template" className="text-sm font-medium">Mẫu báo cáo</label>
-                <select
-                  id="template"
-                  required
-                  value={templateId}
-                  onChange={(event) => {
-                    setTemplateId(event.target.value);
-                    setConfirmingCreate(false);
-                  }}
-                  className={controlClass}
-                >
-                  <option value="">Chọn mẫu đang hoạt động</option>
-                  {templates.map((template) => (
-                    <option key={template.template_id} value={template.template_id}>
-                      {template.display_name} ({template.template_code})
-                    </option>
-                  ))}
-                </select>
-                {templatesLoaded && !error && templates.length === 0 ? (
-                  <p className="text-xs text-muted">Chưa có mẫu đã publish.</p>
+                <div className="space-y-1.5">
+                  <label htmlFor="template" className="text-sm font-medium">Mẫu báo cáo</label>
+                  <select
+                    id="template"
+                    disabled={busy}
+                    required
+                    value={templateId}
+                    onChange={(event) => {
+                      setTemplateId(event.target.value);
+                      resetCreateConfirmation();
+                    }}
+                    className={controlClass}
+                  >
+                    <option value="">Chọn mẫu đang hoạt động</option>
+                    {templates.map((template) => (
+                      <option key={template.template_id} value={template.template_id}>
+                        {template.display_name} ({template.template_code})
+                      </option>
+                    ))}
+                  </select>
+                  {templatesLoaded && !error && templates.length === 0 ? (
+                    <p className="text-xs text-muted">Chưa có mẫu đã publish.</p>
+                  ) : null}
+                </div>
+
+                <div className="space-y-1.5">
+                  <label htmlFor="target-kind" className="text-sm font-medium">Đối tượng nhận báo cáo</label>
+                  <select
+                    id="target-kind"
+                    disabled={busy}
+                    value={targetKind}
+                    onChange={(event) => {
+                      setTargetKind(event.target.value as typeof targetKind);
+                      resetCreateConfirmation();
+                    }}
+                    className={controlClass}
+                  >
+                    <option value="USER">Một nhân viên</option>
+                    <option value="TEAM">Một nhóm (Team hành chính)</option>
+                    <option value="USER_SET">Danh sách nhân viên</option>
+                    <option value="GROUP">Nhóm báo cáo tùy chỉnh</option>
+                  </select>
+                </div>
+
+                {targetKind === "USER_SET" ? (
+                  <div className="space-y-1.5 md:col-span-2">
+                    <label htmlFor="target-users" className="text-sm font-medium">Nhân viên</label>
+                    <select
+                      id="target-users"
+                      disabled={busy}
+                      required
+                      multiple
+                      value={targetUsers}
+                      onChange={(event) => {
+                        setTargetUsers(Array.from(event.target.selectedOptions, (option) => option.value));
+                        resetCreateConfirmation();
+                      }}
+                      className="min-h-32 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                    >
+                      {users.map((user) => (
+                        <option key={user.app_user_id} value={user.app_user_id}>
+                          {user.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : targetKind === "USER" ? (
+                  <div className="space-y-1.5">
+                    <label htmlFor="target-id" className="text-sm font-medium">Nhân viên</label>
+                    <select
+                      id="target-id"
+                      disabled={busy}
+                      required
+                      value={targetId}
+                      onChange={(event) => {
+                        setTargetId(event.target.value);
+                        resetCreateConfirmation();
+                      }}
+                      className={controlClass}
+                    >
+                      <option value="">Chọn nhân viên</option>
+                      {users.map((user) => (
+                        <option key={user.app_user_id} value={user.app_user_id}>
+                          {user.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : targetKind === "GROUP" ? (
+                  <div className="space-y-2 md:col-span-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label htmlFor="target-group" className="text-sm font-medium">Nhóm báo cáo tùy chỉnh</label>
+                      <Button type="button" size="sm" variant="secondary" disabled={busy || groupBusy} onClick={openNewGroupDialog}>
+                        Tạo nhóm báo cáo mới
+                      </Button>
+                    </div>
+                    <select
+                      id="target-group"
+                      disabled={busy}
+                      required
+                      value={targetGroupId}
+                      onChange={(event) => {
+                        setTargetGroupId(event.target.value);
+                        resetCreateConfirmation();
+                      }}
+                      className={controlClass}
+                    >
+                      <option value="">Chọn nhóm báo cáo đang sử dụng</option>
+                      {activeGroups.map((group) => (
+                        <option key={group.group_id} value={group.group_id}>
+                          {group.display_name} ({group.members.length} thành viên)
+                        </option>
+                      ))}
+                    </select>
+                    {!groupsLoading && activeGroups.length === 0 ? (
+                      <p className="text-xs text-muted">
+                        Chưa có nhóm báo cáo đang sử dụng trong phạm vi quyền. Hãy tạo nhóm báo cáo mới trước khi giao.
+                      </p>
+                    ) : null}
+                    {selectedGroup ? (
+                      <div className="rounded-lg bg-subtle p-3 text-xs text-muted">
+                        <span className="font-medium text-foreground">
+                          Thành viên đang hoạt động (
+                          {selectedGroup.members.filter((member) => member.enabled).length}/
+                          {selectedGroup.members.length}):
+                        </span>{" "}
+                        {selectedGroup.members
+                          .map(
+                            (member) =>
+                              `${member.display_name}${member.team_display_name ? ` (${member.team_display_name})` : ""}${!member.enabled ? " · Ngừng hoạt động" : ""}`,
+                          )
+                          .join(", ")}
+                      </div>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
 
-              <div className="space-y-1.5">
-                <label htmlFor="target-kind" className="text-sm font-medium">Đối tượng nhận báo cáo</label>
-                <select
-                  id="target-kind"
-                  value={targetKind}
-                  onChange={(event) => {
-                    setTargetKind(event.target.value as typeof targetKind);
-                    setConfirmingCreate(false);
-                  }}
-                  className={controlClass}
-                >
-                  <option value="USER">Một nhân viên</option>
-                  <option value="TEAM">Một nhóm (Team hành chính)</option>
-                  <option value="USER_SET">Danh sách nhân viên</option>
-                  <option value="GROUP">Nhóm báo cáo tùy chỉnh</option>
-                </select>
+              <p className="text-xs text-muted">
+                Danh sách nhân viên được xác định từ liên kết tài khoản và thành viên nhóm hiện hành. Scope vẫn được kiểm tra lại trong RPC khi tạo assignment.
+              </p>
+
+              <div className="grid gap-4 sm:grid-cols-3">
+                <label className="space-y-1.5 text-sm font-medium">
+                  Chu kỳ
+                  <select
+                    disabled={busy}
+                    value={frequency}
+                    onChange={(event) => {
+                      setFrequency(event.target.value);
+                      resetCreateConfirmation();
+                    }}
+                    className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
+                  >
+                    <option value="DAILY">Hằng ngày</option>
+                    <option value="WEEKLY">Hằng tuần</option>
+                    <option value="MONTHLY">Hằng tháng</option>
+                    <option value="ONCE">Một lần</option>
+                  </select>
+                </label>
+                <label className="space-y-1.5 text-sm font-medium">
+                  Số ngày cộng vào kỳ hạn
+                  <input
+                    type="number"
+                    min="0"
+                    max="31"
+                    disabled={busy}
+                    required
+                    value={dueDayOffset}
+                    onChange={(event) => {
+                      setDueDayOffset(event.target.value);
+                      resetCreateConfirmation();
+                    }}
+                    className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
+                  />
+                </label>
+                <label className="space-y-1.5 text-sm font-medium">
+                  Giờ đến hạn (giờ Việt Nam)
+                  <input
+                    type="time"
+                    step="1"
+                    disabled={busy}
+                    required
+                    value={dueTime}
+                    onChange={(event) => {
+                      setDueTime(event.target.value);
+                      resetCreateConfirmation();
+                    }}
+                    className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
+                  />
+                </label>
               </div>
 
-              {targetKind === "USER_SET" ? (
-                <div className="space-y-1.5 md:col-span-2">
-                  <label htmlFor="target-users" className="text-sm font-medium">Nhân viên</label>
-                  <select
-                    id="target-users"
-                    required
-                    multiple
-                    value={targetUsers}
-                    onChange={(event) => {
-                      setTargetUsers(Array.from(event.target.selectedOptions, (option) => option.value));
-                      setConfirmingCreate(false);
-                    }}
-                    className="min-h-32 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
-                  >
-                    {users.map((user) => (
-                      <option key={user.app_user_id} value={user.app_user_id}>
-                        {user.display_name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : targetKind === "USER" ? (
-                <div className="space-y-1.5">
-                  <label htmlFor="target-id" className="text-sm font-medium">Nhân viên</label>
-                  <select
-                    id="target-id"
-                    required
-                    value={targetId}
-                    onChange={(event) => {
-                      setTargetId(event.target.value);
-                      setConfirmingCreate(false);
-                    }}
-                    className={controlClass}
-                  >
-                    <option value="">Chọn nhân viên</option>
-                    {users.map((user) => (
-                      <option key={user.app_user_id} value={user.app_user_id}>
-                        {user.display_name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : targetKind === "GROUP" ? (
-                <div className="space-y-2 md:col-span-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label htmlFor="target-group" className="text-sm font-medium">Nhóm báo cáo tùy chỉnh</label>
-                    <Button type="button" size="sm" variant="secondary" onClick={openNewGroupDialog}>
-                      Tạo nhóm báo cáo mới
-                    </Button>
-                  </div>
-                  <select
-                    id="target-group"
-                    required
-                    value={targetGroupId}
-                    onChange={(event) => {
-                      setTargetGroupId(event.target.value);
-                      setConfirmingCreate(false);
-                    }}
-                    className={controlClass}
-                  >
-                    <option value="">Chọn nhóm báo cáo đang sử dụng</option>
-                    {activeGroups.map((group) => (
-                      <option key={group.group_id} value={group.group_id}>
-                        {group.display_name} ({group.members.length} thành viên)
-                      </option>
-                    ))}
-                  </select>
-                  {!groupsLoading && activeGroups.length === 0 ? (
-                    <p className="text-xs text-muted">
-                      Chưa có nhóm báo cáo đang sử dụng trong phạm vi quyền. Hãy tạo nhóm báo cáo mới trước khi giao.
-                    </p>
-                  ) : null}
-                  {selectedGroup ? (
-                    <div className="rounded-lg bg-subtle p-3 text-xs text-muted">
-                      <span className="font-medium text-foreground">
-                        Thành viên đang hoạt động (
-                        {selectedGroup.members.filter((member) => member.enabled).length}/
-                        {selectedGroup.members.length}):
-                      </span>{" "}
-                      {selectedGroup.members
-                        .map(
-                          (member) =>
-                            `${member.display_name}${member.team_display_name ? ` (${member.team_display_name})` : ""}${!member.enabled ? " · Ngừng hoạt động" : ""}`,
-                        )
-                        .join(", ")}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-
-            <p className="text-xs text-muted">
-              Danh sách nhân viên được xác định từ liên kết tài khoản và thành viên nhóm hiện hành. Scope vẫn được kiểm tra lại trong RPC khi tạo assignment.
-            </p>
-
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <label className="space-y-1.5 text-sm font-medium">
-                Chu kỳ
-                <select
-                  value={frequency}
-                  onChange={(event) => {
-                    setFrequency(event.target.value);
-                    setConfirmingCreate(false);
-                  }}
-                  className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
-                >
-                  <option value="DAILY">Hằng ngày</option>
-                  <option value="WEEKLY">Hằng tuần</option>
-                  <option value="MONTHLY">Hằng tháng</option>
-                  <option value="ONCE">Một lần</option>
-                </select>
-              </label>
-              <label className="space-y-1.5 text-sm font-medium">
-                Ngày bắt đầu
-                <input
-                  type="date"
-                  required
-                  value={effectiveFrom}
-                  onChange={(event) => {
-                    setEffectiveFrom(event.target.value);
-                    setConfirmingCreate(false);
-                  }}
-                  className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
-                />
-              </label>
-              <label className="space-y-1.5 text-sm font-medium">
-                Số ngày cộng vào kỳ hạn
-                <input
-                  type="number"
-                  min="0"
-                  max="31"
-                  required
-                  value={dueDayOffset}
-                  onChange={(event) => {
-                    setDueDayOffset(event.target.value);
-                    setConfirmingCreate(false);
-                  }}
-                  className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
-                />
-              </label>
-              <label className="space-y-1.5 text-sm font-medium">
-                Giờ đến hạn (giờ Việt Nam)
-                <input
-                  type="time"
-                  step="1"
-                  required
-                  value={dueTime}
-                  onChange={(event) => {
-                    setDueTime(event.target.value);
-                    setConfirmingCreate(false);
-                  }}
-                  className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 font-normal"
-                />
-              </label>
-            </div>
-
-            <div
-              aria-label="Tóm tắt trước khi xác nhận tạo đợt giao"
-              className="rounded-xl border border-primary/25 bg-primary/5 p-4"
-            >
-              <h3 className="text-sm font-semibold text-foreground">
-                Tóm tắt đợt giao trước khi xác nhận
-              </h3>
-              <dl className="mt-2.5 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
-                <div>
-                  <dt className="text-xs text-muted">Mẫu báo cáo</dt>
-                  <dd className="font-medium text-foreground">
-                    {selectedTemplate ? `${selectedTemplate.display_name} (${selectedTemplate.template_code})` : "Chưa chọn mẫu"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted">Đối tượng / Nhóm</dt>
-                  <dd className="font-medium text-foreground">{summaryTargetDescription}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted">Số thành viên</dt>
-                  <dd className="font-medium tabular-nums text-foreground">{summaryMemberCount} người</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted">Chu kỳ</dt>
-                  <dd className="font-medium text-foreground">{frequencyLabel(frequency)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted">Ngày bắt đầu</dt>
-                  <dd className="font-medium tabular-nums text-foreground">{effectiveFrom || "—"}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted">Hạn nộp</dt>
-                  <dd className="font-medium tabular-nums text-foreground">
-                    +{dueDayOffset || "0"} ngày · {dueTime} (giờ VN)
-                  </dd>
-                </div>
-              </dl>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={
-                  busy ||
-                  !templates.length ||
-                  (!teamId && targetKind !== "GROUP") ||
-                  (targetKind === "GROUP" && !targetGroupId) ||
-                  !templatesLoaded
-                }
+              <div
+                aria-label="Tóm tắt trước khi xác nhận tạo đợt giao"
+                className="rounded-xl border border-primary/25 bg-primary/5 p-4"
               >
-                {busy
-                  ? "Đang tạo…"
-                  : confirmingCreate
-                    ? "Xác nhận tạo đợt giao"
-                    : "Tạo đợt giao"}
-              </Button>
-              {confirmingCreate ? (
+                <h3 className="text-sm font-semibold text-foreground">
+                  Tóm tắt đợt giao trước khi xác nhận
+                </h3>
+                <dl className="mt-2.5 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                  <div>
+                    <dt className="text-xs text-muted">Mẫu báo cáo</dt>
+                    <dd className="font-medium text-foreground">
+                      {selectedTemplate ? `${selectedTemplate.display_name} (${selectedTemplate.template_code})` : "Chưa chọn mẫu"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted">Đối tượng / Nhóm</dt>
+                    <dd className="font-medium text-foreground">{summaryTargetDescription}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted">Số thành viên</dt>
+                    <dd className="font-medium tabular-nums text-foreground">{summaryMemberCount} người</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted">Chu kỳ</dt>
+                    <dd className="font-medium text-foreground">{frequencyLabel(frequency)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted">Ngày bắt đầu</dt>
+                    <dd className="font-medium text-foreground">Hiệu lực ngay khi lưu (ngày VN trên máy chủ)</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted">Hạn nộp</dt>
+                    <dd className="font-medium tabular-nums text-foreground">
+                      +{dueDayOffset || "0"} ngày · {dueTime} (giờ VN)
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={busy}
-                  onClick={() => setConfirmingCreate(false)}
+                  type="submit"
+                  variant="primary"
+                  disabled={
+                    busy ||
+                    !templates.length ||
+                    (!teamId && targetKind !== "GROUP") ||
+                    (targetKind === "GROUP" && !targetGroupId) ||
+                    !templatesLoaded
+                  }
                 >
-                  Chỉnh sửa lại
+                  {busy
+                    ? "Đang tạo…"
+                    : confirmingCreate
+                      ? "Xác nhận tạo đợt giao"
+                      : "Tạo đợt giao"}
                 </Button>
-              ) : null}
-            </div>
+                {confirmingCreate ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      if (busy || createInFlightRef.current) return;
+                      setConfirmingCreate(false);
+                    }}
+                  >
+                    Chỉnh sửa lại
+                  </Button>
+                ) : null}
+              </div>
+            </fieldset>
           </form>
         </Card>
       ) : null}
