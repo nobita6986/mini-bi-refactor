@@ -70,8 +70,11 @@ export const VENDOR_FINANCE_MONTHLY_DETAIL_EXPORT_COLUMNS = [
 const CONTROL_CHARS_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 const FORMULA_TRIGGER_RE = /^[\s]*[=+\-@]/;
 const CANONICAL_SIGNED_MINOR_RE = /^(?:0|-?[1-9][0-9]{0,18})$/;
-const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
-const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const CANONICAL_EXACT_INTEGER_RE = /^(?:0|-?[1-9][0-9]*)$/;
+const MAX_EXCEL_EXACT_INT_NUMBER = 999_999_999_999_999;
+const MIN_EXCEL_EXACT_INT_NUMBER = -999_999_999_999_999;
+const MAX_EXCEL_EXACT_INT_BIGINT = BigInt(MAX_EXCEL_EXACT_INT_NUMBER);
+const MIN_EXCEL_EXACT_INT_BIGINT = BigInt(MIN_EXCEL_EXACT_INT_NUMBER);
 
 const CONTRACT_TYPE_EXPORT_LABELS: Readonly<Record<VendorFinanceContractType, string>> = {
   SEASONAL: "Thời vụ",
@@ -103,7 +106,10 @@ function sanitizeCanonicalMinorString(value: string): string {
   return BigInt(cleaned).toString();
 }
 
-type ExportCellSpec = { kind: "number"; value: number } | { kind: "text"; value: string | null | undefined };
+type ExportCellSpec =
+  | { kind: "number"; value: number }
+  | { kind: "exact_integer_text"; value: string }
+  | { kind: "text"; value: string | null | undefined };
 
 function textCell(value: string | null | undefined): ExportCellSpec {
   return { kind: "text", value };
@@ -111,19 +117,23 @@ function textCell(value: string | null | undefined): ExportCellSpec {
 
 function numericCell(value: string | number): ExportCellSpec {
   if (typeof value === "number") {
-    return Number.isSafeInteger(value)
-      ? { kind: "number", value }
-      : { kind: "text", value: String(value) };
+    if (Number.isSafeInteger(value)) {
+      const normalized = value === 0 ? 0 : value;
+      return normalized >= MIN_EXCEL_EXACT_INT_NUMBER && normalized <= MAX_EXCEL_EXACT_INT_NUMBER
+        ? { kind: "number", value: normalized }
+        : { kind: "exact_integer_text", value: String(normalized) };
+    }
+    return { kind: "text", value: String(value) };
   }
-  // Validate canonical signed integer strings before sanitizeExportText so negative numbers
-  // like "-5000000" are written as numeric cells instead of being prefixed by FORMULA_TRIGGER_RE.
+  // Keep integers up to Excel's 15-significant-digit precision as numeric cells for SUM();
+  // preserve longer exact integers (including negatives) verbatim without leading apostrophe.
   const trimmed = value.trim();
-  if (CANONICAL_SIGNED_MINOR_RE.test(trimmed)) {
+  if (CANONICAL_EXACT_INTEGER_RE.test(trimmed)) {
     const parsed = BigInt(trimmed);
-    if (parsed >= MIN_SAFE_BIGINT && parsed <= MAX_SAFE_BIGINT) {
+    if (parsed >= MIN_EXCEL_EXACT_INT_BIGINT && parsed <= MAX_EXCEL_EXACT_INT_BIGINT) {
       return { kind: "number", value: Number(parsed) };
     }
-    return { kind: "text", value: parsed.toString() };
+    return { kind: "exact_integer_text", value: parsed.toString() };
   }
   return { kind: "text", value };
 }
@@ -145,9 +155,11 @@ function appendMonthlyExportRows(
   rows: readonly (readonly ExportCellSpec[])[],
 ): void {
   for (const specs of rows) {
-    const resolved = specs.map((spec) =>
-      spec.kind === "number" ? spec.value : sanitizeExportText(spec.value),
-    );
+    const resolved = specs.map((spec) => {
+      if (spec.kind === "number") return spec.value;
+      if (spec.kind === "exact_integer_text") return spec.value;
+      return sanitizeExportText(spec.value);
+    });
     const added = sheet.addRow(resolved);
     for (let colIdx = 1; colIdx <= specs.length; colIdx += 1) {
       const cell = added.getCell(colIdx);

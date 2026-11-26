@@ -3129,6 +3129,212 @@ test("Monthly report XLSX builder: 2 worksheets, 15/19 columns, zero revenue col
   assert.equal(emptyWb.worksheets[1].rowCount, 1);
 });
 
+test("Monthly report XLSX builder preserves Excel 15-digit numeric precision vs exact >15-digit integer strings (incl. negatives beyond MAX_SAFE_INTEGER) and formula-safe text", async () => {
+  const boundaryReport = {
+    authorization_date: "2026-11-26",
+    allowed_actions: {
+      visibility_scope: "ALL",
+      can_view: true,
+      can_record: true,
+      can_reconcile: true,
+      can_manage_project_assignments: false,
+      can_view_shared_advance: true,
+      can_fund_vendor_advance: false,
+      can_record_vendor_refund: false,
+      can_apply_vendor_advance: true,
+      active_assigned_project_count: 0,
+    },
+    filters: {
+      month: "2026-11",
+      project_id: null,
+      accountant_ref: null,
+      vendor_id: null,
+      contract_type: "all",
+    },
+    totals: {
+      project_revenue_status: "MISSING_CANONICAL_SOURCE",
+      project_revenue_minor: null,
+      project_accountant_book_count: 2,
+      sub_ledger_count: 2,
+      obligations_in_month_minor: "999999999999999",
+      paid_in_month_minor: "1000000000000001",
+      advanced_in_month_minor: "15000000",
+      advance_offset_in_month_minor: "0",
+      paid_and_advanced_in_month_minor: "1000000015000001",
+      closing_payable_minor: "999999999999999",
+      closing_advance_minor: "9007199254740993",
+    },
+    project_accountant_summaries: [
+      {
+        project_id: "=1+1",
+        project_display_name: "-Tên dự án công thức",
+        project_active: true,
+        accountant_ref: ACC_A_ID,
+        responsible_accountant_display_name: "+Kế toán",
+        contract_type: "SEASONAL",
+        is_currently_assigned: true,
+        project_revenue_status: "MISSING_CANONICAL_SOURCE",
+        project_revenue_minor: null,
+        vendor_count: 1,
+        obligations_in_month_minor: "999999999999999",
+        paid_and_advanced_in_month_minor: "1000000000000000",
+        paid_in_month_minor: "1000000000000001",
+        advanced_in_month_minor: "15000000",
+        advance_offset_in_month_minor: "-999999999999999",
+        closing_payable_minor: "9007199254740993",
+        closing_advance_minor: "0",
+        in_month_entry_count: 4,
+      },
+    ],
+    rows: [
+      {
+        project_id: "=1+1",
+        project_display_name: "-Tên dự án công thức",
+        project_active: true,
+        accountant_ref: ACC_A_ID,
+        responsible_accountant_display_name: "+Kế toán",
+        contract_type: "SEASONAL",
+        is_currently_assigned: true,
+        vendor_id: "VND_BOUNDARY",
+        vendor_display_name: "@Vendor Formula",
+        vendor_active: true,
+        project_revenue_status: "MISSING_CANONICAL_SOURCE",
+        project_revenue_minor: null,
+        balance_before_month_minor: "-9007199254740993",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "9007199254740993",
+        obligations_in_month_minor: "999999999999999",
+        paid_and_advanced_in_month_minor: "1000000000000001",
+        paid_in_month_minor: "1000000000000000",
+        advanced_in_month_minor: "-2500000",
+        advance_offset_in_month_minor: "-1000000000000000",
+        net_change_in_month_minor: "0",
+        closing_balance_minor: "-9223372036854775808",
+        closing_direction: "ADVANCE",
+        closing_payable_minor: "-1000000000000001",
+        closing_advance_minor: "15000000",
+        current_balance_minor: "-9223372036854775808",
+        in_month_entry_count: 5,
+        total_entry_count: 5,
+      },
+      {
+        project_id: "PRJ_NUM_SAFE16",
+        project_display_name: "Dự án Số JS Safe 16",
+        project_active: true,
+        accountant_ref: ACC_A_ID,
+        responsible_accountant_display_name: "Kế toán Thuần",
+        contract_type: "OFFICIAL",
+        is_currently_assigned: false,
+        vendor_id: "VND_NUM",
+        vendor_display_name: "Vendor Thường",
+        vendor_active: true,
+        project_revenue_status: "MISSING_CANONICAL_SOURCE",
+        project_revenue_minor: null,
+        balance_before_month_minor: "-999999999999999",
+        opening_payable_in_month_minor: "0",
+        opening_advance_in_month_minor: "999999999999999",
+        obligations_in_month_minor: "0",
+        paid_and_advanced_in_month_minor: 1000000000000001,
+        paid_in_month_minor: -1000000000000001,
+        advanced_in_month_minor: "15000000",
+        advance_offset_in_month_minor: "0",
+        net_change_in_month_minor: "0",
+        closing_balance_minor: "-2500000",
+        closing_direction: "ADVANCE",
+        closing_payable_minor: "0",
+        closing_advance_minor: "2500000",
+        current_balance_minor: "-2500000",
+        in_month_entry_count: 0,
+        total_entry_count: 1,
+      },
+    ],
+    legacy_unallocated_rows: [],
+  };
+
+  const bytes = await buildVendorFinanceMonthlyReportExportXlsx(boundaryReport);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(Buffer.from(bytes));
+
+  const sumRow = wb.worksheets[0].getRow(2);
+  // Formula-like text cells still neutralized with leading '
+  assert.equal(sumRow.getCell(2).value, "'=1+1");
+  assert.equal(sumRow.getCell(2).numFmt, "@");
+  assert.equal(sumRow.getCell(3).value, "'-Tên dự án công thức");
+  assert.equal(sumRow.getCell(3).numFmt, "@");
+  assert.equal(sumRow.getCell(5).value, "'+Kế toán");
+  assert.equal(sumRow.getCell(5).numFmt, "@");
+
+  // 15-digit boundary & normal ints remain numeric cells
+  assert.equal(sumRow.getCell(8).value, 999999999999999);
+  assert.equal(typeof sumRow.getCell(8).value, "number");
+  assert.equal(sumRow.getCell(8).numFmt, "#,##0");
+  assert.equal(sumRow.getCell(11).value, 15000000);
+  assert.equal(typeof sumRow.getCell(11).value, "number");
+  assert.equal(sumRow.getCell(11).numFmt, "#,##0");
+  assert.equal(sumRow.getCell(12).value, -999999999999999);
+  assert.equal(typeof sumRow.getCell(12).value, "number");
+  assert.equal(sumRow.getCell(12).numFmt, "#,##0");
+  assert.equal(sumRow.getCell(14).value, 0);
+  assert.equal(sumRow.getCell(14).numFmt, "#,##0");
+
+  // 16-digit boundary and >MAX_SAFE_INTEGER ints written as exact strings (no leading ')
+  assert.equal(sumRow.getCell(9).value, "1000000000000000");
+  assert.equal(typeof sumRow.getCell(9).value, "string");
+  assert.equal(sumRow.getCell(9).numFmt, "@");
+  assert.equal(sumRow.getCell(10).value, "1000000000000001");
+  assert.equal(typeof sumRow.getCell(10).value, "string");
+  assert.equal(sumRow.getCell(10).numFmt, "@");
+  assert.equal(sumRow.getCell(13).value, "9007199254740993");
+  assert.equal(typeof sumRow.getCell(13).value, "string");
+  assert.equal(sumRow.getCell(13).numFmt, "@");
+
+  const detRow1 = wb.worksheets[1].getRow(2);
+  assert.equal(detRow1.getCell(2).value, "'=1+1");
+  assert.equal(detRow1.getCell(3).value, "'-Tên dự án công thức");
+  assert.equal(detRow1.getCell(4).value, "'+Kế toán");
+  assert.equal(detRow1.getCell(7).value, "'@Vendor Formula");
+  assert.equal(detRow1.getCell(7).numFmt, "@");
+
+  // Explicit T0 repro values: -9007199254740993 (no leading apostrophe!) & 1000000000000001 (string, not number!)
+  assert.equal(detRow1.getCell(9).value, "-9007199254740993");
+  assert.equal(typeof detRow1.getCell(9).value, "string");
+  assert.equal(detRow1.getCell(9).numFmt, "@");
+  assert.equal(detRow1.getCell(10).value, 999999999999999);
+  assert.equal(detRow1.getCell(10).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(11).value, "1000000000000001");
+  assert.equal(typeof detRow1.getCell(11).value, "string");
+  assert.equal(detRow1.getCell(11).numFmt, "@");
+  assert.equal(detRow1.getCell(12).value, "1000000000000000");
+  assert.equal(detRow1.getCell(12).numFmt, "@");
+  assert.equal(detRow1.getCell(13).value, -2500000);
+  assert.equal(typeof detRow1.getCell(13).value, "number");
+  assert.equal(detRow1.getCell(13).numFmt, "#,##0");
+  assert.equal(detRow1.getCell(14).value, "-1000000000000000");
+  assert.equal(detRow1.getCell(14).numFmt, "@");
+  assert.equal(detRow1.getCell(15).value, "-9223372036854775808");
+  assert.equal(typeof detRow1.getCell(15).value, "string");
+  assert.equal(detRow1.getCell(15).numFmt, "@");
+  assert.equal(detRow1.getCell(17).value, "-1000000000000001");
+  assert.equal(detRow1.getCell(17).numFmt, "@");
+  assert.equal(detRow1.getCell(18).value, 15000000);
+  assert.equal(detRow1.getCell(18).numFmt, "#,##0");
+
+  const detRow2 = wb.worksheets[1].getRow(3);
+  assert.equal(detRow2.getCell(9).value, -999999999999999);
+  assert.equal(typeof detRow2.getCell(9).value, "number");
+  assert.equal(detRow2.getCell(9).numFmt, "#,##0");
+  assert.equal(detRow2.getCell(10).value, 0);
+  assert.equal(detRow2.getCell(10).numFmt, "#,##0");
+  assert.equal(detRow2.getCell(11).value, "1000000000000001");
+  assert.equal(typeof detRow2.getCell(11).value, "string");
+  assert.equal(detRow2.getCell(11).numFmt, "@");
+  assert.equal(detRow2.getCell(12).value, "-1000000000000001");
+  assert.equal(typeof detRow2.getCell(12).value, "string");
+  assert.equal(detRow2.getCell(12).numFmt, "@");
+  assert.equal(detRow2.getCell(15).value, -2500000);
+  assert.equal(detRow2.getCell(15).numFmt, "#,##0");
+});
+
 test("handleGetExportVendorFinanceMonthlyReport: filter pass-through, security headers, auth/query guards, PROJECT_SCOPED enforcement, and 503 failure handling", async () => {
   const { repository, calls } = makeMockRepository();
   const fullAdminDeps = {
