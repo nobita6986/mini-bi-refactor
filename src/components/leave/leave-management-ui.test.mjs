@@ -6,6 +6,10 @@ const workspaceSource = readFileSync(
   new URL("./leave-management-workspace.tsx", import.meta.url),
   "utf8",
 );
+const adminProfilesTableCss = readFileSync(
+  new URL("./leave-admin-profiles-table.module.css", import.meta.url),
+  "utf8",
+);
 const pageSource = readFileSync(
   new URL("../../app/leave/page.tsx", import.meta.url),
   "utf8",
@@ -165,4 +169,30 @@ test("WP2 Monthly Attendance & Leave Closing Report surface supports server filt
   assert.ok(workspaceSource.includes("LEAVE_TYPES"));
   assert.ok(workspaceSource.includes("autoAllocateDraftDaysByBalance"));
   assert.equal(workspaceSource.includes("leavePayTreatmentBadge"), false);
+});
+
+test("T1A UI Polish Task 1: leave-admin-profiles-table adds +1px top and top-right rounded header border strictly scoped to desktop", () => {
+  assert.match(
+    workspaceSource,
+    /import styles from "\.\/leave-admin-profiles-table\.module\.css";/,
+  );
+
+  // Applied ONLY to leave-admin-profiles-table
+  const classMatches = workspaceSource.match(/styles\.leaveAdminProfilesTable/g) ?? [];
+  assert.equal(classMatches.length, 1);
+  assert.match(
+    workspaceSource,
+    /<DataTableContainer\s+dataTestId="leave-admin-profiles-table"\s+className=\{styles\.leaveAdminProfilesTable\}/,
+  );
+
+  // Scoped desktop-only (@media (min-width: 768px)) so mobile (<768px where r22-card-table hides thead) stays clean
+  assert.match(adminProfilesTableCss, /@media\s*\(\s*min-width:\s*768px\s*\)/);
+  assert.match(adminProfilesTableCss, /\.leaveAdminProfilesTable::after\s*\{/);
+  assert.match(adminProfilesTableCss, /border-top-width:\s*1px/);
+  assert.match(adminProfilesTableCss, /border-right-width:\s*1px/);
+  assert.match(adminProfilesTableCss, /border-top-right-radius:\s*11px/);
+  assert.match(adminProfilesTableCss, /border-top-left-radius:\s*11px/);
+  assert.match(adminProfilesTableCss, /border-top-color:\s*inherit/);
+  assert.match(adminProfilesTableCss, /border-right-color:\s*inherit/);
+  assert.match(adminProfilesTableCss, /pointer-events:\s*none/);
 });

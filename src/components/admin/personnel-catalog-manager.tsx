@@ -712,7 +712,7 @@ export function PersonnelCatalogManager({
       request = buildPersonnelUpdateRequest({
         personnelCode: form.personnelCode,
         displayName: form.displayName,
-        personnelPosition: form.personnelPosition,
+        personnelPosition: dialog.personnel.personnel_position ?? "",
         expectedVersion: dialog.personnel.version,
         reason: form.reason,
         idempotencyKey,
@@ -1126,30 +1126,32 @@ export function PersonnelCatalogManager({
                         onChange={(value) => changeForm("displayName", value)}
                       />
                     )}
-                    <label className="block text-sm font-medium text-foreground" htmlFor="personnel-position">
-                      Vị trí
-                      <select
-                        id="personnel-position"
-                        value={form.personnelPosition}
-                        onChange={(event) => {
-                          const value = event.currentTarget.value;
-                          changeForm("personnelPosition", value === "STAFF" || value === "TEAM_LEADER" ? value : "");
-                        }}
-                        required
-                        className="mt-1 block min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm"
-                      >
-                        <option value="">Chọn vị trí</option>
-                        <option value="STAFF">Nhân viên</option>
-                        <option value="TEAM_LEADER">Trưởng nhóm</option>
-                      </select>
-                      <span className="mt-1 block text-xs font-normal text-muted">
-                        Vị trí không tự cấp quyền trong hệ thống.
-                      </span>
-                    </label>
                     {dialog?.kind === "create" ? (
-                      <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted sm:col-span-2">
-                        Ngày hiệu lực HRP được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
-                      </div>
+                      <>
+                        <label className="block text-sm font-medium text-foreground" htmlFor="personnel-position">
+                          Vị trí
+                          <select
+                            id="personnel-position"
+                            value={form.personnelPosition}
+                            onChange={(event) => {
+                              const value = event.currentTarget.value;
+                              changeForm("personnelPosition", value === "STAFF" || value === "TEAM_LEADER" ? value : "");
+                            }}
+                            required
+                            className="mt-1 block min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm"
+                          >
+                            <option value="">Chọn vị trí</option>
+                            <option value="STAFF">Nhân viên</option>
+                            <option value="TEAM_LEADER">Trưởng nhóm</option>
+                          </select>
+                          <span className="mt-1 block text-xs font-normal text-muted">
+                            Vị trí không tự cấp quyền trong hệ thống.
+                          </span>
+                        </label>
+                        <div className="rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-muted sm:col-span-2">
+                          Ngày hiệu lực HRP được hệ thống áp dụng ngay theo ngày nghiệp vụ hiện tại (giờ Việt Nam).
+                        </div>
+                      </>
                     ) : null}
                   </div>
                   <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
@@ -1410,7 +1412,6 @@ export function PersonnelCatalogManager({
                     <tr>
                       <th scope="col" className="px-3.5 py-3 font-semibold">Nhân sự</th>
                       <th scope="col" className="px-3.5 py-3 font-semibold">Nhóm</th>
-                      <th scope="col" className="px-3.5 py-3 font-semibold">Vị trí</th>
                       <th scope="col" className="px-3.5 py-3 font-semibold">Trạng thái</th>
                       <th scope="col" className="px-3.5 py-3 font-semibold">Hiệu lực HRP</th>
                       <th scope="col" className="px-3.5 py-3 font-semibold text-right">Thao tác</th>
@@ -1426,7 +1427,6 @@ export function PersonnelCatalogManager({
                           </span>
                         </td>
                         <td data-label="Nhóm công tác" className="px-3.5 py-2.5">{personnel.team_names.join(", ") || "Chưa xếp nhóm"}</td>
-                        <td data-label="Vị trí" className="px-3.5 py-2.5">{positionLabel(personnel.personnel_position)}</td>
                         <td data-label="Trạng thái" className="px-3.5 py-2.5">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <ActiveBadge active={personnel.active} />

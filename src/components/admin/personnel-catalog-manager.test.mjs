@@ -94,3 +94,10 @@ test("Full Admin can link an existing HRP personnel profile to an existing acces
   assert.match(source, /error:\s*outcome\.message/);
   assert.match(source, /Xác nhận liên kết/);
 });
+
+test("edit dialog hides Vị trí dropdown while preserving existing personnel_position and list hides Vị trí column", () => {
+  assert.doesNotMatch(source, />Vị trí<\/th>/);
+  assert.doesNotMatch(source, /data-label="Vị trí"/);
+  assert.match(source, /dialog\?\.kind === "create" \? \(\s*<>\s*<label[^>]*htmlFor="personnel-position"/);
+  assert.match(source, /personnelPosition:\s*dialog\.personnel\.personnel_position \?\? ""/);
+});

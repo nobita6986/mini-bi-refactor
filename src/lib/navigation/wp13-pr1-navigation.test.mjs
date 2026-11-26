@@ -651,15 +651,15 @@ test("Q1: assignment-tab-model + WorkReportsModuleNav + AssignmentManager stay s
   assert.match(resetHtml, /<a href="\/work-reports\/assignments"[^>]*aria-current="page"[^>]*>Đợt giao<\/a>/);
   assert.doesNotMatch(resetHtml, /<a href="\/work-reports\/assignments\?tab=groups"[^>]*aria-current="page"[^>]*>Nhóm nhận báo cáo<\/a>/);
 
-  // Verify AssignmentManager & page wire useSearchParams + router.push (for Back/Forward) without stale replaceState
+  // Verify AssignmentManager & page wire useSearchParams (for Back/Forward) without duplicate nav buttons or stale replaceState
   const managerSrc = readRepo("src/components/work-reports/renderer/assignment-manager.tsx");
   const navSrc = readRepo("src/components/work-reports/work-reports-nav.tsx");
   const shellSrc = readRepo("src/components/work-reports/work-reports-shell.tsx");
   const assignPageSrc = readRepo("src/app/work-reports/assignments/page.tsx");
   assert.match(managerSrc, /useSearchParams\(\)/);
-  assert.match(managerSrc, /router\.push\(href,\s*\{\s*scroll:\s*false\s*\}\)/);
-  assert.match(managerSrc, /aria-pressed=\{activeSubView === "assignments"\}/);
-  assert.match(managerSrc, /aria-pressed=\{activeSubView === "groups"\}/);
+  assert.match(managerSrc, /parseWorkReportAssignmentTab\(searchParams\.get\("tab"\)\)/);
+  assert.doesNotMatch(managerSrc, /Đợt giao \(\{assignments\.length\}\)/);
+  assert.doesNotMatch(managerSrc, /Nhóm nhận báo cáo \(\{groups\.length\}\)/);
   assert.match(managerSrc, /open=\{revokeConfirmAssignment !== null && \(activeSubView === "assignments" \|\| trackingBusy\)\}/);
   assert.match(managerSrc, /open=\{groupEditor !== null && \(activeSubView === "groups" \|\| groupBusy\)\}/);
   assert.doesNotMatch(managerSrc, /window\.history\.replaceState/);

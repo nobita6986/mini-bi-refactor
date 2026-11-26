@@ -572,3 +572,26 @@ test("T1A Hotfix Issue #2: WorkerTable RowActionCluster omits read-only explanat
     "RowActionCluster in WorkerTable must not render the read-only explanation text",
   );
 });
+
+test("T1A UI Polish Task 4: WorkerTable status cell removes bank account summary line while keeping StatusBadge and detail/drawer bank sections intact", () => {
+  const tableStart = source.indexOf("function WorkerTable(");
+  const tableEnd = source.indexOf("const DIRECT_EDIT_FILE_KINDS", tableStart);
+  assert.ok(tableStart >= 0 && tableEnd > tableStart);
+  const tableSource = source.slice(tableStart, tableEnd);
+
+  assert.doesNotMatch(tableSource, /bankAccountSummary/);
+  assert.doesNotMatch(tableSource, /BANK_ACCOUNT_SECTION_LABEL/);
+  assert.doesNotMatch(tableSource, /const bank\s*=/);
+  assert.doesNotMatch(source, /\bbankAccountSummary\b/);
+
+  // Status badge remains intact in WorkerTable
+  assert.match(
+    tableSource,
+    /<td className=\{DATA_TABLE_TD_CLASS \+ " whitespace-nowrap"\} data-label="Trạng thái">\s*<StatusBadge tone=\{statusTone\} dot>\s*\{workerStatusLabel\(row\.employment_status\)\}\s*<\/StatusBadge>\s*<\/td>/,
+  );
+
+  // Bank section in drawer (#worker-bank-fields) and worker detail dialog remain intact
+  assert.match(source, /id="worker-bank-fields"[^>]*>\{BANK_ACCOUNT_SECTION_LABEL\}<\/h3>/);
+  assert.match(workerDetailDialog, /bankAccountSummary\(row\.payment\)/);
+  assert.match(workerDetailDialog, /id="worker-detail-payment">Thanh toán<\/h3>/);
+});
