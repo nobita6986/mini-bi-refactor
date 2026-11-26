@@ -586,115 +586,114 @@ export function VendorFinanceMonthlyReportView({
       {/* Non-Netted Monthly KPI Summary */}
       <section
         aria-label="Chỉ số tổng tham khảo công nợ tháng theo phạm vi lọc (không thay thế số dư riêng từng sổ)"
-        className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
+        className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 xl:grid-rows-[auto_auto_1fr]"
         data-testid="vfin-monthly-kpis"
       >
-        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+        <Card className="grid h-full min-w-0 grid-rows-[auto_auto_1fr] gap-y-1.5 p-3.5 xl:row-span-3 xl:grid-rows-subgrid">
           <p className="text-xs font-medium leading-snug text-muted">
-            Đầu kỳ & mở sổ
+            Phải trả đầu kỳ
           </p>
           <p
             data-testid="vfin-monthly-kpi-opening-payable"
-            className="flex flex-wrap items-baseline gap-x-1.5 font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+            className="break-words font-mono text-lg font-semibold leading-tight tracking-tight tabular-nums text-foreground"
           >
-            <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
-            <span>
-              {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_payable_minor) : "—"}
-            </span>
+            {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_payable_minor) : "—"}
           </p>
-          <div className="space-y-0.5">
+          <div className="space-y-1 text-xs leading-snug text-muted">
+            <p>Đã tính mở sổ trong tháng</p>
             <p
               data-testid="vfin-monthly-kpi-opening-advance"
-              className="whitespace-nowrap font-mono text-xs tabular-nums text-muted"
+              className="break-words font-mono tabular-nums"
             >
               Dư ứng:{" "}
               {openingTotals ? formatAggregatedVndMinor(openingTotals.opening_advance_minor) : "—"}
             </p>
             {openingTotals?.has_in_month_opening ? (
-              <p
+              <div
                 data-testid="vfin-monthly-kpi-opening-in-month"
-                className="flex flex-wrap gap-x-1.5 font-mono text-[11px] leading-snug tabular-nums text-muted"
+                className="space-y-0.5 border-t border-border/60 pt-1 text-[11px] leading-snug text-muted"
               >
-                <span className="whitespace-nowrap">
+                <p className="font-medium text-muted">Trong đó mở sổ trong tháng:</p>
+                <p className="break-words font-mono tabular-nums">
                   Mở nợ: {formatAggregatedVndMinor(openingTotals.opening_payable_in_month_minor)}
-                </span>{" "}
-                ·{" "}
-                <span className="whitespace-nowrap">
+                </p>
+                <p className="break-words font-mono tabular-nums">
                   Mở ứng: {formatAggregatedVndMinor(openingTotals.opening_advance_in_month_minor)}
-                </span>
-              </p>
+                </p>
+              </div>
             ) : null}
           </div>
         </Card>
 
-        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+        <Card className="grid h-full min-w-0 grid-rows-[auto_auto_1fr] gap-y-1.5 p-3.5 xl:row-span-3 xl:grid-rows-subgrid">
           <p className="text-xs font-medium leading-snug text-muted">
             Tổng phải trả phát sinh trong tháng
           </p>
           <p
             data-testid="vfin-monthly-kpi-obligations"
-            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+            className="break-words font-mono text-lg font-semibold leading-tight tracking-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.obligations_in_month_minor) : "—"}
           </p>
-          <p className="text-xs text-muted">Công nợ, lương & điều chỉnh tăng (+)</p>
+          <p className="text-xs leading-snug text-muted">Công nợ, lương & điều chỉnh tăng (+)</p>
         </Card>
 
-        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+        <Card className="grid h-full min-w-0 grid-rows-[auto_auto_1fr] gap-y-1.5 p-3.5 xl:row-span-3 xl:grid-rows-subgrid">
           <p className="text-xs font-medium leading-snug text-muted">
             Đã thanh toán & tạm ứng trong tháng
           </p>
           <p
             data-testid="vfin-monthly-kpi-paid-advanced"
-            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+            className="break-words font-mono text-lg font-semibold leading-tight tracking-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.paid_and_advanced_in_month_minor) : "—"}
           </p>
-          <p className="text-xs text-muted">
+          <div className="space-y-0.5 text-xs leading-snug text-muted">
             {totals ? (
               <>
-                <span className="whitespace-nowrap">
+                <p className="break-words font-mono tabular-nums">
                   TT: {formatVndMinor(totals.paid_in_month_minor)}
-                </span>{" "}
-                ·{" "}
-                <span className="whitespace-nowrap">
+                </p>
+                <p className="break-words font-mono tabular-nums">
                   Ứng: {formatVndMinor(totals.advanced_in_month_minor)}
-                </span>
+                </p>
               </>
             ) : (
-              "Đang tải…"
+              <p>Đang tải…</p>
             )}
-          </p>
+          </div>
         </Card>
 
-        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
+        <Card className="grid h-full min-w-0 grid-rows-[auto_auto_1fr] gap-y-1.5 p-3.5 xl:row-span-3 xl:grid-rows-subgrid">
           <p className="text-xs font-medium leading-snug text-muted">
             Khấu trừ ứng trong tháng
           </p>
           <p
             data-testid="vfin-monthly-kpi-advance-offset"
-            className="whitespace-nowrap font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+            className="break-words font-mono text-lg font-semibold leading-tight tracking-tight tabular-nums text-foreground"
           >
             {totals ? formatVndMinor(totals.advance_offset_in_month_minor) : "—"}
           </p>
-          <p className="text-xs text-muted">Khấu trừ từ số dư ứng (-)</p>
+          <p className="text-xs leading-snug text-muted">Khấu trừ từ số dư ứng (-)</p>
         </Card>
 
-        <Card className="grid h-full min-w-0 grid-rows-[minmax(2.25rem,auto)_auto_1fr] gap-y-1.5 p-3.5">
-          <p className="text-xs font-medium leading-snug text-muted">Số dư cuối tháng</p>
+        <Card className="grid h-full min-w-0 grid-rows-[auto_auto_1fr] gap-y-1.5 p-3.5 xl:row-span-3 xl:grid-rows-subgrid">
+          <p className="text-xs font-medium leading-snug text-muted">Còn nợ cuối kỳ</p>
           <p
             data-testid="vfin-monthly-kpi-closing-payable"
-            className="flex flex-wrap items-baseline gap-x-1.5 font-mono text-lg font-semibold leading-tight tabular-nums text-foreground"
+            className="break-words font-mono text-lg font-semibold leading-tight tracking-tight tabular-nums text-foreground"
           >
-            <span className="font-sans text-xs font-medium text-muted">Còn nợ:</span>{" "}
-            <span>{totals ? formatVndMinor(totals.closing_payable_minor) : "—"}</span>
+            {totals ? formatVndMinor(totals.closing_payable_minor) : "—"}
           </p>
-          <p
-            data-testid="vfin-monthly-kpi-closing-advance"
-            className="whitespace-nowrap font-mono text-xs tabular-nums text-muted"
-          >
-            Dư ứng: {totals ? formatVndMinor(totals.closing_advance_minor) : "—"}
-          </p>
+          <div className="space-y-0.5 text-xs leading-snug text-muted">
+            <p>Số dư cuối tháng</p>
+            <p
+              data-testid="vfin-monthly-kpi-closing-advance"
+              className="break-words font-mono tabular-nums"
+            >
+              Dư ứng: {totals ? formatVndMinor(totals.closing_advance_minor) : "—"}
+            </p>
+          </div>
         </Card>
       </section>
 
