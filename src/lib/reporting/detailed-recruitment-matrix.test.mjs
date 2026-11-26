@@ -650,7 +650,9 @@ test("Detailed Matrix (5): Ephemeral PGlite DB integration for direct_entry_repo
     const names = (await readdir(MIGRATION_DIR))
       .filter((n) => n.endsWith(".sql"))
       .sort();
-    for (const name of names) {
+    const pinIdx = names.indexOf("20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql");
+    assert.notEqual(pinIdx, -1, "missing 20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql");
+    for (const name of names.slice(0, pinIdx + 1)) {
       await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
     }
 

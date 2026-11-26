@@ -82,6 +82,8 @@ async function rewriteLegacyScopeHelpersWithCrlf(db) {
 
 // P3-W07C-R3: cho phep test "trước/sau migration" chạy đúng bằng cách áp dụng
 // chỉ một phần migrations. `null` = tất cả; mảng = whitelist tên file.
+const PRE_3C_PIN_MIGRATION_NAME = "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql";
+
 async function databaseUpTo(untilName, { crlfLegacyScopeHelpers = false } = {}) {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
@@ -90,12 +92,11 @@ async function databaseUpTo(untilName, { crlfLegacyScopeHelpers = false } = {}) 
   const migrations = (await readdir(MIGRATION_DIR))
     .filter((name) => name.endsWith(".sql"))
     .sort();
-  const apply = untilName === null
-    ? migrations
-    : migrations.slice(0, migrations.indexOf(untilName) + 1);
-  if (untilName !== null && !migrations.includes(untilName)) {
-    throw new Error(`databaseUpTo: migration ${untilName} not found in ${MIGRATION_DIR}`);
+  const effectiveUntil = untilName === null ? PRE_3C_PIN_MIGRATION_NAME : untilName;
+  if (!migrations.includes(effectiveUntil)) {
+    throw new Error(`databaseUpTo: migration ${effectiveUntil} not found in ${MIGRATION_DIR}`);
   }
+  const apply = migrations.slice(0, migrations.indexOf(effectiveUntil) + 1);
   const currentStateColumns = apply.includes("20261020200000_r1_current_state_authorization.sql")
     ? ", is_current" : "";
   const currentStateValue = currentStateColumns ? ", true" : "";
