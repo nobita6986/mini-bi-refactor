@@ -4,7 +4,12 @@ import test from "node:test";
 import {
   classifyStagingObject, finalObjectKey, genericDownloadName, inspectDocumentContent, sha256Hex, stagingObjectKey,
 } from "./document-r2-contract.ts";
-import { createR2DocumentStorage, loadR2Config } from "./r2-document-storage.ts";
+import {
+  buildR2S3ClientConfig,
+  createR2DocumentStorage,
+  loadR2Config,
+  resolveDocumentStorageProvider,
+} from "./r2-document-storage.ts";
 
 const documentId = "b2000000-0000-4000-8000-000000000001";
 const key = `p1.6/c2000000-0000-4000-8000-000000000001/CCCD_FRONT/1/${documentId}`;
@@ -195,4 +200,83 @@ test("sha256 is computed from bytes and staging cleanup contract is fixed", () =
   assert.equal(classifyStagingObject({ ageHours: 1, invalid: true, finalized: false }), "delete-invalid");
   assert.equal(classifyStagingObject({ ageHours: 23, invalid: false, finalized: false }), "keep");
   assert.equal(classifyStagingObject({ ageHours: 24, invalid: false, finalized: false }), "eligible-for-cleanup");
+});
+
+test("resolveDocumentStorageProvider defaults to cloudflare_r2, accepts vpsttt, and fails closed on unknown values", () => {
+  assert.equal(resolveDocumentStorageProvider({}), "cloudflare_r2");
+  assert.equal(resolveDocumentStorageProvider({ DOCUMENT_STORAGE_PROVIDER: "cloudflare_r2" }), "cloudflare_r2");
+  assert.equal(resolveDocumentStorageProvider({ DOCUMENT_STORAGE_PROVIDER: " vpsttt " }), "vpsttt");
+  assert.equal(resolveDocumentStorageProvider({ DOCUMENT_STORAGE_PROVIDER: "s3" }), null);
+  assert.equal(resolveDocumentStorageProvider({ DOCUMENT_STORAGE_PROVIDER: "" }), null);
+});
+
+test("loadR2Config validates VPSTTT config with decoupled bucket, rejects invalid fields, and never falls back to R2_*", () => {
+  const vpstttEnv = (extra = {}) => ({
+    ...env(),
+    DOCUMENT_STORAGE_ENVIRONMENT: "production",
+    DOCUMENT_STORAGE_PROVIDER: "vpsttt",
+    VPSTTT_STORAGE_ENDPOINT: "https://s3.synthetic.test:9000",
+    VPSTTT_STORAGE_REGION: "ap-southeast-1",
+    VPSTTT_STORAGE_BUCKET: "vpsttt-clone-bucket",
+    VPSTTT_STORAGE_ACCESS_KEY_ID: "VPSTTTSYNTHETICKEY01",
+    VPSTTT_STORAGE_SECRET_ACCESS_KEY: "vpsttt-synthetic-secret-key-0123456789",
+    ...extra,
+  });
+
+  const valid = loadR2Config(vpstttEnv());
+  assert.ok(valid);
+  assert.equal(valid.provider, "vpsttt");
+  assert.equal(valid.accountId, null);
+  assert.equal(valid.environment, "production");
+  assert.equal(valid.bucket, "vpsttt-clone-bucket");
+  assert.equal(valid.forcePathStyle, true);
+
+  const pathStyleOff = loadR2Config(vpstttEnv({ VPSTTT_STORAGE_FORCE_PATH_STYLE: "false" }));
+  assert.equal(pathStyleOff?.forcePathStyle, false);
+
+  for (const bad of [
+    { VPSTTT_STORAGE_ENDPOINT: undefined },
+    { VPSTTT_STORAGE_ENDPOINT: "http://s3.synthetic.test:9000" },
+    { VPSTTT_STORAGE_ENDPOINT: "https://s3.synthetic.test?foo=1" },
+    { VPSTTT_STORAGE_ENDPOINT: "https://<host>.test" },
+    { VPSTTT_STORAGE_REGION: undefined },
+    { VPSTTT_STORAGE_BUCKET: "a..b" },
+    { VPSTTT_STORAGE_BUCKET: "127.0.0.1" },
+    { VPSTTT_STORAGE_BUCKET: "UPPER_CASE" },
+    { VPSTTT_STORAGE_ACCESS_KEY_ID: "<access-key>" },
+    { VPSTTT_STORAGE_SECRET_ACCESS_KEY: "<secret-key>" },
+    { VPSTTT_STORAGE_FORCE_PATH_STYLE: "invalid" },
+  ]) {
+    assert.equal(loadR2Config(vpstttEnv(bad)), null, JSON.stringify(bad));
+  }
+});
+
+test("buildR2S3ClientConfig targets Cloudflare R2 vs VPSTTT endpoints, regions, and path-style flags", () => {
+  const r2Cfg = loadR2Config(env());
+  assert.ok(r2Cfg);
+  const r2ClientCfg = buildR2S3ClientConfig(r2Cfg);
+  assert.equal(r2ClientCfg.region, "auto");
+  assert.equal(r2ClientCfg.endpoint, "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com");
+  assert.equal(r2ClientCfg.forcePathStyle, false);
+  assert.equal(r2ClientCfg.requestChecksumCalculation, "WHEN_REQUIRED");
+  assert.equal(r2ClientCfg.responseChecksumValidation, "WHEN_REQUIRED");
+
+  const vpstttCfg = loadR2Config({
+    DOCUMENT_STORAGE_ENVIRONMENT: "production",
+    DOCUMENT_STORAGE_PROVIDER: "vpsttt",
+    VPSTTT_STORAGE_ENDPOINT: "https://127.0.0.1:9443/",
+    VPSTTT_STORAGE_REGION: "us-east-1",
+    VPSTTT_STORAGE_BUCKET: "vpsttt-clone-bucket",
+    VPSTTT_STORAGE_ACCESS_KEY_ID: "VPSTTTSYNTHETICKEY01",
+    VPSTTT_STORAGE_SECRET_ACCESS_KEY: "vpsttt-synthetic-secret-key-0123456789",
+  });
+  assert.ok(vpstttCfg);
+  const vpstttClientCfg = buildR2S3ClientConfig(vpstttCfg);
+  assert.equal(vpstttClientCfg.region, "us-east-1");
+  assert.equal(vpstttClientCfg.endpoint, "https://127.0.0.1:9443");
+  assert.equal(vpstttClientCfg.forcePathStyle, true);
+  assert.deepEqual(vpstttClientCfg.credentials, {
+    accessKeyId: "VPSTTTSYNTHETICKEY01",
+    secretAccessKey: "vpsttt-synthetic-secret-key-0123456789",
+  });
 });

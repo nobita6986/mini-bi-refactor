@@ -13,7 +13,7 @@ if (process.env.W2S1_PORTRAIT_STAGE_REAPER_ENABLED !== "true") {
   throw new Error("W2S1_PORTRAIT_STAGE_REAPER_ENABLED must be true");
 }
 if (!isW2S1PortraitStageReaperStagingEnvironment(process.env)) {
-  throw new Error("portrait reaper is restricted to the configured staging DB and Preview bucket");
+  throw new Error("portrait reaper is restricted to the configured staging DB and Preview storage");
 }
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -21,7 +21,7 @@ const serviceKey = process.env.SUPABASE_SECRET_KEY;
 if (!supabaseUrl || !serviceKey) throw new Error("portrait reaper Supabase configuration missing");
 
 const storage = createR2DocumentStorage(process.env);
-if (!storage.available()) throw new Error("portrait reaper R2 configuration missing");
+if (!storage.available()) throw new Error("portrait reaper object storage configuration missing");
 
 const supabase = createClient(supabaseUrl, serviceKey, {
   auth: { persistSession: false, autoRefreshToken: false },

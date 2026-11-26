@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import type { DocumentObjectStorage } from "./r2-document-storage.ts";
+import {
+  loadR2Config,
+  resolveDocumentStorageProvider,
+  type DocumentObjectStorage,
+} from "./r2-document-storage.ts";
 import { DOCUMENT_BUCKETS } from "./document-r2-contract.ts";
 import type { SubmissionObjectCleanup } from "./worker-portrait-stage-repository.ts";
 
@@ -15,10 +19,22 @@ export function isW2S1PortraitStageReaperStagingEnvironment(
   } catch {
     return false;
   }
-  return url.protocol === "https:" &&
-    url.hostname === `${W2S1_STAGING_SUPABASE_REF}.supabase.co` &&
-    env.DOCUMENT_STORAGE_ENVIRONMENT === "preview" &&
-    env.R2_BUCKET_NAME === DOCUMENT_BUCKETS.preview;
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== `${W2S1_STAGING_SUPABASE_REF}.supabase.co` ||
+    env.DOCUMENT_STORAGE_ENVIRONMENT !== "preview"
+  ) {
+    return false;
+  }
+  const provider = resolveDocumentStorageProvider(env);
+  if (provider === "cloudflare_r2") {
+    return env.R2_BUCKET_NAME === DOCUMENT_BUCKETS.preview;
+  }
+  if (provider === "vpsttt") {
+    const config = loadR2Config(env);
+    return config?.provider === "vpsttt" && config.bucket !== DOCUMENT_BUCKETS.production;
+  }
+  return false;
 }
 
 type CleanupRepository = {

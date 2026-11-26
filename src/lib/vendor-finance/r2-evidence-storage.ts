@@ -6,7 +6,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
-  S3Client,
+  type S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
@@ -14,6 +14,7 @@ import {
   type DocumentEnvironment,
 } from "../direct-entry/document-r2-contract.ts";
 import {
+  createR2S3Client,
   loadR2Config,
   type R2Dependencies,
   type SignedDocumentUrl,
@@ -273,16 +274,7 @@ export function createR2VendorFinanceEvidenceStorage(
       getSignedUrl(signer as S3Client, command as never, options));
 
   const getClient = (): Send => {
-    client ??= new S3Client({
-      region: "auto",
-      endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-      },
-      requestChecksumCalculation: "WHEN_REQUIRED",
-      responseChecksumValidation: "WHEN_REQUIRED",
-    }) as unknown as Send;
+    client ??= createR2S3Client(config) as unknown as Send;
     return client;
   };
 

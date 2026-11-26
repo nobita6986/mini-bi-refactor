@@ -33,6 +33,40 @@ test("reaper configuration accepts only the isolated staging Supabase project an
   }), false);
 });
 
+test("reaper configuration supports VPSTTT staging with decoupled non-production bucket and fails closed otherwise", () => {
+  const vpstttStaging = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://oyykqfxkyqhxgrfntokl.supabase.co",
+    DOCUMENT_STORAGE_ENVIRONMENT: "preview",
+    DOCUMENT_STORAGE_PROVIDER: "vpsttt",
+    VPSTTT_STORAGE_ENDPOINT: "https://s3.synthetic.test:9000",
+    VPSTTT_STORAGE_REGION: "ap-southeast-1",
+    VPSTTT_STORAGE_BUCKET: "vpsttt-staging-bucket",
+    VPSTTT_STORAGE_ACCESS_KEY_ID: "VPSTTTSYNTHETICKEY01",
+    VPSTTT_STORAGE_SECRET_ACCESS_KEY: "vpsttt-synthetic-secret-key-0123456789",
+  };
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment(vpstttStaging), true);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    VPSTTT_STORAGE_BUCKET: "hrp-bi-product",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    VPSTTT_STORAGE_ENDPOINT: undefined,
+    R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+    R2_BUCKET_NAME: "hrp-bi-preview",
+    R2_ACCESS_KEY_ID: "SYNTHETICACCESSKEY01",
+    R2_SECRET_ACCESS_KEY: "synthetic-secret-value-0001",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    DOCUMENT_STORAGE_ENVIRONMENT: "production",
+  }), false);
+  assert.equal(isW2S1PortraitStageReaperStagingEnvironment({
+    ...vpstttStaging,
+    DOCUMENT_STORAGE_PROVIDER: "unknown-provider",
+  }), false);
+});
+
 function dependencies({ deleteFailure } = {}) {
   const calls = [];
   return {

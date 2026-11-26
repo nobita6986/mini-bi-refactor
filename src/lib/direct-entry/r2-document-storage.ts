@@ -7,6 +7,7 @@ import {
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
+  type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { DirectEntryDocumentType } from "../contracts/direct-entry-v1.ts";
@@ -23,8 +24,14 @@ import {
   type DocumentMimeType,
 } from "./document-r2-contract.ts";
 
+export type ObjectStorageProvider = "cloudflare_r2" | "vpsttt";
+
 export type R2Config = {
-  accountId: string;
+  provider: ObjectStorageProvider;
+  accountId: string | null;
+  endpoint: string;
+  region: string;
+  forcePathStyle: boolean;
   bucket: string;
   accessKeyId: string;
   secretAccessKey: string;
@@ -100,6 +107,11 @@ export type R2Dependencies = {
 const ACCOUNT_ID = /^[a-f0-9]{32}$/i;
 const ACCESS_KEY_ID = /^[A-Za-z0-9]{16,128}$/;
 const SECRET_ACCESS_KEY = /^[A-Za-z0-9/+=_-]{16,256}$/;
+const VPSTTT_REGION = /^[a-z0-9][a-z0-9-]{0,62}$/i;
+const VPSTTT_BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+const IPV4_HOST = /^\d+\.\d+\.\d+\.\d+$/;
+const VPSTTT_ACCESS_KEY_ID = /^[A-Za-z0-9._-]{8,128}$/;
+const VPSTTT_SECRET_ACCESS_KEY = /^[\x21-\x7e]{16,256}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function enrollmentPortraitStageKey(environment: DocumentEnvironment, stageId: string): string {
@@ -119,17 +131,160 @@ export function resolveDocumentEnvironment(
   return env.VERCEL_ENV === "production" ? "production" : "preview";
 }
 
-export function loadR2Config(env: Record<string, string | undefined>): R2Config | null {
+export function resolveDocumentStorageProvider(
+  env: Record<string, string | undefined>,
+): ObjectStorageProvider | null {
+  const configured = env.DOCUMENT_STORAGE_PROVIDER;
+  if (configured !== undefined) {
+    const value = configured.trim();
+    if (value === "cloudflare_r2" || value === "vpsttt") return value;
+    return null;
+  }
+  return "cloudflare_r2";
+}
+
+export function parseHttpsEndpoint(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value || value.includes("<") || value.includes(">")) return null;
+  if (value.includes("?") || value.includes("#")) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    !url.hostname ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+  const trimmedPath = url.pathname.replace(/\/+$/, "");
+  return trimmedPath ? `${url.origin}${trimmedPath}` : url.origin;
+}
+
+export function parseForcePathStyle(
+  raw: string | undefined,
+  defaultValue: boolean,
+): boolean | null {
+  if (raw === undefined) return defaultValue;
+  const value = raw.trim();
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
+function loadCloudflareR2Config(
+  env: Record<string, string | undefined>,
+  environment: DocumentEnvironment,
+): R2Config | null {
   const accountId = env.R2_ACCOUNT_ID?.trim();
   const bucket = env.R2_BUCKET_NAME?.trim();
   const accessKeyId = env.R2_ACCESS_KEY_ID?.trim();
   const secretAccessKey = env.R2_SECRET_ACCESS_KEY?.trim();
+  if (
+    !accountId ||
+    !bucket ||
+    !accessKeyId ||
+    !secretAccessKey ||
+    !ACCOUNT_ID.test(accountId) ||
+    !ACCESS_KEY_ID.test(accessKeyId) ||
+    !SECRET_ACCESS_KEY.test(secretAccessKey) ||
+    bucket !== DOCUMENT_BUCKETS[environment]
+  ) {
+    return null;
+  }
+  return {
+    provider: "cloudflare_r2",
+    accountId,
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    region: "auto",
+    forcePathStyle: false,
+    bucket,
+    accessKeyId,
+    secretAccessKey,
+    environment,
+  };
+}
+
+function loadVpstttConfig(
+  env: Record<string, string | undefined>,
+  environment: DocumentEnvironment,
+): R2Config | null {
+  const endpoint = parseHttpsEndpoint(env.VPSTTT_STORAGE_ENDPOINT);
+  const region = env.VPSTTT_STORAGE_REGION?.trim();
+  const bucket = env.VPSTTT_STORAGE_BUCKET?.trim();
+  const rawAccessKeyId = env.VPSTTT_STORAGE_ACCESS_KEY_ID;
+  const rawSecretAccessKey = env.VPSTTT_STORAGE_SECRET_ACCESS_KEY;
+  const accessKeyId = rawAccessKeyId?.trim();
+  const secretAccessKey = rawSecretAccessKey?.trim();
+  const forcePathStyle = parseForcePathStyle(env.VPSTTT_STORAGE_FORCE_PATH_STYLE, true);
+
+  if (
+    !endpoint ||
+    !region ||
+    !VPSTTT_REGION.test(region) ||
+    !bucket ||
+    !VPSTTT_BUCKET.test(bucket) ||
+    bucket.includes("..") ||
+    IPV4_HOST.test(bucket) ||
+    !rawAccessKeyId ||
+    !accessKeyId ||
+    rawAccessKeyId.includes("<") ||
+    rawAccessKeyId.includes(">") ||
+    !VPSTTT_ACCESS_KEY_ID.test(accessKeyId) ||
+    !rawSecretAccessKey ||
+    !secretAccessKey ||
+    rawSecretAccessKey.includes("<") ||
+    rawSecretAccessKey.includes(">") ||
+    !VPSTTT_SECRET_ACCESS_KEY.test(secretAccessKey) ||
+    forcePathStyle === null
+  ) {
+    return null;
+  }
+
+  return {
+    provider: "vpsttt",
+    accountId: null,
+    endpoint,
+    region,
+    forcePathStyle,
+    bucket,
+    accessKeyId,
+    secretAccessKey,
+    environment,
+  };
+}
+
+export function loadR2Config(env: Record<string, string | undefined>): R2Config | null {
   const environment = resolveDocumentEnvironment(env);
-  if (!environment || !accountId || !bucket || !accessKeyId || !secretAccessKey ||
-      !ACCOUNT_ID.test(accountId) || !ACCESS_KEY_ID.test(accessKeyId) ||
-      !SECRET_ACCESS_KEY.test(secretAccessKey) ||
-      bucket !== DOCUMENT_BUCKETS[environment]) return null;
-  return { accountId, bucket, accessKeyId, secretAccessKey, environment };
+  const provider = resolveDocumentStorageProvider(env);
+  if (!environment || !provider) return null;
+  return provider === "vpsttt"
+    ? loadVpstttConfig(env, environment)
+    : loadCloudflareR2Config(env, environment);
+}
+
+export function buildR2S3ClientConfig(config: R2Config): S3ClientConfig {
+  return {
+    region: config.region,
+    endpoint: config.endpoint,
+    forcePathStyle: config.forcePathStyle,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
+  };
+}
+
+export function createR2S3Client(config: R2Config): S3Client {
+  return new S3Client(buildR2S3ClientConfig(config));
 }
 
 export const unavailableDocumentObjectStorage: DocumentObjectStorage = {
@@ -168,16 +323,7 @@ export function createR2DocumentStorage(
     ((signer, command, options) =>
       getSignedUrl(signer as S3Client, command as never, options));
   const getClient = (): Send => {
-    client ??= new S3Client({
-      region: "auto",
-      endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-      },
-      requestChecksumCalculation: "WHEN_REQUIRED",
-      responseChecksumValidation: "WHEN_REQUIRED",
-    }) as unknown as Send;
+    client ??= createR2S3Client(config) as unknown as Send;
     return client;
   };
   const expiry = (seconds: number) => new Date(now() + seconds * 1000).toISOString();

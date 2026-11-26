@@ -165,6 +165,7 @@ const TEST_WEIGHTS = {
   "test:hf-block-move-unassign-team-leader": 18.0,
   "test:wp10-6-pause-windows": 12.0,
   "test:hf-direct-entry-catalog-privileged-edit": 14.0,
+  "test:hf-vpsttt-object-storage": 6.0,
 };
 
 const target = process.argv[2];
