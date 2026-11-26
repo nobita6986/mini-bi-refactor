@@ -226,7 +226,7 @@ security definer
 set search_path = pg_catalog, public
 as $function$
 declare
-  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_now timestamptz;
   v_today date := public.leave_management__internal_business_date();
   v_year integer := pg_catalog.date_part('year', v_today)::integer;
   v_auth jsonb;
@@ -365,6 +365,10 @@ begin
     raise exception 'LEAVE_SENIORITY_CONFIG_FORBIDDEN'
       using errcode = '42501';
   end if;
+
+  -- Finalize v_now AFTER all locks and precondition checks so a concurrent Org
+  -- transfer that committed while we waited on locks is reflected in classification.
+  v_now := pg_catalog.clock_timestamp();
 
   -- Ignore p_unit_kind on write; derive classification strictly from Org for audit & response
   select c.department_id, c.unit_kind

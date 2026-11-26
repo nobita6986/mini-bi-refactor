@@ -1504,6 +1504,80 @@ test("WP10-7 Slice 2A (PG18): Retire live dependencies on leave_employee_profile
       assert.match(String(rC2.reason?.message), /LEAVE_ROW_VERSION_CONFLICT/);
       assert.equal((await readDbLeaveProfile(concRecRaceUser.acc.app)).row_version, cOrgC.rv + 1);
 
+      // Barrier D (P2 regression: initial expected_row_version = 0 upsert blocked on U while concurrent MARKETING -> IT transfer commits):
+      //   w1 (superuser) holds U FOR UPDATE ->
+      //   w2 (service_role) calls upsert(expected_row_version = 0) and blocks on U BEFORE touching leave_employee_profiles ->
+      //   wait 25ms so transfer clock_timestamp() > w2 entry time ->
+      //   w1 switches to service_role, transfers MARKETING -> IT, and commits ->
+      //   w2 resolves Org at post-lock v_now and returns profile/balance/routing/audit unit_kind = 'IT', DB stored = 'UNCLASSIFIED'
+      const concNoProfileMkt = await onboardOrgUser("concnoprofmkt", deptByKey.MARKETING, "Concurrency No Profile MKT");
+      const { rows: [cOrgD] } = await observer.query(
+        `select p.version as pv, m.membership_id as mid
+           from public.organization_persons p
+           join public.organization_person_department_memberships m
+             on m.person_id = p.person_id and m.ended_at is null
+          where p.person_id = $1::uuid`,
+        [concNoProfileMkt.person.person_id],
+      );
+      await w1.query("begin; set local deadlock_timeout = '100ms'; set local statement_timeout = '10s'");
+      await w1.query(
+        "select app_user_id from public.direct_entry_app_users where app_user_id = $1::uuid for update",
+        [concNoProfileMkt.acc.app],
+      );
+      await beginServiceTx(w2);
+      const pUpsertD = settleInTx(
+        w2,
+        w2.query(UPSERT_LEAVE_PROFILE_SQL, [
+          OWNER.auth, OWNER.app, concNoProfileMkt.acc.app, "OFFICIAL", null,
+          "2024-01-01", "2024-03-01", null, 0, 0,
+          "Barrier D initial upsert waiting on U", nextKey("bar_d_up"), sha256("bar-d-up"),
+        ]),
+      );
+      const waitD = await waitUntilBlocked(observer, "wp10-7-2a-w2");
+      assert.equal(waitD.wait_event_type, "Lock");
+      const { rows: [pidCheckD] } = await observer.query(
+        `select pg_catalog.pg_blocking_pids($1::int) as blockers,
+                (select pid from pg_stat_activity where application_name = 'wp10-7-2a-w1' limit 1) as w1_pid,
+                exists (
+                  select 1
+                    from pg_locks l
+                   where l.pid = $1::int
+                     and l.relation = 'public.leave_employee_profiles'::regclass
+                     and l.granted = true
+                ) as holds_leave_profile_lock`,
+        [waitD.pid],
+      );
+      assert.equal(pidCheckD.blockers.includes(pidCheckD.w1_pid), true, "Barrier D: w2 must be blocked by w1 holding U");
+      assert.equal(pidCheckD.holds_leave_profile_lock, false, "Barrier D: w2 must block on U BEFORE locking leave_employee_profiles");
+
+      await new Promise((r) => setTimeout(r, 25));
+      await w1.query("set local role service_role");
+      await w1.query(TRANSFER_PERSON_SQL, [
+        OWNER.auth, OWNER.app, concNoProfileMkt.person.person_id, deptByKey.IT,
+        cOrgD.pv, cOrgD.mid, "Barrier D transfer MARKETING -> IT", nextUuid(),
+        computeTransferPersonDepartmentFingerprint(OWNER.app, concNoProfileMkt.person.person_id, {
+          target_department_ref: deptByKey.IT,
+          expected_person_version: cOrgD.pv,
+          expected_current_membership_id: cOrgD.mid,
+          reason: "Barrier D transfer MARKETING -> IT",
+        }),
+      ]);
+      await w1.query("commit");
+
+      const rD = await pUpsertD;
+      assert.equal(
+        rD.status,
+        "fulfilled",
+        `Barrier D initial upsert must succeed without 40P01: ${rD.reason?.code} ${rD.reason?.message}`,
+      );
+      const dData = rD.value.rows[0].data;
+      assert.equal(dData.profile.row_version, 1);
+      assert.equal(dData.profile.unit_kind, "IT", "Barrier D: profile.unit_kind must reflect post-lock IT transfer");
+      assert.equal(dData.balance.unit_kind, "IT", "Barrier D: balance.unit_kind must reflect post-lock IT transfer");
+      assert.equal(dData.routing.unit_kind, "IT", "Barrier D: routing.unit_kind must reflect post-lock IT transfer");
+      assert.equal((await readLatestUpsertAudit(concNoProfileMkt.acc.app)).latest.payload.unit_kind, "IT");
+      assert.equal((await readDbLeaveProfile(concNoProfileMkt.acc.app)).unit_kind, "UNCLASSIFIED");
+
       // 12 concurrent Promise.all trials
       for (let trial = 0; trial < 12; trial += 1) {
         const targetDept = trial % 2 === 0 ? deptByKey.MARKETING : deptByKey.IT;
