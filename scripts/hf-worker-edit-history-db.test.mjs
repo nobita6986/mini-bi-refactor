@@ -56,27 +56,35 @@ const REC_ORPHAN = "93000000-0000-4000-8000-000000000199";
 const PROJECT_1 = "hf_proj_alpha";
 const PROJECT_2 = "hf_proj_beta";
 
+const HF_WORKER_EDIT_HISTORY_SUBSTRING_MIGRATION_NAME =
+  "20261126163000_hf_worker_edit_history_employee_code_substring.sql";
+
 let seq = 1;
 function nextUuid(prefix = "aa000000-0000-4000-8000") {
   const hex = (seq++).toString(16).padStart(12, "0");
   return `${prefix}-${hex}`;
 }
 
-async function createMigratedDb() {
+async function createMigratedDb(untilMigration = null) {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
-  const names = (await readdir(MIGRATION_DIR))
+  const allNames = (await readdir(MIGRATION_DIR))
     .filter((name) => name.endsWith(".sql"))
     .sort();
+  const names = [];
   const appliedMap = new Map();
   let s0Sql = "";
-  for (const name of names) {
+  for (const name of allNames) {
     const sql = await readFile(path.join(MIGRATION_DIR, name), "utf8");
     if (name === S0_T1_C_MIGRATION_NAME) {
       s0Sql = sql;
     }
     await db.exec(migrationSqlForTransaction(sql));
     appliedMap.set(name, "applied");
+    names.push(name);
+    if (untilMigration && name === untilMigration) {
+      break;
+    }
   }
   return { db, names, appliedMap, s0Sql };
 }
@@ -229,6 +237,10 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
   assert.ok(
     names.includes(HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME),
     "migration file must exist in supabase/migrations",
+  );
+  assert.ok(
+    names.includes(HF_WORKER_EDIT_HISTORY_SUBSTRING_MIGRATION_NAME),
+    "substring migration file must exist in supabase/migrations",
   );
 
   // 1. S0-T1-C dynamic postconditions, index & single-overload verification
@@ -483,61 +495,96 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
   assert.deepEqual(malformedDetail.resolved_recruiters, { [REC_INACTIVE]: "Phạm Thị Nghỉ Việc" });
   assert.deepEqual(malformedDetail.resolved_teams, { [TEAM_INACTIVE]: "Team Ngừng Hoạt Động" });
 
-  // 4. Employee code exact/trimmed/case-insensitive/prefix/invalid/combined/pagination checks
-  const { rows: [{ res: exactRes }] } = await db.query(
-    `select public.worker_edit_history_search(
-       p_auth_subject => $1::uuid,
-       p_app_user_id => $2::uuid,
-       p_from_date => $3::date,
-       p_to_date => $4::date,
-       p_employee_code => 'hrp-2026-000123'
-     ) as res`,
-    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
-  );
+  // 4. Employee code full/substring/literal-wildcard/invalid/combined/pagination checks
+  const searchEmployeeCode = async (code, extra = {}) => {
+    const { rows: [{ res }] } = await db.query(
+      `select public.worker_edit_history_search(
+         p_auth_subject => $1::uuid,
+         p_app_user_id => $2::uuid,
+         p_from_date => $3::date,
+         p_to_date => $4::date,
+         p_project_query => $5::text,
+         p_recruiter_query => $6::text,
+         p_action_group => $7::text,
+         p_page_size => $8::integer,
+         p_cursor => $9::text,
+         p_employee_code => $10::text
+       ) as res`,
+      [
+        ADMIN.auth,
+        ADMIN.app,
+        fromStr,
+        todayStr,
+        extra.projectQuery ?? null,
+        extra.recruiterQuery ?? null,
+        extra.actionGroup ?? null,
+        extra.pageSize ?? 50,
+        extra.cursor ?? null,
+        code,
+      ],
+    );
+    return res;
+  };
+
+  // Full code (exact & trimmed/case-insensitive)
+  const exactRes = await searchEmployeeCode("HRP-2026-000123");
   assert.equal(exactRes.rows.length, 3);
   assert.ok(exactRes.rows.every((r) => r.employee_code === "hrp-2026-000123"));
 
-  const { rows: [{ res: trimmedCaseRes }] } = await db.query(
-    `select public.worker_edit_history_search(
-       p_auth_subject => $1::uuid,
-       p_app_user_id => $2::uuid,
-       p_from_date => $3::date,
-       p_to_date => $4::date,
-       p_employee_code => '  HRP-2026-000123  '
-     ) as res`,
-    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
-  );
+  const trimmedCaseRes = await searchEmployeeCode("  hrp-2026-000123  ");
   assert.equal(trimmedCaseRes.rows.length, 3);
   assert.deepEqual(
     trimmedCaseRes.rows.map((r) => r.revision_id),
     exactRes.rows.map((r) => r.revision_id),
   );
 
+  // Contiguous prefix, infix, and suffix matches (case-insensitive & trimmed)
+  for (const multiSub of ["HRP-2026-0001", "  hrp-2026-00012  ", "2026-0001", "00012"]) {
+    const subRes = await searchEmployeeCode(multiSub);
+    assert.equal(
+      subRes.rows.length,
+      4,
+      `${JSON.stringify(multiSub)} must match hrp-2026-000123 (3 revs) + hrp-2026-000124 (1 rev)`,
+    );
+    assert.ok(
+      subRes.rows.every((r) => r.employee_code === "hrp-2026-000123" || r.employee_code === "hrp-2026-000124"),
+    );
+  }
+
+  for (const suffixSub of ["000123", "  000123  "]) {
+    const suffixRes = await searchEmployeeCode(suffixSub);
+    assert.equal(suffixRes.rows.length, 3, `${JSON.stringify(suffixSub)} must match only hrp-2026-000123`);
+    assert.deepEqual(
+      suffixRes.rows.map((r) => r.revision_id),
+      exactRes.rows.map((r) => r.revision_id),
+    );
+  }
+
   // Blank whitespace-only employee_code behaves as no filter
-  const { rows: [{ res: blankCodeRes }] } = await db.query(
-    `select public.worker_edit_history_search(
-       p_auth_subject => $1::uuid,
-       p_app_user_id => $2::uuid,
-       p_from_date => $3::date,
-       p_to_date => $4::date,
-       p_employee_code => '   '
-     ) as res`,
-    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
-  );
+  const blankCodeRes = await searchEmployeeCode("   ");
   assert.equal(blankCodeRes.rows.length, 6, "blank employee_code must act as null/no filter");
 
-  // Near-miss prefix & non-existent must return 0 rows
-  for (const probeCode of ["hrp-2026-00012", "HRP-2026-999999"]) {
-    const { rows: [{ res: emptyRes }] } = await db.query(
-      `select public.worker_edit_history_search(
-         p_auth_subject => $1::uuid,
-         p_app_user_id => $2::uuid,
-         p_from_date => $3::date,
-         p_to_date => $4::date,
-         p_employee_code => $5
-       ) as res`,
-      [ADMIN.auth, ADMIN.app, fromStr, todayStr, probeCode],
-    );
+  // Confirm direct_entries_employee_code_check enforces ^hrp-[0-9]{4}-[0-9]{6}$ (so _ and % cannot be stored)
+  const { rows: checkDefRows } = await db.query(
+    `select pg_catalog.pg_get_constraintdef(c.oid) as def
+       from pg_catalog.pg_constraint c
+      where c.conrelid = 'public.direct_entries'::pg_catalog.regclass
+        and c.conname = 'direct_entries_employee_code_check'`,
+  );
+  assert.equal(checkDefRows.length, 1);
+  assert.match(checkDefRows[0].def, /\^hrp-\[0-9\]\{4\}-\[0-9\]\{6\}\$/);
+
+  // Literal '%' and '_' probes must NOT act as SQL wildcards; non-matching substrings return 0 rows
+  for (const probeCode of [
+    "%",
+    "_",
+    "hrp%2026",
+    "hrp_2026",
+    "2026_000123",
+    "HRP-2026-999999",
+    "009999",
+  ]) {
+    const emptyRes = await searchEmployeeCode(probeCode);
     assert.equal(emptyRes.rows.length, 0, `${probeCode} must return 0 rows`);
     assert.equal(emptyRes.has_more, false);
     assert.equal(emptyRes.next_cursor, null);
@@ -546,35 +593,18 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
   // Invalid employee_code chars/length -> 22023
   for (const invalidCode of ["a".repeat(65), "hrp 2026", "hrp\t2026", "hrp\n2026", "hrp\u001f2026"]) {
     await assert.rejects(
-      db.query(
-        `select public.worker_edit_history_search(
-           p_auth_subject => $1::uuid,
-           p_app_user_id => $2::uuid,
-           p_from_date => $3::date,
-           p_to_date => $4::date,
-           p_employee_code => $5
-         )`,
-        [ADMIN.auth, ADMIN.app, fromStr, todayStr, invalidCode],
-      ),
+      searchEmployeeCode(invalidCode),
       (err) => err?.code === "22023" && String(err?.message).includes("WORKER_EDIT_HISTORY_QUERY_INVALID"),
       `invalid employee_code ${JSON.stringify(invalidCode)} must reject with 22023`,
     );
   }
 
-  // Combined filters: project + recruiter + action_group + 93-day window + employee_code
-  const { rows: [{ res: comboMatch }] } = await db.query(
-    `select public.worker_edit_history_search(
-       p_auth_subject => $1::uuid,
-       p_app_user_id => $2::uuid,
-       p_from_date => $3::date,
-       p_to_date => $4::date,
-       p_project_query => $5,
-       p_recruiter_query => $6,
-       p_action_group => 'PROFILE_EDIT',
-       p_employee_code => 'HRP-2026-000123'
-     ) as res`,
-    [ADMIN.auth, ADMIN.app, fromStr, todayStr, PROJECT_1, REC_C],
-  );
+  // Combined filters: project + recruiter + action_group + 93-day window + substring employee_code
+  const comboMatch = await searchEmployeeCode("  2026-000123  ", {
+    projectQuery: PROJECT_1,
+    recruiterQuery: REC_C,
+    actionGroup: "PROFILE_EDIT",
+  });
   assert.equal(comboMatch.rows.length, 2, "rev2 and rev3 are PROFILE_EDIT for worker1");
 
   // Window > 93 days (to - from > 92) still rejected with 22023
@@ -585,46 +615,95 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
          p_app_user_id => $2::uuid,
          p_from_date => $3::date,
          p_to_date => $4::date,
-         p_employee_code => 'hrp-2026-000123'
+         p_employee_code => '000123'
        )`,
       [ADMIN.auth, ADMIN.app, over93FromStr, todayStr],
     ),
     (err) => err?.code === "22023",
   );
 
-  // Pagination BEFORE limit: page_size = 2 across interleaved revisions (rev3, workerOther, rev2, rev1)
-  const { rows: [{ res: page1 }] } = await db.query(
-    `select public.worker_edit_history_search(
-       p_auth_subject => $1::uuid,
-       p_app_user_id => $2::uuid,
-       p_from_date => $3::date,
-       p_to_date => $4::date,
-       p_page_size => 2,
-       p_employee_code => 'HRP-2026-000123'
-     ) as res`,
-    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
-  );
+  // Pagination BEFORE limit: single-entry interleaved revisions (rev3, workerOther, rev2, rev1)
+  const page1 = await searchEmployeeCode("000123", { pageSize: 2 });
   assert.equal(page1.rows.length, 2);
   assert.equal(page1.has_more, true);
   assert.ok(page1.next_cursor);
   assert.deepEqual(page1.rows.map((r) => r.revision_id), [rev3Id, rev2Id]);
 
-  const { rows: [{ res: page2 }] } = await db.query(
-    `select public.worker_edit_history_search(
-       p_auth_subject => $1::uuid,
-       p_app_user_id => $2::uuid,
-       p_from_date => $3::date,
-       p_to_date => $4::date,
-       p_page_size => 2,
-       p_cursor => $5,
-       p_employee_code => 'HRP-2026-000123'
-     ) as res`,
-    [ADMIN.auth, ADMIN.app, fromStr, todayStr, page1.next_cursor],
-  );
+  const page2 = await searchEmployeeCode("000123", { pageSize: 2, cursor: page1.next_cursor });
   assert.equal(page2.rows.length, 1);
   assert.equal(page2.has_more, false);
   assert.equal(page2.next_cursor, null);
   assert.deepEqual(page2.rows.map((r) => r.revision_id), [rev1Id]);
+
+  // Multi-entry substring cursor pagination: two workers sharing suffix '003278'
+  // (hrp-2026-003278 & hrp-2025-003278) interleaved with non-matching hrp-2026-003279
+  const subW1 = await seedWorkerEntry(db, {
+    employeeCode: "hrp-2026-003278",
+    displayName: "Nguyễn Văn 3278A",
+    nationalId: "079096003278",
+    projectId: PROJECT_1,
+    recruiterId: REC_A,
+    teamId: TEAM_1,
+  });
+  const subW2 = await seedWorkerEntry(db, {
+    employeeCode: "hrp-2025-003278",
+    displayName: "Trần Thị 3278B",
+    nationalId: "079096003279",
+    projectId: PROJECT_2,
+    recruiterId: REC_B,
+    teamId: TEAM_2,
+  });
+  const subNonMatch = await seedWorkerEntry(db, {
+    employeeCode: "hrp-2026-003279",
+    displayName: "Lê Văn Không Khớp",
+    nationalId: "079096003280",
+    projectId: PROJECT_1,
+    recruiterId: REC_A,
+    teamId: TEAM_1,
+  });
+
+  const writeRev = async (entryId, version) => {
+    const { rows } = await db.query(
+      "select public.direct_entry_write_revision($1::uuid, $2::uuid, $3::uuid, null::jsonb, public.worker_edit_history_snapshot($1::uuid), $4::integer) as revision_id",
+      [entryId, ADMIN.app, reason1Id, version],
+    );
+    await pause();
+    return rows[0].revision_id;
+  };
+
+  const s1Rev1 = await writeRev(subW1.entryId, 1);
+  await writeRev(subNonMatch.entryId, 1);
+  const s2Rev1 = await writeRev(subW2.entryId, 1);
+  const s1Rev2 = await writeRev(subW1.entryId, 2);
+  await writeRev(subNonMatch.entryId, 2);
+  const s2Rev2 = await writeRev(subW2.entryId, 2);
+  const s1Rev3 = await writeRev(subW1.entryId, 3);
+
+  const expectedOrderedRevs = [s1Rev3, s2Rev2, s1Rev2, s2Rev1, s1Rev1];
+  const collectedRows = [];
+  let walkCursor = null;
+  let walkPages = 0;
+  while (true) {
+    const page = await searchEmployeeCode("  003278  ", { pageSize: 2, cursor: walkCursor });
+    walkPages += 1;
+    collectedRows.push(...page.rows);
+    if (!page.has_more) {
+      assert.equal(page.next_cursor, null);
+      break;
+    }
+    assert.ok(page.next_cursor);
+    assert.equal(page.rows.length, 2);
+    walkCursor = page.next_cursor;
+  }
+  assert.equal(walkPages, 3);
+  assert.deepEqual(
+    collectedRows.map((r) => r.revision_id),
+    expectedOrderedRevs,
+    "multi-entry substring pagination must return all matching revisions in exact created_at desc, revision_id desc order with no duplicates or non-matching rows",
+  );
+  assert.ok(
+    collectedRows.every((r) => r.employee_code === "hrp-2026-003278" || r.employee_code === "hrp-2025-003278"),
+  );
 
   // Inactive recruiter name still shown cleanly in search list rows
   const { rows: [{ res: inactiveListRes }] } = await db.query(
@@ -670,13 +749,13 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
     "select public.worker_edit_history_search($1::uuid, $2::uuid, null, null, $3::date, $4::date) as res",
     [ADMIN.auth, ADMIN.app, fromStr, todayStr],
   );
-  assert.equal(pos6.rows.length, 6);
+  assert.equal(pos6.rows.length, 13);
 
   const { rows: [{ res: pos11 }] } = await db.query(
     "select public.worker_edit_history_search($1::uuid, $2::uuid, null, null, $3::date, $4::date, $5::text, null, null, 10, null) as res",
     [ADMIN.auth, ADMIN.app, fromStr, todayStr, PROJECT_2],
   );
-  assert.equal(pos11.rows.length, 2);
+  assert.equal(pos11.rows.length, 4);
 
   const { rows: [{ res: named11 }] } = await db.query(
     `select public.worker_edit_history_search(
@@ -694,7 +773,7 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
      ) as res`,
     [ADMIN.auth, ADMIN.app, fromStr, todayStr, PROJECT_2],
   );
-  assert.equal(named11.rows.length, 2);
+  assert.equal(named11.rows.length, 4);
 
   // 6. Unauthorized actors rejected with 42501
   for (const denied of [NON_ADMIN, RECRUITER_ACTOR]) {
@@ -718,5 +797,165 @@ test("HF Worker Edit History: migration hygiene, ACL postconditions, per-snapsho
       ),
       (err) => err?.code === "42501",
     );
+  }
+});
+
+test("HF Worker Edit History: live upgrade from REQ #246 (20261126120000) to 20261126163000 enables substring employee_code search", async () => {
+  const { db, names, appliedMap, s0Sql } = await createMigratedDb(
+    HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME,
+  );
+  assert.equal(
+    names.includes(HF_WORKER_EDIT_HISTORY_SUBSTRING_MIGRATION_NAME),
+    false,
+    "pre-upgrade DB must stop strictly at migration #246",
+  );
+
+  await seedActorsAndCatalog(db);
+
+  const { rows: [{ today_str: todayStr, from_str: fromStr }] } = await db.query(
+    `select to_char((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') as today_str,
+            to_char((clock_timestamp() at time zone 'Asia/Ho_Chi_Minh')::date - 30, 'YYYY-MM-DD') as from_str`,
+  );
+
+  const reasonId = nextUuid("f9000000-0000-4000-8000");
+  await db.query(
+    "insert into public.direct_entry_restricted_reasons(reason_id, actor_user_id, reason_text) values ($1, $2, 'Kiểm tra nâng cấp')",
+    [reasonId, ADMIN.app],
+  );
+
+  const targetWorker = await seedWorkerEntry(db, {
+    employeeCode: "hrp-2026-003278",
+    displayName: "Nguyễn Văn Upgrade",
+    nationalId: "079096003278",
+    projectId: PROJECT_1,
+    recruiterId: REC_A,
+    teamId: TEAM_1,
+  });
+  const otherWorker = await seedWorkerEntry(db, {
+    employeeCode: "hrp-2026-000999",
+    displayName: "Trần Thị Khác",
+    nationalId: "079096000999",
+    projectId: PROJECT_2,
+    recruiterId: REC_B,
+    teamId: TEAM_2,
+  });
+
+  await db.query(
+    "select public.direct_entry_write_revision($1::uuid, $2::uuid, $3::uuid, null::jsonb, public.worker_edit_history_snapshot($1::uuid), 1)",
+    [targetWorker.entryId, ADMIN.app, reasonId],
+  );
+  await db.query(
+    "select public.direct_entry_write_revision($1::uuid, $2::uuid, $3::uuid, null::jsonb, public.worker_edit_history_snapshot($1::uuid), 2)",
+    [targetWorker.entryId, ADMIN.app, reasonId],
+  );
+  await db.query(
+    "select public.direct_entry_write_revision($1::uuid, $2::uuid, $3::uuid, null::jsonb, public.worker_edit_history_snapshot($1::uuid), 1)",
+    [otherWorker.entryId, ADMIN.app, reasonId],
+  );
+
+  // BEFORE 20261126163000: exact code matches, partial '003278' returns 0 rows
+  const { rows: [{ res: preExact }] } = await db.query(
+    `select public.worker_edit_history_search(
+       p_auth_subject => $1::uuid,
+       p_app_user_id => $2::uuid,
+       p_from_date => $3::date,
+       p_to_date => $4::date,
+       p_employee_code => 'HRP-2026-003278'
+     ) as res`,
+    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
+  );
+  assert.equal(preExact.rows.length, 2);
+
+  const { rows: [{ res: prePartial }] } = await db.query(
+    `select public.worker_edit_history_search(
+       p_auth_subject => $1::uuid,
+       p_app_user_id => $2::uuid,
+       p_from_date => $3::date,
+       p_to_date => $4::date,
+       p_employee_code => '003278'
+     ) as res`,
+    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
+  );
+  assert.equal(prePartial.rows.length, 0, "before 20261126163000 partial code must return 0 rows");
+
+  // Apply 20261126163000 onto the live REQ #246 DB
+  const substringSql = await readFile(
+    path.join(MIGRATION_DIR, HF_WORKER_EDIT_HISTORY_SUBSTRING_MIGRATION_NAME),
+    "utf8",
+  );
+  await db.exec(migrationSqlForTransaction(substringSql));
+  appliedMap.set(HF_WORKER_EDIT_HISTORY_SUBSTRING_MIGRATION_NAME, "applied");
+
+  const postconditions = await verifyS0T1CSecurityPostconditions(db, s0Sql, appliedMap);
+  assert.equal(postconditions.ok, true, `S0-T1-C postconditions failed after upgrade: ${postconditions.reason}`);
+
+  // 11-arg calls without p_employee_code still succeed
+  const { rows: [{ res: postPos11 }] } = await db.query(
+    "select public.worker_edit_history_search($1::uuid, $2::uuid, null, null, $3::date, $4::date, $5::text, null, null, 10, null) as res",
+    [ADMIN.auth, ADMIN.app, fromStr, todayStr, PROJECT_2],
+  );
+  assert.equal(postPos11.rows.length, 1);
+  assert.equal(postPos11.rows[0].employee_code, "hrp-2026-000999");
+
+  const { rows: [{ res: postNamed11 }] } = await db.query(
+    `select public.worker_edit_history_search(
+       p_auth_subject => $1::uuid,
+       p_app_user_id => $2::uuid,
+       p_national_id => null,
+       p_full_name => null,
+       p_from_date => $3::date,
+       p_to_date => $4::date,
+       p_project_query => $5::text,
+       p_recruiter_query => null,
+       p_action_group => null,
+       p_page_size => 10,
+       p_cursor => null
+     ) as res`,
+    [ADMIN.auth, ADMIN.app, fromStr, todayStr, PROJECT_1],
+  );
+  assert.equal(postNamed11.rows.length, 2);
+  assert.ok(postNamed11.rows.every((r) => r.employee_code === "hrp-2026-003278"));
+
+  // AFTER 20261126163000: substring queries match hrp-2026-003278 cleanly
+  for (const probe of ["003278", "2026-0032", "  003278  "]) {
+    const { rows: [{ res }] } = await db.query(
+      `select public.worker_edit_history_search(
+         p_auth_subject => $1::uuid,
+         p_app_user_id => $2::uuid,
+         p_from_date => $3::date,
+         p_to_date => $4::date,
+         p_employee_code => $5
+       ) as res`,
+      [ADMIN.auth, ADMIN.app, fromStr, todayStr, probe],
+    );
+    assert.equal(res.rows.length, 2, `${JSON.stringify(probe)} must match 2 rows of hrp-2026-003278`);
+    assert.ok(res.rows.every((r) => r.employee_code === "hrp-2026-003278"));
+  }
+
+  const { rows: [{ res: prefixAll }] } = await db.query(
+    `select public.worker_edit_history_search(
+       p_auth_subject => $1::uuid,
+       p_app_user_id => $2::uuid,
+       p_from_date => $3::date,
+       p_to_date => $4::date,
+       p_employee_code => 'HRP-2026'
+     ) as res`,
+    [ADMIN.auth, ADMIN.app, fromStr, todayStr],
+  );
+  assert.equal(prefixAll.rows.length, 3, "'HRP-2026' must match both hrp-2026-003278 and hrp-2026-000999");
+
+  // Literal '%' and '_' still return 0 rows
+  for (const wildcardProbe of ["%", "_"]) {
+    const { rows: [{ res }] } = await db.query(
+      `select public.worker_edit_history_search(
+         p_auth_subject => $1::uuid,
+         p_app_user_id => $2::uuid,
+         p_from_date => $3::date,
+         p_to_date => $4::date,
+         p_employee_code => $5
+       ) as res`,
+      [ADMIN.auth, ADMIN.app, fromStr, todayStr, wildcardProbe],
+    );
+    assert.equal(res.rows.length, 0, `${wildcardProbe} must return 0 rows after upgrade`);
   }
 });

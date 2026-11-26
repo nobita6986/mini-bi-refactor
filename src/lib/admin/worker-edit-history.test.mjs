@@ -19,6 +19,23 @@ import {
   getWorkerEditHistory,
   getWorkerEditHistoryRevision,
 } from "./worker-edit-history-api.ts";
+import {
+  WORKER_HISTORY_FIELD_LABELS,
+  formatAuditActionLabel,
+  formatAuditActionsSummary,
+  formatAuditOutcomeLabel,
+  formatChangedFieldsSummary,
+  formatDocumentStatusLabel,
+  formatDocumentTypeLabel,
+  formatEmploymentStatusValue,
+  formatFieldLabel,
+  formatGenderValue,
+  formatLaborTypeValue,
+  formatPaymentStateValue,
+  formatPlainValue,
+  formatProviderTypeValue,
+  formatSnapshotFieldValue,
+} from "./worker-edit-history-display.ts";
 
 const ENTRY_ID = "11111111-1111-4111-8111-111111111111";
 const REV_ID = "22222222-2222-4222-8222-222222222222";
@@ -150,6 +167,25 @@ test("contract: parseWorkerEditHistorySearchQuery handles optional employee_code
   );
   assert.equal(trimmedPreservedCase.ok, true);
   assert.equal(trimmedPreservedCase.value.employee_code, "HRP-2026-000123");
+
+  for (const [rawInput, expectedNormalized] of [
+    ["  003278  ", "003278"],
+    ["HRP-2026", "HRP-2026"],
+    ["2026-003", "2026-003"],
+    ["50%_code", "50%_code"],
+    ["%", "%"],
+    ["_", "_"],
+  ]) {
+    assert.deepEqual(normalizeWorkerEditHistoryEmployeeCode(rawInput), {
+      ok: true,
+      value: expectedNormalized,
+    });
+    const parsedSubstring = parseWorkerEditHistorySearchQuery(
+      new URL(`https://app.example/api/admin/worker-edit-history?from_date=2026-10-01&to_date=2026-10-31&employee_code=${encodeURIComponent(rawInput)}`),
+    );
+    assert.equal(parsedSubstring.ok, true);
+    assert.equal(parsedSubstring.value.employee_code, expectedNormalized);
+  }
 
   const max64 = "A".repeat(64);
   const atLimit = parseWorkerEditHistorySearchQuery(
@@ -447,6 +483,42 @@ test("repository & API: forwards p_employee_code, projects resolved maps, and pr
   assert.equal(searchCall?.name, "worker_edit_history_search");
   assert.equal("p_employee_code" in searchCall.args, true);
   assert.equal(searchCall.args.p_employee_code, "HRP-2026-000123");
+
+  // 200 search with partial substrings and literal %/_ forwards trimmed p_employee_code cleanly
+  for (const [rawCode, expectedCode] of [
+    ["  003278  ", "003278"],
+    ["HRP-2026", "HRP-2026"],
+    ["2026-003", "2026-003"],
+    ["50%_code", "50%_code"],
+    ["%", "%"],
+    ["_", "_"],
+  ]) {
+    const apiRes = await getWorkerEditHistory(
+      new Request(`https://app.example/api/admin/worker-edit-history?from_date=2026-10-01&to_date=2026-10-31&employee_code=${encodeURIComponent(rawCode)}`),
+      { resolveSession: validSession, repository },
+    );
+    assert.equal(apiRes.status, 200);
+    const apiCall = rpcCalls.at(-1);
+    assert.equal(apiCall?.name, "worker_edit_history_search");
+    assert.equal(apiCall?.args.p_employee_code, expectedCode);
+
+    const directRes = await repository.search({
+      auth_subject: AUTH_SUB,
+      app_user_id: USER_ID,
+      from_date: "2026-10-01",
+      to_date: "2026-10-31",
+      action_group: null,
+      project_id: null,
+      recruiter_id: null,
+      employee_code: expectedCode,
+      page_size: 50,
+      cursor: null,
+    });
+    assert.equal(directRes.ok, true);
+    const directCall = rpcCalls.at(-1);
+    assert.equal(directCall?.name, "worker_edit_history_search");
+    assert.equal(directCall?.args.p_employee_code, expectedCode);
+  }
 
   // 200 revision detail includes resolved_recruiters and resolved_teams
   const okDetailRes = await getWorkerEditHistoryRevision(
@@ -851,7 +923,7 @@ test("UI: WorkerEditHistoryManager renders Mã NLĐ filter inside <search>, enfo
   assert.equal(codeInputs.length, 1);
   assert.equal(codeInputs[0].props.name, "employee_code");
   assert.equal(codeInputs[0].props.maxLength, 64);
-  assert.equal(codeInputs[0].props.placeholder, "Ví dụ: hrp-2026-000123");
+  assert.equal(codeInputs[0].props.placeholder, "Ví dụ: 003278");
 
   // 3. Invalid employee_code with space triggers client error without calling API
   codeInputs[0].props.onChange({ target: { value: "HRP 2026" } });
@@ -923,7 +995,9 @@ test("UI: WorkerEditHistoryManager renders Mã NLĐ filter inside <search>, enfo
   const dialogText = collectText(dialog);
   assert.match(dialogText, /Trạng thái làm việc/);
   assert.match(dialogText, /Hồ sơ \/ ảnh và người tải/);
-  assert.match(dialogText, /Audit/);
+  assert.match(dialogText, /Nhật ký thao tác/);
+  assert.doesNotMatch(dialogText, /revision/i);
+  assert.doesNotMatch(dialogText, /\bAudit\b/);
 
   const currentText = collectText(currentPanel);
   const beforeText = collectText(beforePanel);
@@ -1297,6 +1371,395 @@ test("UI: FormDialog restores focus with preventScroll=true on Đóng button and
   assert.equal(page2Params.get("employee_code"), "HRP-2026-000777");
   assert.equal(page2Params.get("cursor"), page2Cursor);
   assert.equal(findNodes(mounted.tree, (n) => n.type === "tr").length, 3); // header + row1 + row2
+
+  mounted.unmount();
+});
+
+test("display: Vietnamese formatters localize optional states, privacy tokens, enums, document statuses, fields, audit actions and outcomes without raw JSON", () => {
+  // Optional wrappers & privacy tokens
+  assert.equal(formatPlainValue({ state: "omitted" }), "Chưa cung cấp");
+  assert.equal(formatPlainValue({ state: "unknown" }), "Chưa xác định");
+  assert.equal(formatPlainValue({ state: "intentionally_blank" }), "Để trống");
+  for (const state of ["redacted", "hidden", "masked", "restricted"]) {
+    assert.equal(formatPlainValue({ state }), "Được ẩn theo quyền hiện hành");
+  }
+  for (const token of ["[REDACTED]", "[HIDDEN]", "REDACTED", "HIDDEN"]) {
+    assert.equal(formatPlainValue(token), "Được ẩn theo quyền hiện hành");
+  }
+  assert.equal(formatPlainValue("****1234"), "****1234");
+  assert.equal(formatPlainValue("Đã ẩn số tài khoản theo quyền"), "Đã ẩn số tài khoản theo quyền");
+  assert.equal(formatPlainValue({ state: "provided", value: "Nguyễn Văn A" }), "Nguyễn Văn A");
+  assert.equal(formatPlainValue(null), "—");
+  assert.equal(formatPlainValue(undefined), "—");
+  assert.equal(formatPlainValue(""), "—");
+  assert.equal(formatPlainValue({ unexpected: "object" }), "Không có dữ liệu hiển thị");
+
+  // Business value formatters
+  assert.equal(formatGenderValue("MALE"), "Nam");
+  assert.equal(formatGenderValue("FEMALE"), "Nữ");
+  assert.equal(formatGenderValue("OTHER"), "Khác");
+  assert.equal(formatGenderValue({ state: "provided", value: "FEMALE" }), "Nữ");
+  assert.equal(formatGenderValue({ state: "omitted" }), "Chưa cung cấp");
+  assert.equal(formatGenderValue("INVALID_GENDER"), "Không xác định");
+  assert.equal(formatGenderValue(null), "—");
+
+  const catalogLaborTypes = [
+    { labor_type_key: "TEMPORARY", display_name: "Thời vụ (Danh mục)", sort_order: 1 },
+    { labor_type_key: "SEASONAL", display_name: "Theo mùa", sort_order: 2 },
+  ];
+  assert.equal(formatLaborTypeValue("TEMPORARY"), "Thời vụ");
+  assert.equal(formatLaborTypeValue("PERMANENT"), "Chính thức");
+  assert.equal(formatLaborTypeValue("OFFICIAL"), "Chính thức");
+  assert.equal(formatLaborTypeValue("OUTSOURCED"), "Gia công");
+  assert.equal(formatLaborTypeValue("TEMPORARY", catalogLaborTypes), "Thời vụ (Danh mục)");
+  assert.equal(formatLaborTypeValue("seasonal", catalogLaborTypes), "Theo mùa");
+  assert.equal(formatLaborTypeValue("UNKNOWN_LT"), "Không xác định");
+
+  assert.equal(formatProviderTypeValue("hrp"), "HRP");
+  assert.equal(formatProviderTypeValue("HRP"), "HRP");
+  assert.equal(formatProviderTypeValue("vendor"), "Vendor");
+  assert.equal(formatProviderTypeValue("VENDOR"), "Vendor");
+  assert.equal(formatProviderTypeValue("partner"), "Không xác định");
+
+  assert.equal(formatEmploymentStatusValue("ON"), "Đang làm");
+  assert.equal(formatEmploymentStatusValue("OFF"), "Đã nghỉ");
+  assert.equal(formatEmploymentStatusValue("UNCONFIRMED"), "Đang chờ việc");
+  assert.equal(formatEmploymentStatusValue("PENDING"), "Đang chờ việc");
+  assert.equal(formatEmploymentStatusValue("UNKNOWN_STATUS"), "Chưa có trạng thái");
+
+  assert.equal(formatPaymentStateValue("provided"), "Đã cung cấp");
+  assert.equal(formatPaymentStateValue("omitted"), "Chưa cung cấp");
+  assert.equal(formatPaymentStateValue("unknown"), "Chưa xác định");
+  assert.equal(formatPaymentStateValue("intentionally_blank"), "Để trống");
+  assert.equal(formatPaymentStateValue("redacted"), "Được ẩn theo quyền hiện hành");
+  assert.equal(formatPaymentStateValue("restricted"), "Được ẩn theo quyền hiện hành");
+  assert.equal(formatPaymentStateValue("mystery"), "Không xác định");
+
+  assert.equal(formatDocumentTypeLabel("WORKER_PORTRAIT"), "Ảnh NLĐ");
+  assert.equal(formatDocumentTypeLabel("CCCD_FRONT"), "CCCD mặt trước");
+  assert.equal(formatDocumentTypeLabel("CCCD_BACK"), "CCCD mặt sau");
+  assert.equal(formatDocumentTypeLabel("EMPLOYMENT_CONTRACT"), "Hợp đồng lao động");
+  assert.equal(formatDocumentTypeLabel("OTHER_DOC"), "Tài liệu khác");
+
+  assert.equal(formatDocumentStatusLabel("UPLOADED"), "Đã tải lên");
+  assert.equal(formatDocumentStatusLabel("VERIFIED"), "Đã xác minh");
+  assert.equal(formatDocumentStatusLabel("APPROVED"), "Đã duyệt");
+  assert.equal(formatDocumentStatusLabel("DELETED"), "Đã xóa");
+  assert.equal(formatDocumentStatusLabel("VOIDED"), "Đã hủy");
+  assert.equal(formatDocumentStatusLabel("READY"), "Sẵn sàng");
+  assert.equal(formatDocumentStatusLabel("VALIDATED"), "Đã kiểm tra định dạng");
+  assert.equal(formatDocumentStatusLabel("CLEAN"), "Đã kiểm tra");
+  assert.equal(formatDocumentStatusLabel("SOME_NEW_STATUS"), "Không xác định");
+
+  // Snapshot field formatter preserves codes/user-entered text & routes leaf semantics
+  assert.equal(formatSnapshotFieldValue("employee_code", "HRP-2026-000123"), "HRP-2026-000123");
+  assert.equal(formatSnapshotFieldValue("payment.bank_id", "VCB"), "VCB");
+  assert.equal(formatSnapshotFieldValue("worker_details.gender", { state: "provided", value: "FEMALE" }), "Nữ");
+  assert.equal(formatSnapshotFieldValue("national_id_issued_at", { state: "omitted" }), "Chưa cung cấp");
+  assert.equal(formatSnapshotFieldValue("national_id_issued_place", { state: "unknown" }), "Chưa xác định");
+  assert.equal(formatSnapshotFieldValue("phone", { state: "intentionally_blank" }), "Để trống");
+  assert.equal(formatSnapshotFieldValue("employment_status.status", "ON"), "Đang làm");
+  assert.equal(formatSnapshotFieldValue("payment.state", "omitted"), "Chưa cung cấp");
+  assert.equal(
+    formatSnapshotFieldValue("voided_at", "2026-11-10T03:00:00.000Z", {
+      formatDateTime: (value) => `VN:${value.slice(0, 10)}`,
+    }),
+    "VN:2026-11-10",
+  );
+
+  // Field, summary & audit log localization
+  assert.equal(WORKER_HISTORY_FIELD_LABELS.recruiter_id, "Người tuyển");
+  assert.equal(formatFieldLabel("employment_status.leave_reason_text"), "Lý do nghỉ việc");
+  assert.equal(formatFieldLabel("unmapped_custom_key"), "Thông tin khác");
+  assert.equal(formatChangedFieldsSummary(["recruiter_id", "recruiter_name"]), "Người tuyển");
+  assert.equal(
+    formatChangedFieldsSummary(["recruiter_id", "team_id", "phone", "national_id_issued_at"]),
+    "Người tuyển, Nhóm, Số điện thoại, Ngày cấp CCCD",
+  );
+
+  assert.equal(formatAuditActionLabel("entry_privileged_edit"), "Sửa thông tin hồ sơ");
+  assert.equal(formatAuditActionLabel("entry_create"), "Nhập mới hồ sơ NLĐ");
+  assert.equal(formatAuditActionLabel("ENTRY_VOID"), "Rút hồ sơ trùng");
+  assert.equal(formatAuditActionLabel("unknown_action_xyz"), "Thao tác hệ thống khác");
+  assert.equal(
+    formatAuditActionsSummary(["entry_privileged_edit", "entry_privileged_edit", "payment_update"]),
+    "Sửa thông tin hồ sơ, Cập nhật tài khoản ngân hàng",
+  );
+
+  assert.equal(formatAuditOutcomeLabel("APPLIED"), "Đã áp dụng");
+  assert.equal(formatAuditOutcomeLabel("SUCCEEDED"), "Thành công");
+  assert.equal(formatAuditOutcomeLabel("ALLOWED"), "Được phép");
+  assert.equal(formatAuditOutcomeLabel("DENIED"), "Bị từ chối quyền");
+  assert.equal(formatAuditOutcomeLabel("REJECTED"), "Bị từ chối");
+  assert.equal(formatAuditOutcomeLabel("FAILED"), "Thất bại");
+  assert.equal(formatAuditOutcomeLabel("CONFLICT"), "Xung đột dữ liệu");
+  assert.equal(formatAuditOutcomeLabel("NOOP"), "Không thay đổi");
+  assert.equal(formatAuditOutcomeLabel("OTHER"), "Không xác định");
+});
+
+test("UI: WorkerEditHistoryManager renders full Vietnamese labels, optional states, fallback audit summary, and leaks zero raw JSON/enums/revision/Audit", async () => {
+  const { WorkerEditHistoryManager } = repoRequire("./src/components/admin/worker-edit-history-manager.tsx");
+
+  const rowWithAuditFallback = makeSearchRow({
+    revision_id: REV_ID,
+    version: 4,
+    employee_code: "HRP-2026-000202",
+    display_name: "Trần Thị Minh Châu",
+    changed_fields: [],
+    audit_actions: ["entry_privileged_edit"],
+  });
+
+  const detailPayload = makeRevisionPayload({
+    revision_id: REV_ID,
+    version: 4,
+    snapshot_state: "LEGACY_LIMITED",
+    before_snapshot: {
+      recruiter_id: REC_A_ID,
+      recruiter_name: "Nguyễn Văn A",
+      team_id: TEAM_1_ID,
+      team_name: "Nhóm 1",
+      provider_type: "hrp",
+      labor_type: "TEMPORARY",
+      worker_details: {
+        display_name: "Trần Thị Minh Châu",
+        gender: { state: "provided", value: "FEMALE" },
+        date_of_birth: { state: "provided", value: "1998-05-12" },
+        national_id: { state: "provided", value: "079098001234" },
+        national_id_issued_at: { state: "omitted" },
+        national_id_issued_place: { state: "unknown" },
+        address: { state: "provided", value: "123 Lê Lợi, Q.1, TP.HCM" },
+        phone: { state: "intentionally_blank" },
+      },
+      employment_status: { status: "ON", effective_date: "2026-11-01" },
+      payment: { state: "omitted" },
+    },
+    after_snapshot: {
+      recruiter_id: REC_B_ID,
+      recruiter_name: "Trần Thị B",
+      team_id: TEAM_2_ID,
+      team_name: "Nhóm 2",
+      provider_type: "hrp",
+      labor_type: "TEMPORARY",
+      worker_details: {
+        display_name: "Trần Thị Minh Châu",
+        gender: { state: "provided", value: "FEMALE" },
+        date_of_birth: { state: "provided", value: "1998-05-12" },
+        national_id: { state: "provided", value: "079098001234" },
+        national_id_issued_at: { state: "omitted" },
+        national_id_issued_place: { state: "unknown" },
+        address: { state: "provided", value: "123 Lê Lợi, Q.1, TP.HCM" },
+        phone: { state: "intentionally_blank" },
+      },
+      employment_status: { status: "ON", effective_date: "2026-11-01" },
+      payment: { state: "provided", account_number: "0123456789", account_holder_name: "TRAN THI MINH CHAU", bank_id: "VCB", bank_name: "Vietcombank" },
+    },
+    current_snapshot: {
+      employee_code: "HRP-2026-000202",
+      project_name: "Dự Án Alpha",
+      recruiter_id: REC_B_ID,
+      recruiter_name: "Trần Thị B",
+      team_id: TEAM_2_ID,
+      team_name: "Nhóm 2",
+      provider_type: "hrp",
+      labor_type: "TEMPORARY",
+      first_work_date: "2026-11-01",
+      worker_details: {
+        display_name: "Trần Thị Minh Châu",
+        gender: { state: "provided", value: "FEMALE" },
+        date_of_birth: { state: "provided", value: "1998-05-12" },
+        national_id: { state: "provided", value: "079098001234" },
+        national_id_issued_at: { state: "omitted" },
+        national_id_issued_place: { state: "unknown" },
+        address: { state: "provided", value: "123 Lê Lợi, Q.1, TP.HCM" },
+        phone: { state: "intentionally_blank" },
+      },
+      employment_status: { status: "ON", effective_date: "2026-11-01" },
+      payment: { state: "provided", account_number: "0123456789", account_holder_name: "TRAN THI MINH CHAU", bank_id: "VCB", bank_name: "Vietcombank" },
+    },
+    employment_status_events: [
+      {
+        event_id: "evt-status-1",
+        status: "OFF",
+        effective_date: "2026-11-12",
+        actor_display_name: "Admin Mẫu",
+        reason_text: null,
+        leave_date: "2026-11-12",
+        leave_reason_text: "Chuyển công tác",
+      },
+    ],
+    document_events: [
+      {
+        document_id: "doc-1",
+        document_type: "CCCD_FRONT",
+        version: 1,
+        uploader_display_name: "Nhân sự A",
+        event_status: "UPLOADED",
+        validation_status: "VERIFIED",
+        scan_status: "CLEAN",
+        created_at: "2026-11-10T03:00:00.000Z",
+      },
+      {
+        document_id: "doc-2",
+        document_type: "WORKER_PORTRAIT",
+        version: 2,
+        uploader_display_name: "Nhân sự A",
+        event_status: "READY",
+        validation_status: "VALIDATED",
+        created_at: "2026-11-10T03:05:00.000Z",
+      },
+    ],
+    audit_events: [
+      {
+        event_id: "evt-audit-1",
+        action: "entry_privileged_edit",
+        outcome: "APPLIED",
+        actor_display_name: "Admin Mẫu",
+        reason_text: "Chuẩn hóa hồ sơ",
+        changed_fields: ["recruiter_id", "team_id", "phone", "national_id_issued_at"],
+        created_at: "2026-11-10T03:00:00.000Z",
+      },
+    ],
+  });
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.startsWith("/api/direct-entry/catalog")) {
+      return new Response(JSON.stringify({ ok: true, projects: [], recruiters: [], banks: [] }), { status: 200 });
+    }
+    if (urlStr.startsWith("/api/admin/worker-edit-history?")) {
+      return new Response(JSON.stringify({ ok: true, data: { rows: [rowWithAuditFallback], has_more: false, next_cursor: null } }), { status: 200 });
+    }
+    if (urlStr === `/api/admin/worker-edit-history/${ENTRY_ID}/${REV_ID}`) {
+      return new Response(JSON.stringify({ ok: true, data: detailPayload }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: false, code: "NOT_FOUND" }), { status: 404 });
+  };
+
+  const mounted = mountComponent(WorkerEditHistoryManager);
+  await mounted.flush();
+
+  findNodes(mounted.tree, (n) => n.type === "form")[0].props.onSubmit({ preventDefault() {} });
+  await mounted.flush();
+
+  // List table renders Vietnamese summary from audit_actions fallback and zero raw tokens
+  const pageTextBeforeOpen = collectText(mounted.tree);
+  assert.match(pageTextBeforeOpen, /lần chỉnh sửa/);
+  assert.match(pageTextBeforeOpen, /Sửa thông tin hồ sơ/);
+  assert.doesNotMatch(pageTextBeforeOpen, /entry_privileged_edit/);
+  assert.doesNotMatch(pageTextBeforeOpen, /revision/i);
+
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xem v4")[0].props.onClick({ currentTarget: null });
+  await mounted.flush();
+
+  const fullText = collectText(mounted.tree);
+  for (const required of [
+    "lần chỉnh sửa",
+    "Nhật ký thao tác",
+    "Lần chỉnh sửa cũ chưa có dữ liệu đối chiếu đầy đủ",
+    "Nữ",
+    "Thời vụ",
+    "HRP",
+    "Đang làm",
+    "Đã nghỉ",
+    "Chưa cung cấp",
+    "Chưa xác định",
+    "Để trống",
+    "Đã cung cấp",
+    "CCCD mặt trước",
+    "Ảnh NLĐ",
+    "Đã tải lên",
+    "Đã xác minh",
+    "Đã kiểm tra",
+    "Sẵn sàng",
+    "Đã kiểm tra định dạng",
+    "Sửa thông tin hồ sơ",
+    "Đã áp dụng",
+    "Người tuyển, Nhóm, Số điện thoại, Ngày cấp CCCD",
+    "HRP-2026-000202",
+    "VCB",
+  ]) {
+    assert.ok(fullText.includes(required), `Expected rendered text to include "${required}"`);
+  }
+
+  for (const forbidden of [
+    '{"state"',
+    "FEMALE",
+    "TEMPORARY",
+    "CCCD_FRONT",
+    "WORKER_PORTRAIT",
+    "UPLOADED",
+    "VERIFIED",
+    "entry_privileged_edit",
+    "APPLIED",
+    "recruiter_id",
+  ]) {
+    assert.equal(fullText.includes(forbidden), false, `Expected rendered text NOT to include "${forbidden}"`);
+  }
+  assert.doesNotMatch(fullText, /revision/i);
+  assert.doesNotMatch(fullText, /\bAudit\b/);
+  assert.doesNotMatch(fullText, /\bhrp\b/);
+
+  mounted.unmount();
+});
+
+test("UI: WorkerEditHistoryManager trims partial Mã NLĐ substring \"  003278  \" on submit, preserves it on Tải thêm, and clears on Xóa lọc", async () => {
+  const { WorkerEditHistoryManager } = repoRequire("./src/components/admin/worker-edit-history-manager.tsx");
+
+  const fetchedUrls = [];
+  const page2Cursor = "2026-11-10T03:00:00.000000Z|22222222-2222-4222-8222-222222222222";
+  const row1 = makeSearchRow({
+    revision_id: REV_ID,
+    version: 2,
+    employee_code: "hrp-2026-003278",
+  });
+  const row2 = makeSearchRow({
+    revision_id: REV_ID_2,
+    version: 1,
+    employee_code: "vnd-2026-003278",
+  });
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    fetchedUrls.push(urlStr);
+    if (urlStr.startsWith("/api/direct-entry/catalog")) {
+      return new Response(JSON.stringify({ ok: true, projects: [], recruiters: [], banks: [] }), { status: 200 });
+    }
+    if (urlStr.startsWith("/api/admin/worker-edit-history?")) {
+      const parsed = new URL(`https://app.example${urlStr}`);
+      if (!parsed.searchParams.get("cursor")) {
+        return new Response(JSON.stringify({ ok: true, data: { rows: [row1], has_more: true, next_cursor: page2Cursor } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, data: { rows: [row2], has_more: false, next_cursor: null } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: false, code: "NOT_FOUND" }), { status: 404 });
+  };
+
+  const mounted = mountComponent(WorkerEditHistoryManager);
+  await mounted.flush();
+
+  const codeInput = findNodes(mounted.tree, (n) => n.type === "input" && n.props.id === "worker-edit-history-employee-code")[0];
+  assert.equal(codeInput.props.placeholder, "Ví dụ: 003278");
+  codeInput.props.onChange({ target: { value: "  003278  " } });
+  await mounted.flush();
+
+  findNodes(mounted.tree, (n) => n.type === "form")[0].props.onSubmit({ preventDefault() {} });
+  await mounted.flush();
+
+  const loadMoreBtn = findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Tải thêm")[0];
+  assert.ok(loadMoreBtn);
+  loadMoreBtn.props.onClick();
+  await mounted.flush();
+
+  const historyFetches = fetchedUrls.filter((u) => u.startsWith("/api/admin/worker-edit-history?"));
+  assert.equal(historyFetches.length, 2);
+  assert.equal(new URL(`https://app.example${historyFetches[0]}`).searchParams.get("employee_code"), "003278");
+  const page2Params = new URL(`https://app.example${historyFetches[1]}`).searchParams;
+  assert.equal(page2Params.get("employee_code"), "003278");
+  assert.equal(page2Params.get("cursor"), page2Cursor);
+
+  findNodes(mounted.tree, (n) => n.type === "button" && collectText(n) === "Xóa lọc")[0].props.onClick();
+  await mounted.flush();
+  assert.equal(findNodes(mounted.tree, (n) => n.type === "input" && n.props.id === "worker-edit-history-employee-code")[0].props.value, "");
 
   mounted.unmount();
 });
