@@ -514,6 +514,11 @@ export const HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES = Object.freeze([
 export const HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES = Object.freeze([
   "public.worker_edit_history_search(uuid, uuid, text, text, date, date, text, text, text, integer, text, text)",
 ]);
+export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME =
+  "20261126130000_hf_block_move_unassign_active_team_leader.sql";
+export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)",
+]);
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
   "20261121090000_retire_ai_reports_and_provider_config.sql";
 export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
@@ -849,6 +854,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     hfWorkerEditHistoryNamesAndEmployeeCodeApplied: has(
       HF_WORKER_EDIT_HISTORY_NAMES_AND_EMPLOYEE_CODE_MIGRATION_NAME,
     ),
+    hfBlockMoveUnassignTeamLeaderApplied: has(
+      HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
+    ),
   };
 }
 
@@ -925,6 +933,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     pr28PermissionGroupsFoundationApplied = false,
     pr28CleanupApplied = false,
     hfWorkerEditHistoryNamesAndEmployeeCodeApplied = false,
+    hfBlockMoveUnassignTeamLeaderApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1083,6 +1092,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     ...(pr28CleanupApplied ? PR28_CLEANUP_ADDED_RPC_SIGNATURES : []),
     ...(hfWorkerEditHistoryNamesAndEmployeeCodeApplied
       ? HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES
+      : []),
+    ...(hfBlockMoveUnassignTeamLeaderApplied
+      ? HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES
       : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))

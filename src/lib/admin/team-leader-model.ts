@@ -24,6 +24,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SEARCH_MAX = 256;
 const STATE_QUERY: Readonly<Record<TeamLeaderState, string>> = {
   CURRENT: "current",
+  SUSPENDED: "suspended",
   SCHEDULED: "scheduled",
   HISTORY: "history",
 };
@@ -212,19 +213,21 @@ export function newTeamLeaderIntentKey(): string {
   return newIdempotencyKey();
 }
 
+export type TeamLeaderTabState = Exclude<TeamLeaderState, "SUSPENDED">;
+
 export type TeamLeaderSnapshot = {
   team: AdminTeam;
-  lists: Record<TeamLeaderState, TeamLeaderList>;
+  lists: Record<TeamLeaderTabState, TeamLeaderList>;
 };
 
 export function projectTeamLeaderSnapshot(
   teamId: string,
   teamPayload: unknown,
-  leaderPayloads: Record<TeamLeaderState, unknown>,
+  leaderPayloads: Record<TeamLeaderTabState, unknown>,
 ): TeamLeaderSnapshot | null {
   const team = projectTeamItem(teamPayload);
   if (!team || team.team_id !== teamId) return null;
-  const lists = {} as Record<TeamLeaderState, TeamLeaderList>;
+  const lists = {} as Record<TeamLeaderTabState, TeamLeaderList>;
   for (const state of ["CURRENT", "SCHEDULED", "HISTORY"] as const) {
     const list = projectTeamLeaderList(leaderPayloads[state], { teamId, state, page: 1 });
     if (!list) return null;

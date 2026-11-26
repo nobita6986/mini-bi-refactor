@@ -1072,11 +1072,25 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         await w1.query("commit");
         const r2 = await p2;
         assertNotDeadlock(r2, "C5a unassign revoke_first");
-        assert.equal(r2.status, "fulfilled", "Close-only unassign blocks on R(recA) and closes G1 after revoke commits with 0 40P01");
+        assert.equal(r2.status, "rejected", "Unassign blocks on canonical lock and rejects with PT409 after revoke restores A as active TL (0 40P01)");
+        assert.equal(r2.reason?.code, "PT409");
+        assert.match(r2.reason?.message ?? "", /recruiter holds active or restorable team leader assignment/i);
         const st = await inspectC5State(c5au.tId, c5au.metaA.acc.app, c5au.metaB.acc.app, c5au.metaA.person.person_id);
         assert.equal(st.tlaRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, true);
         assert.equal(st.tlaRows.find((r) => r.uid === c5au.metaB.acc.app)?.valid_to, "2026-11-24");
-        console.log(`[PG18 C5a-unassign ${order}] wait=${JSON.stringify(waitInfo)} winner=REVOKE(A+SG+CG restored, B closed 0-len) unassign=FULFILLED(0 40P01)`);
+        assert.equal(st.sgRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, true);
+        assert.equal(st.cgRows.find((r) => r.uid === c5au.metaA.acc.app)?.is_current, true);
+        const { rows: memRows } = await observer.query(
+          `select team_id::text as team_id, is_current, valid_to
+             from public.recruiter_team_memberships
+            where recruiter_id = $1::uuid`,
+          [c5au.metaA.recruiterId],
+        );
+        assert.equal(memRows.length, 1);
+        assert.equal(memRows[0].team_id, c5au.tId);
+        assert.equal(memRows[0].is_current, true);
+        assert.equal(memRows[0].valid_to, null);
+        console.log(`[PG18 C5a-unassign ${order}] wait=${JSON.stringify(waitInfo)} winner=REVOKE(A+SG+CG restored, B closed 0-len) unassign=REJECTED(PT409 active TL, G1 intact, 0 40P01)`);
       } else {
         await w1.query(UNASSIGN_TEAM_SQL, unassignParams);
         await beginServiceTx(w2);

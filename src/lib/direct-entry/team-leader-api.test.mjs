@@ -227,6 +227,35 @@ test("mutation submits only trusted actor and path team, and revocation has no t
   }
 });
 
+test("read routes accept suspended state using only session actor and support revoke flow", async () => {
+  const suspendedList = { ...LIST, leaders: [{ ...ITEM, state: "SUSPENDED" }] };
+  const d = dependencies({ result: { ok: true, data: suspendedList } });
+  const read = await listTeamLeader(
+    new Request(`https://app.test/?state=suspended&team_id=${TEAM}`),
+    "true",
+    d.value,
+  );
+  assert.equal(read.status, 200);
+  assert.equal(read.headers.get("cache-control"), "private, no-store");
+  const body = await read.json();
+  assert.equal(body.list.leaders[0].state, "SUSPENDED");
+  assert.deepEqual(d.calls.repository[0], ["listLeaders", {
+    ...ACTOR, state: "SUSPENDED", team_id: TEAM, search: null, page: 1, page_size: 25,
+  }]);
+
+  const revokeDeps = dependencies({
+    result: { ok: true, data: { ...MUTATION, valid_to: DAY, version: 2, change: "revoke" } },
+  });
+  const rev = await revokeTeamLeader(
+    post(REVOKE_BODY, `/api/admin/catalog/teams/${TEAM}/leaders/revoke`),
+    TEAM,
+    "true",
+    revokeDeps.value,
+  );
+  assert.equal(rev.status, 200);
+  assert.equal((await rev.json()).leader.change, "revoke");
+});
+
 test("denials, not-found and raw RPC failures have stable sanitized responses", async () => {
   for (const [kind, status, code] of [
     ["denied", 403, "LEADER_DENIED"], ["not-found", 404, "LEADER_NOT_FOUND"],

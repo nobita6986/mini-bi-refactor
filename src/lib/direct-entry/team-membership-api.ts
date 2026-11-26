@@ -121,6 +121,7 @@ async function resolveTrustedActor(
 
 /** Taxonomy sanitized: khong bao gio forward raw DB message. */
 export function teamMembershipErrorResponse(kind: string): Response {
+  if (kind === "active-team-leader") return fail("MEMBERSHIP_ACTIVE_TEAM_LEADER", 409);
   if (kind === "overlap") return fail("MEMBERSHIP_OVERLAP", 409);
   if (kind === "already-team") return fail("MEMBERSHIP_SAME_TEAM", 400);
   if (kind === "no-membership") return fail("MEMBERSHIP_NOT_MOVABLE", 409);

@@ -1,6 +1,6 @@
 import { parseIsoDate } from "./direct-entry-date-format.ts";
 
-export type TeamLeaderState = "CURRENT" | "SCHEDULED" | "HISTORY";
+export type TeamLeaderState = "CURRENT" | "SUSPENDED" | "SCHEDULED" | "HISTORY";
 export type TeamLeaderChange = "designate" | "replace" | "revoke";
 
 export type TeamLeaderItem = {
@@ -99,8 +99,8 @@ export function teamLeaderItem(value: unknown): TeamLeaderItem | null {
   const leader_display_name = text(value.leader_display_name);
   const valid_from = day(value.valid_from);
   const valid_to = value.valid_to === null ? null : day(value.valid_to);
-  const state = value.state === "CURRENT" || value.state === "SCHEDULED" ||
-      value.state === "HISTORY" ? value.state : null;
+  const state = value.state === "CURRENT" || value.state === "SUSPENDED" ||
+      value.state === "SCHEDULED" || value.state === "HISTORY" ? value.state : null;
   if (!assignment_id || !team_id || !team_display_name || !leader_app_user_id ||
       !leader_recruiter_id || !leader_display_name || !valid_from ||
       (valid_to === null && value.valid_to !== null) || !state) return null;

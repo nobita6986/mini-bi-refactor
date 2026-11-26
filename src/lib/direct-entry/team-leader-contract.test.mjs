@@ -33,6 +33,7 @@ const CANDIDATES = {
 
 test("strictly projects leader read, mutation, and three-key candidate shapes", () => {
   assert.deepEqual(teamLeaderItem(ITEM), ITEM);
+  assert.deepEqual(teamLeaderItem({ ...ITEM, state: "SUSPENDED" }), { ...ITEM, state: "SUSPENDED" });
   assert.deepEqual(teamLeaderList(LIST), LIST);
   assert.deepEqual(teamLeaderMutation(MUTATION), MUTATION);
   assert.deepEqual(teamLeaderCandidate(CANDIDATE), CANDIDATE);
