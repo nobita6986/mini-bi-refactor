@@ -643,7 +643,6 @@ async function runWp106DualEngineMatrix(engine) {
   const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
   const wp106Idx = files.indexOf(WP10_6_MIGRATION_NAME);
   assert.ok(wp106Idx > 0, "WP10-6 migration #244 must exist");
-  assert.equal(wp106Idx, files.length - 1, "WP10-6 migration #244 must be the latest migration");
 
   const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
   assert.ok(groupsIdx > 0 && groupsIdx < wp106Idx);

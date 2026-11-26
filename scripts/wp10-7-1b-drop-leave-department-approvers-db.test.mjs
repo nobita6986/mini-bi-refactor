@@ -598,7 +598,6 @@ async function runPost245FunctionalMatrix(engine, { mode, onPre245Ready = null }
   const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
   const dropIdx = files.indexOf(WP10_7_1B_MIGRATION_NAME);
   assert.ok(dropIdx > 0, "WP10-7 Slice 1B migration #245 must exist");
-  assert.equal(dropIdx, files.length - 1, "WP10-7 Slice 1B migration #245 must be latest migration");
   const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
   assert.ok(groupsIdx > 0 && groupsIdx < dropIdx);
 
