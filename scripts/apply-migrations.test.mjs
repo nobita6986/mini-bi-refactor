@@ -7,9 +7,14 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  composeBeforeApplyMigrationGuards,
   createWp1072bArchiveGuard,
   createWp1072bMissingArchiveGuard,
+  createWp1073dArchiveGuard,
+  createWp1073dMissingArchiveGuard,
   extractS0T1CAllowlistSignatures,
+  isWp1073dMigrationName,
+  loadAndVerifyWp1073dArchiveManifest,
   migrationChecksum,
   migrationSqlForTransaction,
   parseLeaveProfileUnitKindArchiveCsv,
@@ -21,7 +26,18 @@ import {
   S0_T1_C_MIGRATION_NAME,
   S0_T1_C_PRE_PR92_CHECKSUM,
   WP10_7_2B_MIGRATION_NAME,
+  WP10_7_3D_MIGRATION_SUFFIX,
 } from "./lib/migration-validation.mjs";
+import {
+  assertValidWp1073dCatalogSnapshot,
+  buildWp1073dRestoreSql,
+  computeWp1073dBundleFingerprint,
+  formatWp1073dTableArchiveCsv,
+  parseWp1073dTableArchiveCsv,
+  WP10_7_3D_ARCHIVE_FORMAT_VERSION,
+  WP10_7_3D_BUNDLE_TABLE_KEY,
+  WP10_7_3D_LOCK_ORDER_SQL,
+} from "./lib/wp10-7-3d-legacy-grants-archive.mjs";
 import { buildSslOptions } from "./lib/supabase-tls.mjs";
 
 test("explicit local PostgreSQL mode disables TLS", () => {
@@ -878,5 +894,800 @@ test("createWp1072bMissingArchiveGuard and direct runMigrationApply fail closed 
     }
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// =============================================================================
+// WP10-7 Slice 3D — 3-Table Legacy Grants Archive, Guard & Runner CLI Tests
+// =============================================================================
+
+function buildSyntheticWp1073dCatalogSnapshot() {
+  return {
+    tables: {
+      direct_entry_capability_grants: {
+        owner: "postgres",
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+        relacl: ["direct_entry_catalog_bootstrap_executor=r/postgres", "postgres=arwdDxtm/postgres"],
+        cols: [
+          { attnum: 1, attname: "grant_id", typ: "uuid", attnotnull: true, defval: "gen_random_uuid()" },
+          { attnum: 2, attname: "app_user_id", typ: "uuid", attnotnull: true, defval: null },
+        ],
+        cons: [
+          { conname: "direct_entry_capability_grants_pkey", contype: "p", condef: "PRIMARY KEY (grant_id)" },
+        ],
+        idxs: [
+          {
+            idx: "direct_entry_capability_grants_pkey",
+            is_primary: true,
+            idxdef: "CREATE UNIQUE INDEX direct_entry_capability_grants_pkey ON public.direct_entry_capability_grants USING btree (grant_id)",
+          },
+        ],
+        trgs: [],
+        pols: [
+          {
+            polname: "direct_entry_catalog_bootstrap_capability_read",
+            polcmd: "r",
+            polpermissive: true,
+            qual: "true",
+            withcheck: null,
+            roles: ["direct_entry_catalog_bootstrap_executor"],
+          },
+        ],
+      },
+      direct_entry_scope_grants: {
+        owner: "postgres",
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+        relacl: ["postgres=arwdDxtm/postgres"],
+        cols: [
+          { attnum: 1, attname: "grant_id", typ: "uuid", attnotnull: true, defval: "gen_random_uuid()" },
+          { attnum: 2, attname: "app_user_id", typ: "uuid", attnotnull: true, defval: null },
+        ],
+        cons: [
+          { conname: "direct_entry_scope_grants_pkey", contype: "p", condef: "PRIMARY KEY (grant_id)" },
+        ],
+        idxs: [
+          {
+            idx: "direct_entry_scope_grants_pkey",
+            is_primary: true,
+            idxdef: "CREATE UNIQUE INDEX direct_entry_scope_grants_pkey ON public.direct_entry_scope_grants USING btree (grant_id)",
+          },
+        ],
+        trgs: [],
+        pols: [],
+      },
+      work_report_team_leader_capability_grants: {
+        owner: "postgres",
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+        relacl: ["postgres=arwdDxtm/postgres"],
+        cols: [
+          { attnum: 1, attname: "leader_assignment_id", typ: "uuid", attnotnull: true, defval: null },
+          { attnum: 2, attname: "capability", typ: "text", attnotnull: true, defval: null },
+          { attnum: 3, attname: "capability_grant_id", typ: "uuid", attnotnull: true, defval: null },
+        ],
+        cons: [
+          {
+            conname: "work_report_team_leader_capability_grants_pkey",
+            contype: "p",
+            condef: "PRIMARY KEY (leader_assignment_id, capability)",
+          },
+        ],
+        idxs: [
+          {
+            idx: "work_report_team_leader_capability_grants_pkey",
+            is_primary: true,
+            idxdef: "CREATE UNIQUE INDEX work_report_team_leader_capability_grants_pkey ON public.work_report_team_leader_capability_grants USING btree (leader_assignment_id, capability)",
+          },
+        ],
+        trgs: [],
+        pols: [],
+      },
+    },
+    external_bridge_triggers: [],
+    functions: {},
+  };
+}
+
+async function writeSyntheticWp1073dArchiveBundle(targetDir) {
+  const grantCapA = "10000000-0000-4000-8000-000000000001";
+  const grantCapB = "10000000-0000-4000-8000-000000000002";
+  const grantScopeA = "20000000-0000-4000-8000-000000000001";
+  const grantScopeB = "20000000-0000-4000-8000-000000000002";
+  const userA = "30000000-0000-4000-8000-000000000001";
+  const teamA = "40000000-0000-4000-8000-000000000001";
+  const leaderAsgnA = "50000000-0000-4000-8000-000000000001";
+
+  const capRows = [
+    {
+      grant_id: grantCapA,
+      app_user_id: userA,
+      capability: "report_view",
+      valid_from: "2026-01-01",
+      valid_to: null,
+      created_at_utc: "2026-01-01T00:00:00.000000Z",
+      is_current: true,
+      suspended_by_account_disable: false,
+    },
+    {
+      grant_id: grantCapB,
+      app_user_id: userA,
+      capability: "payment_view",
+      valid_from: "2026-01-01",
+      valid_to: "2026-02-01",
+      created_at_utc: "2026-01-02T12:34:56.654321Z",
+      is_current: false,
+      suspended_by_account_disable: true,
+    },
+  ];
+  const scopeRows = [
+    {
+      grant_id: grantScopeA,
+      app_user_id: userA,
+      scope_kind: "all",
+      team_id: null,
+      valid_from: "2026-01-01",
+      valid_to: null,
+      created_at_utc: "2026-01-01T00:00:00.000000Z",
+      is_current: true,
+      suspended_by_account_disable: false,
+    },
+    {
+      grant_id: grantScopeB,
+      app_user_id: userA,
+      scope_kind: "team",
+      team_id: teamA,
+      valid_from: "2026-01-05",
+      valid_to: "2026-01-10",
+      created_at_utc: "2026-01-05T08:00:00.000000Z",
+      is_current: false,
+      suspended_by_account_disable: false,
+    },
+  ];
+  const bridgeRows = [
+    {
+      leader_assignment_id: leaderAsgnA,
+      capability: "report_view",
+      capability_grant_id: grantCapA,
+    },
+  ];
+
+  const tables = {};
+  for (const [tableName, rows] of [
+    ["direct_entry_capability_grants", capRows],
+    ["direct_entry_scope_grants", scopeRows],
+    ["work_report_team_leader_capability_grants", bridgeRows],
+  ]) {
+    const csvText = formatWp1073dTableArchiveCsv(tableName, rows);
+    const parsed = parseWp1073dTableArchiveCsv(tableName, csvText);
+    const jsonText = `${JSON.stringify({ table_name: tableName, row_count: parsed.rowCount, canonical_sha256: parsed.canonicalSha256, rows: parsed.rows }, null, 2)}\n`;
+    const csvFile = `${tableName}.archive.csv`;
+    const jsonFile = `${tableName}.archive.json`;
+    await writeFile(path.join(targetDir, csvFile), csvText, "utf8");
+    await writeFile(path.join(targetDir, jsonFile), jsonText, "utf8");
+    tables[tableName] = {
+      row_count: parsed.rowCount,
+      canonical_sha256: parsed.canonicalSha256,
+      csv_file: csvFile,
+      json_file: jsonFile,
+      csv_sha256: createHash("sha256").update(csvText, "utf8").digest("hex"),
+      json_sha256: createHash("sha256").update(jsonText, "utf8").digest("hex"),
+    };
+  }
+
+  const catalogSnapshot = buildSyntheticWp1073dCatalogSnapshot();
+  const restoreSql = buildWp1073dRestoreSql({ catalogSnapshot });
+  const restoreSqlFile = "restore.sql";
+  const restoreSqlPath = path.join(targetDir, restoreSqlFile);
+  await writeFile(restoreSqlPath, restoreSql, "utf8");
+  const restoreSqlSha256 = createHash("sha256").update(restoreSql, "utf8").digest("hex");
+
+  const bundle = computeWp1073dBundleFingerprint(tables);
+  const manifest = {
+    format_version: WP10_7_3D_ARCHIVE_FORMAT_VERSION,
+    exported_at: "2026-11-27T00:00:00.000Z",
+    tables,
+    bundle,
+    restore_sql_file: restoreSqlFile,
+    restore_sql_sha256: restoreSqlSha256,
+    catalog_snapshot: catalogSnapshot,
+  };
+  const manifestPath = path.join(targetDir, "manifest.json");
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return { manifestPath, restoreSqlPath, restoreSql, restoreSqlSha256, manifest, tables, bundle, catalogSnapshot };
+}
+
+test("WP10-7-3D filename matcher is timestamp-agnostic and strict", () => {
+  assert.equal(isWp1073dMigrationName(`20261127050000${WP10_7_3D_MIGRATION_SUFFIX}`), true);
+  assert.equal(isWp1073dMigrationName(`20261201235959${WP10_7_3D_MIGRATION_SUFFIX}`), true);
+  assert.equal(isWp1073dMigrationName(`20261127_wp10_7_3d_drop_direct_entry_legacy_grants.sql`), false);
+  assert.equal(isWp1073dMigrationName(WP10_7_2B_MIGRATION_NAME), false);
+  assert.equal(isWp1073dMigrationName(null), false);
+});
+
+test("WP10-7-3D archive CSV parser & manifest loader normalize canonically and fail closed on corruption", async () => {
+  const idA = "00000000-0000-4000-8000-000000000001";
+  const idB = "00000000-0000-4000-8000-000000000002";
+  const userA = "00000000-0000-4000-8000-000000000010";
+  const teamA = "00000000-0000-4000-8000-000000000020";
+
+  // Unsorted CRLF + quoted empty nullable valid_to + uppercase UUIDs normalize identically
+  const capParsed = parseWp1073dTableArchiveCsv(
+    "direct_entry_capability_grants",
+    [
+      "grant_id,app_user_id,capability,valid_from,valid_to,created_at_utc,is_current,suspended_by_account_disable",
+      `${idB.toUpperCase()},${userA.toUpperCase()},entry_create,2026-01-02,"",2026-01-02T00:00:00.000000Z,true,false`,
+      `${idA},${userA},payment_view,2026-01-01,2026-01-05,2026-01-01T00:00:00.000000Z,false,true`,
+    ].join("\r\n") + "\r\n",
+  );
+  const expectedCapSha = createHash("sha256")
+    .update(
+      [
+        `${idA}|${userA}|payment_view|2026-01-01|2026-01-05|2026-01-01T00:00:00.000000Z|false|true`,
+        `${idB}|${userA}|entry_create|2026-01-02||2026-01-02T00:00:00.000000Z|true|false`,
+      ].join("\n"),
+      "utf8",
+    )
+    .digest("hex");
+  assert.equal(capParsed.rowCount, 2);
+  assert.equal(capParsed.canonicalSha256, expectedCapSha);
+
+  // Empty 0-row CSV hashes empty string
+  const emptyBridge = parseWp1073dTableArchiveCsv(
+    "work_report_team_leader_capability_grants",
+    "leader_assignment_id,capability,capability_grant_id\n",
+  );
+  assert.equal(emptyBridge.rowCount, 0);
+  assert.equal(emptyBridge.canonicalSha256, createHash("sha256").update("", "utf8").digest("hex"));
+
+  // Fail-closed validation checks
+  assert.throws(
+    () => parseWp1073dTableArchiveCsv("direct_entry_capability_grants", "wrong,header\n"),
+    /exact header/,
+  );
+  assert.throws(
+    () =>
+      parseWp1073dTableArchiveCsv(
+        "direct_entry_scope_grants",
+        `grant_id,app_user_id,scope_kind,team_id,valid_from,valid_to,created_at_utc,is_current,suspended_by_account_disable\n${idA},${userA},team,,2026-01-01,,2026-01-01T00:00:00.000000Z,true,false\n`,
+      ),
+    /scope_kind\/team_id invariant violation/,
+  );
+  assert.throws(
+    () =>
+      parseWp1073dTableArchiveCsv(
+        "direct_entry_scope_grants",
+        `grant_id,app_user_id,scope_kind,team_id,valid_from,valid_to,created_at_utc,is_current,suspended_by_account_disable\n${idA},${userA},all,${teamA},2026-01-01,,2026-01-01T00:00:00.000000Z,true,false\n`,
+      ),
+    /scope_kind\/team_id invariant violation/,
+  );
+  assert.throws(
+    () =>
+      parseWp1073dTableArchiveCsv(
+        "work_report_team_leader_capability_grants",
+        `leader_assignment_id,capability,capability_grant_id\n${idA},entry_admin,${idB}\n`,
+      ),
+    /invalid bridge capability/,
+  );
+  assert.throws(
+    () =>
+      parseWp1073dTableArchiveCsv(
+        "work_report_team_leader_capability_grants",
+        `leader_assignment_id,capability,capability_grant_id\n${idA},report_view,${idB}\n${idA.toUpperCase()},report_view,${idB}\n`,
+      ),
+    /duplicate primary key/,
+  );
+
+  // Manifest loader round-trip & tamper rejection
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "wp10-7-3d-manifest-"));
+  try {
+    const { manifestPath, manifest, bundle } = await writeSyntheticWp1073dArchiveBundle(tmpDir);
+    const loaded = await loadAndVerifyWp1073dArchiveManifest(manifestPath);
+    assert.equal(loaded.expectedBundle.row_count, 5);
+    assert.equal(loaded.expectedBundle.canonical_sha256, bundle.canonical_sha256);
+
+    // Tamper CSV -> fails closed
+    const bridgeCsvPath = path.join(tmpDir, "work_report_team_leader_capability_grants.archive.csv");
+    const origBridgeCsv = await readFile(bridgeCsvPath, "utf8");
+    await writeFile(bridgeCsvPath, `${origBridgeCsv}\n`, "utf8");
+    await assert.rejects(
+      () => loadAndVerifyWp1073dArchiveManifest(manifestPath),
+      /CSV file digest mismatch/,
+    );
+    await writeFile(bridgeCsvPath, origBridgeCsv, "utf8");
+
+    // Path traversal in manifest -> fails closed
+    const badManifestPath = path.join(tmpDir, "bad-manifest.json");
+    const badManifest = structuredClone(manifest);
+    badManifest.tables.direct_entry_capability_grants.csv_file = "../escape.csv";
+    await writeFile(badManifestPath, JSON.stringify(badManifest), "utf8");
+    await assert.rejects(
+      () => loadAndVerifyWp1073dArchiveManifest(badManifestPath),
+      /path traversal rejected/,
+    );
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("runMigrationApply with createWp1073dArchiveGuard locks all 3 tables before parity, rolls back on drift, and commits on match", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "migration-3d-guard-"));
+  const archiveDir = await mkdtemp(path.join(os.tmpdir(), "migration-3d-arc-"));
+  try {
+    const preMigration = "20261127020000_wp10_7_3c_stop_legacy_sync.sql";
+    const m3dName = `20261127050000${WP10_7_3D_MIGRATION_SUFFIX}`;
+    const preSql = "select 254;\n";
+    const m3dSql = "begin;\nselect 255;\ncommit;\n";
+    await writeFile(path.join(directory, preMigration), preSql);
+    await writeFile(path.join(directory, m3dName), m3dSql);
+
+    const { manifestPath } = await writeSyntheticWp1073dArchiveBundle(archiveDir);
+    const loaded = await loadAndVerifyWp1073dArchiveManifest(manifestPath);
+    const guard = createWp1073dArchiveGuard(loaded);
+
+    const liveRowsMatching = [
+      {
+        table_name: "direct_entry_capability_grants",
+        row_count: String(loaded.expectedTables.direct_entry_capability_grants.row_count),
+        canonical_sha256: loaded.expectedTables.direct_entry_capability_grants.canonical_sha256,
+      },
+      {
+        table_name: "direct_entry_scope_grants",
+        row_count: String(loaded.expectedTables.direct_entry_scope_grants.row_count),
+        canonical_sha256: loaded.expectedTables.direct_entry_scope_grants.canonical_sha256,
+      },
+      {
+        table_name: "work_report_team_leader_capability_grants",
+        row_count: String(loaded.expectedTables.work_report_team_leader_capability_grants.row_count),
+        canonical_sha256: loaded.expectedTables.work_report_team_leader_capability_grants.canonical_sha256,
+      },
+      {
+        table_name: WP10_7_3D_BUNDLE_TABLE_KEY,
+        row_count: String(loaded.expectedBundle.row_count),
+        canonical_sha256: loaded.expectedBundle.canonical_sha256,
+      },
+    ];
+
+    // 1. Drift on any table -> LOCK TABLE runs first, parity fails, ROLLBACK runs, 3D DDL & schema_migrations INSERT never run
+    for (const driftedTable of [
+      "direct_entry_capability_grants",
+      "direct_entry_scope_grants",
+      "work_report_team_leader_capability_grants",
+    ]) {
+      const ops = [];
+      let rolledBack = false;
+      let committed = false;
+      const driftedRows = liveRowsMatching.map((r) =>
+        r.table_name === driftedTable ? { ...r, row_count: String(Number(r.row_count) + 1) } : r,
+      );
+      await assert.rejects(
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              if (sql === "commit") {
+                committed = true;
+                return { rows: [] };
+              }
+              if (sql.includes("WITH cap_manifest AS")) {
+                return { rows: driftedRows };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: guard,
+          log() {},
+          errorLog() {},
+        }),
+        new RegExp(`WP10-7-3D archive parity check failed in transaction:.*${driftedTable}`),
+      );
+      assert.equal(rolledBack, true);
+      assert.equal(committed, false);
+      const lockIdx = ops.findIndex((o) => o.sql === WP10_7_3D_LOCK_ORDER_SQL);
+      const parityIdx = ops.findIndex((o) => o.sql.includes("WITH cap_manifest AS"));
+      assert.ok(lockIdx >= 0 && parityIdx > lockIdx, `LOCK TABLE must execute before parity for ${driftedTable}`);
+      assert.equal(ops.some((o) => o.sql.includes("select 255;")), false);
+      assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+    }
+
+    // 2. Match -> non-3D skips guard, 3D runs LOCK -> parity -> DDL -> schema_migrations INSERT -> COMMIT
+    {
+      const ops = [];
+      const res = await runMigrationApply({
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql, params) {
+            ops.push({ sql, params });
+            if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+            if (sql === "select version, checksum from public.schema_migrations") return { rows: [] };
+            if (sql.includes("WITH cap_manifest AS")) return { rows: liveRowsMatching };
+            return { rows: [] };
+          },
+          async end() {},
+        }),
+        beforeApplyMigration: composeBeforeApplyMigrationGuards(
+          createWp1072bMissingArchiveGuard(),
+          guard,
+        ),
+        log() {},
+        errorLog() {},
+      });
+      assert.equal(res.appliedCount, 2);
+      assert.equal(res.skippedCount, 0);
+      assert.equal(ops.filter((o) => o.sql === WP10_7_3D_LOCK_ORDER_SQL).length, 1);
+      const lockIdx = ops.findIndex((o) => o.sql === WP10_7_3D_LOCK_ORDER_SQL);
+      const parityIdx = ops.findIndex((o) => o.sql.includes("WITH cap_manifest AS"));
+      const ddlIdx = ops.findIndex((o) => o.sql.includes("select 255;"));
+      const ledgerIdx = ops.findIndex(
+        (o) => o.sql.includes("insert into public.schema_migrations") && o.params?.[0] === m3dName,
+      );
+      const commitIdx = ops.findIndex((o, idx) => idx > ledgerIdx && o.sql === "commit");
+      assert.ok(lockIdx >= 0 && parityIdx > lockIdx && ddlIdx > parityIdx && ledgerIdx > ddlIdx && commitIdx > ledgerIdx);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(archiveDir, { recursive: true, force: true });
+  }
+});
+
+test("createWp1073dMissingArchiveGuard and direct runMigrationApply fail closed when 3D is pending without archive and skip cleanly once recorded", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "migration-3d-default-gate-"));
+  try {
+    const preMigration = "20261127020000_wp10_7_3c_stop_legacy_sync.sql";
+    const m3dName = `20261127060000${WP10_7_3D_MIGRATION_SUFFIX}`;
+    const preSql = "select 254;\n";
+    const m3dSql = "begin;\nselect 255;\ncommit;\n";
+    await writeFile(path.join(directory, preMigration), preSql);
+    await writeFile(path.join(directory, m3dName), m3dSql);
+
+    // 1. Default missing-archive guard blocks pending 3D BEFORE DDL and BEFORE schema_migrations write
+    {
+      const ops = [];
+      let rolledBack = false;
+      await assert.rejects(
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: createWp1073dMissingArchiveGuard(),
+          log() {},
+          errorLog() {},
+        }),
+        /requires verified 3-table archive parity before dropping/,
+      );
+      assert.equal(rolledBack, true);
+      assert.equal(ops.some((o) => o.sql.includes("select 255;")), false);
+      assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+    }
+
+    // 2. Already recorded 3D migration skips cleanly by checksum without invoking missing-archive guard
+    {
+      const ops = [];
+      const res = await runMigrationApply({
+        directory,
+        loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+        createClient: () => ({
+          async connect() {},
+          async query(sql, params) {
+            ops.push({ sql, params });
+            if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+            if (sql === "select version, checksum from public.schema_migrations") {
+              return {
+                rows: [
+                  { version: preMigration, checksum: migrationChecksum(preSql) },
+                  { version: m3dName, checksum: migrationChecksum(m3dSql) },
+                ],
+              };
+            }
+            return { rows: [] };
+          },
+          async end() {},
+        }),
+        beforeApplyMigration: createWp1073dMissingArchiveGuard(),
+        log() {},
+        errorLog() {},
+      });
+      assert.equal(res.appliedCount, 0);
+      assert.equal(res.skippedCount, 2);
+      assert.equal(ops.some((o) => o.sql === "begin"), false);
+    }
+
+    // 3. Direct runMigrationApply without beforeApplyMigration: blocks populated legacy tables (>0 rows), allows 0-row fresh bootstrap DB
+    for (const [counts, shouldReject] of [
+      [{ cap_count: "1", scope_count: "0", bridge_count: "0" }, true],
+      [{ cap_count: "0", scope_count: "2", bridge_count: "0" }, true],
+      [{ cap_count: "0", scope_count: "0", bridge_count: "1" }, true],
+      [{ cap_count: "0", scope_count: "0", bridge_count: "0" }, false],
+    ]) {
+      const ops = [];
+      let rolledBack = false;
+      const exec = () =>
+        runMigrationApply({
+          directory,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              if (sql.includes("cap_count") && sql.includes("bridge_count")) {
+                return { rows: [counts] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          log() {},
+          errorLog() {},
+        });
+      if (shouldReject) {
+        await assert.rejects(
+          exec,
+          /requires verified 3-table archive parity when legacy grant tables have existing rows/,
+        );
+        assert.equal(rolledBack, true);
+        assert.equal(ops.some((o) => o.sql.includes("select 255;")), false);
+        assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+      } else {
+        const res = await exec();
+        assert.equal(res.appliedCount, 1);
+        assert.ok(ops.some((o) => o.sql.includes("select 255;")));
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("scripts/apply-migrations.mjs CLI validates WP10-7-3D archive flags fail-closed", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "apply-mig-3d-cli-"));
+  try {
+    const { manifestPath, bundle } = await writeSyntheticWp1073dArchiveBundle(tempDir);
+    const wrongBundleSha = bundle.canonical_sha256 === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64);
+    const runCli = (args) =>
+      spawnSync(process.execPath, ["scripts/apply-migrations.mjs", ...args], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+
+    for (const [label, args, pattern] of [
+      ["bundle sha without manifest", ["--wp10-7-3d-expected-bundle-sha256", bundle.canonical_sha256], /yêu cầu đi kèm --wp10-7-3d-archive-manifest/],
+      ["combined with offline", ["--offline", "--wp10-7-3d-archive-manifest", manifestPath], /--offline hoặc --dry-run/],
+      ["combined with dry-run", ["--dry-run", "--wp10-7-3d-archive-manifest", manifestPath], /--offline hoặc --dry-run/],
+      ["bad bundle sha hex", ["--wp10-7-3d-archive-manifest", manifestPath, "--wp10-7-3d-expected-bundle-sha256", "not-hex"], /expected-bundle-sha256 không hợp lệ/],
+      ["manifest bundle sha mismatch", [`--wp10-7-3d-archive-manifest=${manifestPath}`, `--wp10-7-3d-expected-bundle-sha256=${wrongBundleSha}`], /archive manifest không khớp --wp10-7-3d-expected-bundle-sha256/],
+      ["missing manifest path", ["--wp10-7-3d-archive-manifest", path.join(tempDir, "missing.json")], /ENOENT/],
+    ]) {
+      const res = runCli(args);
+      assert.notEqual(res.status, 0, `${label} must fail`);
+      assert.match(res.stderr, pattern, `${label} error message`);
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("WP10-7-3D archive gate fails closed BEFORE DDL and schema_migrations write on missing/incomplete catalog_snapshot, missing restore.sql, or tampered restore.sql SHA-256", async () => {
+  const migDir = await mkdtemp(path.join(os.tmpdir(), "migration-3d-hardened-gate-"));
+  const arcDir = await mkdtemp(path.join(os.tmpdir(), "archive-3d-hardened-gate-"));
+  try {
+    const preMigration = "20261127020000_wp10_7_3c_stop_legacy_sync.sql";
+    const m3dName = `20261127050000${WP10_7_3D_MIGRATION_SUFFIX}`;
+    const preSql = "select 254;\n";
+    const m3dSql = "begin;\nselect 255;\ncommit;\n";
+    await writeFile(path.join(migDir, preMigration), preSql);
+    await writeFile(path.join(migDir, m3dName), m3dSql);
+
+    const { manifestPath, restoreSqlPath, restoreSql, restoreSqlSha256, manifest, catalogSnapshot } =
+      await writeSyntheticWp1073dArchiveBundle(arcDir);
+
+    // 0. Portable restore.sql rejects absolute paths and '..' traversal
+    assert.equal(restoreSql.includes(arcDir.replaceAll("\\", "/")), false, "restore.sql must not embed export dir");
+    assert.match(restoreSql, /\\copy public\.direct_entry_capability_grants .* FROM 'direct_entry_capability_grants\.archive\.csv'/);
+    assert.throws(
+      () =>
+        buildWp1073dRestoreSql({
+          catalogSnapshot,
+          csvPaths: {
+            direct_entry_capability_grants: "/tmp/abs.csv",
+            direct_entry_scope_grants: "direct_entry_scope_grants.archive.csv",
+            work_report_team_leader_capability_grants: "work_report_team_leader_capability_grants.archive.csv",
+          },
+        }),
+      /absolute path rejected/,
+    );
+    assert.throws(
+      () =>
+        buildWp1073dRestoreSql({
+          catalogSnapshot,
+          csvPaths: {
+            direct_entry_capability_grants: "../escape.csv",
+            direct_entry_scope_grants: "direct_entry_scope_grants.archive.csv",
+            work_report_team_leader_capability_grants: "work_report_team_leader_capability_grants.archive.csv",
+          },
+        }),
+      /path traversal rejected/,
+    );
+
+    // Helper: assert CLI rejects bad manifest BEFORE connecting to DB
+    const runCli = (args) =>
+      spawnSync(process.execPath, ["scripts/apply-migrations.mjs", ...args], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+
+    // 1. Missing or incomplete catalog_snapshot
+    {
+      const noSnap = structuredClone(manifest);
+      delete noSnap.catalog_snapshot;
+      const noSnapPath = path.join(arcDir, "manifest-no-snapshot.json");
+      await writeFile(noSnapPath, JSON.stringify(noSnap), "utf8");
+      await assert.rejects(() => loadAndVerifyWp1073dArchiveManifest(noSnapPath), /catalog_snapshot/);
+      assert.throws(() => createWp1073dArchiveGuard({ manifest: noSnap, restoreSqlSha256 }), /catalog_snapshot/);
+      const cliRes = runCli(["--wp10-7-3d-archive-manifest", noSnapPath]);
+      assert.notEqual(cliRes.status, 0);
+      assert.match(cliRes.stderr, /catalog_snapshot/);
+
+      const incompleteSnap = structuredClone(manifest);
+      incompleteSnap.catalog_snapshot.tables.direct_entry_capability_grants.cons = [];
+      const incPath = path.join(arcDir, "manifest-incomplete-snapshot.json");
+      await writeFile(incPath, JSON.stringify(incompleteSnap), "utf8");
+      assert.throws(() => assertValidWp1073dCatalogSnapshot(incompleteSnap.catalog_snapshot), /primary key/);
+      await assert.rejects(() => loadAndVerifyWp1073dArchiveManifest(incPath), /primary key/);
+      assert.throws(() => createWp1073dArchiveGuard({ manifest: incompleteSnap, restoreSqlSha256 }), /primary key/);
+      const cliInc = runCli(["--wp10-7-3d-archive-manifest", incPath]);
+      assert.notEqual(cliInc.status, 0);
+      assert.match(cliInc.stderr, /primary key/);
+    }
+
+    // 2. Missing restore_sql_file in manifest.json AND missing restore.sql on disk
+    {
+      const noRestoreField = structuredClone(manifest);
+      delete noRestoreField.restore_sql_file;
+      const noFieldPath = path.join(arcDir, "manifest-no-restore-field.json");
+      await writeFile(noFieldPath, JSON.stringify(noRestoreField), "utf8");
+      await assert.rejects(() => loadAndVerifyWp1073dArchiveManifest(noFieldPath), /restore_sql_file/);
+      assert.throws(() => createWp1073dArchiveGuard({ manifest: noRestoreField, restoreSqlSha256 }), /restore_sql_file/);
+      const cliNoField = runCli(["--wp10-7-3d-archive-manifest", noFieldPath]);
+      assert.notEqual(cliNoField.status, 0);
+      assert.match(cliNoField.stderr, /restore_sql_file/);
+
+      // Delete restore.sql on disk -> loader, CLI, AND in-tx guard MUST block before DDL & ledger write
+      const loadedBeforeDelete = await loadAndVerifyWp1073dArchiveManifest(manifestPath);
+      const guard = createWp1073dArchiveGuard(loadedBeforeDelete);
+      await rm(restoreSqlPath, { force: true });
+      await assert.rejects(() => loadAndVerifyWp1073dArchiveManifest(manifestPath), /ENOENT|missing|restore\.sql/i);
+      const cliMissingFile = runCli(["--wp10-7-3d-archive-manifest", manifestPath]);
+      assert.notEqual(cliMissingFile.status, 0);
+      assert.match(cliMissingFile.stderr, /ENOENT|missing|restore\.sql/i);
+
+      const ops = [];
+      let rolledBack = false;
+      await assert.rejects(
+        runMigrationApply({
+          directory: migDir,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: guard,
+          log() {},
+          errorLog() {},
+        }),
+        /ENOENT|restore\.sql/i,
+      );
+      assert.equal(rolledBack, true);
+      assert.equal(ops.some((o) => o.sql.includes("select 255;")), false);
+      assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+      await writeFile(restoreSqlPath, restoreSql, "utf8");
+    }
+
+    // 3. Tampered restore.sql content AND mismatched restore_sql_sha256 in manifest.json
+    {
+      const wrongSha = restoreSqlSha256 === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64);
+      const badShaManifest = structuredClone(manifest);
+      badShaManifest.restore_sql_sha256 = wrongSha;
+      const badShaPath = path.join(arcDir, "manifest-bad-restore-sha.json");
+      await writeFile(badShaPath, JSON.stringify(badShaManifest), "utf8");
+      await assert.rejects(() => loadAndVerifyWp1073dArchiveManifest(badShaPath), /restore\.sql.*digest|checksum|mismatch/i);
+      const cliBadSha = runCli(["--wp10-7-3d-archive-manifest", badShaPath]);
+      assert.notEqual(cliBadSha.status, 0);
+      assert.match(cliBadSha.stderr, /restore\.sql.*digest|checksum|mismatch/i);
+
+      // Tamper restore.sql on disk AFTER loading manifest -> guard MUST block BEFORE DDL & ledger write
+      const loadedBeforeTamper = await loadAndVerifyWp1073dArchiveManifest(manifestPath);
+      const guard = createWp1073dArchiveGuard(loadedBeforeTamper);
+      await writeFile(restoreSqlPath, `${restoreSql}-- tampered\n`, "utf8");
+      await assert.rejects(() => loadAndVerifyWp1073dArchiveManifest(manifestPath), /restore\.sql.*digest|checksum|mismatch/i);
+      const cliTampered = runCli(["--wp10-7-3d-archive-manifest", manifestPath]);
+      assert.notEqual(cliTampered.status, 0);
+      assert.match(cliTampered.stderr, /restore\.sql.*digest|checksum|mismatch/i);
+
+      const ops = [];
+      let rolledBack = false;
+      await assert.rejects(
+        runMigrationApply({
+          directory: migDir,
+          loadConfig: async () => ({ databaseUrl: "postgres://synthetic", projectRef: "reqtest" }),
+          createClient: () => ({
+            async connect() {},
+            async query(sql, params) {
+              ops.push({ sql, params });
+              if (sql.includes("create table if not exists public.schema_migrations")) return { rows: [] };
+              if (sql === "select version, checksum from public.schema_migrations") {
+                return { rows: [{ version: preMigration, checksum: migrationChecksum(preSql) }] };
+              }
+              if (sql === "rollback") {
+                rolledBack = true;
+                return { rows: [] };
+              }
+              return { rows: [] };
+            },
+            async end() {},
+          }),
+          beforeApplyMigration: guard,
+          log() {},
+          errorLog() {},
+        }),
+        /restore\.sql.*digest|checksum|mismatch/i,
+      );
+      assert.equal(rolledBack, true);
+      assert.equal(ops.some((o) => o.sql.includes("select 255;")), false);
+      assert.equal(ops.some((o) => o.sql.includes("insert into public.schema_migrations")), false);
+      await writeFile(restoreSqlPath, restoreSql, "utf8");
+    }
+  } finally {
+    await rm(migDir, { recursive: true, force: true });
+    await rm(arcDir, { recursive: true, force: true });
   }
 });
