@@ -523,6 +523,25 @@ export function formatIsoDateVi(isoDate: string | null | undefined): string {
   return `${day}/${month}/${year}`;
 }
 
+/**
+ * Formats an ISO date string (`YYYY-MM-DD`) into a 2-digit day-of-month (`"02"`, `"16"`),
+ * returning `"—"` for null/empty/whitespace and falling back to `formatIsoDateVi` for non-ISO strings.
+ */
+export function formatIsoDayOfMonth(isoDate: string | null | undefined): string {
+  if (typeof isoDate !== "string") {
+    return "—";
+  }
+  const trimmed = isoDate.trim();
+  if (trimmed.length === 0) {
+    return "—";
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (match) {
+    return match[3]!;
+  }
+  return formatIsoDateVi(isoDate);
+}
+
 export function formatIsoTimestampVi(isoTimestamp: string | null | undefined): string {
   if (typeof isoTimestamp !== "string" || isoTimestamp.trim().length === 0) {
     return "—";
