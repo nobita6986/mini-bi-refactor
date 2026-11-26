@@ -42,6 +42,8 @@ test("membership failures retain safe, distinct reasons from database through UI
   const cases = [
     ["40001", "recruiter version conflict", 409, "MEMBERSHIP_CONFLICT", "Hồ sơ đã thay đổi"],
     ["PT409", "recruiter version conflict", 409, "MEMBERSHIP_CONFLICT", "Hồ sơ đã thay đổi"],
+    ["PT409", "recruiter holds active or restorable team leader assignment", 409, "MEMBERSHIP_ACTIVE_TEAM_LEADER",
+      "Hãy thay thế hoặc thu hồi phân công Trưởng nhóm trước khi chuyển tổ hoặc bỏ gán."],
     ["23P01", "effective interval overlaps", 409, "MEMBERSHIP_OVERLAP", "Lịch phân công bị trùng"],
     ["22023", "membership already targets this team", 400, "MEMBERSHIP_SAME_TEAM", "đã được phân công vào nhóm này"],
     ["22023", "no open membership to move", 409, "MEMBERSHIP_NOT_MOVABLE", "Không có phân công"],
@@ -56,6 +58,28 @@ test("membership failures retain safe, distinct reasons from database through UI
     const outcome = classifyMembershipMutation(status, body, RECRUITER, "move");
     assert.ok(outcome.message.includes(copy));
     assert.equal(outcome.message.includes(message), false);
+  }
+  const activeLeaderMsg = "recruiter holds active or restorable team leader assignment";
+  const expectedLeaderCopy = "Hãy thay thế hoặc thu hồi phân công Trưởng nhóm trước khi chuyển tổ hoặc bỏ gán.";
+  for (const [label, run] of [
+    ["move", (d) => moveTeamMembership(
+      jsonRequest(ASSIGN_BODY, "/api/admin/catalog/personnel/" + RECRUITER + "/team-memberships/" + TEAM2 + "/move"),
+      RECRUITER, TEAM2, "true", d.dependencies)],
+    ["unassign", (d) => unassignTeamMembership(
+      jsonRequest(UNASSIGN_BODY, "/api/admin/catalog/personnel/" + RECRUITER + "/team-memberships/unassign"),
+      RECRUITER, "true", d.dependencies)],
+  ]) {
+    const d = deps({ ok: false, kind: classifyTeamMembershipError({ code: "PT409", message: activeLeaderMsg }) });
+    const res = await run(d);
+    assert.equal(res.status, 409, label);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: false, code: "MEMBERSHIP_ACTIVE_TEAM_LEADER" }, label);
+    assert.equal(JSON.stringify(body).includes(activeLeaderMsg), false, label);
+    assert.deepEqual(
+      classifyMembershipMutation(res.status, body, RECRUITER, label),
+      { kind: "conflict", message: expectedLeaderCopy },
+      label,
+    );
   }
   assert.equal(classifyMembershipMutation(400, { ok: false, code: "RAW_DB_ERROR" }, RECRUITER, "move").message,
     "Thông tin gửi lên không hợp lệ.");
@@ -383,6 +407,11 @@ test("an invalid recruiter path id is rejected before session", async () => {
 test("repository maps SQLSTATE to sanitized kinds and calls the canonical RPCs", async () => {
   assert.equal(classifyTeamMembershipError({ code: "40001" }), "conflict");
   assert.equal(classifyTeamMembershipError({ code: "PT409" }), "conflict");
+  assert.equal(classifyTeamMembershipError({
+    code: "PT409",
+    message: "recruiter holds active or restorable team leader assignment",
+  }), "active-team-leader");
+  assert.equal(classifyTeamMembershipError({ code: "PT409", message: "other conflict" }), "conflict");
   assert.equal(classifyTeamMembershipError({ code: "23P01" }), "overlap");
   assert.equal(classifyTeamMembershipError({ code: "23505" }), "conflict");
   assert.equal(classifyTeamMembershipError({ code: "42501" }), "denied");

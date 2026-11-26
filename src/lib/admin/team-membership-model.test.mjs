@@ -258,6 +258,14 @@ test("mutation classification fails closed and distinguishes denial, absence and
   assert.equal(classifyMembershipMutation(403, null, RECRUITER_A, "assign").kind, "denied");
   assert.equal(classifyMembershipMutation(404, null, RECRUITER_A, "assign").kind, "not-found");
   assert.equal(classifyMembershipMutation(409, null, RECRUITER_A, "assign").kind, "conflict");
+  assert.deepEqual(
+    classifyMembershipMutation(409, { ok: false, code: "MEMBERSHIP_ACTIVE_TEAM_LEADER" }, RECRUITER_A, "move"),
+    { kind: "conflict", message: "Hãy thay thế hoặc thu hồi phân công Trưởng nhóm trước khi chuyển tổ hoặc bỏ gán." },
+  );
+  assert.deepEqual(
+    classifyMembershipMutation(409, { ok: false, code: "MEMBERSHIP_ACTIVE_TEAM_LEADER" }, RECRUITER_A, "unassign"),
+    { kind: "conflict", message: "Hãy thay thế hoặc thu hồi phân công Trưởng nhóm trước khi chuyển tổ hoặc bỏ gán." },
+  );
   assert.equal(classifyMembershipMutation(400, null, RECRUITER_A, "assign").kind, "invalid");
   assert.equal(classifyMembershipMutation(500, null, RECRUITER_A, "assign").kind, "unavailable");
 });

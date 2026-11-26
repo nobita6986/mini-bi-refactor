@@ -376,6 +376,7 @@ export function classifyMembershipMutation(
   if (status === 403) return { kind: "denied", message: "Bạn không có quyền quản lý nhóm của hồ sơ này." };
   if (status === 404) return { kind: "not-found", message: "Hồ sơ hoặc nhóm không còn khả dụng." };
   const code = isRecord(payload) && payload.ok === false ? payload.code : null;
+  if (status === 409 && code === "MEMBERSHIP_ACTIVE_TEAM_LEADER") return { kind: "conflict", message: "Hãy thay thế hoặc thu hồi phân công Trưởng nhóm trước khi chuyển tổ hoặc bỏ gán." };
   if (status === 409 && code === "MEMBERSHIP_OVERLAP") return { kind: "conflict", message: "Lịch phân công bị trùng. Hãy tải lại và kiểm tra các phân công đã lên lịch." };
   if (status === 409 && code === "MEMBERSHIP_NOT_MOVABLE") return { kind: "conflict", message: "Không có phân công có thể thay đổi vào ngày đã chọn. Hãy tải lại và kiểm tra ngày bắt đầu, kết thúc." };
   if (status === 400 && code === "MEMBERSHIP_SAME_TEAM") return { kind: "invalid", message: "Nhân sự đã được phân công vào nhóm này. Hãy chọn nhóm khác." };

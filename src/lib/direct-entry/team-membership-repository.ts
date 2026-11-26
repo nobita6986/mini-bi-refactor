@@ -31,7 +31,8 @@ export type TeamMembershipOutcome<T> =
 
 export type TeamMembershipErrorKind =
   | "conflict" | "denied" | "invalid" | "not-found" | "unavailable"
-  | "overlap" | "already-team" | "no-membership" | "date-before" | "attribution";
+  | "overlap" | "already-team" | "no-membership" | "date-before" | "attribution"
+  | "active-team-leader";
 
 const READ_RPC: Readonly<Record<MembershipState, string>> = {
   CURRENT: "direct_entry_list_team_membership_current",
@@ -67,7 +68,7 @@ function serviceRoleRpc(): Rpc {
 
 /**
  * SQLSTATE -> kind. Chi nhan cac ma RPC #70 thuc su dung:
- *   PT409/40001 OCC stale (recruiter version)
+ *   PT409/40001 OCC stale (recruiter version), or active/restorable team leader guard
  *   23P01 interval overlap (distinct from stale data)
  *   23505 idempotency key unique
  *   23514 target team inactive, vendor-provider recruiter, reserved team,
@@ -82,7 +83,12 @@ function serviceRoleRpc(): Rpc {
 export function classifyTeamMembershipError(
   error: { code?: string; message?: string },
 ): TeamMembershipErrorKind {
-  if (error.code === "PT409" || error.code === "40001" || error.code === "23505") return "conflict";
+  if (error.code === "PT409") {
+    return error.message === "recruiter holds active or restorable team leader assignment"
+      ? "active-team-leader"
+      : "conflict";
+  }
+  if (error.code === "40001" || error.code === "23505") return "conflict";
   if (error.code === "23P01") return "overlap";
   if (error.code === "42501") return "denied";
   if (error.code === "P0002") return "not-found";
