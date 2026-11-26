@@ -26,6 +26,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const MIGRATION_DIR = path.join(REPO_ROOT, "supabase", "migrations");
 const SQL_DIR = path.join(__dirname, "wp2a-shadow", "sql");
+const WP2A_HISTORICAL_CUTOFF_MIGRATION =
+  "20261121160000_pr28_retire_integrations_and_account_type_cleanup.sql";
 const EXPECTED_NWC_PROJECT_REF = "nwcvmigrhzdywaumkrjp";
 const DEFAULT_NWC_CONFIG = "C:/importal/db-test-nwc/DB-staging-for-VPS-nwc.txt";
 
@@ -171,6 +173,22 @@ async function loadSqlTemplates() {
     loaded[key] = { name, sql: raw, statement: stripSqlCommentsAndSemicolon(raw) };
   }
   return loaded;
+}
+
+/**
+ * Fail-closed schema-compatibility preflight for WP2A standalone shadow SQLs.
+ * WP2A shadow queries target the historical schema (<= #244 / < 20261121160000)
+ * where public.leave_department_approvers exists.
+ */
+export async function assertWp2aShadowSchemaCompatible(executor) {
+  const { rows } = await executor.query(
+    `select pg_catalog.to_regclass('public.leave_department_approvers') is not null as has_leave_department_approvers`
+  );
+  if (!rows[0]?.has_leave_department_approvers) {
+    throw new Error(
+      "WP2A shadow comparator requires historical schema <= #244 (< 20261121160000) where public.leave_department_approvers exists; public.leave_department_approvers is absent on this target (>= #245). Use --pglite (historical cutoff) or a pre-#245 database restore."
+    );
+  }
 }
 
 async function runInReadOnlyTx(executor, asOfIso, fn) {
@@ -378,12 +396,13 @@ async function runPgliteMode(args, sqlTemplates) {
     await db.exec("alter table auth.users add column if not exists email text;");
 
     const migrationFiles = (await fsp.readdir(MIGRATION_DIR))
-      .filter((name) => name.endsWith(".sql"))
+      .filter((name) => name.endsWith(".sql") && name < WP2A_HISTORICAL_CUTOFF_MIGRATION)
       .sort();
     for (const file of migrationFiles) {
       await db.exec(await fsp.readFile(path.join(MIGRATION_DIR, file), "utf8"));
     }
 
+    await assertWp2aShadowSchemaCompatible(db);
     await seedPgliteShadowFixture(db);
     const asOfIso = args.asOf || "2026-11-12T10:00:00+07:00";
 
@@ -498,6 +517,7 @@ async function runNwcMode(args, sqlTemplates) {
   await client.connect();
   try {
     const result = await runInReadOnlyTx(client, args.asOf, async () => {
+      await assertWp2aShadowSchemaCompatible(client);
       const meta = await client.query(
         `select coalesce(nullif(current_setting('wp2a.as_of_ts', true), '')::timestamptz, pg_catalog.transaction_timestamp())::text as effective_as_of_ts`
       );
