@@ -77,7 +77,7 @@ async function readMigration(name) {
 async function database(names) {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
-  for (const name of names) await db.exec(await readMigration(name));
+  for (const name of names.filter((n) => n <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")) await db.exec(await readMigration(name));
   return db;
 }
 

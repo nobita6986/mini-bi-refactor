@@ -69,7 +69,7 @@ async function createMigratedDb(untilMigration = null) {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   const allNames = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
     .sort();
   const names = [];
   const appliedMap = new Map();

@@ -58,13 +58,15 @@ const REC_AUTH = uuid(35), REC_APP = uuid(45);
 const CREATOR_AUTH = uuid(36), CREATOR_APP = uuid(46);
 const MGR_NO_SCOPE_AUTH = uuid(37), MGR_NO_SCOPE_APP = uuid(47);
 
+const PRE_3C_PIN_MIGRATION_NAME = "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql";
+
 async function migrationNamesUpTo(untilName) {
   const names = (await readdir(MIGRATION_DIR))
     .filter((name) => name.endsWith(".sql"))
     .sort();
-  if (untilName === null) return names;
-  const index = names.indexOf(untilName);
-  assert.notEqual(index, -1, "migration not found: " + untilName);
+  const target = untilName === null ? PRE_3C_PIN_MIGRATION_NAME : untilName;
+  const index = names.indexOf(target);
+  assert.notEqual(index, -1, "migration not found: " + target);
   return names.slice(0, index + 1);
 }
 

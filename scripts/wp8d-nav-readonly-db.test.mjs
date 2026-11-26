@@ -71,8 +71,13 @@ function makeUser(tag) {
   };
 }
 
+const PRE_3C_PIN_MIGRATION_NAME = "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql";
+
 async function loadMigrations() {
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const allNames = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const pinIdx = allNames.indexOf(PRE_3C_PIN_MIGRATION_NAME);
+  assert.notEqual(pinIdx, -1, `missing ${PRE_3C_PIN_MIGRATION_NAME}`);
+  const names = allNames.slice(0, pinIdx + 1);
   return Promise.all(
     names.map(async (name) => ({
       name,

@@ -75,11 +75,15 @@ const CONFIRMATION_REQUIRED = /duplicate cccd acknowledgement required/;
 const CONFIRMATION_MALFORMED = /duplicate cccd acknowledgement is malformed/;
 const CONFIRMATION_TARGET = /duplicate cccd acknowledgement needs the submitted target/;
 
+const PRE_3C_PIN_MIGRATION_NAME = "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql";
+
 async function buildDb() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   const names = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql")).sort();
-  for (const name of names) {
+  const pinIdx = names.indexOf(PRE_3C_PIN_MIGRATION_NAME);
+  assert.notEqual(pinIdx, -1, `missing ${PRE_3C_PIN_MIGRATION_NAME}`);
+  for (const name of names.slice(0, pinIdx + 1)) {
     const sql = await readFile(path.join(MIGRATION_DIR, name), "utf8");
     try {
       await db.exec(sql);

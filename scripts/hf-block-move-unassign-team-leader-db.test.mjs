@@ -1158,14 +1158,6 @@ test("HF [5/6]: Suspended TL flow: disable -> Move/Unassign blocked -> list susp
         (team_id, leader_app_user_id, leader_recruiter_id, valid_from, valid_to, is_current, suspended_by_account_disable)
       values
         ('${t1}', '${uMove.app}', '${uMove.recruiterId}', ('${today}'::date - 7), null, true, false);
-      insert into public.direct_entry_scope_grants
-        (app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable)
-      values
-        ('${uMove.app}', 'team', '${t1}', ('${today}'::date - 7), null, true, false);
-      insert into public.direct_entry_capability_grants
-        (app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable)
-      values
-        ('${uMove.app}', 'team_manager_assign', ('${today}'::date - 7), null, true, false);
     `);
 
     const { rows: [uMoveAccVer] } = await db.query(
@@ -1367,16 +1359,6 @@ test("HF [6/6]: Drifted suspended TL on Team A while effective membership is on 
       values
         ('${teamA}', '${uDrift.app}', '${uDrift.recruiterId}', ('${today}'::date - 7), null, true, false),
         ('${teamA2}', '${uDriftMove.app}', '${uDriftMove.recruiterId}', ('${today}'::date - 7), null, true, false);
-      insert into public.direct_entry_scope_grants
-        (app_user_id, scope_kind, team_id, valid_from, valid_to, is_current, suspended_by_account_disable)
-      values
-        ('${uDrift.app}', 'team', '${teamA}', ('${today}'::date - 7), null, true, false),
-        ('${uDriftMove.app}', 'team', '${teamA2}', ('${today}'::date - 7), null, true, false);
-      insert into public.direct_entry_capability_grants
-        (app_user_id, capability, valid_from, valid_to, is_current, suspended_by_account_disable)
-      values
-        ('${uDrift.app}', 'team_manager_assign', ('${today}'::date - 7), null, true, false),
-        ('${uDriftMove.app}', 'team_manager_assign', ('${today}'::date - 7), null, true, false);
     `);
 
     // Disable both accounts (TL assignments on A / A2 become suspended_by_account_disable=true), then simulate historical drift: memberships now in Team B

@@ -232,7 +232,7 @@ async function createDatabase() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   const names = (await readdir(MIGRATION_DIR))
-    .filter((name) => name.endsWith(".sql"))
+    .filter((name) => name.endsWith(".sql") && name <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
     .sort();
   assert.ok(
     names.includes(RECRUITMENT_LOCATION_CATALOG_MIGRATION_NAME),

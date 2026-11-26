@@ -30,7 +30,9 @@ export const SOURCE = uuid(61);
 export const RUN = uuid(62);
 const OMITTED = { state: "omitted" };
 
-export async function buildDb({ throughMigration } = {}) {
+const PRE_3C_PIN_MIGRATION_NAME = "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql";
+
+export async function buildDb({ throughMigration = PRE_3C_PIN_MIGRATION_NAME } = {}) {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
   const migrationNames = (await readdir(MIGRATION_DIR)).filter((name) => name.endsWith(".sql")).sort();

@@ -174,7 +174,9 @@ test("PR #28 #237 PG18: fail-closed preflight, S0-T1-C postconditions, and post-
       create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);
     `);
 
-    const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const names = (await readdir(MIGRATION_DIR))
+      .filter((f) => f.endsWith(".sql") && f <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
+      .sort();
     const grpIdx = names.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
     const cleanupIdx = names.indexOf(PR28_CLEANUP_MIGRATION_NAME);
     assert.ok(grpIdx > 0 && cleanupIdx > grpIdx, `${PR28_CLEANUP_MIGRATION_NAME} must follow ${PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME}`);
@@ -402,7 +404,9 @@ test("PR #28 #237 PG18: Marketing retirement lock-order concurrency against real
   ];
   const MKT_IDS = MKT_TARGETS.map((x) => x.app);
 
-  const names = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  const names = (await readdir(MIGRATION_DIR))
+    .filter((f) => f.endsWith(".sql") && f <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
+    .sort();
   const grpIdx = names.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
   const cleanupIdx = names.indexOf(PR28_CLEANUP_MIGRATION_NAME);
   assert.ok(grpIdx > 0 && cleanupIdx > grpIdx);

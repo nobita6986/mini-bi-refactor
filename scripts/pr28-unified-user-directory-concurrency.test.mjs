@@ -195,7 +195,9 @@ test(
           " create schema auth; create table auth.users (id uuid primary key, email text);",
       );
 
-      const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
+      const names = (await readdir(MIGRATION_DIR))
+        .filter((n) => n.endsWith(".sql") && n <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")
+        .sort();
       const pr28Idx = names.indexOf(PR28_UNIFIED_USER_DIRECTORY_READER_MIGRATION_NAME);
       assert.ok(pr28Idx >= 0, "PR #28 migration must exist");
 

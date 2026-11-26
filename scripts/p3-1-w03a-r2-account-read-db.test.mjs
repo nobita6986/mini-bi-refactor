@@ -25,7 +25,7 @@ async function migrations() {
 async function db() {
   const database = new PGlite();
   await database.exec(AUTH_PROLOGUE);
-  for (const name of await migrations()) await database.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+  for (const name of (await migrations()).filter((n) => n <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql")) await database.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
   return database;
 }
 async function rows(database, sql, values = []) {

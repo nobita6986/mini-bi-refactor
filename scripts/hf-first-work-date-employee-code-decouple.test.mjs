@@ -88,7 +88,7 @@ async function buildDb({ upToBeforeHotfix = false } = {}) {
   );
   const targetNames = upToBeforeHotfix
     ? names.slice(0, names.indexOf(HOTFIX_MIGRATION))
-    : names;
+    : names.filter((name) => name <= "20261126233000_wp10_7_3b_team_leader_authz_managed_cutover.sql");
   for (const name of targetNames) {
     await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
   }

@@ -1870,13 +1870,16 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     assert.equal(preFingerprints.tables.work_report_team_leader_capability_grants.row_count, 4);
 
     // -------------------------------------------------------------------------
-    // 2. Build & apply simulated Slice 3C migration (#254) + stage REAL Slice 3D (#255)
-    //    Record 0..254 in public.schema_migrations so #255 (3D) is PENDING for real CLI!
+    // 2. Ensure Slice 3C state (real 3C when already in supabase/migrations/,
+    //    or simulated 3C otherwise) + stage REAL Slice 3D
     // -------------------------------------------------------------------------
-    const sim3cSql = await buildSimulated3cMigrationSql(setup);
-    await writeFile(path.join(fakeMigrationsDir, SIMULATED_3C_MIGRATION_NAME), sim3cSql, "utf8");
+    const hasReal3c = repoMigFiles.some((f) => /_wp10_7_3c_/.test(f));
+    if (!hasReal3c) {
+      const sim3cSql = await buildSimulated3cMigrationSql(setup);
+      await writeFile(path.join(fakeMigrationsDir, SIMULATED_3C_MIGRATION_NAME), sim3cSql, "utf8");
+      await setup.query(sim3cSql);
+    }
     await writeFile(path.join(fakeMigrationsDir, STAGED_3D_MIGRATION_NAME), staged3dSql, "utf8");
-    await setup.query(sim3cSql);
 
     // Verify precheck on post-3C DB is 100% READY!
     const post3cPrecheck = await runWp1073dPrecheck(observer);
@@ -1894,7 +1897,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
     assert.equal(post3cPrecheck.summary.unexpected_pg_depend_objects, 0);
     assert.equal(post3cPrecheck.summary.unmanaged_accounts, 0);
 
-    // Seed public.schema_migrations for all migrations up through simulated 3C (leaving 3D pending!)
+    // Seed public.schema_migrations for all migrations up through 3C (leaving 3D pending!)
     await setup.query(`
       create table if not exists public.schema_migrations (
         version     text primary key,
@@ -1902,7 +1905,9 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
         applied_at  timestamptz not null default now()
       )
     `);
-    const allPre3dFiles = [...repoMigFiles, SIMULATED_3C_MIGRATION_NAME].sort();
+    const allPre3dFiles = (
+      hasReal3c ? [...repoMigFiles] : [...repoMigFiles, SIMULATED_3C_MIGRATION_NAME]
+    ).sort();
     for (const fname of allPre3dFiles) {
       const sqlText = await readFile(path.join(fakeMigrationsDir, fname), "utf8");
       await setup.query(

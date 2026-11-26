@@ -23,6 +23,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { seedLegacyReviewSubmission } from "./lib/seed-legacy-review-submission.mjs";
 
 import {
+  REPAIR_ACTOR_SQL,
   REPAIR_DISTRIBUTION_SQL,
   REPAIR_PLAN_SQL,
   REPAIR_VERIFY_SQL,
@@ -748,6 +749,93 @@ test("P2-DE-dim R1: a dry-run applies nothing and leaves the window untouched", 
       " where valid_from = $1::date", [REPAIRED_FROM]);
     assert.equal(reverted.rows[0].still_open, 7, "every membership window must be back to its original date");
     assert.deepEqual((await currentState(db)).distribution, before.distribution);
+  } finally {
+    await db.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 10. WP10-7-3C: REPAIR_ACTOR_SQL resolves canonical Permission Group actors
+//     on HEAD migrations without reading legacy grant tables.
+// ---------------------------------------------------------------------------
+test("P2-DE-dim WP10-7-3C: REPAIR_ACTOR_SQL resolves canonical authz_managed actors on HEAD", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(AUTH_PROLOGUE);
+    const names = (await readdir(MIGRATION_DIR)).filter((n) => n.endsWith(".sql")).sort();
+    for (const name of names) {
+      await db.exec(await readFile(path.join(MIGRATION_DIR, name), "utf8"));
+    }
+
+    const adminAuth = uuid(501), adminApp = uuid(601);
+    const hrAuth = uuid(502), hrApp = uuid(602);
+    const bothAuth = uuid(503), bothApp = uuid(603);
+    const recAuth = uuid(504), recApp = uuid(604);
+    const disabledAuth = uuid(505), disabledApp = uuid(605);
+    const unmanagedAuth = uuid(506), unmanagedApp = uuid(606);
+    const futureAuth = uuid(507), futureApp = uuid(607);
+    const expiredAuth = uuid(508), expiredApp = uuid(608);
+
+    for (const [auth, app, enabled, managed] of [
+      [adminAuth, adminApp, true, true],
+      [hrAuth, hrApp, true, true],
+      [bothAuth, bothApp, true, true],
+      [recAuth, recApp, true, true],
+      [disabledAuth, disabledApp, false, true],
+      [unmanagedAuth, unmanagedApp, true, false],
+      [futureAuth, futureApp, true, true],
+      [expiredAuth, expiredApp, true, true],
+    ]) {
+      await db.query("insert into auth.users (id) values ($1::uuid)", [auth]);
+      await db.query(
+        "insert into public.direct_entry_app_users (app_user_id, auth_subject, enabled, authz_managed, display_name)" +
+        " values ($1::uuid, $2::uuid, $3, $4, $5)",
+        [app, auth, enabled, managed, "Actor " + app.slice(-4)],
+      );
+    }
+
+    const assign = async (app, code, { startedAt = "2020-01-01T00:00:00Z", endedAt = null } = {}) => {
+      await db.query(
+        "insert into public.authz_user_group_members" +
+        " (group_id, app_user_id, source_kind, reason, started_at, ended_at, ended_by_app_user_id, ended_reason)" +
+        " select g.group_id, $1::uuid, 'ADMIN_ASSIGNMENT', 'Hotfix actor test', $3::timestamptz, $4::timestamptz," +
+        "   case when $4::timestamptz is null then null else $5::uuid end," +
+        "   case when $4::timestamptz is null then null else 'Expired' end" +
+        " from public.authz_user_groups g where g.code = $2",
+        [app, code, startedAt, endedAt, adminApp],
+      );
+    };
+
+    await assign(adminApp, "SYSTEM_ADMIN");
+    await assign(hrApp, "HR_CATALOG_OPERATOR");
+    await assign(bothApp, "SYSTEM_ADMIN");
+    await assign(bothApp, "HR_CATALOG_OPERATOR");
+    await assign(recApp, "RECRUITER_OPERATIONS");
+    await assign(disabledApp, "SYSTEM_ADMIN");
+    await assign(unmanagedApp, "SYSTEM_ADMIN");
+    await assign(futureApp, "SYSTEM_ADMIN", { startedAt: "2099-01-01T00:00:00Z" });
+    await assign(expiredApp, "SYSTEM_ADMIN", { endedAt: "2020-06-01T00:00:00Z" });
+
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [adminApp])).rows, [
+      { app_user_id: adminApp, auth_subject: adminAuth, capability: "recruiter_master_manage" },
+    ]);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [hrApp])).rows, [
+      { app_user_id: hrApp, auth_subject: hrAuth, capability: "recruiter_master_manage" },
+    ]);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [bothApp])).rows, [
+      { app_user_id: bothApp, auth_subject: bothAuth, capability: "recruiter_master_manage" },
+    ]);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [recApp])).rows, [
+      { app_user_id: recApp, auth_subject: recAuth, capability: null },
+    ]);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [disabledApp])).rows, []);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [unmanagedApp])).rows, []);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [futureApp])).rows, [
+      { app_user_id: futureApp, auth_subject: futureAuth, capability: null },
+    ]);
+    assert.deepEqual((await db.query(REPAIR_ACTOR_SQL, [expiredApp])).rows, [
+      { app_user_id: expiredApp, auth_subject: expiredAuth, capability: null },
+    ]);
   } finally {
     await db.close();
   }

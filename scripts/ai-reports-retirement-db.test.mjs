@@ -184,8 +184,8 @@ test("AI retirement migration: historical prefix replay -> data cleanup -> dynam
     const authSubId = "55555555-5555-4555-8555-555555555555";
     await db.query("insert into auth.users (id, email) values ($1::uuid, 'keep@hrpartner.vn')", [authSubId]);
     await db.query(
-      `insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, account_type, enabled)
-       values ($1::uuid, $2::uuid, 'Keep User', 'NORMAL', true)`,
+      `insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, account_type, enabled, authz_managed)
+       values ($1::uuid, $2::uuid, 'Keep User', 'NORMAL', true, true)`,
       [appUserId, authSubId],
     );
     await db.query(

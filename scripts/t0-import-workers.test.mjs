@@ -51,6 +51,13 @@ const UP_AUTH = uuid(32), UP_APP = uuid(42);
 const UP2_AUTH = uuid(33), UP2_APP = uuid(43);
 const MGR_AUTH = uuid(34), MGR_APP = uuid(44);
 
+const UP5_GROUP_CODE = "T0_ENTRY_CREATE_ONLY";
+const MGR_GROUP_CODE = "T0_CHANGE_REQUEST_ONLY";
+const HR_OPS_LOGIN = "t0-hr-ops@example.test";
+const HR_OPS_AUTH = uuid(39), HR_OPS_APP = uuid(49);
+const DISABLED_OPS_LOGIN = "t0-disabled-ops@example.test";
+const DISABLED_OPS_AUTH = uuid(50), DISABLED_OPS_APP = uuid(51);
+
 async function buildDb(ledger = IMPORT_REQUIRED_MIGRATIONS) {
   const db = new PGlite();
   await db.exec("create role anon; create role authenticated; create role service_role;" +
@@ -66,18 +73,53 @@ async function buildDb(ledger = IMPORT_REQUIRED_MIGRATIONS) {
   return db;
 }
 
-async function insertActor(db, auth, app, email, capabilities, scopeKinds) {
+async function ensureCustomGroup(db, code, name, capabilities) {
+  const existing = await db.query(
+    "select group_id::text as group_id from public.authz_user_groups where code = $1",
+    [code],
+  );
+  if (existing.rows.length === 1) return existing.rows[0].group_id;
+  const inserted = await db.query(
+    "insert into public.authz_user_groups (code, name, description, department_id, team_id, is_system_admin, active)" +
+    " select $1, $2, $2, d.department_id, null, false, true" +
+    "   from public.organization_departments d where d.system_key = 'RECRUITMENT' limit 1" +
+    " returning group_id::text as group_id",
+    [code, name],
+  );
+  const groupId = inserted.rows[0].group_id;
+  for (const capability of capabilities) {
+    await db.query(
+      "insert into public.authz_user_group_capabilities (group_id, capability, reason)" +
+      " values ($1::uuid, $2, 'T0 import test fixture group')",
+      [groupId, capability],
+    );
+  }
+  return groupId;
+}
+
+async function assignGroupMember(db, appUserId, groupCode, options = {}) {
+  const {
+    startedAt = "2020-01-01T00:00:00Z",
+    endedAt = null,
+    endedByAppUserId = null,
+    endedReason = null,
+  } = options;
+  await db.query(
+    "insert into public.authz_user_group_members" +
+    " (group_id, app_user_id, source_kind, reason, started_at, ended_at, ended_by_app_user_id, ended_reason)" +
+    " select g.group_id, $1::uuid, 'ADMIN_ASSIGNMENT', 'T0 import test membership', $3::timestamptz, $4::timestamptz, $5::uuid, $6" +
+    "   from public.authz_user_groups g where g.code = $2",
+    [appUserId, groupCode, startedAt, endedAt, endedByAppUserId, endedReason],
+  );
+}
+
+async function insertActor(db, auth, app, email, groupCodes, { enabled = true } = {}) {
   await db.query("insert into auth.users (id, email) values ($1,$2)", [auth, email]);
   await db.query("insert into public.direct_entry_app_users" +
-    " (app_user_id, auth_subject, enabled, display_name) values ($1,$2,true,$3)",
-    [app, auth, email.split("@")[0]]);
-  for (const capability of capabilities) {
-    await db.query("insert into public.direct_entry_capability_grants" +
-      " (app_user_id, capability, valid_from, is_current) values ($1,$2,'2020-01-01',true)", [app, capability]);
-  }
-  for (const scopeKind of scopeKinds) {
-    await db.query("insert into public.direct_entry_scope_grants" +
-      " (app_user_id, scope_kind, valid_from, is_current) values ($1,$2,'2020-01-01',true)", [app, scopeKind]);
+    " (app_user_id, auth_subject, enabled, authz_managed, display_name) values ($1,$2,$3,true,$4)",
+    [app, auth, enabled, email.split("@")[0]]);
+  for (const groupCode of groupCodes) {
+    await assignGroupMember(db, app, groupCode);
   }
 }
 
@@ -101,35 +143,38 @@ async function seed(db) {
       " select recruiter_id,$2,'2020-01-01',true from public.recruiters where display_name = $1",
       [name, TEAM]);
   }
-  await insertActor(db, OPS_AUTH, OPS_APP, OPERATOR_LOGIN, ["entry_admin"], ["all"]);
-  // Business uploaders are project managers: lifecycle capabilities only, NO scope grant, so the
-  // legacy create path cannot authorise them - authority comes from the assignment.
-  // Uploaders are real PMs: assignment gives project authority. The lifecycle capability
-  // submission_create plus exactly ONE current own scope is the real contract of
-  // direct_entry_transition_submission (never granted by the operator).
-  await insertActor(db, UP_AUTH, UP_APP, UPLOADER_LOGIN, ["entry_create", "submission_create"],
-    ["own"]);
-  await insertActor(db, UP2_AUTH, UP2_APP, UPLOADER2_LOGIN,
-    ["entry_create", "submission_create"], ["own"]);
-  // Negative fixture: PM of project A with the lifecycle capability but NO own scope.
-  await insertActor(db, UP5_AUTH, UP5_APP, UP5_LOGIN, ["entry_create", "submission_create"], []);
+  await ensureCustomGroup(db, UP5_GROUP_CODE, "T0 Entry Create Only", ["entry_create"]);
+  await ensureCustomGroup(db, MGR_GROUP_CODE, "T0 Change Request Only", ["change_request_create"]);
+
+  await insertActor(db, OPS_AUTH, OPS_APP, OPERATOR_LOGIN, ["SYSTEM_ADMIN"]);
+  // Business uploaders are project managers: assigned PM grants project create authority, while
+  // RECRUITER_OPERATIONS provides submission_create @ OWN for direct_entry_transition_submission.
+  await insertActor(db, UP_AUTH, UP_APP, UPLOADER_LOGIN, ["RECRUITER_OPERATIONS"]);
+  await insertActor(db, UP2_AUTH, UP2_APP, UPLOADER2_LOGIN, ["RECRUITER_OPERATIONS"]);
+  // Negative fixture: PM of project A with entry_create only (NO submission_create permission).
+  await insertActor(db, UP5_AUTH, UP5_APP, UP5_LOGIN, [UP5_GROUP_CODE]);
   await assignProject(db, { project: PROJ_A, recruiterName: REC_C, app: UP5_APP });
   // Status fixture: separate canonical actor for closing an episode (not the importer flow).
-  await insertActor(db, STATUS_AUTH, STATUS_APP, "t0-status-admin@example.test",
-    ["employment_status.apply", "entry_admin"], ["all"]);
+  await insertActor(db, STATUS_AUTH, STATUS_APP, "t0-status-admin@example.test", ["SYSTEM_ADMIN"]);
   await assignProject(db, { project: PROJ_A, recruiterName: REC_A, app: UP_APP });
   await assignProject(db, { project: PROJ_B, recruiterName: REC_B, app: UP2_APP });
-  // Negative fixtures: future and expired assignments on project A.
-  await insertActor(db, UP3_AUTH, UP3_APP, UP3_LOGIN, ["entry_create", "submission_create"], []);
-  await insertActor(db, UP4_AUTH, UP4_APP, UP4_LOGIN, ["entry_create", "submission_create"], []);
+  // Negative fixtures: future and expired assignments on projects C and D.
+  await insertActor(db, UP3_AUTH, UP3_APP, UP3_LOGIN, ["RECRUITER_OPERATIONS"]);
+  await insertActor(db, UP4_AUTH, UP4_APP, UP4_LOGIN, ["RECRUITER_OPERATIONS"]);
   // Each negative fixture lives on its own project: the canonical assignment guard forbids
   // overlapping intervals on one project, and a single assignment per project is a valid seed.
   await assignProject(db, { project: PROJ_C, recruiterName: REC_FUTURE, app: UP3_APP,
     validFrom: "2027-01-01", isCurrent: false });
   await assignProject(db, { project: PROJ_D, recruiterName: REC_D, app: UP4_APP,
     validFrom: "2020-01-01", validTo: "2020-06-01", isCurrent: false });
-  // Manager of project B only, no legacy bundle and no all scope.
-  await insertActor(db, MGR_AUTH, MGR_APP, MGR_LOGIN, ["change_request_create"], []);
+  // Manager fixture without assignment and without ALL/entry_admin access.
+  await insertActor(db, MGR_AUTH, MGR_APP, MGR_LOGIN, [MGR_GROUP_CODE]);
+  // HR catalog fixture: has ALL scope capabilities (e.g. recruiter_master_manage) but NOT entry_admin.
+  await insertActor(db, HR_OPS_AUTH, HR_OPS_APP, HR_OPS_LOGIN, ["HR_CATALOG_OPERATOR"]);
+  // Disabled operator fixture: even with SYSTEM_ADMIN membership, disabled account is rejected.
+  await insertActor(db, DISABLED_OPS_AUTH, DISABLED_OPS_APP, DISABLED_OPS_LOGIN, ["SYSTEM_ADMIN"], {
+    enabled: false,
+  });
   // MGR keeps a verified link but NO assignment: the negative fixture for "no project access".
   await db.query("insert into public.direct_entry_app_user_recruiter_links" +
     " (app_user_id, recruiter_id, verified, valid_from, is_current)" +
@@ -296,24 +341,52 @@ test("R5B-R2: reason is validated before any connection", async () => {
   }
 });
 
-test("R1: operator import authorization follows current markers, not grant dates", async () => {
+test("R1 / WP10-7-3C: operator import authorization follows canonical Permission Groups", async () => {
   const db = await buildDb();
   try {
     await seed(db);
-    await db.query(
-      `update public.direct_entry_capability_grants set valid_from = '2099-01-01'
-        where app_user_id in ($1, $2)`, [OPS_APP, UP_APP],
-    );
-    await db.query(
-      `update public.direct_entry_scope_grants set valid_from = '2099-01-01'
-        where app_user_id in ($1, $2)`, [OPS_APP, UP_APP],
-    );
-    assert.equal((await resolveOperator(clientOf(db), OPERATOR_LOGIN)).ok, true,
-      "operator access remains while the all-scope and entry_admin markers are current");
+    const resolved = await resolveOperator(clientOf(db), OPERATOR_LOGIN);
+    assert.equal(resolved.ok, true, "active SYSTEM_ADMIN operator resolves cleanly");
+    assert.deepEqual(Object.keys(resolved.operator).sort(),
+      ["app_user_id", "auth_subject", "capabilities", "scopes"]);
+    assert.equal(resolved.operator.capabilities.includes("entry_admin"), true);
+    assert.equal(resolved.operator.scopes.includes("all"), true);
+
     const input = await manifestFile([row()]);
     const result = await runImport(await optionsFor(input, BATCH_C, "check"),
       dependenciesFor(db).deps);
     assert.equal(result.ok, true, JSON.stringify(result));
+
+    // Negative: missing entry_admin (HR_CATALOG_OPERATOR has ALL scope, no entry_admin)
+    assert.deepEqual(await resolveOperator(clientOf(db), HR_OPS_LOGIN),
+      { ok: false, code: "OPERATOR_NOT_AUTHORIZED" });
+    // Negative: OWN scope only (RECRUITER_OPERATIONS)
+    assert.deepEqual(await resolveOperator(clientOf(db), UPLOADER_LOGIN),
+      { ok: false, code: "OPERATOR_NOT_AUTHORIZED" });
+    // Negative: disabled operator even with active SYSTEM_ADMIN membership
+    assert.deepEqual(await resolveOperator(clientOf(db), DISABLED_OPS_LOGIN),
+      { ok: false, code: "OPERATOR_NOT_FOUND" });
+
+    // Negative: future-dated SYSTEM_ADMIN membership is rejected
+    const futureAuth = uuid(52), futureApp = uuid(53);
+    const futureLogin = "t0-future-ops@example.test";
+    await insertActor(db, futureAuth, futureApp, futureLogin, []);
+    await assignGroupMember(db, futureApp, "SYSTEM_ADMIN", { startedAt: "2099-01-01T00:00:00Z" });
+    assert.deepEqual(await resolveOperator(clientOf(db), futureLogin),
+      { ok: false, code: "OPERATOR_NOT_AUTHORIZED" });
+
+    // Negative: ended/expired SYSTEM_ADMIN membership is rejected
+    const expiredAuth = uuid(54), expiredApp = uuid(55);
+    const expiredLogin = "t0-expired-ops@example.test";
+    await insertActor(db, expiredAuth, expiredApp, expiredLogin, []);
+    await assignGroupMember(db, expiredApp, "SYSTEM_ADMIN", {
+      startedAt: "2020-01-01T00:00:00Z",
+      endedAt: "2020-06-01T00:00:00Z",
+      endedByAppUserId: OPS_APP,
+      endedReason: "Expired test membership",
+    });
+    assert.deepEqual(await resolveOperator(clientOf(db), expiredLogin),
+      { ok: false, code: "OPERATOR_NOT_AUTHORIZED" });
   } finally {
     await db.close();
   }

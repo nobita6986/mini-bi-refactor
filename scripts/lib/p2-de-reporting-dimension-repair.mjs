@@ -153,15 +153,15 @@ export const REPAIR_DISTRIBUTION_SQL = [
  */
 export const REPAIR_ACTOR_SQL = [
   "select a.app_user_id::text as app_user_id, a.auth_subject::text as auth_subject," +
-  "  (select c.capability from public.direct_entry_capability_grants c" +
-  "    where c.app_user_id = a.app_user_id" +
-  "      and c.capability in ('recruiter_master_manage', 'entry_admin')" +
-  "      and c.valid_from <= public.direct_entry_authorization_date()" +
-  "      and (c.valid_to is null or public.direct_entry_authorization_date() < c.valid_to)" +
-  "    order by case c.capability when 'recruiter_master_manage' then 0 else 1 end" +
+  "  (select g.capability" +
+  "     from pg_catalog.jsonb_to_recordset(" +
+  "       public.direct_entry_authz__internal_resolve_effective_grants(a.app_user_id)" +
+  "     ) as g(capability text, scope_kind text, scope_id text)" +
+  "    where g.capability in ('recruiter_master_manage', 'entry_admin')" +
+  "    order by case g.capability when 'recruiter_master_manage' then 0 else 1 end" +
   "    limit 1) as capability" +
   "  from public.direct_entry_app_users a" +
-  " where a.app_user_id = $1::uuid and a.enabled",
+  " where a.app_user_id = $1::uuid and a.enabled and coalesce(a.authz_managed, false)",
 ].join("\n");
 
 /** Restricted reason for this operation, via the existing audited mechanism. */
