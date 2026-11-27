@@ -542,6 +542,17 @@ export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME =
 export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)",
 ]);
+export const VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME =
+  "20261128090000_vendor_referrer_attribution.sql";
+export const VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_vendor_referrer_get_actor_access(uuid, uuid)",
+  "public.direct_entry_vendor_referrer_list_candidates(uuid, uuid, text, integer)",
+  "public.direct_entry_vendor_referrer_list_vendors(uuid, uuid, text, boolean, integer, integer)",
+  "public.direct_entry_vendor_referrer_get_history(uuid, uuid, text)",
+  "public.direct_entry_vendor_referrer_assign(uuid, uuid, text, uuid, date, uuid, text, text)",
+  "public.direct_entry_vendor_referrer_revoke(uuid, uuid, text, date, uuid, text, text)",
+  "public.direct_entry_vendor_referrer_monthly_report(uuid, uuid, text, uuid, text, text)",
+]);
 export const WP10_7_2B_MIGRATION_NAME =
   "20261126210000_wp10_7_2b_drop_leave_profile_unit_kind.sql";
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
@@ -882,6 +893,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     hfBlockMoveUnassignTeamLeaderApplied: has(
       HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
     ),
+    vendorReferrerAttributionApplied: has(
+      VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
+    ),
   };
 }
 
@@ -959,6 +973,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     pr28CleanupApplied = false,
     hfWorkerEditHistoryNamesAndEmployeeCodeApplied = false,
     hfBlockMoveUnassignTeamLeaderApplied = false,
+    vendorReferrerAttributionApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1120,6 +1135,9 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(hfBlockMoveUnassignTeamLeaderApplied
       ? HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES
+      : []),
+    ...(vendorReferrerAttributionApplied
+      ? VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES
       : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))

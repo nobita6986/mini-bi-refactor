@@ -9,9 +9,11 @@ import { AppShell } from "@/components/app-shell/app-shell";
 import { decideAdminAreaAccess } from "@/lib/auth/direct-entry-page-access";
 import { visibleAdminSections } from "@/lib/admin/admin-navigation";
 import { isDirectEntryUiEnabled } from "@/lib/direct-entry/ui-model";
+import { hasVendorReferrerManageCapability } from "@/lib/navigation/registry-capability";
 import {
   resolveActorForRequest,
   resolveNavActorForAppShell,
+  resolveVendorReferrerAccessForRequest,
 } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +21,16 @@ export const dynamic = "force-dynamic";
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   await connection();
   const actor = await resolveActorForRequest().catch(() => null);
-  const decision = decideAdminAreaAccess({ actor });
+  const referrerAccess =
+    actor?.ok && hasVendorReferrerManageCapability(actor.actor)
+      ? await resolveVendorReferrerAccessForRequest().catch(() => ({
+          canManage: false,
+          canViewReport: false,
+        }))
+      : { canManage: false, canViewReport: false };
+  const hasVendorReferrerAccess =
+    referrerAccess.canManage || referrerAccess.canViewReport;
+  const decision = decideAdminAreaAccess({ actor, hasVendorReferrerAccess });
   if (decision === "REDIRECT_LOGIN") {
     redirect("/login?next=/admin");
   }

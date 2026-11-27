@@ -20,6 +20,7 @@ import {
   directEntryNavPredicate,
   projectAdminNavPredicate,
   recruitmentLocationCatalogNavPredicate,
+  vendorReferrerNavPredicate,
   workReportAnalyticsPredicate,
   workReportAssignmentPredicate,
   workReportTemplateManagePredicate,
@@ -57,10 +58,17 @@ function decideCapabilityPageAccess(input: {
 /** Server page gate for /admin; not coupled to the Direct Entry UI flag. */
 export function decideAdminAreaAccess(input: {
   actor: ActorResolution | null;
+  hasVendorReferrerAccess?: boolean;
 }): DirectEntryPageDecision {
   return decideCapabilityPageAccess({
     actor: input.actor,
-    allowed: adminPanelNavPredicate,
+    allowed: (actor) =>
+      adminPanelNavPredicate({
+        ...actor,
+        ...(input.hasVendorReferrerAccess !== undefined
+          ? { hasVendorReferrerAccess: input.hasVendorReferrerAccess }
+          : {}),
+      }),
   });
 }
 
@@ -68,7 +76,8 @@ export type AdminLandingPath =
   | "/admin/organization/persons"
   | "/admin/catalog/personnel"
   | "/admin/attendance"
-  | "/admin/worker-edit-history";
+  | "/admin/worker-edit-history"
+  | "/admin/vendor-referrals";
 
 /**
  * WP13 M2: Resolves the canonical default landing page for `/admin` strictly from
@@ -78,15 +87,27 @@ export type AdminLandingPath =
  * 2) Catalog / HR Operator -> `/admin/catalog/personnel`
  * 3) Attendance Report viewer (BoD / Team Leader / Department Head) -> `/admin/attendance`
  * 4) `worker_edit_history_view`-only -> `/admin/worker-edit-history`
+ * 5) BoD Vendor Referrer manager -> `/admin/vendor-referrals`
  */
 export function resolveAdminLandingPath(
   actor: ActorResolution | null,
+  options?: { hasVendorReferrerAccess?: boolean },
 ): AdminLandingPath | null {
   if (!actor?.ok) return null;
   if (adminSecurityNavPredicate(actor.actor)) return "/admin/organization/persons";
   if (adminAreaNavPredicate(actor.actor)) return "/admin/catalog/personnel";
   if (attendanceReportNavPredicate(actor.actor)) return "/admin/attendance";
   if (workerEditHistoryNavPredicate(actor.actor)) return "/admin/worker-edit-history";
+  if (
+    vendorReferrerNavPredicate({
+      ...actor.actor,
+      ...(options?.hasVendorReferrerAccess !== undefined
+        ? { hasVendorReferrerAccess: options.hasVendorReferrerAccess }
+        : {}),
+    })
+  ) {
+    return "/admin/vendor-referrals";
+  }
   return null;
 }
 
@@ -110,13 +131,41 @@ export function decideTeamCatalogPageAccess(input: {
   });
 }
 
-/** Separate direct-URL gate for the implemented Vendor catalog page. */
+/** Separate direct-URL gate for the implemented Vendor catalog page (admits catalog operators, Full Admin, and BoD with vendor referrer access). */
 export function decideVendorCatalogPageAccess(input: {
   actor: ActorResolution | null;
+  hasVendorReferrerAccess?: boolean;
 }): DirectEntryPageDecision {
   return decideCapabilityPageAccess({
     actor: input.actor,
-    allowed: adminAreaNavPredicate,
+    allowed: (actor) =>
+      adminAreaNavPredicate(actor) ||
+      vendorReferrerNavPredicate({
+        ...actor,
+        ...(input.hasVendorReferrerAccess !== undefined
+          ? { hasVendorReferrerAccess: input.hasVendorReferrerAccess }
+          : {}),
+      }),
+  });
+}
+
+/**
+ * Separate direct-URL gate for `/admin/vendor-referrals` (BoD with `vendor_referrer_manage` only).
+ * Non-BoD Admin, HR, Accounting, Team Leader, and Employee receive `ACCESS_DENIED`.
+ */
+export function decideVendorReferrerReportPageAccess(input: {
+  actor: ActorResolution | null;
+  hasVendorReferrerAccess?: boolean;
+}): DirectEntryPageDecision {
+  return decideCapabilityPageAccess({
+    actor: input.actor,
+    allowed: (actor) =>
+      vendorReferrerNavPredicate({
+        ...actor,
+        ...(input.hasVendorReferrerAccess !== undefined
+          ? { hasVendorReferrerAccess: input.hasVendorReferrerAccess }
+          : {}),
+      }),
   });
 }
 

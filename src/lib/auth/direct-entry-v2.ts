@@ -36,6 +36,7 @@ export const CAPABILITIES = [
   // VFIN-01: Vendor Finance direct-grant capability tokens (both require effective `all` scope).
   "vendor_finance_view",
   "vendor_finance_record",
+  "vendor_referrer_manage",
   "duplicate_cccd_withdraw",
   "worker_edit_history_view",
 ] as const;
@@ -259,6 +260,7 @@ const REASON_REQUIRED_ACTIONS = new Set<AuthorizationAction>([
   "catalog_master_manage",
   "team_manager_assign",
   "vendor_finance_record",
+  "vendor_referrer_manage",
 ]);
 const VERSION_REQUIRED_ACTIONS = new Set<AuthorizationAction>([
   "entry_admin",
@@ -283,6 +285,7 @@ const REQUIRED_SCOPE_KIND: Partial<Record<AuthorizationAction, ScopeKind>> = {
   report_form_manage: "all",
   vendor_finance_view: "all",
   vendor_finance_record: "all",
+  vendor_referrer_manage: "all",
 };
 const FORBIDDEN_CLIENT_FIELDS = new Set([
   "authsubject",
@@ -872,6 +875,7 @@ const PAIRED_CAPABILITY_ALLOWED_SCOPE_KINDS: Readonly<
   report_delegate: ["ALL", "CONTEXT_TEAM"],
   vendor_finance_view: ["ALL"],
   vendor_finance_record: ["ALL"],
+  vendor_referrer_manage: ["ALL"],
   duplicate_cccd_withdraw: ["ALL"],
   worker_edit_history_view: ["ALL"],
 };

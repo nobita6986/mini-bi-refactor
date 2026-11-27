@@ -41,12 +41,14 @@ import { createChangeRequestReadRepository } from "@/lib/direct-entry/change-req
 import { createLeaveRepository } from "@/lib/leave/leave-repository";
 import { createSalaryAdvanceRepository } from "@/lib/salary-advance/salary-advance-repository";
 import { createVendorFinanceRepository } from "@/lib/vendor-finance/vendor-finance-repository";
+import { createVendorReferrerRepository } from "@/lib/vendor-referrals/vendor-referrer-repository";
 import { createAssignmentRepository } from "@/lib/work-reports/assignment-repository";
 import { createSubmissionRepository } from "@/lib/work-reports/submission-repository";
 import type { ActorResolution } from "@/lib/auth/direct-entry-v2";
 import {
   changeRequestsNavPredicate,
   hasActiveDepartmentHeadRole,
+  hasVendorReferrerManageCapability,
   leaveManagementNavPredicate,
   type NavActorProjection,
   salaryAdvanceNavPredicate,
@@ -201,6 +203,33 @@ export const resolveSalaryAdvanceAccessForRequest = cache(
       // Fail closed without disrupting AppShell rendering.
     }
     return null;
+  },
+);
+
+export const resolveVendorReferrerAccessForRequest = cache(
+  async (): Promise<{
+    canManage: boolean;
+    canViewReport: boolean;
+  }> => {
+    const actor = await resolveActorForRequest();
+    if (!actor.ok) {
+      return { canManage: false, canViewReport: false };
+    }
+    try {
+      const access = await createVendorReferrerRepository().getActorAccess({
+        auth_subject: actor.actor.auth_subject,
+        app_user_id: actor.actor.app_user_id,
+      });
+      if (access.ok) {
+        return {
+          canManage: access.data.can_manage,
+          canViewReport: access.data.can_view_report,
+        };
+      }
+    } catch {
+      // Fail closed without disrupting AppShell rendering.
+    }
+    return { canManage: false, canViewReport: false };
   },
 );
 
@@ -388,6 +417,15 @@ export const resolveNavActorForAppShell = cache(
       const salaryAdvanceAccess = await resolveSalaryAdvanceAccessForRequest();
       if (salaryAdvanceAccess?.canAccess) {
         projection.hasSalaryAdvanceAccess = true;
+      }
+    }
+    if (
+      process.env.DIRECT_ENTRY_API_ENABLED === "true" &&
+      hasVendorReferrerManageCapability(projection)
+    ) {
+      const vrAccess = await resolveVendorReferrerAccessForRequest();
+      if (vrAccess.canManage || vrAccess.canViewReport) {
+        projection.hasVendorReferrerAccess = true;
       }
     }
     if (input.directEntryEnabled && !changeRequestsNavPredicate(projection)) {

@@ -137,6 +137,8 @@ import {
   HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
   HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
   HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
+  VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
+  VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
@@ -1176,7 +1178,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
         ...PR28_CLEANUP_ADDED_RPC_SIGNATURES,
         ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
-        ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES);
+        ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
+        ...VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES);
       for (let idx = expectedSignatures.length - 1; idx >= 0; idx -= 1) {
         if (
           PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx]) ||
@@ -1256,7 +1259,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
           ...PR28_CLEANUP_ADDED_RPC_SIGNATURES,
           ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
-          ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES]
+          ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
+          ...VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES]
           .filter((sig) => !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
           .filter((sig) => !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig))
           .sort(),
@@ -1692,6 +1696,29 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `grant execute on function ${sig.toLowerCase()} to service_role;`,
           ),
           `HF block move/unassign TL RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const vendorReferrerMigration = await readFile(
+        path.join(MIGRATION_DIR, VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME),
+        "utf8",
+      );
+      const vendorReferrerNormalized = vendorReferrerMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES) {
+        assert.ok(
+          vendorReferrerNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `Vendor referrer RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          vendorReferrerNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `Vendor referrer RPC ${sig} grants EXECUTE only to service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(

@@ -215,8 +215,12 @@ function makePutRequest(
 test("Attendance Report navigation, Admin shell, and page-gate matrix enforces Admin & canonical BoD only", () => {
   const allSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
   const workerEditHistorySection = allSections.filter(({ id }) => id === "worker-edit-history");
-  const allSectionsWithoutWorkerHistory = allSections.filter(({ id }) => id !== "worker-edit-history");
-  const fullAdminSections = allSections.filter(({ id }) => id !== "teams");
+  const allSectionsWithoutWorkerHistory = allSections.filter(
+    ({ id }) => id !== "worker-edit-history" && id !== "vendor-referrals",
+  );
+  const fullAdminSections = allSections.filter(
+    ({ id }) => id !== "teams" && id !== "vendor-referrals",
+  );
   const fullAdminSectionsWithoutWorkerHistory = fullAdminSections.filter(
     ({ id }) => id !== "worker-edit-history",
   );

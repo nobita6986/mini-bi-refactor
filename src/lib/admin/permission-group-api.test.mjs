@@ -59,8 +59,8 @@ function makeFullAdminSession() {
   });
 }
 
-test("business descriptors cover all 29 verbatim CAPABILITIES and 7 D4 module roles with zero technical scope jargon", () => {
-  assert.equal(CAPABILITY_BUSINESS_DESCRIPTORS.length, 29);
+test("business descriptors cover all 30 verbatim CAPABILITIES and 7 D4 module roles with zero technical scope jargon", () => {
+  assert.equal(CAPABILITY_BUSINESS_DESCRIPTORS.length, 30);
   const described = new Set(CAPABILITY_BUSINESS_DESCRIPTORS.map((d) => d.capability));
   assert.deepEqual([...described].sort(), [...CAPABILITIES].sort());
   for (const d of CAPABILITY_BUSINESS_DESCRIPTORS) {

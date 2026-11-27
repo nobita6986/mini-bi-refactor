@@ -4,13 +4,29 @@ import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denie
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { VendorCatalogManager } from "@/components/admin/vendor-catalog-manager";
 import { decideVendorCatalogPageAccess } from "@/lib/auth/direct-entry-page-access";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import { adminAreaNavPredicate } from "@/lib/navigation/registry-capability";
+import {
+  resolveActorForRequest,
+  resolveVendorReferrerAccessForRequest,
+} from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
 export default async function VendorCatalogPage() {
   const actor = await resolveActorForRequest().catch(() => null);
-  switch (decideVendorCatalogPageAccess({ actor })) {
+  const access = actor?.ok
+    ? await resolveVendorReferrerAccessForRequest().catch(() => ({
+        canManage: false,
+        canViewReport: false,
+      }))
+    : { canManage: false, canViewReport: false };
+
+  switch (
+    decideVendorCatalogPageAccess({
+      actor,
+      hasVendorReferrerAccess: access.canManage,
+    })
+  ) {
     case "REDIRECT_LOGIN":
       redirect("/login?next=/admin/catalog/vendors");
     case "ACCOUNT_UNAVAILABLE":
@@ -20,7 +36,14 @@ export default async function VendorCatalogPage() {
     case "ACCESS_DENIED":
     case "NOT_FOUND":
       return <AccessDenied />;
-    case "ALLOW":
-      return <VendorCatalogManager />;
+    case "ALLOW": {
+      const canManageVendorCatalog = actor?.ok ? adminAreaNavPredicate(actor.actor) : false;
+      return (
+        <VendorCatalogManager
+          canManageVendorCatalog={canManageVendorCatalog}
+          canManageReferrers={access.canManage}
+        />
+      );
+    }
   }
 }

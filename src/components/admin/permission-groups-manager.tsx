@@ -69,6 +69,32 @@ function moduleRoleKey(role: PermissionGroupModuleRole): string {
   return `${role.module_code}:${role.role_code}`;
 }
 
+export function resolveAllowedGroupCapabilities(input: {
+  isTeamScoped: boolean;
+  departmentSystemKey?: string | null;
+  isSystemAdmin?: boolean;
+}): readonly Capability[] {
+  if (input.isTeamScoped) {
+    return TEAM_GROUP_ALLOWED_CAPABILITIES;
+  }
+  if (input.departmentSystemKey === "MANAGEMENT_BOD" || input.isSystemAdmin === true) {
+    return [...DEPARTMENT_GROUP_ALLOWED_CAPABILITIES, "vendor_referrer_manage"];
+  }
+  return DEPARTMENT_GROUP_ALLOWED_CAPABILITIES;
+}
+
+export function stripDisallowedCapabilitiesForScope(
+  caps: readonly Capability[],
+  input: {
+    isTeamScoped: boolean;
+    departmentSystemKey?: string | null;
+    isSystemAdmin?: boolean;
+  },
+): Capability[] {
+  const allowed = new Set<Capability>(resolveAllowedGroupCapabilities(input));
+  return caps.filter((cap) => allowed.has(cap));
+}
+
 export function PermissionGroupsManager() {
   const notify = useNotify();
   const workspaceGuard = useWp4WorkspaceGuard();
@@ -328,9 +354,15 @@ export function PermissionGroupsManager() {
   const canSelectTeam = selectedDeptObj?.system_key === "RECRUITMENT";
   const isTeamScoped = canSelectTeam && selectedTeamId.trim().length > 0;
 
-  const allowedCapabilities = isTeamScoped
-    ? TEAM_GROUP_ALLOWED_CAPABILITIES
-    : DEPARTMENT_GROUP_ALLOWED_CAPABILITIES;
+  const allowedCapabilities = useMemo(
+    () =>
+      resolveAllowedGroupCapabilities({
+        isTeamScoped,
+        departmentSystemKey: selectedDeptObj?.system_key ?? null,
+        isSystemAdmin: editor?.kind === "edit" && editor.group.is_system_admin,
+      }),
+    [editor, isTeamScoped, selectedDeptObj],
+  );
   const capabilityCategories = useMemo(
     () => groupDescriptorsByCategory(allowedCapabilities),
     [allowedCapabilities],
@@ -949,9 +981,18 @@ export function PermissionGroupsManager() {
                     const nextDeptId = e.target.value;
                     setSelectedDepartmentId(nextDeptId);
                     const nextDept = departments.find((d) => d.department_id === nextDeptId);
-                    if (nextDept?.system_key !== "RECRUITMENT") {
+                    const nextCanSelectTeam = nextDept?.system_key === "RECRUITMENT";
+                    const nextTeamId = nextCanSelectTeam ? selectedTeamId : "";
+                    if (!nextCanSelectTeam) {
                       setSelectedTeamId("");
                     }
+                    setSelectedCaps((prev) =>
+                      stripDisallowedCapabilitiesForScope(prev, {
+                        isTeamScoped: nextCanSelectTeam && nextTeamId.trim().length > 0,
+                        departmentSystemKey: nextDept?.system_key ?? null,
+                        isSystemAdmin: editor.kind === "edit" && editor.group.is_system_admin,
+                      }),
+                    );
                   }}
                   className="min-h-11 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-ring/30"
                 >

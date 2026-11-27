@@ -106,6 +106,7 @@ export const ADMIN_NON_AUTO_GRANT_TOKENS = [
   "report_delegate",
   "vendor_finance_view",
   "vendor_finance_record",
+  "vendor_referrer_manage",
 ] as const satisfies readonly Capability[];
 
 export type RoleCapabilityTemplate = {
@@ -461,7 +462,7 @@ export const AUTHZ_CANONICAL_ROLE_CATALOG: readonly RoleCatalogItem[] = deepFree
   {
     role_code: "ADMIN",
     display_name: "BoD/Admin",
-    description: "Vai trò điều hành/quản trị hợp nhất với bộ 21 quyền chuẩn (tách riêng 8 quyền chuyên trách ngoài gói tự cấp).",
+    description: "Vai trò điều hành/quản trị hợp nhất với bộ 21 quyền chuẩn (tách riêng 9 quyền chuyên trách ngoài gói tự cấp).",
     assignment_mode: "GLOBAL",
     fixed_scope_kind: "all",
     requires_active_person: false,
@@ -562,8 +563,8 @@ function assertCanonicalRoleCatalogInvariants(): void {
   if (adminCaps.length !== 21 || adminSet.size !== 21) {
     throw new Error("ADMIN canonical bundle must define exactly 21 unique capabilities.");
   }
-  if (ADMIN_NON_AUTO_GRANT_TOKENS.length !== 8 || excludedSet.size !== 8) {
-    throw new Error("ADMIN_NON_AUTO_GRANT_TOKENS must define exactly 8 unique tokens.");
+  if (ADMIN_NON_AUTO_GRANT_TOKENS.length !== 9 || excludedSet.size !== 9) {
+    throw new Error("ADMIN_NON_AUTO_GRANT_TOKENS must define exactly 9 unique tokens.");
   }
   for (const excluded of excludedSet) {
     if (!activeSet.has(excluded) || adminSet.has(excluded)) {

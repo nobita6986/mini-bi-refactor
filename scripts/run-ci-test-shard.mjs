@@ -60,6 +60,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/hf-direct-entry-catalog-privileged-edit-db.test.mjs",
   "scripts/wp10-7-3c-retire-legacy-grant-mirror-and-fallback-db.test.mjs",
   "scripts/wp10-7-3d-archive-restore-db.test.mjs",
+  "scripts/vendor-referrer-attribution-db.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -168,6 +169,7 @@ const TEST_WEIGHTS = {
   "test:wp10-6-pause-windows": 12.0,
   "test:hf-direct-entry-catalog-privileged-edit": 14.0,
   "test:hf-vpsttt-object-storage": 6.0,
+  "test:vendor-referrer-attribution": 20.0,
 };
 
 const target = process.argv[2];

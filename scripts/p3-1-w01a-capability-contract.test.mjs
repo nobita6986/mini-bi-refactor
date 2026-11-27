@@ -52,10 +52,11 @@ const VFIN_TOKENS = ["vendor_finance_view", "vendor_finance_record"];
 const DUPLICATE_CCCD_TOKENS = ["duplicate_cccd_withdraw"];
 const WORKER_EDIT_HISTORY_MIGRATION = "20261031120000_worker_edit_history_admin.sql";
 const WORKER_EDIT_HISTORY_TOKENS = ["worker_edit_history_view"];
+const POST_LEGACY_GROUP_ONLY_TOKENS = ["vendor_referrer_manage"];
 const LEGACY_TOKEN_COUNT = 21;
 const RETIRED_TOKENS = ["pii_view", "pii_export", "payment_view", "payment_edit"];
 const TOKEN_COUNT = 33;
-const ACTIVE_TOKEN_COUNT = 29;
+const ACTIVE_TOKEN_COUNT = 30;
 const UNKNOWN_TOKEN = "unknown_capability_probe";
 
 const AUTH_SUBJECT = "10000000-0000-4000-8000-00000000c001";
@@ -151,6 +152,7 @@ test("the auth contract is versioned as direct-entry-auth/1.7 without retired ca
   for (const token of VFIN_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
   for (const token of DUPLICATE_CCCD_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
   for (const token of WORKER_EDIT_HISTORY_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
+  for (const token of POST_LEGACY_GROUP_ONLY_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
 });
 
 test("database preserves legacy grant storage while active SQL and TypeScript agree", async () => {
@@ -158,7 +160,7 @@ test("database preserves legacy grant storage while active SQL and TypeScript ag
   const schemaTokens = await schemaVocabulary(db);
   assert.equal(schemaTokens.length, TOKEN_COUNT);
   assert.deepEqual(
-    schemaTokens.filter((token) => !RETIRED_TOKENS.includes(token)).sort(),
+    schemaTokens.filter((token) => !RETIRED_TOKENS.includes(token)).concat(POST_LEGACY_GROUP_ONLY_TOKENS).sort(),
     [...CAPABILITIES].sort(),
   );
   for (const token of NEW_TOKENS) assert.ok(schemaTokens.includes(token), token);
@@ -207,7 +209,8 @@ test("migration 67 is append-only: the frozen foundation vocabulary is untouched
           !F2_WORK_REPORT_TOKENS.includes(token) &&
           !VFIN_TOKENS.includes(token) &&
           !DUPLICATE_CCCD_TOKENS.includes(token) &&
-          !WORKER_EDIT_HISTORY_TOKENS.includes(token),
+          !WORKER_EDIT_HISTORY_TOKENS.includes(token) &&
+          !POST_LEGACY_GROUP_ONLY_TOKENS.includes(token),
       )
       .concat(RETIRED_TOKENS)
       .sort(),

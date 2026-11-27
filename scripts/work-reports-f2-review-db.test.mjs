@@ -268,7 +268,7 @@ async function createDelegation(
 }
 
 test("F2 contract adds exactly the two locked capabilities and RLS-protected tables", async () => {
-  assert.equal(CAPABILITIES.length, 29, "Active capability registry includes F2, VFIN-01, duplicate CCCD, and worker history tokens");
+  assert.equal(CAPABILITIES.length, 30, "Active capability registry includes F2, VFIN-01, vendor_referrer_manage, duplicate CCCD, and worker history tokens");
   assert.ok(CAPABILITIES.includes("report_review"));
   assert.ok(CAPABILITIES.includes("report_delegate"));
 

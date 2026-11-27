@@ -97,6 +97,7 @@ export const CAPABILITY_BUSINESS_DESCRIPTORS: readonly CapabilityBusinessDescrip
   { capability: "report_analytics_view", category: "Báo cáo & Thống kê", label: "Xem phân tích số liệu", description: "Xem biểu đồ và báo cáo phân tích theo phạm vi nhóm." },
   { capability: "vendor_finance_view", category: "Tài chính NCC", label: "Xem công nợ nhà cung cấp", description: "Xem sổ công nợ và báo cáo tài chính nhà cung cấp." },
   { capability: "vendor_finance_record", category: "Tài chính NCC", label: "Ghi nhận thu chi nhà cung cấp", description: "Tạo chứng từ thu chi và đối soát tài chính nhà cung cấp." },
+  { capability: "vendor_referrer_manage", category: "Đối tác & Báo cáo BoD", label: "Quản lý người giới thiệu Vendor", description: "Gắn, thay đổi, thu hồi người giới thiệu Vendor và xem báo cáo lượt tuyển dụng theo người giới thiệu (chỉ nhóm BoD / System Admin)." },
   { capability: "entry_admin", category: "Quản trị hệ thống", label: "Quản trị người dùng & hệ thống", description: "Quản trị người dùng, phòng ban, nhóm quyền (chỉ nhóm BoD/Admin)." },
   { capability: "entry_privileged_edit", category: "Quản trị hệ thống", label: "Sửa trực tiếp hồ sơ đã nộp", description: "Chỉnh sửa trực tiếp hồ sơ tuyển dụng đã nộp (chỉ nhóm BoD/Admin)." },
   { capability: "entry_restore", category: "Quản trị hệ thống", label: "Khôi phục hồ sơ đã ẩn", description: "Khôi phục bản ghi tuyển dụng đã ẩn (chỉ nhóm BoD/Admin)." },
