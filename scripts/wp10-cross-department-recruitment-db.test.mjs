@@ -304,7 +304,10 @@ test("WP10 Cross-Department Recruitment (PG18): Cases 1-5 (Direct Entry, Negativ
         " create schema auth; create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);",
     );
 
-    const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    // The negative peer case also verifies the pre-drop legacy grant rows.
+    const files = (await readdir(MIGRATION_DIR))
+      .filter((f) => f.endsWith(".sql") && f <= "20261127020000_wp10_7_3c_retire_legacy_grant_mirror_and_fallback.sql")
+      .sort();
     const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
     assert.ok(groupsIdx > 0, "PR28 permission groups migration must exist");
     assert.ok(files.includes(CROSS_DEPT_MIGRATION_NAME), "Cross-dept recruitment migration must exist");

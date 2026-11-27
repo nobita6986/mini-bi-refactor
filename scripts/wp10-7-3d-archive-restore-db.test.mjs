@@ -1066,7 +1066,7 @@ test("WP10-7 Slice 3D (PG18): Fail-closed runner gate, 3-table post-archive drif
       [WP10_7_3D_MIGRATION_NAME],
     );
     assert.ok(mig3dRow, "public.schema_migrations must record 3D after clean apply");
-    assert.equal(mig3dRow.checksum, migrationChecksum(staged3dSql));
+    assert.equal(mig3dRow.checksum, migrationChecksum(migrationSql));
 
     // Re-run default CLI WITHOUT archive flag -> MUST skip cleanly by checksum!
     const idempotentRerunCli = runApplyCli([]);
