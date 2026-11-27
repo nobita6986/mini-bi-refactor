@@ -8,6 +8,7 @@ import { AUTH_PROLOGUE } from "./lib/s04c-read-fixture.mjs";
 
 const MIGRATION_DIR = path.resolve("supabase/migrations");
 const SEED_MIGRATION = "20261008080000_p3_w05a_actor_scoped_reporting.sql";
+const RETIRE_SEED_MIGRATION = "20261127050000_wp10_7_3d_drop_direct_entry_legacy_grants.sql";
 const SEED_CALL = /^\s*select\s+public\.direct_entry_seed_team_scope_grants\s*\(/im;
 
 test("W05A team-scope seed remains migration-only and is superseded by W01D", async () => {
@@ -31,7 +32,9 @@ test("W05A team-scope seed remains migration-only and is superseded by W01D", as
     assert.equal(sources.slice(sources.indexOf(seedSource) + 1)
       .some((entry) => SEED_CALL.test(entry.sql)), false);
 
-    for (const { sql } of sources) await db.exec(sql);
+    const retireIndex = sources.findIndex(({ name }) => name === RETIRE_SEED_MIGRATION);
+    assert.ok(retireIndex > 0, "3D migration must be present");
+    for (const { sql } of sources.slice(0, retireIndex)) await db.exec(sql);
 
     const seedAcl = (await db.query(`
       select to_regprocedure('public.direct_entry_seed_team_scope_grants()') is not null as present,
@@ -51,6 +54,11 @@ test("W05A team-scope seed remains migration-only and is superseded by W01D", as
       authenticated_exec: false,
       service_exec: false,
     });
+    await db.exec(sources[retireIndex].sql);
+    const { rows: [after] } = await db.query(
+      "select to_regprocedure('public.direct_entry_seed_team_scope_grants()') is null as retired",
+    );
+    assert.equal(after.retired, true);
   } finally {
     await db.close();
   }

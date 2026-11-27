@@ -42,7 +42,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -326,6 +326,7 @@ async function setBusinessDate(client, isoDate) {
 describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback reads", () => {
   const clients = [];
   let tmpDir = "";
+  let migrationDirThrough3c;
   let pgData = "";
   let pgLog = "";
   let pgCtl = null;
@@ -1281,7 +1282,14 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
 
     await setup.query(ROLE_PREAMBLE);
 
-    files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    files = (await readdir(MIGRATION_DIR))
+      .filter((f) => f.endsWith(".sql") && f <= WP10_7_3C_MIGRATION_NAME)
+      .sort();
+    migrationDirThrough3c = path.join(tmpDir, "migrations");
+    await mkdir(migrationDirThrough3c);
+    for (const name of files) {
+      await copyFile(path.join(MIGRATION_DIR, name), path.join(migrationDirThrough3c, name));
+    }
     const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
     const wp1073bIdx = files.indexOf(WP10_7_3B_MIGRATION_NAME);
     wp1073cIdx = files.indexOf(WP10_7_3C_MIGRATION_NAME);
@@ -1723,7 +1731,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
 
     // 1e. Clean apply 0..3B -> 3C via runMigrationApply
     const applyRes = await runMigrationApply({
-      directory: MIGRATION_DIR,
+      directory: migrationDirThrough3c,
       loadConfig: async () => ({
         databaseUrl: `postgresql://postgres@127.0.0.1:${port}/postgres`,
         projectRef: "local",
@@ -1737,7 +1745,7 @@ describe("WP10-7 Slice 3C (PG18): Retire legacy grant mirror writes and fallback
       log: () => {},
       errorLog: () => {},
     });
-    assert.equal(applyRes.appliedCount, files.length - wp1073cIdx);
+    assert.equal(applyRes.appliedCount, 1);
   });
 
   it("2. Post-DDL invariants: DEFAULT true, new account RPCs/insert (0 legacy writes), pg_proc scan, 5 shared triggers, & +0 net RPCs", async () => {

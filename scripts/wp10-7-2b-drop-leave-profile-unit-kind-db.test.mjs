@@ -42,7 +42,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -354,7 +354,15 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
         " create schema auth; create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);",
     );
 
-    const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const files = (await readdir(MIGRATION_DIR))
+      .filter((f) => f.endsWith(".sql") && f <= WP10_7_2B_MIGRATION_NAME)
+      .sort();
+    const cliWorkspace = path.join(tmpDir, "workspace");
+    const migrationDirThrough2b = path.join(cliWorkspace, "supabase", "migrations");
+    await mkdir(migrationDirThrough2b, { recursive: true });
+    for (const name of files) {
+      await copyFile(path.join(MIGRATION_DIR, name), path.join(migrationDirThrough2b, name));
+    }
     const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
     const wp1072aIdx = files.indexOf(WP10_7_2A_MIGRATION_NAME);
     const wp1072bIdx = files.indexOf(WP10_7_2B_MIGRATION_NAME);
@@ -840,7 +848,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
         expectedCanonicalSha256: parityExpectation.canonicalSha256,
       });
       return runMigrationApply({
-        directory: MIGRATION_DIR,
+        directory: migrationDirThrough2b,
         loadConfig: async () => ({
           databaseUrl: `postgresql://postgres@127.0.0.1:${port}/postgres`,
           projectRef: "local",
@@ -1098,7 +1106,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
       delete cliEnv.SUPABASE_POOLER_HOST;
       delete cliEnv.SUPABASE_POOLER_PORT;
       return spawnSync(process.execPath, [path.join(ROOT, "scripts", "apply-migrations.mjs"), ...args], {
-        cwd: ROOT,
+        cwd: cliWorkspace,
         env: cliEnv,
         encoding: "utf8",
         windowsHide: true,
@@ -1122,7 +1130,7 @@ test("WP10-7 Slice 2B (PG18): Drop leave_employee_profiles.unit_kind across 0..2
     await assert.rejects(
       () =>
         runMigrationApply({
-          directory: MIGRATION_DIR,
+          directory: migrationDirThrough2b,
           loadConfig: async () => ({
             databaseUrl: `postgresql://postgres@127.0.0.1:${port}/postgres`,
             projectRef: "local",

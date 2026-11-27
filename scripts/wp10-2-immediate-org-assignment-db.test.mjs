@@ -142,7 +142,10 @@ async function seedPlainAccount(db, loginPrefix, displayName) {
 async function seedBootstrappedDb() {
   const db = new PGlite();
   await db.exec(ROLE_PREAMBLE);
-  const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  // These assignment tests inspect legacy grant history before it is removed.
+  const files = (await readdir(MIGRATION_DIR))
+    .filter((f) => f.endsWith(".sql") && f <= "20261127020000_wp10_7_3c_retire_legacy_grant_mirror_and_fallback.sql")
+    .sort();
   const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
   assert.ok(groupsIdx > 0, "PR28 permission groups migration must exist");
   assert.ok(files.includes(WP10_2_MIGRATION_NAME), "WP10-2 migration must exist");
