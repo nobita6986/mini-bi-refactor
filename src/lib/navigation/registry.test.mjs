@@ -17,13 +17,14 @@ const {
 const { isDirectEntryUiEnabled } = await import("../direct-entry/ui-model.ts");
 
 test("CURRENT_NAV_ENTRIES chứa các entry hiện hành trong một registry", () => {
-  assert.equal(CURRENT_NAV_ENTRIES.length, 14, "phải có đúng 14 entries current sau WP13 N1");
+  assert.equal(CURRENT_NAV_ENTRIES.length, 15, "phải có đúng 15 entries current sau HR Bulletins");
   const ids = CURRENT_NAV_ENTRIES.map((e) => e.id).sort();
   assert.deepEqual(
     ids,
     [
       "admin",
       "attendance-report",
+      "bulletins",
       "change-requests",
       "dashboard",
       "direct-entry",
@@ -59,6 +60,7 @@ test("Global IA nav groups enforce Tổng quan → Công việc của tôi → T
         "work-reports",
         "leave",
         "recruitment-posts",
+        "bulletins",
       ],
     },
     {
@@ -199,6 +201,7 @@ test("Desktop viewport theo feature flag, luôn giữ Dashboard và không có P
       "work-reports",
       "leave",
       "recruitment-posts",
+      "bulletins",
       "finance",
       "salary-advances",
       "leave-admin",
@@ -221,6 +224,7 @@ test("Mobile viewport theo feature flag, luôn giữ Dashboard và không có Pi
       "work-reports",
       "leave",
       "recruitment-posts",
+      "bulletins",
       "finance",
       "salary-advances",
       "leave-admin",
@@ -238,6 +242,7 @@ test("feature flag Direct Entry chỉ mở với giá trị chính xác true", (
     "work-reports",
     "leave",
     "recruitment-posts",
+    "bulletins",
     "finance",
     "salary-advances",
     "leave-admin",
@@ -368,6 +373,7 @@ test("findEntryByPath('/work-reports') tách biệt 2 trang cá nhân với 5 nh
   assert.equal(findEntryByPath("/leave")?.id, "leave");
   assert.equal(findEntryByPath("/salary-advances")?.id, "salary-advances");
   assert.equal(findEntryByPath("/recruitment-posts")?.id, "recruitment-posts");
+  assert.equal(findEntryByPath("/bulletins")?.id, "bulletins");
   assert.equal(findEntryByPath("/admin/attendance")?.id, "attendance-report");
   assert.equal(findEntryByPath("/admin/catalog/personnel")?.id, "admin");
 });

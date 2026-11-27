@@ -400,7 +400,7 @@ function decideFor(actor, viewport) {
     });
 }
 
-test("filterEntriesForActor: valid actor + hrp role → Dashboard + Direct Entry + Người lao động + Tin tuyển dụng", () => {
+test("filterEntriesForActor: valid actor + hrp role → Dashboard + Direct Entry + Người lao động + Tin tuyển dụng + Bản tin HRPartner", () => {
   const hrpActor = makeActor(["entry_own"]);
   const result = filterEntriesForActor({
     viewport: "desktop",
@@ -409,10 +409,10 @@ test("filterEntriesForActor: valid actor + hrp role → Dashboard + Direct Entry
     decide: decideFor(hrpActor, "desktop"),
   });
   const ids = result.map((e) => e.id);
-  assert.deepEqual(ids, ["dashboard", "direct-entry", "worker-operations", "recruitment-posts"]);
+  assert.deepEqual(ids, ["dashboard", "direct-entry", "worker-operations", "recruitment-posts", "bulletins"]);
 });
 
-test("filterEntriesForActor: reader (no capability, active BI account) → Dashboard + Tin tuyển dụng", () => {
+test("filterEntriesForActor: reader (no capability, active BI account) → Dashboard + Tin tuyển dụng + Bản tin HRPartner", () => {
   const readerActor = makeActor([]);
   const result = filterEntriesForActor({
     viewport: "desktop",
@@ -420,7 +420,7 @@ test("filterEntriesForActor: reader (no capability, active BI account) → Dashb
     actor: readerActor,
     decide: decideFor(readerActor, "desktop"),
   });
-  assert.deepEqual(result.map((e) => e.id), ["dashboard", "recruitment-posts"]);
+  assert.deepEqual(result.map((e) => e.id), ["dashboard", "recruitment-posts", "bulletins"]);
 });
 
 test("filterEntriesForActor: Work Reports chỉ hiện với actor có quyền trong scope", () => {
@@ -452,7 +452,7 @@ test("filterEntriesForActor: reviewer (change_review + all) → Dashboard + Ngư
     actor: reviewerActor,
     decide: decideFor(reviewerActor, "mobile"),
   });
-  assert.deepEqual(result.map((e) => e.id), ["dashboard", "worker-operations", "recruitment-posts"]);
+  assert.deepEqual(result.map((e) => e.id), ["dashboard", "worker-operations", "recruitment-posts", "bulletins"]);
   // Reviewer KHONG thay entry Direct Entry / Du an.
   assert.equal(result.some((e) => e.id === "direct-entry"), false);
   assert.equal(result.some((e) => e.id === "project-operations"), false);
@@ -484,6 +484,7 @@ test("filterEntriesForActor: owner (đủ 3 admin) + viewport=mobile → các kh
     [
       "admin",
       "attendance-report",
+      "bulletins",
       "dashboard",
       "direct-entry",
       "finance",
@@ -506,7 +507,7 @@ test("filterEntriesForActor: Direct Entry off bởi env → ẩn các route Dire
     actor: hrpActor,
     decide: decideFor(hrpActor, "desktop"),
   });
-  assert.deepEqual(result.map((e) => e.id), ["dashboard", "recruitment-posts"]);
+  assert.deepEqual(result.map((e) => e.id), ["dashboard", "recruitment-posts", "bulletins"]);
 });
 
 test("Admin catalog navigation remains available when Direct Entry UI is disabled", () => {
@@ -517,17 +518,18 @@ test("Admin catalog navigation remains available when Direct Entry UI is disable
     actor: accounting,
     decide: decideFor(accounting, "desktop"),
   });
-  assert.deepEqual(result.map((entry) => entry.id), ["dashboard", "recruitment-posts", "admin"]);
+  assert.deepEqual(result.map((entry) => entry.id), ["dashboard", "recruitment-posts", "bulletins", "admin"]);
 });
 
 test("CURRENT_NAV_ENTRIES giữ nguyên một registry duy nhất (không tạo registry thứ hai)", () => {
-  // Admin, Finance, Leave, Salary Advances, Recruitment Posts, Change Requests and Work Reports share one registry; hidden entries retain route metadata.
+  // Admin, Finance, Leave, Salary Advances, Recruitment Posts, Bulletins, Change Requests and Work Reports share one registry; hidden entries retain route metadata.
   const ids = CURRENT_NAV_ENTRIES.map((e) => e.id).sort();
   assert.deepEqual(
     ids,
     [
       "admin",
       "attendance-report",
+      "bulletins",
       "change-requests",
       "dashboard",
       "direct-entry",
@@ -593,7 +595,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     {
       id: "my-work",
       label: "Công việc của tôi",
-      children: ["direct-entry", "worker-operations", "work-reports", "leave", "recruitment-posts"],
+      children: ["direct-entry", "worker-operations", "work-reports", "leave", "recruitment-posts", "bulletins"],
     },
   ]);
   assert.equal(recruiterMenu.ids.includes("admin"), false);
@@ -619,7 +621,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     {
       id: "my-work",
       label: "Công việc của tôi",
-      children: ["direct-entry", "worker-operations", "work-reports", "leave", "recruitment-posts"],
+      children: ["direct-entry", "worker-operations", "work-reports", "leave", "recruitment-posts", "bulletins"],
     },
     {
       id: "management",
@@ -647,7 +649,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     {
       id: "my-work",
       label: "Công việc của tôi",
-      children: ["work-reports", "leave", "recruitment-posts"],
+      children: ["work-reports", "leave", "recruitment-posts", "bulletins"],
     },
     {
       id: "management",
@@ -671,7 +673,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     {
       id: "my-work",
       label: "Công việc của tôi",
-      children: ["worker-operations", "work-reports", "leave", "recruitment-posts"],
+      children: ["worker-operations", "work-reports", "leave", "recruitment-posts", "bulletins"],
     },
     {
       id: "finance",
@@ -701,6 +703,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
         "work-reports",
         "leave",
         "recruitment-posts",
+        "bulletins",
       ],
     },
     {
@@ -737,7 +740,7 @@ test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader,
     {
       id: "my-work",
       label: "Công việc của tôi",
-      children: ["leave", "recruitment-posts"],
+      children: ["leave", "recruitment-posts", "bulletins"],
     },
     {
       id: "finance",
