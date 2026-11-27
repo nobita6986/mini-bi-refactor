@@ -70,7 +70,8 @@ export type CapabilityDomainId =
   | "worker_compliance"
   | "organization_catalog"
   | "work_reports"
-  | "vendor_finance";
+  | "vendor_finance"
+  | "internal_bulletins";
 
 export type CapabilityDomainMeta = {
   id: CapabilityDomainId;
@@ -103,6 +104,11 @@ export const CAPABILITY_DOMAINS: readonly CapabilityDomainMeta[] = [
     id: "vendor_finance",
     title: "Tài chính & Công nợ Vendor",
     description: "Quyền theo dõi công nợ, chứng từ và ghi nhận giao dịch Vendor.",
+  },
+  {
+    id: "internal_bulletins",
+    title: "Bản tin nội bộ",
+    description: "Quyền tạo, chỉnh sửa, ghim, xuất bản và lưu trữ bản tin nội bộ.",
   },
 ];
 
@@ -175,6 +181,7 @@ export const CAPABILITY_PRESENTATION_MAP: Readonly<Record<Capability, Capability
   report_delegate: { label: "Ủy quyền duyệt / giao báo cáo", domain: "work_reports" },
   vendor_finance_view: { label: "Xem công nợ & sổ cái Vendor", domain: "vendor_finance" },
   vendor_finance_record: { label: "Ghi nhận thanh toán & tạm ứng Vendor", domain: "vendor_finance" },
+  bulletin_manage: { label: "Quản trị Bản tin HRPartner", domain: "internal_bulletins" },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

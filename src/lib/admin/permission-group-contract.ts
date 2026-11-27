@@ -44,6 +44,7 @@ export const DEPARTMENT_GROUP_ALLOWED_CAPABILITIES = [
   "report_delegate",
   "vendor_finance_view",
   "duplicate_cccd_withdraw",
+  "bulletin_manage",
 ] as const satisfies readonly Capability[];
 
 export const TEAM_GROUP_ALLOWED_CAPABILITIES = [
@@ -102,6 +103,7 @@ export const CAPABILITY_BUSINESS_DESCRIPTORS: readonly CapabilityBusinessDescrip
   { capability: "entry_restore", category: "Quản trị hệ thống", label: "Khôi phục hồ sơ đã ẩn", description: "Khôi phục bản ghi tuyển dụng đã ẩn (chỉ nhóm BoD/Admin)." },
   { capability: "employment_status.review", category: "Quản trị hệ thống", label: "Xem xét trạng thái làm việc NLĐ", description: "Rà soát đề xuất thay đổi trạng thái làm việc (chỉ nhóm BoD/Admin)." },
   { capability: "employment_status.apply", category: "Quản trị hệ thống", label: "Áp dụng trạng thái làm việc NLĐ", description: "Cập nhật trực tiếp trạng thái làm việc NLĐ (chỉ nhóm BoD/Admin)." },
+  { capability: "bulletin_manage", category: "Bản tin nội bộ", label: "Quản trị Bản tin HRPartner", description: "Tạo, chỉnh sửa, ghim, xuất bản và lưu trữ bản tin nội bộ trên hệ thống." },
 ];
 
 export type ModuleRoleBusinessDescriptor = {

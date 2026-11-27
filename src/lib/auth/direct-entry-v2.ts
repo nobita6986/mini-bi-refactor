@@ -38,6 +38,7 @@ export const CAPABILITIES = [
   "vendor_finance_record",
   "duplicate_cccd_withdraw",
   "worker_edit_history_view",
+  "bulletin_manage",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -874,6 +875,7 @@ const PAIRED_CAPABILITY_ALLOWED_SCOPE_KINDS: Readonly<
   vendor_finance_record: ["ALL"],
   duplicate_cccd_withdraw: ["ALL"],
   worker_edit_history_view: ["ALL"],
+  bulletin_manage: ["ALL"],
 };
 
 /**
