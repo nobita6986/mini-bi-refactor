@@ -492,7 +492,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
     new URL("../../app/admin/page.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(adminRootSource, /resolveAdminLandingPath\(actor\)/);
+  assert.match(adminRootSource, /resolveAdminLandingPath\(actor,\s*\{\s*hasVendorReferrerAccess\s*\}\)/);
   assert.match(adminRootSource, /redirect\(target\)/);
 });
 
