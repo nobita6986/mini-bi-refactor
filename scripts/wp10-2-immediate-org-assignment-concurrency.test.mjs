@@ -351,7 +351,10 @@ test("WP10-2 Real PG18 Concurrency: C0-C5b + P2 Tier-U barriers + F-01 idempoten
         " create schema auth; create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);",
     );
 
-    const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    // These assignment tests inspect legacy grant history before it is removed.
+    const files = (await readdir(MIGRATION_DIR))
+      .filter((f) => f.endsWith(".sql") && f <= "20261127020000_wp10_7_3c_retire_legacy_grant_mirror_and_fallback.sql")
+      .sort();
     const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
     assert.ok(groupsIdx > 0, "PR28 permission groups migration must exist");
     assert.ok(files.includes(WP10_2_MIGRATION_NAME), "WP10-2 migration must exist");

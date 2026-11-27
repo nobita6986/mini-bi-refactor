@@ -126,7 +126,10 @@ async function createFullDb() {
   const db = new PGlite();
   await db.exec(ROLE_PREAMBLE);
 
-  const files = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+  // Keep the legacy grant tables for history and unchanged-state assertions.
+  const files = (await readdir(MIGRATION_DIR))
+    .filter((f) => f.endsWith(".sql") && f <= "20261127020000_wp10_7_3c_retire_legacy_grant_mirror_and_fallback.sql")
+    .sort();
   assert.ok(files.includes(HF_MIGRATION_NAME), `Missing migration ${HF_MIGRATION_NAME}`);
   const groupsIdx = files.indexOf(PR28_PERMISSION_GROUPS_FOUNDATION_MIGRATION_NAME);
   assert.ok(groupsIdx > 0, "PR28 permission groups migration must exist");

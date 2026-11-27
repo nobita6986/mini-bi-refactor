@@ -1,7 +1,7 @@
 /**
  * P3.1-W01D-A1a2 - Team leader lifecycle schema foundation (#71) DB regression.
  *
- * Applies all 93 migrations from scratch in PGlite and asserts the 30 items of the
+ * Applies the schema through Slice 3C in PGlite and asserts the 30 items of the
  * A1a2 contract: append-only ledger, the two widened grant interval CHECKs, the
  * marker-excluding partial unique indexes, the assignment/revision table shapes,
  * forced RLS and deny-by-default ACL, the three internal helpers, marker write
@@ -64,7 +64,10 @@ async function readMigration(name) {
 async function database() {
   const db = new PGlite();
   await db.exec(AUTH_PROLOGUE);
-  for (const name of await readMigrationNames()) {
+  const names = await readMigrationNames();
+  const lastWithLegacyGrants = names.indexOf("20261127020000_wp10_7_3c_retire_legacy_grant_mirror_and_fallback.sql");
+  assert.ok(lastWithLegacyGrants >= 0, "Slice 3C migration must be present");
+  for (const name of names.slice(0, lastWithLegacyGrants + 1)) {
     await db.exec(await readMigration(name));
   }
   return db;

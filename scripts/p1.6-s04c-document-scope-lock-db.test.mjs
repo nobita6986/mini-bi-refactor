@@ -137,10 +137,11 @@ test("114-migration DB rejects DOCUMENT RPC and table inserts without residue", 
   await db.close();
 });
 
-test("full migration set preserves the derived direct-entry function and RPC inventory", async () => {
-  const migrations = await readLocalMigrations();
+test("fixture migrations preserve the derived direct-entry function and RPC inventory", async () => {
+  const { db, migrationNames } = await createMigratedDatabase();
+  const appliedNames = new Set(migrationNames);
+  const migrations = (await readLocalMigrations()).filter(({ name }) => appliedNames.has(name));
   const expected = expectedDirectEntryFunctions(migrations);
-  const { db } = await createMigratedDatabase();
   const { rows } = await db.query(
     "select p.proname, has_function_privilege('service_role', p.oid, 'EXECUTE') as service_exec" +
     " from pg_proc p join pg_namespace n on n.oid = p.pronamespace" +
