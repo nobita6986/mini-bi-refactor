@@ -1,14 +1,14 @@
 /**
- * Vendor Referrer Attribution (Migration #257) — Real Isolated PostgreSQL 18 Acceptance Suite.
+ * Vendor Referrer Attribution — Real Isolated PostgreSQL 18 Acceptance Suite.
  *
  * Pure ESM (runs under `node --conditions=react-server --test`) against an isolated
  * native PostgreSQL 18 cluster (`initdb` + `pg_ctl`).
  *
  * Covers:
- *   1. Migration #257 clean apply (`0..257` via `runMigrationApply` + idempotent re-run),
+ *   1. Clean apply including Bản tin HRPartner (via `runMigrationApply` + idempotent re-run),
  *      `vendor_referrer_links` / `vendor_referrer_audit_events` FORCE RLS + 0 policies + 0 grants,
  *      7 service_role-only RPCs (`EXECUTE` only to `service_role`/owner), 4 internal helpers
- *      with 0 `EXECUTE`, and `verifyS0T1CSecurityPostconditions` (`317` service_role RPCs, 0 exposed).
+ *      with 0 EXECUTE and the combined S0-T1-C RPC allowlist.
  *   2. Permission Group capability #30 (`vendor_referrer_manage`): rejected on team groups &
  *      non-BoD department groups (Recruitment/Accounting/Marketing/IT), allowed on `SYSTEM_ADMIN`
  *      and `MANAGEMENT_BOD` department groups, exposed in `direct_entry_resolve_actor_context`;
@@ -39,6 +39,8 @@ import { Client } from "pg";
 import { computeCreatePersonFingerprint } from "../src/lib/organization/person-contract.ts";
 import {
   buildS0T1CAppliedFlags,
+  HR_BULLETINS_MIGRATION_NAME,
+  HR_BULLETINS_RPC_SIGNATURES,
   runMigrationApply,
   S0_T1_C_MIGRATION_NAME,
   VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
@@ -111,7 +113,7 @@ async function connect(port, appName, database = "postgres") {
   return client;
 }
 
-describe("Vendor Referrer Attribution (#257) — PG18 Acceptance Suite", () => {
+describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
   const clients = [];
   let tmpDir = "";
   let pgData = "";
@@ -455,11 +457,13 @@ describe("Vendor Referrer Attribution (#257) — PG18 Acceptance Suite", () => {
     });
     const allMigs = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
     assert.equal(applyRes.totalCount, allMigs.length);
-    assert.equal(applyRes.appliedCount, allMigs.length, "All 257 migrations must apply cleanly from scratch");
+    assert.equal(applyRes.appliedCount, allMigs.length, "Full migration chain must apply cleanly from scratch");
     assert.equal(applyRes.skippedCount, 0);
-    assert.equal(allMigs.at(-1), VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME);
+    assert.ok(allMigs.includes(VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME));
+    assert.ok(allMigs.indexOf(HR_BULLETINS_MIGRATION_NAME) >= 0);
+    assert.ok(allMigs.indexOf(HR_BULLETINS_MIGRATION_NAME) < allMigs.indexOf(VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME));
 
-    // Idempotent second run skips all 257 migrations & verifies checksums/postconditions
+    // Idempotent second run skips all applied migrations & verifies checksums/postconditions
     const rerunRes = await runMigrationApply({
       directory: MIGRATION_DIR,
       loadConfig: async () => ({ databaseUrl, projectRef: "pg18test", usesPooler: false }),
@@ -668,9 +672,9 @@ describe("Vendor Referrer Attribution (#257) — PG18 Acceptance Suite", () => {
     }
   });
 
-  it("1. Migration #257 hygiene, FORCE RLS, 0 policies/grants, 7 service_role RPCs, and S0-T1-C 317 allowlist", async () => {
+  it("1. Migration hygiene, FORCE RLS, 0 policies/grants, 7 service_role RPCs, and combined S0-T1-C allowlist", async () => {
     const sqlText = await readFile(path.join(MIGRATION_DIR, VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME), "utf8");
-    assert.equal(sqlText.includes("\r"), false, "Migration #257 must use strict LF");
+    assert.equal(sqlText.includes("\r"), false, "Vendor referrer migration must use strict LF");
     assert.equal(sqlText.replace(/--[^\n]*/g, "").includes("@"), false, "Zero literal '@' in migration SQL");
     assert.equal(/\bsavepoint\b/i.test(sqlText), false, "Zero SAVEPOINT in migration SQL");
     assert.equal(/\balter\s+default\s+privileges\b/i.test(sqlText), false, "Zero ALTER DEFAULT PRIVILEGES");
@@ -758,8 +762,9 @@ describe("Vendor Referrer Attribution (#257) — PG18 Acceptance Suite", () => {
       buildS0T1CAppliedFlags(new Set(allMigs)),
     );
     assert.equal(postcond.ok, true, `S0-T1-C postcondition failed: ${postcond.reason}`);
-    assert.equal(postcond.details.expectedServiceCount, 317);
-    assert.equal(postcond.details.actualServiceCount, 317);
+    const expectedServiceCount = 317 + HR_BULLETINS_RPC_SIGNATURES.length;
+    assert.equal(postcond.details.expectedServiceCount, expectedServiceCount);
+    assert.equal(postcond.details.actualServiceCount, expectedServiceCount);
     assert.equal(postcond.details.exposedClientOrPublicCount, 0);
     assert.equal(postcond.details.unsafeSecdefSearchPathCount, 0);
   });
@@ -907,11 +912,18 @@ describe("Vendor Referrer Attribution (#257) — PG18 Acceptance Suite", () => {
     // direct_entry_resolve_actor_context exposes vendor_referrer_manage cleanly
     const ownerCtx = await serviceRpc("direct_entry_resolve_actor_context", [OWNER.auth], ["uuid"]);
     assert.ok(ownerCtx.capabilities.includes("vendor_referrer_manage"));
+    assert.ok(ownerCtx.capabilities.includes("bulletin_manage"));
+    assert.ok(ownerCtx.effective_grants.some(
+      (g) => g.capability === "bulletin_manage" && g.scope_kind === "ALL" && g.scope_id === null,
+    ));
     assert.ok(
       ownerCtx.effective_grants.some(
         (g) => g.capability === "vendor_referrer_manage" && g.scope_kind === "ALL" && g.scope_id === null,
       ),
     );
+    const bulletinArchive = await serviceRpc("hr_bulletin_list_archive", [OWNER.auth, OWNER.app], ["uuid", "uuid"]);
+    assert.equal(bulletinArchive.can_manage, true);
+
     const bodCustomCtx = await serviceRpc("direct_entry_resolve_actor_context", [BOD_CUSTOM.auth], ["uuid"]);
     assert.deepEqual(bodCustomCtx.capabilities, ["vendor_referrer_manage"]);
 

@@ -14,6 +14,7 @@ import {
   CAPABILITY_BUSINESS_DESCRIPTORS,
   DEPARTMENT_GROUP_ALLOWED_CAPABILITIES,
   MODULE_ROLE_BUSINESS_DESCRIPTORS,
+  TEAM_GROUP_ALLOWED_CAPABILITIES,
   parseAssignGroupMemberBody,
   parseCreateGroupBody,
   parseListGroupsQuery,
@@ -59,8 +60,8 @@ function makeFullAdminSession() {
   });
 }
 
-test("business descriptors cover all 30 verbatim CAPABILITIES and 7 D4 module roles with zero technical scope jargon", () => {
-  assert.equal(CAPABILITY_BUSINESS_DESCRIPTORS.length, 30);
+test("business descriptors cover all active CAPABILITIES and 7 D4 module roles with zero technical scope jargon", () => {
+  assert.equal(CAPABILITY_BUSINESS_DESCRIPTORS.length, CAPABILITIES.length);
   const described = new Set(CAPABILITY_BUSINESS_DESCRIPTORS.map((d) => d.capability));
   assert.deepEqual([...described].sort(), [...CAPABILITIES].sort());
   for (const d of CAPABILITY_BUSINESS_DESCRIPTORS) {
@@ -73,6 +74,8 @@ test("business descriptors cover all 30 verbatim CAPABILITIES and 7 D4 module ro
   assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("report_analytics_view"), false);
   assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("vendor_finance_record"), false);
   assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("vendor_finance_view"), true);
+  assert.equal(DEPARTMENT_GROUP_ALLOWED_CAPABILITIES.includes("bulletin_manage"), true);
+  assert.equal(TEAM_GROUP_ALLOWED_CAPABILITIES.includes("bulletin_manage"), false);
 });
 
 test("request parsers reject forbidden authority/scope fields, SYSTEM_ADMIN creation, and malformed payloads", () => {

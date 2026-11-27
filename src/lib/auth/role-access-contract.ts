@@ -457,12 +457,13 @@ export const AUTHZ_CANONICAL_ROLE_CATALOG: readonly RoleCatalogItem[] = deepFree
       capTemplate("catalog_master_manage", "ALL"),
       capTemplate("audit_view", "ALL"),
       capTemplate("document_view", "ALL"),
+      capTemplate("bulletin_manage", "ALL"),
     ],
   },
   {
     role_code: "ADMIN",
     display_name: "BoD/Admin",
-    description: "Vai trò điều hành/quản trị hợp nhất với bộ 21 quyền chuẩn (tách riêng 9 quyền chuyên trách ngoài gói tự cấp).",
+    description: "Vai trò điều hành/quản trị hợp nhất với bộ 22 quyền chuẩn (tách riêng 9 quyền chuyên trách ngoài gói tự cấp).",
     assignment_mode: "GLOBAL",
     fixed_scope_kind: "all",
     requires_active_person: false,
@@ -490,6 +491,7 @@ export const AUTHZ_CANONICAL_ROLE_CATALOG: readonly RoleCatalogItem[] = deepFree
       capTemplate("duplicate_cccd_withdraw", "ALL"),
       capTemplate("report_view", "ALL"),
       capTemplate("report_analytics_view", "ALL"),
+      capTemplate("bulletin_manage", "ALL"),
     ],
   },
   {
@@ -560,8 +562,8 @@ function assertCanonicalRoleCatalogInvariants(): void {
   const adminSet = new Set<string>(adminCaps);
   const excludedSet = new Set<string>(ADMIN_NON_AUTO_GRANT_TOKENS);
 
-  if (adminCaps.length !== 21 || adminSet.size !== 21) {
-    throw new Error("ADMIN canonical bundle must define exactly 21 unique capabilities.");
+  if (adminCaps.length !== 22 || adminSet.size !== 22) {
+    throw new Error("ADMIN canonical bundle must define exactly 22 unique capabilities.");
   }
   if (ADMIN_NON_AUTO_GRANT_TOKENS.length !== 9 || excludedSet.size !== 9) {
     throw new Error("ADMIN_NON_AUTO_GRANT_TOKENS must define exactly 9 unique tokens.");

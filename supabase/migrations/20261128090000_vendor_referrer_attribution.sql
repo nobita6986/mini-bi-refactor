@@ -1,8 +1,8 @@
 -- =============================================================================
--- Migration #257: Vendor Referrer Attribution (BoD-managed)
+-- Vendor Referrer Attribution (BoD-managed)
 --
 -- Scope (100% forward migration; zero historical migration edits):
---   1. Capability #30 ('vendor_referrer_manage') in authz_user_group_capabilities,
+--   1. Capability ('vendor_referrer_manage') in authz_user_group_capabilities,
 --      guard trigger & group admin RPCs (allowed ONLY on SYSTEM_ADMIN or
 --      teamless MANAGEMENT_BOD department groups), seeded onto SYSTEM_ADMIN,
 --      and exposed in direct_entry_resolve_actor_context(uuid).
@@ -27,7 +27,7 @@
 begin;
 
 -- =============================================================================
--- SECTION 1: Permission Group Capability #30 (vendor_referrer_manage)
+-- SECTION 1: Permission Group Capability (vendor_referrer_manage)
 -- =============================================================================
 
 alter table public.authz_user_group_capabilities
@@ -64,6 +64,7 @@ alter table public.authz_user_group_capabilities
     'vendor_finance_record',
     'duplicate_cccd_withdraw',
     'worker_edit_history_view',
+    'bulletin_manage',
     'vendor_referrer_manage'
   ));
 
@@ -832,6 +833,7 @@ begin
             'vendor_finance_record',
             'duplicate_cccd_withdraw',
             'worker_edit_history_view',
+            'bulletin_manage',
             'vendor_referrer_manage'
           )
           and g.scope_kind = 'ALL'

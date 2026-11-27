@@ -179,7 +179,8 @@ export type Capability =
   | "vendor_finance_record"
   | "vendor_referrer_manage"
   | "duplicate_cccd_withdraw"
-  | "worker_edit_history_view";
+  | "worker_edit_history_view"
+  | "bulletin_manage";
 
 export type ValidationIssue = { code: string; path: string };
 export type ValidationResult =

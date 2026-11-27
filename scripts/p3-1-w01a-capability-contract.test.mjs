@@ -52,11 +52,13 @@ const VFIN_TOKENS = ["vendor_finance_view", "vendor_finance_record"];
 const DUPLICATE_CCCD_TOKENS = ["duplicate_cccd_withdraw"];
 const WORKER_EDIT_HISTORY_MIGRATION = "20261031120000_worker_edit_history_admin.sql";
 const WORKER_EDIT_HISTORY_TOKENS = ["worker_edit_history_view"];
-const POST_LEGACY_GROUP_ONLY_TOKENS = ["vendor_referrer_manage"];
+const HR_BULLETINS_MIGRATION = "20261127060000_wp_hr_bulletins_foundation.sql";
+const GROUP_ONLY_TOKENS = ["vendor_referrer_manage"];
+const POST_3D_CAPABILITY_TOKENS = ["bulletin_manage", ...GROUP_ONLY_TOKENS];
 const LEGACY_TOKEN_COUNT = 21;
 const RETIRED_TOKENS = ["pii_view", "pii_export", "payment_view", "payment_edit"];
 const TOKEN_COUNT = 33;
-const ACTIVE_TOKEN_COUNT = 30;
+const ACTIVE_TOKEN_COUNT = 31;
 const UNKNOWN_TOKEN = "unknown_capability_probe";
 
 const AUTH_SUBJECT = "10000000-0000-4000-8000-00000000c001";
@@ -152,17 +154,24 @@ test("the auth contract is versioned as direct-entry-auth/1.7 without retired ca
   for (const token of VFIN_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
   for (const token of DUPLICATE_CCCD_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
   for (const token of WORKER_EDIT_HISTORY_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
-  for (const token of POST_LEGACY_GROUP_ONLY_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
+  for (const token of POST_3D_CAPABILITY_TOKENS) assert.ok(CAPABILITIES.includes(token), token);
 });
 
 test("database preserves legacy grant storage while active SQL and TypeScript agree", async () => {
-  const db = await database(await migrationNames());
+  const names = await migrationNames();
+  const db = await database(names);
   const schemaTokens = await schemaVocabulary(db);
   assert.equal(schemaTokens.length, TOKEN_COUNT);
-  assert.deepEqual(
-    schemaTokens.filter((token) => !RETIRED_TOKENS.includes(token)).concat(POST_LEGACY_GROUP_ONLY_TOKENS).sort(),
-    [...CAPABILITIES].sort(),
+  const pre3dActiveCapabilities = CAPABILITIES.filter(
+    (token) => !POST_3D_CAPABILITY_TOKENS.includes(token),
   );
+  assert.deepEqual(
+    schemaTokens.filter((token) => !RETIRED_TOKENS.includes(token)).sort(),
+    [...pre3dActiveCapabilities].sort(),
+  );
+  for (const token of POST_3D_CAPABILITY_TOKENS) {
+    assert.equal(schemaTokens.includes(token), false, `${token} must be absent before ${HR_BULLETINS_MIGRATION}`);
+  }
   for (const token of NEW_TOKENS) assert.ok(schemaTokens.includes(token), token);
   await db.close();
 
@@ -197,6 +206,16 @@ test("migration 67 is append-only: the frozen foundation vocabulary is untouched
     }
   }
 
+  // Post-3D capability tokens belong only to HR_BULLETINS_MIGRATION or later; they must not
+  // appear in any earlier migration.
+  for (const name of names) {
+    if (name >= HR_BULLETINS_MIGRATION) continue;
+    const sql = await readMigration(name);
+    for (const token of POST_3D_CAPABILITY_TOKENS) {
+      assert.equal(sql.includes(token), false, token + " must not appear in " + name);
+    }
+  }
+
   const foundationTokens = foundationVocabulary(await readMigration(FOUNDATION_MIGRATION));
   assert.equal(foundationTokens.length, LEGACY_TOKEN_COUNT);
   assert.deepEqual(
@@ -210,7 +229,7 @@ test("migration 67 is append-only: the frozen foundation vocabulary is untouched
           !VFIN_TOKENS.includes(token) &&
           !DUPLICATE_CCCD_TOKENS.includes(token) &&
           !WORKER_EDIT_HISTORY_TOKENS.includes(token) &&
-          !POST_LEGACY_GROUP_ONLY_TOKENS.includes(token),
+          !POST_3D_CAPABILITY_TOKENS.includes(token),
       )
       .concat(RETIRED_TOKENS)
       .sort(),
@@ -224,6 +243,35 @@ test("migration 67 is append-only: the frozen foundation vocabulary is untouched
       ...DUPLICATE_CCCD_TOKENS, ...WORKER_EDIT_HISTORY_TOKENS].sort(),
   );
   await db.close();
+
+  // Post-3D HEAD verification: authz_role_capabilities_cap_chk & authz_user_group_capabilities_cap_chk
+  // share the active vocabulary except for capabilities reserved for permission groups.
+  if (names.includes(HR_BULLETINS_MIGRATION)) {
+    const headDb = new PGlite();
+    await headDb.exec(AUTH_PROLOGUE);
+    for (const name of names) {
+      await headDb.exec(await readMigration(name));
+    }
+    const { rows: post3dChecks } = await headDb.query(
+      `select c.conname, pg_get_constraintdef(c.oid) as definition
+         from pg_constraint c
+         join pg_class t on t.oid = c.conrelid
+         join pg_namespace n on n.oid = t.relnamespace
+        where n.nspname = 'public'
+          and c.contype = 'c'
+          and c.conname in ('authz_role_capabilities_cap_chk', 'authz_user_group_capabilities_cap_chk')
+        order by c.conname`,
+    );
+    assert.equal(post3dChecks.length, 2, "both post-3D authz capability CHECK constraints must exist");
+    for (const row of post3dChecks) {
+      const tokens = [...String(row.definition).matchAll(/'([^']+)'::text/g)].map((m) => m[1]);
+      const expected = row.conname === "authz_role_capabilities_cap_chk"
+        ? CAPABILITIES.filter((token) => !GROUP_ONLY_TOKENS.includes(token))
+        : CAPABILITIES;
+      assert.deepEqual(tokens.sort(), [...expected].sort(), row.conname);
+    }
+    await headDb.close();
+  }
 });
 
 test("the vocabulary extension keeps every existing capability grant", async () => {

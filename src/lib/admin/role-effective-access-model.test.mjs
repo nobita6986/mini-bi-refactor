@@ -158,8 +158,8 @@ test("resolveAssignableGlobalRoles restricts assignments to 4 global roles and d
   );
 });
 
-test("CAPABILITY_PRESENTATION_MAP covers all 30 canonical capabilities and groups effective grants cleanly", () => {
-  assert.equal(CAPABILITIES.length, 30);
+test("CAPABILITY_PRESENTATION_MAP covers all canonical capabilities and groups effective grants cleanly", () => {
+  assert.equal(CAPABILITIES.length, 31);
   for (const cap of CAPABILITIES) {
     const meta = CAPABILITY_PRESENTATION_MAP[cap];
     assert.ok(meta, `Missing presentation for capability ${cap}`);

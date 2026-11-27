@@ -555,6 +555,22 @@ export const VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES = Object.freeze([
 ]);
 export const WP10_7_2B_MIGRATION_NAME =
   "20261126210000_wp10_7_2b_drop_leave_profile_unit_kind.sql";
+export const HR_BULLETINS_MIGRATION_NAME =
+  "20261127060000_wp_hr_bulletins_foundation.sql";
+export const HR_BULLETINS_RPC_SIGNATURES = Object.freeze([
+  "public.hr_bulletin_list_mobile_feed(uuid, uuid, text, integer, boolean, timestamp with time zone, uuid, integer)",
+  "public.hr_bulletin_get_detail(uuid, uuid, uuid, boolean)",
+  "public.hr_bulletin_mark_read(uuid, uuid, uuid)",
+  "public.hr_bulletin_mark_all_read(uuid, uuid)",
+  "public.hr_bulletin_get_attachment_content_meta(uuid, uuid, uuid, uuid)",
+  "public.hr_bulletin_list_archive(uuid, uuid, date, date, text, text, text, uuid, text, integer, integer)",
+  "public.hr_bulletin_create_admin(uuid, uuid, text, text, text, text, jsonb, text, boolean, text, text)",
+  "public.hr_bulletin_update_admin(uuid, uuid, uuid, integer, text, text, text, text, jsonb, text, boolean, text, text)",
+  "public.hr_bulletin_set_status_admin(uuid, uuid, uuid, text, integer, text, text)",
+  "public.hr_bulletin_set_pinned_admin(uuid, uuid, uuid, boolean, integer, text, text)",
+  "public.hr_bulletin_attach_file_admin(uuid, uuid, uuid, integer, uuid, text, text, text, text, bigint, text, integer, integer, integer, text, text, text)",
+  "public.hr_bulletin_delete_attachment_admin(uuid, uuid, uuid, uuid, integer, text, text)",
+]);
 export const RETIRE_AI_REPORTS_MIGRATION_NAME =
   "20261121090000_retire_ai_reports_and_provider_config.sql";
 export const RETIRED_AI_REPORTS_RPC_SIGNATURES = Object.freeze([
@@ -599,7 +615,7 @@ export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_submit(uuid, uuid, uuid, jsonb, integer, text)",
 ]);
 export const S0_T1_C_TARGET_ROUTINE_PATTERN =
-  "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
+  "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|hr_bulletin_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
 
 export function migrationChecksum(text) {
   // Git may materialize SQL files as CRLF on Windows even though the same
@@ -896,6 +912,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     vendorReferrerAttributionApplied: has(
       VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
     ),
+    hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
   };
 }
 
@@ -974,6 +991,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     hfWorkerEditHistoryNamesAndEmployeeCodeApplied = false,
     hfBlockMoveUnassignTeamLeaderApplied = false,
     vendorReferrerAttributionApplied = false,
+    hrBulletinsApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1139,6 +1157,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     ...(vendorReferrerAttributionApplied
       ? VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES
       : []),
+    ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
     .filter(
