@@ -60,6 +60,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/hf-direct-entry-catalog-privileged-edit-db.test.mjs",
   "scripts/wp10-7-3c-retire-legacy-grant-mirror-and-fallback-db.test.mjs",
   "scripts/wp10-7-3d-archive-restore-db.test.mjs",
+  "scripts/hf-dashboard-reporting-options-perf-db.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
