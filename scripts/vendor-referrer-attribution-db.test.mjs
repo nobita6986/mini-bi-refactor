@@ -2312,6 +2312,99 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       ],
     );
 
+    // (e) Valid change requests created BEFORE #259:
+    //   - Proposer submits change request on eUniqueA (stays version 1 across backfill) -> approved AFTER #259 SUCCEEDS
+    //   - Proposer submits change request on eStaleCr (version 1), then real privileged_edit bumps eStaleCr to version 2 before/around #259 -> approval AFTER #259 FAILS with PT409
+    const preReviewerAuth = nextUuid();
+    const preReviewerApp = nextUuid();
+    await preDb.query("insert into auth.users (id, email) values ($1::uuid, 'prereviewer@hrpartner.local')", [preReviewerAuth]);
+    await preDb.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled, authz_managed, version) values ($1::uuid, $2::uuid, 'Pre Reviewer', true, true, 1)",
+      [preReviewerApp, preReviewerAuth],
+    );
+    await preDb.query(
+      "insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason) values ($1::uuid, $2::uuid, 'ADMIN_ASSIGNMENT', 'Seed pre-reviewer')",
+      [preGrp.SYSTEM_ADMIN, preReviewerApp],
+    );
+
+    const preOwnerRec = nextUuid();
+    await preDb.query(
+      "insert into public.recruiters (recruiter_id, display_name, personnel_code, personnel_position, active) values ($1::uuid, 'Pre Owner', 'PRE_OWN_REC', 'STAFF', true)",
+      [preOwnerRec],
+    );
+    await preDb.query(
+      "insert into public.direct_entry_app_user_recruiter_links (app_user_id, recruiter_id, verified, valid_from, is_current) values ($1::uuid, $2::uuid, true, '2025-01-01', true)",
+      [preOwnerApp, preOwnerRec],
+    );
+    await preDb.query(
+      "insert into public.direct_entry_project_manager_assignments (project_id, manager_recruiter_id, valid_from, is_current, created_by_user_id) values ($1, $2::uuid, '2025-01-01', true, $3::uuid)",
+      [prePrj, preOwnerRec, preOwnerApp],
+    );
+
+    const eStaleCr = await seedPreEntry({
+      employeeCode: "hrp-2026-003557",
+      firstWorkDate: "2026-11-12",
+      createdAt: "2026-11-12T04:00:00Z",
+      recruiterId: vPreA.recruiter_id,
+    });
+    const { rows: [preRevCounts] } = await preDb.query(
+      "select version from public.direct_entries where entry_id = $1::uuid",
+      [eUniqueA],
+    );
+    assert.equal(preRevCounts.version, 1);
+
+    const crValidPre = await preRpc(
+      "direct_entry_create_change_request",
+      [
+        preOwnerAuth,
+        preOwnerApp,
+        JSON.stringify([
+          {
+            entry_id: eUniqueA,
+            target_kind: "ENTRY_FIELD",
+            expected_version: 1,
+            proposal: { first_work_date: "2026-11-02" },
+          },
+        ]),
+        "Change date on backfilled entry",
+        nextKey("cr_pre_ok"),
+      ],
+      ["uuid", "uuid", "jsonb", "text", "text"],
+    );
+    const crStalePre = await preRpc(
+      "direct_entry_create_change_request",
+      [
+        preOwnerAuth,
+        preOwnerApp,
+        JSON.stringify([
+          {
+            entry_id: eStaleCr,
+            target_kind: "ENTRY_FIELD",
+            expected_version: 1,
+            proposal: { first_work_date: "2026-11-03" },
+          },
+        ]),
+        "Change date before concurrent real edit",
+        nextKey("cr_pre_stale"),
+      ],
+      ["uuid", "uuid", "jsonb", "text", "text"],
+    );
+
+    // Real edit bumps eStaleCr version 1 -> 2 before migration runs
+    await preRpc(
+      "direct_entry_privileged_edit",
+      [
+        preReviewerAuth,
+        preReviewerApp,
+        eStaleCr,
+        1,
+        JSON.stringify({ labor_type: "PERMANENT" }),
+        "Real edit bumps version before backfill",
+        nextKey("pe_stale_lt"),
+      ],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text", "text"],
+    );
+
     // 1) Dry-run BEFORE #259
     const dryBefore = await runVendorEntryBackfillDryRun(preDb, {
       employeeCode: "hrp-2026-003553",
@@ -2321,7 +2414,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     assert.equal(dryBefore.schema.has_vendor_id_column, false);
     assert.deepEqual(dryBefore.groups, {
       already_snapshotted: { entries: 0, active_submitted_turns: 0 },
-      unique_match: { entries: 2, active_submitted_turns: 2 },
+      unique_match: { entries: 3, active_submitted_turns: 3 },
       missing_evidence: { entries: 1, active_submitted_turns: 1 },
       conflicting_evidence: { entries: 1, active_submitted_turns: 1 },
     });
@@ -2339,7 +2432,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       ["uuid", "uuid", "text", "uuid", "text", "text"],
     );
     const totalTurnsBefore = preReport.reconciliation.total_vendor_turns;
-    assert.equal(totalTurnsBefore, 4);
+    assert.equal(totalTurnsBefore, 5);
 
     // 2) Apply #259 onto vr_backfill_test
     const apply259 = await runMigrationApply({
@@ -2351,15 +2444,19 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     assert.equal(apply259.appliedCount, 1, "Only migration #259 is newly applied");
     assert.equal(apply259.skippedCount, allSqlFiles.length - 1);
 
-    // 3) Verify ONLY UNIQUE_MATCH rows were backfilled; MISSING_EVIDENCE & CONFLICTING_EVIDENCE remain NULL
+    // 3) Verify ONLY UNIQUE_MATCH rows were backfilled with version preserved; MISSING_EVIDENCE & CONFLICTING_EVIDENCE remain NULL
     const { rows: postEntries } = await preDb.query(
-      "select entry_id::text, vendor_id from public.direct_entries order by employee_code",
+      "select entry_id::text, vendor_id, version from public.direct_entries order by employee_code",
     );
-    const postByEntry = Object.fromEntries(postEntries.map((r) => [r.entry_id, r.vendor_id]));
-    assert.equal(postByEntry[eUniqueA], vPreA.vendor_id);
-    assert.equal(postByEntry[eUniqueRevB], vPreB.vendor_id);
-    assert.equal(postByEntry[eMissing], null);
-    assert.equal(postByEntry[eConflict], null);
+    const postByEntry = Object.fromEntries(postEntries.map((r) => [r.entry_id, r]));
+    assert.equal(postByEntry[eUniqueA].vendor_id, vPreA.vendor_id);
+    assert.equal(postByEntry[eUniqueA].version, 1, "Backfill preserves entry version on eUniqueA");
+    assert.equal(postByEntry[eUniqueRevB].vendor_id, vPreB.vendor_id);
+    assert.equal(postByEntry[eUniqueRevB].version, 1, "Backfill preserves entry version on eUniqueRevB");
+    assert.equal(postByEntry[eStaleCr].vendor_id, vPreA.vendor_id);
+    assert.equal(postByEntry[eStaleCr].version, 2, "Backfill preserves entry version (2) on eStaleCr");
+    assert.equal(postByEntry[eMissing].vendor_id, null);
+    assert.equal(postByEntry[eConflict].vendor_id, null);
 
     const { rows: backfillAudits } = await preDb.query(
       `select resource_ref, outcome, changed_fields
@@ -2369,7 +2466,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     );
     assert.deepEqual(
       backfillAudits.map((a) => a.resource_ref).sort(),
-      [eUniqueA, eUniqueRevB].sort(),
+      [eUniqueA, eUniqueRevB, eStaleCr].sort(),
     );
 
     const postReport = await preRpc(
@@ -2378,11 +2475,51 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       ["uuid", "uuid", "text", "uuid", "text", "text"],
     );
     assert.equal(postReport.reconciliation.total_vendor_turns, totalTurnsBefore, "total_vendor_turns BEFORE == AFTER");
-    assert.equal(postReport.reconciliation.unassigned_vendor_turns, 2);
+    assert.equal(postReport.reconciliation.unassigned_vendor_turns, 3);
     assert.equal(postReport.reconciliation.unresolved_vendor_turns, 2);
     assert.equal(
       postReport.unresolved_vendor_breakdown.reduce((acc, r) => acc + r.turns, 0),
       2,
+    );
+
+    // 3b) Approve pre-migration valid change request -> SUCCEEDS (version 1 preserved across backfill -> becomes version 2, preserves vendor_id)
+    const crApproved = await preRpc(
+      "direct_entry_approve_change_request",
+      [
+        preReviewerAuth,
+        preReviewerApp,
+        crValidPre.request_id,
+        1,
+        "Approve valid change request created before #259 backfill",
+        nextKey("cr_pre_ok_approve"),
+      ],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+    assert.equal(crApproved.state, "APPROVED");
+    const { rows: [eAfterCr] } = await preDb.query(
+      "select version, vendor_id, first_work_date::text from public.direct_entries where entry_id = $1::uuid",
+      [eUniqueA],
+    );
+    assert.equal(eAfterCr.version, 2);
+    assert.equal(eAfterCr.vendor_id, vPreA.vendor_id);
+    assert.equal(eAfterCr.first_work_date, "2026-11-02");
+
+    // 3c) Approve pre-migration stale change request (real edit bumped version 1 -> 2) -> FAILS with PT409
+    await assert.rejects(
+      () =>
+        preRpc(
+          "direct_entry_approve_change_request",
+          [
+            preReviewerAuth,
+            preReviewerApp,
+            crStalePre.request_id,
+            1,
+            "Approve stale change request must fail 409",
+            nextKey("cr_pre_stale_approve"),
+          ],
+          ["uuid", "uuid", "uuid", "integer", "text", "text"],
+        ),
+      (err) => err.code === "PT409" && /change item version conflict/i.test(err.message),
     );
 
     // 4) Dry-run AFTER #259
@@ -2393,7 +2530,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     assert.equal(dryAfter.schema.mode, "post_259");
     assert.equal(dryAfter.schema.has_vendor_id_column, true);
     assert.deepEqual(dryAfter.groups, {
-      already_snapshotted: { entries: 2, active_submitted_turns: 2 },
+      already_snapshotted: { entries: 3, active_submitted_turns: 3 },
       unique_match: { entries: 0, active_submitted_turns: 0 },
       missing_evidence: { entries: 1, active_submitted_turns: 1 },
       conflicting_evidence: { entries: 1, active_submitted_turns: 1 },
@@ -2409,6 +2546,6 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     const { rows: [auditCountAfter] } = await preDb.query(
       "select count(*)::int as n from public.direct_entry_audit_events where action = 'vendor_entry_snapshot_backfill'",
     );
-    assert.equal(auditCountAfter.n, 2, "Idempotent backfill re-run writes 0 additional audit rows");
+    assert.equal(auditCountAfter.n, 3, "Idempotent backfill re-run writes 0 additional audit rows");
   });
 });

@@ -22,6 +22,7 @@ import {
   ClipboardList,
   FileDiff,
   LayoutDashboard,
+  Newspaper,
   NotebookPen,
   Receipt,
   ShieldCheck,
@@ -247,6 +248,18 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     description:
       "Tra cứu tin tuyển dụng đang hiệu lực theo dự án, khu công nghiệp và hình thức tuyển dụng.",
     icon: ClipboardList,
+    status: "current",
+    capability: "any",
+    group: "my-work",
+    visibility: { desktop: true, mobile: true },
+  },
+  {
+    id: "bulletins",
+    label: "Bản tin HRPartner",
+    path: "/bulletins",
+    description:
+      "Tra cứu kho bản tin HRPartner vĩnh viễn và quản trị xuất bản bản tin nội bộ.",
+    icon: Newspaper,
     status: "current",
     capability: "any",
     group: "my-work",

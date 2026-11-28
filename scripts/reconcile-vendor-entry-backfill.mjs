@@ -223,6 +223,22 @@ export function buildVendorEntryClassificationSql(hasVendorIdColumn) {
             from public.direct_entry_revisions rev
            where rev.entry_id = ve.entry_id
         ) as has_revisions,
+        exists (
+          select 1
+            from public.direct_entry_revisions rev
+           where rev.entry_id = ve.entry_id
+             and (
+               rev.after_snapshot->>'recruiter_id' is distinct from ve.recruiter_id::text
+               or rev.after_snapshot->>'provider_type' is distinct from 'vendor'
+               or (
+                 rev.before_snapshot is not null
+                 and (
+                   rev.before_snapshot->>'recruiter_id' is distinct from ve.recruiter_id::text
+                   or rev.before_snapshot->>'provider_type' is distinct from 'vendor'
+                 )
+               )
+             )
+        ) as has_disagreeing_rev,
         latest_rev.created_at as latest_rev_created_at,
         latest_rev.after_snapshot->>'recruiter_id' as latest_rev_recruiter_id,
         latest_rev.after_snapshot->>'provider_type' as latest_rev_provider_type,
@@ -257,9 +273,9 @@ export function buildVendorEntryClassificationSql(hasVendorIdColumn) {
         (
           re.has_revisions
           and (
-            re.src_rev_created_at is null
-            or re.latest_rev_recruiter_id is distinct from ve.recruiter_id::text
+            re.latest_rev_recruiter_id is distinct from ve.recruiter_id::text
             or re.latest_rev_provider_type is distinct from 'vendor'
+            or (re.src_rev_created_at is null and re.has_disagreeing_rev)
           )
         ) as has_revision_conflict,
         case
@@ -268,6 +284,11 @@ export function buildVendorEntryClassificationSql(hasVendorIdColumn) {
            and re.latest_rev_recruiter_id is not distinct from ve.recruiter_id::text
            and re.latest_rev_provider_type is not distinct from 'vendor'
             then re.src_rev_created_at
+          when re.src_rev_created_at is null
+           and not re.has_disagreeing_rev
+           and re.latest_rev_recruiter_id is not distinct from ve.recruiter_id::text
+           and re.latest_rev_provider_type is not distinct from 'vendor'
+            then ve.entry_created_at
           else coalesce(re.src_rev_created_at, re.latest_rev_created_at, ve.entry_created_at)
         end as source_recorded_at
       from vendor_entries ve

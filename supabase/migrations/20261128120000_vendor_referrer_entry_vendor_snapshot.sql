@@ -2028,8 +2028,58 @@ revoke all on function public.direct_entry_apply_change_item(uuid, uuid, uuid, p
   from public, anon, authenticated, service_role;
 
 -- =============================================================================
--- SECTION 5: Safe Idempotent Historical Backfill
+-- SECTION 5: Safe Idempotent Historical Backfill (version-preserving)
 -- =============================================================================
+
+create or replace function public.direct_entry_entry_version_guard()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, public
+as $function$
+declare
+  v_is_vendor_backfill boolean := false;
+begin
+  v_is_vendor_backfill :=
+    old.provider_type = 'vendor'
+    and old.vendor_id is null
+    and new.vendor_id is not null
+    and new.vendor_id <> '__system_vendor__'
+    and new.version = old.version
+    and new.entry_id is not distinct from old.entry_id
+    and new.submission_id is not distinct from old.submission_id
+    and new.candidate_id is not distinct from old.candidate_id
+    and new.created_by_user_id is not distinct from old.created_by_user_id
+    and new.project_id is not distinct from old.project_id
+    and new.first_work_date is not distinct from old.first_work_date
+    and new.employee_code is not distinct from old.employee_code
+    and new.worker_details is not distinct from old.worker_details
+    and new.recruiter_id is not distinct from old.recruiter_id
+    and new.team_id is not distinct from old.team_id
+    and new.provider_type is not distinct from old.provider_type
+    and new.labor_type is not distinct from old.labor_type
+    and new.created_at is not distinct from old.created_at
+    and new.deleted_at is not distinct from old.deleted_at
+    and new.general_note is not distinct from old.general_note
+    and new.voided_at is not distinct from old.voided_at
+    and new.voided_by_user_id is not distinct from old.voided_by_user_id
+    and new.void_reason_id is not distinct from old.void_reason_id;
+
+  if v_is_vendor_backfill then
+    new.updated_at := old.updated_at;
+    return new;
+  end if;
+
+  if new.entry_id <> old.entry_id
+     or new.submission_id <> old.submission_id
+     or new.candidate_id <> old.candidate_id
+     or new.created_by_user_id <> old.created_by_user_id
+     or new.version <> old.version + 1 then
+    raise exception 'invalid entry mutation or stale version' using errcode = '40001';
+  end if;
+  new.updated_at := now();
+  return new;
+end;
+$function$;
 
 do $backfill_vendor_entry_snapshots$
 declare
@@ -2037,6 +2087,9 @@ declare
   v_after_submitted_turns integer := 0;
   v_bad_hrp_vendor_count integer := 0;
   v_bad_system_vendor_count integer := 0;
+  v_backfilled_count integer := 0;
+  v_version_drift_count integer := 0;
+  v_after_version integer := null;
   v_row record;
 begin
   select count(*)::integer
@@ -2051,7 +2104,7 @@ begin
 
   for v_row in
     with pending_vendor_entries as (
-      select e.entry_id, e.recruiter_id, e.created_at
+      select e.entry_id, e.recruiter_id, e.created_at, e.version
         from public.direct_entries e
        where e.provider_type = 'vendor'
          and e.vendor_id is null
@@ -2062,11 +2115,28 @@ begin
         p.entry_id,
         p.recruiter_id,
         p.created_at,
+        p.version,
         exists (
           select 1
             from public.direct_entry_revisions rev
            where rev.entry_id = p.entry_id
         ) as has_any_revisions,
+        exists (
+          select 1
+            from public.direct_entry_revisions rev
+           where rev.entry_id = p.entry_id
+             and (
+               rev.after_snapshot->>'recruiter_id' is distinct from p.recruiter_id::text
+               or rev.after_snapshot->>'provider_type' is distinct from 'vendor'
+               or (
+                 rev.before_snapshot is not null
+                 and (
+                   rev.before_snapshot->>'recruiter_id' is distinct from p.recruiter_id::text
+                   or rev.before_snapshot->>'provider_type' is distinct from 'vendor'
+                 )
+               )
+             )
+        ) as has_disagreeing_rev,
         latest.after_snapshot as latest_after_snapshot,
         src.created_at as src_created_at
       from pending_vendor_entries p
@@ -2074,7 +2144,7 @@ begin
         select rev.after_snapshot
           from public.direct_entry_revisions rev
          where rev.entry_id = p.entry_id
-         order by rev.version desc
+         order by rev.version desc, rev.created_at desc, rev.revision_id desc
          limit 1
       ) latest on true
       left join lateral (
@@ -2088,7 +2158,7 @@ begin
              or rev.before_snapshot->>'recruiter_id' is distinct from rev.after_snapshot->>'recruiter_id'
              or rev.before_snapshot->>'provider_type' is distinct from rev.after_snapshot->>'provider_type'
            )
-         order by rev.version desc
+         order by rev.version desc, rev.created_at desc, rev.revision_id desc
          limit 1
       ) src on true
     ),
@@ -2096,23 +2166,34 @@ begin
       select
         rs.entry_id,
         rs.recruiter_id,
+        rs.version,
         (
           rs.has_any_revisions
           and (
-            rs.src_created_at is null
-            or rs.latest_after_snapshot->>'recruiter_id' is distinct from rs.recruiter_id::text
+            rs.latest_after_snapshot->>'recruiter_id' is distinct from rs.recruiter_id::text
             or rs.latest_after_snapshot->>'provider_type' is distinct from 'vendor'
+            or (rs.src_created_at is null and rs.has_disagreeing_rev)
           )
         ) as has_revision_conflict,
         case
-          when rs.has_any_revisions then rs.src_created_at
-          else rs.created_at
+          when not rs.has_any_revisions then rs.created_at
+          when rs.src_created_at is not null
+           and rs.latest_after_snapshot->>'recruiter_id' is not distinct from rs.recruiter_id::text
+           and rs.latest_after_snapshot->>'provider_type' is not distinct from 'vendor'
+            then rs.src_created_at
+          when rs.src_created_at is null
+           and not rs.has_disagreeing_rev
+           and rs.latest_after_snapshot->>'recruiter_id' is not distinct from rs.recruiter_id::text
+           and rs.latest_after_snapshot->>'provider_type' is not distinct from 'vendor'
+            then rs.created_at
+          else null
         end as source_recorded_at
       from rev_state rs
     ),
     classified as (
       select
         st.entry_id,
+        st.version,
         st.has_revision_conflict,
         st.source_recorded_at,
         (st.source_recorded_at at time zone 'Asia/Ho_Chi_Minh')::date as source_vn_date,
@@ -2168,7 +2249,7 @@ begin
         ) as matched_vendor_id
       from source_timed st
     )
-    select c.entry_id, c.matched_vendor_id
+    select c.entry_id, c.version, c.matched_vendor_id
       from classified c
      where not c.has_revision_conflict
        and not c.has_hrp_conflict
@@ -2177,13 +2258,17 @@ begin
      order by c.entry_id asc
   loop
     update public.direct_entries e
-       set vendor_id = v_row.matched_vendor_id,
-           version = e.version + 1
+       set vendor_id = v_row.matched_vendor_id
      where e.entry_id = v_row.entry_id
        and e.provider_type = 'vendor'
-       and e.vendor_id is null;
+       and e.vendor_id is null
+    returning e.version into v_after_version;
 
     if found then
+      v_backfilled_count := v_backfilled_count + 1;
+      if v_after_version is distinct from v_row.version then
+        v_version_drift_count := v_version_drift_count + 1;
+      end if;
       insert into public.direct_entry_audit_events (
         auth_subject,
         app_user_id,
@@ -2242,6 +2327,12 @@ begin
     into v_bad_system_vendor_count
     from public.direct_entries e
    where e.vendor_id = '__system_vendor__';
+
+  if v_version_drift_count <> 0 then
+    raise exception 'Vendor snapshot backfill postcheck failed: % backfilled rows drifted from latest revision version',
+      v_version_drift_count
+      using errcode = '55000';
+  end if;
 
   if v_bad_system_vendor_count <> 0 then
     raise exception 'Vendor snapshot backfill postcheck failed: % rows have __system_vendor__',
@@ -2643,7 +2734,10 @@ declare
     'public.direct_entry_update_draft_row(uuid, uuid, uuid, integer, jsonb, text)',
     'public.direct_entry_apply_change_item(uuid, uuid, uuid, public.direct_entries, text, jsonb, uuid)'
   ];
-  v_trigger_fn text := 'public.direct_entry_validate_new_entry()';
+  v_trigger_fns text[] := array[
+    'public.direct_entry_validate_new_entry()',
+    'public.direct_entry_entry_version_guard()'
+  ];
   v_sig text;
   v_oid oid;
   v_proc_owner oid;
@@ -2724,31 +2818,33 @@ begin
     end if;
   end loop;
 
-  v_oid := pg_catalog.to_regprocedure(v_trigger_fn);
-  if v_oid is null then
-    raise exception 'Vendor snapshot postcheck failed: missing trigger fn %', v_trigger_fn using errcode = '55000';
-  end if;
-  select p.proowner into v_proc_owner from pg_catalog.pg_proc p where p.oid = v_oid;
-  if v_can_set_owner and v_proc_owner is distinct from v_base_owner_oid then
-    execute pg_catalog.format('alter function %s owner to %I', v_trigger_fn, v_base_owner);
-  end if;
-  execute pg_catalog.format('revoke all on function %s from public, anon, authenticated, service_role', v_trigger_fn);
+  foreach v_sig in array v_trigger_fns loop
+    v_oid := pg_catalog.to_regprocedure(v_sig);
+    if v_oid is null then
+      raise exception 'Vendor snapshot postcheck failed: missing trigger fn %', v_sig using errcode = '55000';
+    end if;
+    select p.proowner into v_proc_owner from pg_catalog.pg_proc p where p.oid = v_oid;
+    if v_can_set_owner and v_proc_owner is distinct from v_base_owner_oid then
+      execute pg_catalog.format('alter function %s owner to %I', v_sig, v_base_owner);
+    end if;
+    execute pg_catalog.format('revoke all on function %s from public, anon, authenticated, service_role', v_sig);
 
-  select p.proconfig
-    into v_rec
-    from pg_catalog.pg_proc p
-   where p.oid = v_oid;
+    select p.proconfig
+      into v_rec
+      from pg_catalog.pg_proc p
+     where p.oid = v_oid;
 
-  if not ('search_path=pg_catalog, public' = any(coalesce(v_rec.proconfig, array[]::text[]))) then
-    raise exception 'Vendor snapshot postcheck failed: search_path invalid on %', v_trigger_fn using errcode = '55000';
-  end if;
+    if not ('search_path=pg_catalog, public' = any(coalesce(v_rec.proconfig, array[]::text[]))) then
+      raise exception 'Vendor snapshot postcheck failed: search_path invalid on %', v_sig using errcode = '55000';
+    end if;
 
-  if pg_catalog.has_function_privilege('public', v_oid, 'EXECUTE')
-     or pg_catalog.has_function_privilege('anon', v_oid, 'EXECUTE')
-     or pg_catalog.has_function_privilege('authenticated', v_oid, 'EXECUTE')
-     or pg_catalog.has_function_privilege('service_role', v_oid, 'EXECUTE') then
-    raise exception 'Vendor snapshot postcheck failed: trigger ACL invalid on %', v_trigger_fn using errcode = '55000';
-  end if;
+    if pg_catalog.has_function_privilege('public', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('anon', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('authenticated', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('service_role', v_oid, 'EXECUTE') then
+      raise exception 'Vendor snapshot postcheck failed: trigger ACL invalid on %', v_sig using errcode = '55000';
+    end if;
+  end loop;
 
   select pg_catalog.pg_get_triggerdef(t.oid, true)
     into v_trg_def
