@@ -62,6 +62,7 @@ const POSTGRES_TEST_FILES = new Set([
   "scripts/wp10-7-3d-archive-restore-db.test.mjs",
   "scripts/vendor-referrer-attribution-db.test.mjs",
   "scripts/hf-dashboard-reporting-options-perf-db.test.mjs",
+  "scripts/collaborators-integration-db.test.mjs",
 ]);
 // shortcut: weights come from the latest successful main CI run; refresh when shard times drift.
 const TEST_WEIGHTS = {
@@ -175,6 +176,7 @@ const TEST_WEIGHTS = {
   "test:wp-hr-bulletins-api": 10.0,
   "test:wp-hr-bulletins-ui": 3.0,
   "test:collaborators-ctv": 5.0,
+  "test:collaborators-integration": 20.0,
 };
 
 const target = process.argv[2];
