@@ -169,6 +169,7 @@ const TEST_WEIGHTS = {
   "test:hf-direct-entry-catalog-privileged-edit": 14.0,
   "test:hf-vpsttt-object-storage": 6.0,
   "test:wp-hr-bulletins-foundation": 10.0,
+  "test:wp-hr-bulletins-api": 10.0,
 };
 
 const target = process.argv[2];
