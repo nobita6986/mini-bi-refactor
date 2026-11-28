@@ -5,6 +5,7 @@ import { parseReportingFilters } from "./p1-filter.ts";
 import {
   buildDailyTrend,
   buildSourceOptions,
+  PROVIDER_OPTIONS,
   sortBuckets,
   sourceStatusLabel,
   topBuckets,
@@ -233,7 +234,29 @@ test("22. options query failure không thành empty catalog (ok:false, không c�
   assert.equal(err.ok, false);
   assert.ok(!("options" in err));
   assert.ok(!("data" in err));
-  const healthyEmpty = { ok: true, options: { dimensions: { projects: [], recruiters: [], providers: [], employments: [] }, sources: [] } };
+  const healthyEmpty = { ok: true, options: { dimensions: { projects: [], recruiters: [], providers: [], employments: [], collaborators: [] }, sources: [] } };
   assert.notDeepEqual(err, healthyEmpty);
   assert.equal(healthyEmpty.ok, true);
+});
+
+test("23. PROVIDER_OPTIONS and buildDimensionOptions support CTV channel & collaborators", () => {
+  assert.deepEqual(
+    PROVIDER_OPTIONS.map((o) => [o.key, o.display]),
+    [
+      ["hrp", "Tổng tuyển của NVTD"],
+      ["hrp_direct", "HRP trực tiếp"],
+      ["hrp_ctv", "Qua CTV"],
+      ["vendor", "Vendor"],
+      ["__unknown__", "Không xác định"],
+      ["__invalid__", "Không hợp lệ"],
+    ],
+  );
+  const dims = buildDimensionOptions([
+    { dimension: "collaborator", key: "ctv-b", display: "CTV B", recruited_count: 2 },
+    { dimension: "collaborator", key: "ctv-a", display: "CTV A (Đã ngừng)", recruited_count: 1 },
+  ]);
+  assert.deepEqual(dims.collaborators, [
+    { key: "ctv-a", display: "CTV A (Đã ngừng)" },
+    { key: "ctv-b", display: "CTV B" },
+  ]);
 });

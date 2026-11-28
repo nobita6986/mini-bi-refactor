@@ -10,6 +10,7 @@ import {
   ALL_RECRUITERS_TEAM_FILTER,
   buildDetailedMatrixTeamDropdownOptions,
   buildDetailedRecruitmentMatrix,
+  canShowDetailedMatrixCtvBreakdown,
   clampDetailedMatrixZoom,
   computeCompletedWorkMonths,
   computeDetailedMatrixZoomMetrics,
@@ -19,6 +20,7 @@ import {
   DETAILED_MATRIX_FIXED_NAME_PAD_X_PX,
   DETAILED_MATRIX_NAME_COL_WIDTH_PX,
   DETAILED_MATRIX_STT_COL_WIDTH_PX,
+  formatDetailedMatrixMetricCell,
   formatPersonnelCodeCell,
   formatWorkMonthsCell,
   isMarketingHrpTeamOption,
@@ -753,4 +755,232 @@ test("Detailed Matrix (5): Ephemeral PGlite DB integration for direct_entry_repo
   } finally {
     await db.close();
   }
+});
+
+test("Detailed Matrix (6): Single-pass CTV subset counts, channel/collaborator filtering, and UI toggle formatting", async () => {
+  const catalog = {
+    teams: [{ teamId: "team-a", teamCode: "TEAM_A", displayName: "Nhóm Alpha" }],
+    recruiters: [
+      {
+        recruiterId: "rec-1",
+        recruiterKey: "nvtd a",
+        displayName: "NVTD A",
+        personnelCode: "NV01",
+        active: true,
+        isActiveHrp: true,
+        currentTeamIds: ["team-a"],
+        workStartDate: "2024-01-01",
+      },
+      {
+        recruiterId: "rec-2",
+        recruiterKey: "nvtd b",
+        displayName: "NVTD B",
+        personnelCode: "NV02",
+        active: true,
+        isActiveHrp: true,
+        currentTeamIds: ["team-a"],
+        workStartDate: "2024-01-01",
+      },
+    ],
+  };
+
+  const facts = [
+    // NVTD A: 6 direct + 4 CTV = 10 on 2026-10-01
+    {
+      source_id: P2_W04A_DIRECT_ENTRY_SOURCE_ID,
+      business_date: "2026-10-01",
+      project_key: "prj-1",
+      project_display: "Dự án 1",
+      recruiter_key: "nvtd a",
+      recruiter_display: "NVTD A",
+      provider_type_key: "hrp",
+      provider_type_display: "HRP",
+      employment_type_key: "thời vụ",
+      employment_type_display: "Thời vụ",
+      collaborator_id: null,
+      collaborator_display: null,
+      recruitment_channel: "hrp_direct",
+      recruited_count: 6,
+    },
+    {
+      source_id: P2_W04A_DIRECT_ENTRY_SOURCE_ID,
+      business_date: "2026-10-01",
+      project_key: "prj-1",
+      project_display: "Dự án 1",
+      recruiter_key: "nvtd a",
+      recruiter_display: "NVTD A",
+      provider_type_key: "hrp",
+      provider_type_display: "HRP",
+      employment_type_key: "thời vụ",
+      employment_type_display: "Thời vụ",
+      collaborator_id: "ctv-1",
+      collaborator_display: "CTV Một",
+      recruitment_channel: "hrp_ctv",
+      recruited_count: 4,
+    },
+    // NVTD B: 11 direct, 0 CTV (ranks ABOVE NVTD A even though CTV=0)
+    {
+      source_id: P2_W04A_DIRECT_ENTRY_SOURCE_ID,
+      business_date: "2026-10-02",
+      project_key: "prj-1",
+      project_display: "Dự án 1",
+      recruiter_key: "nvtd b",
+      recruiter_display: "NVTD B",
+      provider_type_key: "hrp",
+      provider_type_display: "HRP",
+      employment_type_key: "thời vụ",
+      employment_type_display: "Thời vụ",
+      collaborator_id: null,
+      collaborator_display: null,
+      recruitment_channel: "hrp_direct",
+      recruited_count: 11,
+    },
+    // Vendor fact excluded under hrp / hrp_direct / hrp_ctv
+    {
+      source_id: P2_W04A_DIRECT_ENTRY_SOURCE_ID,
+      business_date: "2026-10-01",
+      project_key: "prj-1",
+      project_display: "Dự án 1",
+      recruiter_key: "vendor 1",
+      recruiter_display: "Vendor 1",
+      provider_type_key: "vendor",
+      provider_type_display: "Vendor",
+      employment_type_key: "thời vụ",
+      employment_type_display: "Thời vụ",
+      collaborator_id: null,
+      collaborator_display: null,
+      recruitment_channel: "vendor",
+      recruited_count: 5,
+    },
+  ];
+
+  // 1. Tổng tuyển của NVTD (`hrp`)
+  const hrpMatrix = buildDetailedRecruitmentMatrix({
+    facts,
+    catalog,
+    filters: { from: "2026-10-01", to: "2026-10-02", provider: "hrp" },
+    resolution: "day",
+  });
+  assert.equal(hrpMatrix.grandTotal, 21);
+  assert.equal(hrpMatrix.grandCtvTotal, 4);
+  assert.deepEqual(hrpMatrix.columnTotals, [10, 11]);
+  assert.deepEqual(hrpMatrix.columnCtvTotals, [4, 0]);
+  assert.deepEqual(hrpMatrix.rows.map((r) => r.recruiterId), ["rec-2", "rec-1"]);
+  const rowA = hrpMatrix.rows.find((r) => r.recruiterId === "rec-1");
+  const rowB = hrpMatrix.rows.find((r) => r.recruiterId === "rec-2");
+  assert.equal(rowA.total, 10);
+  assert.equal(rowA.ctvTotal, 4);
+  assert.deepEqual(rowA.counts, [10, 0]);
+  assert.deepEqual(rowA.ctvCounts, [4, 0]);
+  assert.equal(rowB.total, 11);
+  assert.equal(rowB.ctvTotal, 0);
+
+  // 2. Display formatting rules for checkbox OFF/ON across provider modes
+  assert.equal(canShowDetailedMatrixCtvBreakdown("hrp"), true);
+  assert.equal(canShowDetailedMatrixCtvBreakdown("hrp_ctv"), false);
+  assert.equal(canShowDetailedMatrixCtvBreakdown("hrp_direct"), false);
+  assert.equal(canShowDetailedMatrixCtvBreakdown("vendor"), false);
+
+  assert.equal(formatDetailedMatrixMetricCell(10, 4, { showCtv: false, provider: "hrp" }), "10");
+  assert.equal(formatDetailedMatrixMetricCell(10, 4, { showCtv: true, provider: "hrp" }), "10 (4)");
+  assert.equal(formatDetailedMatrixMetricCell(11, 0, { showCtv: true, provider: "hrp" }), "11");
+  assert.equal(formatDetailedMatrixMetricCell(0, 0, { showCtv: true, provider: "hrp" }), "0");
+  assert.equal(formatDetailedMatrixMetricCell(4, 4, { showCtv: true, provider: "hrp_ctv" }), "4");
+  assert.equal(formatDetailedMatrixMetricCell(6, 0, { showCtv: true, provider: "hrp_direct" }), "6");
+  assert.equal(formatDetailedMatrixMetricCell(5, 0, { showCtv: true, provider: "vendor" }), "5");
+
+  // 3. Direct-only, CTV-only, and collaborator filters
+  const directMatrix = buildDetailedRecruitmentMatrix({
+    facts,
+    catalog,
+    filters: { from: "2026-10-01", to: "2026-10-02", provider: "hrp_direct" },
+    resolution: "day",
+  });
+  assert.equal(directMatrix.grandTotal, 17);
+  assert.equal(directMatrix.grandCtvTotal, 0);
+
+  const ctvMatrix = buildDetailedRecruitmentMatrix({
+    facts,
+    catalog,
+    filters: { from: "2026-10-01", to: "2026-10-02", provider: "hrp_ctv" },
+    resolution: "day",
+  });
+  assert.equal(ctvMatrix.grandTotal, 4);
+  assert.equal(ctvMatrix.grandCtvTotal, 4);
+
+  // 4. Server handler forwards `provider=hrp_ctv` & `collaborator`
+  const bodActor = {
+    auth_subject: uuid(1),
+    app_user_id: uuid(11),
+    enabled: true,
+    roles: ["SYSTEM_ADMIN"],
+    capabilities: ["entry_admin"],
+    scopes: [{ kind: "all" }],
+    effective_grants: [
+      {
+        capability: "entry_admin",
+        scope_kind: "ALL",
+        scope_id: null,
+        source_type: "LEGACY_BRIDGE",
+        source_id: uuid(91),
+      },
+    ],
+  };
+  let capturedFilters = null;
+  const res = await fetchDetailedRecruitmentMatrixReport(
+    { from: "2026-10-01", to: "2026-10-02", provider: "hrp_ctv", collaborator: "ctv-1" },
+    bodActor,
+    {
+      referenceDate: new Date("2026-10-02T08:00:00Z"),
+      callScopedFactsRpc: async (args) => {
+        capturedFilters = args.p_filters;
+        return { data: { audience: { audience: "all" }, facts }, error: null };
+      },
+      callCatalogRpc: async () => ({
+        data: {
+          teams: [{ team_id: uuid(31), team_code: "TEAM_A", display_name: "Nhóm Alpha" }],
+          recruiters: [
+            {
+              recruiter_id: uuid(41),
+              recruiter_key: "nvtd a",
+              display_name: "NVTD A",
+              personnel_code: "NV01",
+              active: true,
+              is_active_hrp: true,
+              current_team_ids: [uuid(31)],
+              work_start_date: "2024-01-01",
+            },
+          ],
+        },
+        error: null,
+      }),
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(capturedFilters.provider, "hrp_ctv");
+  assert.equal(capturedFilters.collaborator, "ctv-1");
+  assert.equal(res.data.matrix.grandTotal, 4);
+  assert.equal(res.data.matrix.grandCtvTotal, 4);
+
+  // 5. UI source guards: checkbox, helper note, 4 provider modes, no refetch on toggle
+  const panelSrc = fs.readFileSync(
+    path.resolve(process.cwd(), "src/components/dashboard/detailed-recruitment-matrix-panel.tsx"),
+    "utf8",
+  );
+  assert.ok(panelSrc.includes("Tổng tuyển của NVTD"));
+  assert.ok(panelSrc.includes("HRP trực tiếp"));
+  assert.ok(panelSrc.includes("Qua CTV"));
+  assert.ok(panelSrc.includes("Hiện số tuyển qua CTV"));
+  assert.ok(panelSrc.includes("Số trong ngoặc là số lượt qua CTV, đã tính trong tổng."));
+  const reqKeyLine = panelSrc.match(/const requestKey = `[^`]+`;/)?.[0] ?? "";
+  assert.ok(!reqKeyLine.includes("showCtvCounts"), "toggling CTV display must never trigger a refetch");
+
+  const filtersSrc = fs.readFileSync(
+    path.resolve(process.cwd(), "src/components/dashboard/dashboard-filters.tsx"),
+    "utf8",
+  );
+  assert.ok(filtersSrc.includes("collaborator: parseAsString"));
+  assert.ok(filtersSrc.includes("f-collaborator"));
+  assert.ok(filtersSrc.includes("Cộng tác viên"));
+  assert.ok(filtersSrc.includes("options.dimensions.collaborators"));
 });

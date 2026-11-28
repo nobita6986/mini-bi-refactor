@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { normalizeDimensionKey } from "../contracts/daily-recruitment-breakdown.ts";
 import { parseReportingFilters, isRealCalendarDate } from "./p1-filter.ts";
-import { computeReporting, reportingQueryFailed, buildReportingFactQuery, REPORTING_QUERY_FAILED_CODE } from "./p1-reporting.ts";
+import { computeReporting, matchesReportingFilters, reportingQueryFailed, buildReportingFactQuery, REPORTING_QUERY_FAILED_CODE } from "./p1-reporting.ts";
 
 const dir = path.join(process.cwd(), "docs", "contracts", "fixtures", "p1-reporting");
 const input = JSON.parse(readFileSync(path.join(dir, "input.json"), "utf8"));
@@ -260,7 +260,7 @@ test("24. buildReportingFactQuery: scope rỗng => skip, không query facts", ()
 test("25. buildReportingFactQuery: filter được truyền xuống DB", () => {
   const ids = new Set(["a", "b"]);
   const plan = buildReportingFactQuery(
-    { from: "2026-10-01", to: "2026-10-31", project: "dự án a", recruiter: "nguyễn văn a", provider: "hrp", employment: "thời vụ", source: "a" },
+    { from: "2026-10-01", to: "2026-10-31", project: "dự án a", recruiter: "nguyễn văn a", provider: "hrp_ctv", collaborator: "CTV-01", employment: "thời vụ", source: "a" },
     ids
   );
   assert.equal(plan.skip, false);
@@ -270,6 +270,87 @@ test("25. buildReportingFactQuery: filter được truyền xuống DB", () => {
   assert.equal(plan.query.to, "2026-10-31");
   assert.equal(plan.query.project, "dự án a");
   assert.equal(plan.query.recruiter, "nguyễn văn a");
-  assert.equal(plan.query.provider, "hrp");
+  assert.equal(plan.query.provider, "hrp_ctv");
+  assert.equal(plan.query.collaborator, "CTV-01");
   assert.equal(plan.query.employment, "thời vụ");
+});
+
+test("26. CTV channel filtering (hrp, hrp_direct, hrp_ctv, vendor) & collaborator filter", () => {
+  for (const p of ["hrp", "hrp_direct", "hrp_ctv", "vendor", "__unknown__", "__invalid__"]) {
+    assert.equal(parseReportingFilters({ provider: p }, scopeIds).ok, true, p);
+  }
+  assert.equal(parseReportingFilters({ collaborator: "CTV_01" }, scopeIds).ok, true);
+  assert.equal(parseReportingFilters({ collaborator: "__system_vendor__" }, scopeIds).ok, false);
+  assert.equal(parseReportingFilters({ collaborator: "bad space" }, scopeIds).ok, false);
+
+  const fs = [
+    fact(SRC.id, {
+      recruiter_key: "nvtd a",
+      recruiter_display: "NVTD A",
+      provider_type_key: "hrp",
+      provider_type_display: "HRP",
+      collaborator_id: null,
+      collaborator_display: null,
+      recruitment_channel: "hrp_direct",
+      recruited_count: 6,
+    }),
+    fact(SRC.id, {
+      recruiter_key: "nvtd a",
+      recruiter_display: "NVTD A",
+      provider_type_key: "hrp",
+      provider_type_display: "HRP",
+      collaborator_id: "ctv-active",
+      collaborator_display: "CTV Hoạt động",
+      recruitment_channel: "hrp_ctv",
+      recruited_count: 3,
+    }),
+    fact(SRC.id, {
+      recruiter_key: "nvtd a",
+      recruiter_display: "NVTD A",
+      provider_type_key: "hrp",
+      provider_type_display: "HRP",
+      collaborator_id: "ctv-inactive",
+      collaborator_display: "CTV Ngừng hoạt động",
+      recruitment_channel: "hrp_ctv",
+      recruited_count: 1,
+    }),
+    fact(SRC.id, {
+      recruiter_key: "vendor x",
+      recruiter_display: "Vendor X",
+      provider_type_key: "vendor",
+      provider_type_display: "Vendor",
+      collaborator_id: null,
+      collaborator_display: null,
+      recruitment_channel: "vendor",
+      recruited_count: 5,
+    }),
+  ];
+
+  // hrp includes both direct (6) + CTV (3 + 1) = 10, counted ONCE for NVTD A
+  const hrpOnly = computeReporting([SRC], fs, { provider: "hrp" }, new Set([SRC.id]));
+  assert.equal(hrpOnly.recruitedTotal, 10);
+  assert.equal(hrpOnly.byRecruiter["nvtd a"].recruitedCount, 10);
+  assert.equal(hrpOnly.byChannel.hrp_direct.recruitedCount, 6);
+  assert.equal(hrpOnly.byChannel.hrp_ctv.recruitedCount, 4);
+  assert.equal(hrpOnly.byCollaborator["ctv-active"].recruitedCount, 3);
+  assert.equal(hrpOnly.byCollaborator["ctv-inactive"].recruitedCount, 1);
+
+  // hrp_direct = 6
+  const directOnly = computeReporting([SRC], fs, { provider: "hrp_direct" }, new Set([SRC.id]));
+  assert.equal(directOnly.recruitedTotal, 6);
+
+  // hrp_ctv = 4
+  const ctvOnly = computeReporting([SRC], fs, { provider: "hrp_ctv" }, new Set([SRC.id]));
+  assert.equal(ctvOnly.recruitedTotal, 4);
+
+  // collaborator filter matches deactivated CTV too and combines with recruiter/project
+  const collabOnly = computeReporting(
+    [SRC],
+    fs,
+    { provider: "hrp", recruiter: "nvtd a", collaborator: "ctv-inactive" },
+    new Set([SRC.id]),
+  );
+  assert.equal(collabOnly.recruitedTotal, 1);
+  assert.equal(collabOnly.byCollaborator["ctv-inactive"].display, "CTV Ngừng hoạt động");
+  assert.equal(matchesReportingFilters(fs[0], { collaborator: "ctv-inactive" }), false);
 });

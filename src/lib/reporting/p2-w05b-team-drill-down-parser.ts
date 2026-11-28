@@ -4,7 +4,7 @@ import type { ReportingFilters } from "./p1-filter.ts";
 export type RequestParams = Record<string, string | string[] | undefined>;
 
 const ALLOWED_KEYS = new Set([
-  "bucket_key", "from", "to", "project", "recruiter", "provider", "employment", "status", "cursor", "limit",
+  "bucket_key", "from", "to", "project", "recruiter", "provider", "collaborator", "employment", "status", "cursor", "limit",
 ]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UNKNOWN_BUCKET_KEY = "unknown";
@@ -116,7 +116,7 @@ export function parseTeamDrillDownRequest(params: RequestParams): ParserResult {
   }
 
   const filterParams: RequestParams = {};
-  for (const key of ["from", "to", "project", "recruiter", "provider", "employment", "status"] as const) {
+  for (const key of ["from", "to", "project", "recruiter", "provider", "collaborator", "employment", "status"] as const) {
     if (params[key] !== undefined) filterParams[key] = params[key];
   }
   const parsed = parseReportingFilters(filterParams, undefined);

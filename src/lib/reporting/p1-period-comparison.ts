@@ -131,6 +131,7 @@ function buildPreviousFilters(
   if (filters.project) next.project = filters.project;
   if (filters.recruiter) next.recruiter = filters.recruiter;
   if (filters.provider) next.provider = filters.provider;
+  if (filters.collaborator) next.collaborator = filters.collaborator;
   if (filters.employment) next.employment = filters.employment;
   if (filters.status) next.status = filters.status;
   return next;

@@ -80,9 +80,11 @@ export interface ReportingOptionsCatalog {
   sources: SourceOption[];
 }
 
-/** Danh mục cố định provider/employment cho filter (luôn đủ 4 giá trị kể cả khi chưa có data). */
+/** Danh mục cố định provider/employment cho filter (bao gồm kênh trực tiếp và qua CTV). */
 export const PROVIDER_OPTIONS = [
-  { key: "hrp", display: "HRP" },
+  { key: "hrp", display: "Tổng tuyển của NVTD" },
+  { key: "hrp_direct", display: "HRP trực tiếp" },
+  { key: "hrp_ctv", display: "Qua CTV" },
   { key: "vendor", display: "Vendor" },
   { key: "__unknown__", display: "Không xác định" },
   { key: "__invalid__", display: "Không hợp lệ" },

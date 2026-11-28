@@ -22,6 +22,7 @@ import { formatTimestamp } from "@/lib/format";
 import {
   ALL_RECRUITERS_TEAM_FILTER,
   buildDetailedMatrixTeamDropdownOptions,
+  canShowDetailedMatrixCtvBreakdown,
   clampDetailedMatrixZoom,
   computeDetailedMatrixZoomMetrics,
   DETAILED_MATRIX_FIXED_CELL_PAD_X_PX,
@@ -34,6 +35,7 @@ import {
   DETAILED_MATRIX_ZOOM_MAX,
   DETAILED_MATRIX_ZOOM_MIN,
   DETAILED_MATRIX_ZOOM_STEP,
+  formatDetailedMatrixMetricCell,
   formatWorkMonthsCell,
   isMarketingHrpTeamOption,
   sortDetailedMatrixTeamOptions,
@@ -53,6 +55,7 @@ import { FiltersOrError } from "./dashboard-shared";
 
 export {
   buildDetailedMatrixTeamDropdownOptions,
+  canShowDetailedMatrixCtvBreakdown,
   clampDetailedMatrixZoom,
   computeDetailedMatrixZoomMetrics,
   DETAILED_MATRIX_FIXED_CELL_PAD_X_PX,
@@ -65,26 +68,33 @@ export {
   DETAILED_MATRIX_ZOOM_MAX,
   DETAILED_MATRIX_ZOOM_MIN,
   DETAILED_MATRIX_ZOOM_STEP,
+  formatDetailedMatrixMetricCell,
   isMarketingHrpTeamOption,
   sortDetailedMatrixTeamOptions,
   type DetailedMatrixTeamDropdownOption,
   type DetailedMatrixZoomMetrics,
 };
 
-export type DetailedMatrixProvider = "hrp" | "vendor";
+export type DetailedMatrixProvider = "hrp" | "hrp_direct" | "hrp_ctv" | "vendor";
 
 export const DETAILED_MATRIX_PROVIDER_OPTIONS: readonly {
   key: DetailedMatrixProvider;
   label: string;
 }[] = [
-  { key: "hrp", label: "HRP" },
+  { key: "hrp", label: "Tổng tuyển của NVTD" },
+  { key: "hrp_direct", label: "HRP trực tiếp" },
+  { key: "hrp_ctv", label: "Qua CTV" },
   { key: "vendor", label: "Vendor" },
 ] as const;
 
 export function normalizeDetailedMatrixProvider(
   value: string | null | undefined,
 ): DetailedMatrixProvider {
-  return value?.trim().toLowerCase() === "vendor" ? "vendor" : "hrp";
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "hrp_direct") return "hrp_direct";
+  if (normalized === "hrp_ctv") return "hrp_ctv";
+  if (normalized === "vendor") return "vendor";
+  return "hrp";
 }
 
 /**
@@ -154,6 +164,7 @@ export function buildDetailedMatrixFilterSignature(data: ReportingData): string 
     a.to ?? "",
     a.project ?? "",
     a.recruiter ?? "",
+    a.collaborator ?? "",
     a.employment ?? "",
     a.status ?? "",
     a.source ?? "",
@@ -166,6 +177,7 @@ export function buildDetailedMatrixUrl(
     resolution?: TrendResolution;
     teamId?: string;
     provider?: DetailedMatrixProvider;
+    collaborator?: string;
   },
 ): string {
   const query = new URLSearchParams();
@@ -178,6 +190,10 @@ export function buildDetailedMatrixUrl(
 
   const provider = normalizeDetailedMatrixProvider(options?.provider ?? "hrp");
   query.set("provider", provider);
+
+  const collaborator =
+    options?.collaborator !== undefined ? options.collaborator : a.collaborator;
+  if (collaborator) query.set("collaborator", collaborator);
 
   if (a.employment) query.set("employment", a.employment);
   if (a.status) query.set("status", a.status);
@@ -241,6 +257,7 @@ export function DetailedRecruitmentMatrixPanel({
   const [selectedTeamId, setSelectedTeamId] = useState<string>(
     ALL_RECRUITERS_TEAM_FILTER,
   );
+  const [showCtvCounts, setShowCtvCounts] = useState<boolean>(false);
   const [knownTeams, setKnownTeams] = useState<DetailedMatrixTeamOption[]>([]);
   const [reloadToken, setReloadToken] = useState(0);
   const [zoomPercent, setZoomPercent] = useState<number>(
@@ -515,7 +532,9 @@ export function DetailedRecruitmentMatrixPanel({
     TREND_RESOLUTION_OPTIONS[0];
   const activeProviderLabel =
     DETAILED_MATRIX_PROVIDER_OPTIONS.find((opt) => opt.key === selectedProvider)
-      ?.label ?? "HRP";
+      ?.label ?? "Tổng tuyển của NVTD";
+  const ctvToggleAvailable = canShowDetailedMatrixCtvBreakdown(selectedProvider);
+  const showCtvInCells = ctvToggleAvailable && showCtvCounts;
   const teamOptions = useMemo(
     () => sortDetailedMatrixTeamOptions(effectiveMatrix?.teams ?? knownTeams),
     [effectiveMatrix?.teams, knownTeams],
@@ -603,11 +622,23 @@ export function DetailedRecruitmentMatrixPanel({
                     {" · "}
                     Tổng tuyển:{" "}
                     <strong className="font-mono tabular-nums text-foreground">
-                      {effectiveMatrix.grandTotal}
+                      {formatDetailedMatrixMetricCell(
+                        effectiveMatrix.grandTotal,
+                        effectiveMatrix.grandCtvTotal,
+                        { showCtv: showCtvCounts, provider: selectedProvider },
+                      )}
                     </strong>
                   </>
                 ) : null}
               </p>
+              {showCtvInCells ? (
+                <p
+                  data-testid="detailed-matrix-ctv-helper-note"
+                  className="text-xs text-muted"
+                >
+                  Số trong ngoặc là số lượt qua CTV, đã tính trong tổng.
+                </p>
+              ) : null}
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
@@ -622,12 +653,12 @@ export function DetailedRecruitmentMatrixPanel({
                   htmlFor="detailed-matrix-provider-select"
                   className="text-xs font-medium whitespace-nowrap text-muted"
                 >
-                  HRP/Vendor
+                  Kênh tuyển
                 </label>
                 <select
                   id="detailed-matrix-provider-select"
                   data-testid="detailed-matrix-provider-select"
-                  aria-label="HRP/Vendor"
+                  aria-label="Kênh tuyển"
                   value={selectedProvider}
                   onChange={(event) =>
                     setSelectedProvider(
@@ -697,6 +728,31 @@ export function DetailedRecruitmentMatrixPanel({
                   );
                 })}
               </div>
+
+              <label
+                htmlFor="detailed-matrix-show-ctv-checkbox"
+                className={`inline-flex min-h-9 items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition-colors ${
+                  ctvToggleAvailable
+                    ? "cursor-pointer text-foreground hover:bg-surface-muted"
+                    : "cursor-not-allowed text-muted opacity-55"
+                }`}
+                title={
+                  ctvToggleAvailable
+                    ? "Số trong ngoặc là số lượt qua CTV, đã tính trong tổng."
+                    : "Chỉ áp dụng khi xem Tổng tuyển của NVTD"
+                }
+              >
+                <input
+                  id="detailed-matrix-show-ctv-checkbox"
+                  data-testid="detailed-matrix-show-ctv-checkbox"
+                  type="checkbox"
+                  checked={showCtvInCells}
+                  disabled={!ctvToggleAvailable}
+                  onChange={(event) => setShowCtvCounts(event.target.checked)}
+                  className="h-4 w-4 rounded border-border accent-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed"
+                />
+                <span>Hiện số tuyển qua CTV</span>
+              </label>
 
               <div
                 role="group"
@@ -936,6 +992,7 @@ export function DetailedRecruitmentMatrixPanel({
                             </th>
                             {effectiveMatrix.buckets.map((bucket, bucketIdx) => {
                               const count = row.counts[bucketIdx] ?? 0;
+                              const ctvCount = row.ctvCounts?.[bucketIdx] ?? 0;
                               return (
                                 <td
                                   key={bucket.key}
@@ -952,7 +1009,10 @@ export function DetailedRecruitmentMatrixPanel({
                                       : "text-muted"
                                   }`}
                                 >
-                                  {count}
+                                  {formatDetailedMatrixMetricCell(count, ctvCount, {
+                                    showCtv: showCtvCounts,
+                                    provider: selectedProvider,
+                                  })}
                                 </td>
                               );
                             })}
@@ -966,7 +1026,14 @@ export function DetailedRecruitmentMatrixPanel({
                               }}
                               className="border-l border-border bg-surface text-right align-middle font-semibold tabular-nums text-foreground whitespace-nowrap group-hover:bg-surface-hover md:sticky md:right-0 md:z-10"
                             >
-                              {row.total}
+                              {formatDetailedMatrixMetricCell(
+                                row.total,
+                                row.ctvTotal,
+                                {
+                                  showCtv: showCtvCounts,
+                                  provider: selectedProvider,
+                                },
+                              )}
                             </td>
                           </tr>
                         );
@@ -1009,7 +1076,14 @@ export function DetailedRecruitmentMatrixPanel({
                           }}
                           className="bg-surface-muted text-right align-middle tabular-nums whitespace-nowrap"
                         >
-                          {effectiveMatrix.columnTotals[bucketIdx] ?? 0}
+                          {formatDetailedMatrixMetricCell(
+                            effectiveMatrix.columnTotals[bucketIdx] ?? 0,
+                            effectiveMatrix.columnCtvTotals?.[bucketIdx] ?? 0,
+                            {
+                              showCtv: showCtvCounts,
+                              provider: selectedProvider,
+                            },
+                          )}
                         </td>
                       ))}
                       <td
@@ -1022,7 +1096,14 @@ export function DetailedRecruitmentMatrixPanel({
                         }}
                         className="border-l border-border bg-surface-muted text-right align-middle font-bold tabular-nums text-primary whitespace-nowrap md:sticky md:right-0 md:z-10"
                       >
-                        {effectiveMatrix.grandTotal}
+                        {formatDetailedMatrixMetricCell(
+                          effectiveMatrix.grandTotal,
+                          effectiveMatrix.grandCtvTotal,
+                          {
+                            showCtv: showCtvCounts,
+                            provider: selectedProvider,
+                          },
+                        )}
                       </td>
                     </tr>
                   </tfoot>
