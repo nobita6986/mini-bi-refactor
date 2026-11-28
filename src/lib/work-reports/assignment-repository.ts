@@ -169,6 +169,7 @@ export type WorkReportAssignmentDetail = {
 };
 
 export type AssignmentRepository = {
+  hasAssignmentAccess(input: WorkReportActorRef): Promise<WorkReportRpcOutcome<boolean>>;
   listOptions(input: WorkReportActorRef & { team_id: string | null }): Promise<WorkReportRpcOutcome<WorkReportAssignmentOptions>>;
   listAssignments(input: WorkReportActorRef & { team_id: string | null }): Promise<WorkReportRpcOutcome<WorkReportAssignmentSummary[]>>;
   getAssignmentDetail?(input: WorkReportActorRef & { assignment_id: string }): Promise<WorkReportRpcOutcome<WorkReportAssignmentDetail>>;
@@ -370,6 +371,17 @@ export function createAssignmentRepository(rpc?: Rpc): AssignmentRepository {
     return call(name, args);
   };
   return {
+    async hasAssignmentAccess(input) {
+      try {
+        const { data, error } = await invoke("work_report_has_assignment_access", {
+          p_auth_subject: input.auth_subject, p_app_user_id: input.app_user_id,
+        });
+        return outcome(data, error, (value): value is boolean => typeof value === "boolean");
+      } catch {
+        console.error("[work-reports] assignment access RPC failed");
+        return { ok: false, kind: "unavailable" };
+      }
+    },
     async listOptions(input) {
       try {
         const { data, error } = await invoke("work_report_list_assignment_options", {

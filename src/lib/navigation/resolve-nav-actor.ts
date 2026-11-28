@@ -243,10 +243,8 @@ export type WorkReportAssignmentAccessProbe = {
  * authority (including delegated `report_assign` without expanding `effective_grants`,
  * preserving WP5 R3 and the 12/13-key actor RPC contract).
  *
- * Reuses the existing `STABLE` read-only SQL reader (`work_report_list_assignment_options`
- * via `createAssignmentRepository().listOptions(..., team_id: null)`), short-circuits when
- * direct paired `report_assign` or Full Admin is already present, and fails closed on any
- * denied, malformed, or unavailable outcome.
+ * The boolean RPC keeps expected denials out of the data-reading path.
+ * Direct authority and Full Admin still short-circuit here.
  */
 export const resolveWorkReportAssignmentAccessForRequest = cache(
   async (): Promise<WorkReportAssignmentAccessProbe> => {
@@ -258,32 +256,14 @@ export const resolveWorkReportAssignmentAccessForRequest = cache(
       if (workReportAssignmentPredicate(actor.actor)) {
         return { status: "allowed", hasAssignmentAccess: true };
       }
-      const options = await createAssignmentRepository().listOptions({
+      const access = await createAssignmentRepository().hasAssignmentAccess({
         auth_subject: actor.actor.auth_subject,
         app_user_id: actor.actor.app_user_id,
-        team_id: null,
       });
-      if (options?.ok === true) {
-        const templates = options.data?.templates;
-        const teams = options.data?.teams;
-        if (!Array.isArray(templates) || !Array.isArray(teams)) {
-          return { status: "unavailable", hasAssignmentAccess: false };
-        }
-        if (templates.length === 0) {
-          return { status: "denied", hasAssignmentAccess: false };
-        }
-        const allValidTemplates = templates.every(
-          (item) =>
-            item !== null &&
-            typeof item === "object" &&
-            typeof item.template_id === "string" &&
-            item.template_id.trim().length > 0,
-        );
-        return allValidTemplates
-          ? { status: "allowed", hasAssignmentAccess: true }
-          : { status: "unavailable", hasAssignmentAccess: false };
+      if (access.ok && typeof access.data === "boolean") {
+        return { status: access.data ? "allowed" : "denied", hasAssignmentAccess: access.data };
       }
-      if (options && options.ok === false && options.kind === "denied") {
+      if (!access.ok && access.kind === "denied") {
         return { status: "denied", hasAssignmentAccess: false };
       }
       return { status: "unavailable", hasAssignmentAccess: false };

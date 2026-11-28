@@ -10,9 +10,10 @@
  *   6. strict result projection (worker-directory-contract)
  *   7. sanitized response (private, no-store)
  *
- * GET khong mutation nen khong co CSRF/origin check. Khong danh gia capability/scope o
- * application; audience thuoc RPC. Khong log identity/cursor/raw error.
+ * GET khong mutation nen khong co CSRF/origin check. Reuse the actor RPC's
+ * worker-tab projection for early denials. The directory RPC still checks scope.
  */
+import type { WorkerOperationsTabId } from "../auth/direct-entry-v2.ts";
 import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core.ts";
 import { projectWorkerDirectoryQuery } from "./worker-directory-contract.ts";
 import type { WorkerDirectoryRepository } from "./worker-directory-repository.ts";
@@ -39,7 +40,7 @@ function fail(code: string, status: number): Response {
 
 async function resolveTrustedActor(
   dependencies: WorkerDirectoryDependencies,
-): Promise<{ ok: true; actor: TrustedActor } | { ok: false; response: Response }> {
+): Promise<{ ok: true; actor: TrustedActor; allowedTabs: readonly WorkerOperationsTabId[] | undefined } | { ok: false; response: Response }> {
   try {
     const session = await dependencies.resolveSession();
     if (!session.actor.ok) {
@@ -55,7 +56,11 @@ async function resolveTrustedActor(
         typeof actor.app_user_id !== "string" || !UUID.test(actor.app_user_id)) {
       return { ok: false, response: fail("ACTOR_NOT_AVAILABLE", 403) };
     }
-    return { ok: true, actor: { auth_subject: actor.auth_subject, app_user_id: actor.app_user_id } };
+    return {
+      ok: true,
+      actor: { auth_subject: actor.auth_subject, app_user_id: actor.app_user_id },
+      allowedTabs: actor.allowed_worker_tabs,
+    };
   } catch {
     console.error("[direct-entry] worker directory session unavailable");
     return { ok: false, response: fail("WORKER_DIRECTORY_UNAVAILABLE", 500) };
@@ -79,6 +84,9 @@ export async function listWorkers(
 
   const session = await resolveTrustedActor(dependencies);
   if (!session.ok) return session.response;
+  if (session.allowedTabs !== undefined && !session.allowedTabs.includes(parsed.value.scope)) {
+    return fail("WORKER_DIRECTORY_DENIED", 403);
+  }
 
   let result: Awaited<ReturnType<WorkerDirectoryRepository["listWorkers"]>>;
   try {
