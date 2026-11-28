@@ -27,7 +27,6 @@ import {
   VENDOR_REFERRER_DEFAULT_PAGE_SIZE,
   VENDOR_REFERRER_SEARCH_MAX,
   isValidUuid,
-  parseRequiredReason,
   projectAssignMutationResult,
   projectCandidateList,
   projectRevokeMutationResult,
@@ -161,14 +160,12 @@ export function validateAssignReferrerInput(input: {
   vendor: Pick<VendorWithReferrer, "active" | "current_link">;
   referrerPersonId: string;
   effectiveDate: string;
-  reason: string;
 }):
   | {
       ok: true;
       referrer_person_id: string;
       effective_date: string;
       expected_current_link_id: string | null;
-      reason: string;
     }
   | { ok: false; message: string } {
   if (!input.vendor.active) {
@@ -197,32 +194,22 @@ export function validateAssignReferrerInput(input: {
       message: `Ngày hiệu lực không được sớm hơn liên kết hiện tại (${input.vendor.current_link.effective_from}).`,
     };
   }
-  const reason = parseRequiredReason(input.reason);
-  if (reason === null) {
-    return {
-      ok: false,
-      message: "Vui lòng nhập lý do thao tác (bắt buộc, tối đa 4.000 ký tự).",
-    };
-  }
   return {
     ok: true,
     referrer_person_id: personId,
     effective_date: effectiveDate,
     expected_current_link_id: input.vendor.current_link?.link_id ?? null,
-    reason,
   };
 }
 
 export function validateRevokeReferrerInput(input: {
   vendor: Pick<VendorWithReferrer, "current_link">;
   effectiveDate: string;
-  reason: string;
 }):
   | {
       ok: true;
       effective_date: string;
       expected_current_link_id: string;
-      reason: string;
     }
   | { ok: false; message: string } {
   if (!input.vendor.current_link) {
@@ -238,18 +225,10 @@ export function validateRevokeReferrerInput(input: {
       message: `Ngày hiệu lực thu hồi không được sớm hơn ngày bắt đầu liên kết hiện tại (${input.vendor.current_link.effective_from}).`,
     };
   }
-  const reason = parseRequiredReason(input.reason);
-  if (reason === null) {
-    return {
-      ok: false,
-      message: "Vui lòng nhập lý do thu hồi (bắt buộc, tối đa 4.000 ký tự).",
-    };
-  }
   return {
     ok: true,
     effective_date: effectiveDate,
     expected_current_link_id: input.vendor.current_link.link_id,
-    reason,
   };
 }
 
@@ -291,7 +270,7 @@ export function classifyReferrerApiFailure(
     return {
       kind: "invalid",
       message:
-        "Thông tin không hợp lệ (kiểm tra người giới thiệu, ngày hiệu lực, lý do hoặc trạng thái nhân sự/Vendor).",
+        "Thông tin không hợp lệ (kiểm tra người giới thiệu, ngày hiệu lực hoặc trạng thái nhân sự/Vendor).",
     };
   }
   return {
@@ -347,7 +326,6 @@ export function VendorReferrerPanel() {
   const [mutationDialog, setMutationDialog] = useState<MutationDialogState | null>(null);
   const [selectedPersonId, setSelectedPersonId] = useState("");
   const [effectiveDate, setEffectiveDate] = useState("");
-  const [reason, setReason] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingIntent, setPendingIntent] = useState<PendingReferrerIntent | null>(null);
@@ -496,7 +474,6 @@ export function VendorReferrerPanel() {
     setSelectedPersonId("");
     setCandidateSearch("");
     setEffectiveDate(listState.data.authorization_date);
-    setReason("");
     setFormError(null);
     setConflictState(null);
     setPendingIntent(null);
@@ -514,7 +491,6 @@ export function VendorReferrerPanel() {
       return;
     }
     setEffectiveDate(listState.data.authorization_date);
-    setReason("");
     setFormError(null);
     setConflictState(null);
     setPendingIntent(null);
@@ -542,7 +518,7 @@ export function VendorReferrerPanel() {
         typeof json === "object" && json !== null && "ok" in json && (json as { ok: unknown }).ok === true
           ? (json as { data?: unknown }).data
           : null;
-      const projected = projectVendorHistory(rawData);
+      const projected = projectVendorHistory(rawData, "api");
       if (!projected) {
         setHistoryDialog({
           kind: "error",
@@ -656,7 +632,6 @@ export function VendorReferrerPanel() {
         vendor: mutationDialog.vendor,
         referrerPersonId: selectedPersonId,
         effectiveDate,
-        reason,
       });
       if (!checked.ok) {
         setFormError(checked.message);
@@ -672,7 +647,6 @@ export function VendorReferrerPanel() {
           referrer_person_id: checked.referrer_person_id,
           effective_date: checked.effective_date,
           expected_current_link_id: checked.expected_current_link_id,
-          reason: checked.reason,
           idempotency_key: idempotencyKey,
         },
       };
@@ -684,7 +658,6 @@ export function VendorReferrerPanel() {
     const checked = validateRevokeReferrerInput({
       vendor: mutationDialog.vendor,
       effectiveDate,
-      reason,
     });
     if (!checked.ok) {
       setFormError(checked.message);
@@ -699,7 +672,6 @@ export function VendorReferrerPanel() {
       body: {
         effective_date: checked.effective_date,
         expected_current_link_id: checked.expected_current_link_id,
-        reason: checked.reason,
         idempotency_key: idempotencyKey,
       },
     };
@@ -1138,9 +1110,7 @@ export function VendorReferrerPanel() {
             ) : (
               <Alert tone="warning" title="Xác nhận thu hồi liên kết">
                 <p>
-                  Sau ngày hiệu lực thu hồi, các lượt tuyển mới của Vendor này sẽ được ghi nhận vào
-                  nhóm <strong>Vendor chưa có người giới thiệu</strong> cho tới khi gán lại. Lịch sử
-                  trước đó được giữ nguyên.
+                  Các lượt có ngày vào làm trước ngày thu hồi vẫn được tính cho người giới thiệu hiện tại.
                 </p>
               </Alert>
             )}
@@ -1154,7 +1124,7 @@ export function VendorReferrerPanel() {
                 id="referrer-effective-date"
                 type="date"
                 value={effectiveDate}
-                maxLength={10}
+                aria-describedby="referrer-effective-date-help"
                 required
                 onChange={(event) => {
                   setEffectiveDate(event.target.value);
@@ -1164,25 +1134,11 @@ export function VendorReferrerPanel() {
               />
             </label>
 
-            <label
-              htmlFor="referrer-reason"
-              className="flex flex-col gap-1 text-sm font-medium text-foreground"
-            >
-              Lý do thao tác (bắt buộc) *
-              <textarea
-                id="referrer-reason"
-                value={reason}
-                rows={3}
-                maxLength={4000}
-                required
-                placeholder="Nhập rõ lý do gán / thay thế / thu hồi người giới thiệu..."
-                onChange={(event) => {
-                  setReason(event.target.value);
-                  setFormError(null);
-                }}
-                className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-              />
-            </label>
+            <p id="referrer-effective-date-help" className="text-sm text-muted">
+              {mutationDialog.kind === "assign"
+                ? "Các lượt có ngày vào làm từ ngày đã chọn sẽ được tính cho người giới thiệu."
+                : "Các lượt có ngày vào làm từ ngày đã chọn sẽ vào nhóm Vendor chưa có người giới thiệu."}
+            </p>
 
             {formError ? (
               <p role="alert" className="text-sm font-medium text-rose-700 dark:text-rose-300">
@@ -1307,13 +1263,12 @@ export function VendorReferrerPanel() {
                           ) : null}
                         </div>
                         <div className="text-muted">
-                          Lý do tạo: <span className="text-foreground">{link.reason}</span> · Bởi{" "}
+                          Người gán{" "}
                           {link.created_by_display_name} ({formatTimestamp(link.created_at)})
                         </div>
                         {link.ended_at ? (
                           <div className="text-muted">
-                            Kết thúc:{" "}
-                            <span className="text-foreground">{link.ended_reason ?? "—"}</span> · Bởi{" "}
+                            Người kết thúc{" "}
                             {link.ended_by_display_name ?? "—"} ({formatTimestamp(link.ended_at)})
                           </div>
                         ) : null}
@@ -1354,8 +1309,7 @@ export function VendorReferrerPanel() {
                             : eventItem.referrer_full_name ?? "—"}
                         </div>
                         <div className="text-muted">
-                          Người thực hiện: <span className="text-foreground">{eventItem.actor_display_name}</span> · Lý do:{" "}
-                          <span className="text-foreground">{eventItem.reason}</span>
+                          Người thực hiện <span className="text-foreground">{eventItem.actor_display_name}</span>
                         </div>
                       </div>
                     );

@@ -183,13 +183,12 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
     assert.equal(filterReferrerCandidates(CANDIDATES, "").length, 2);
   });
 
-  it("validates assign/replace inputs fail-closed (inactive vendor, same referrer, invalid/early date, required reason)", () => {
+  it("validates assign/replace inputs fail-closed (inactive vendor, same referrer, invalid/early date)", () => {
     assert.equal(
       validateAssignReferrerInput({
         vendor: { active: false, current_link: null },
         referrerPersonId: PERSON_A,
         effectiveDate: "2026-11-27",
-        reason: "Gán mới",
       }).ok,
       false,
     );
@@ -200,7 +199,6 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
         vendor: activeUnassigned,
         referrerPersonId: "not-a-uuid",
         effectiveDate: "2026-11-27",
-        reason: "Gán mới",
       }).ok,
       false,
     );
@@ -210,17 +208,6 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
         vendor: activeUnassigned,
         referrerPersonId: PERSON_A,
         effectiveDate: "2026-02-30",
-        reason: "Gán mới",
-      }).ok,
-      false,
-    );
-
-    assert.equal(
-      validateAssignReferrerInput({
-        vendor: activeUnassigned,
-        referrerPersonId: PERSON_A,
-        effectiveDate: "2026-11-27",
-        reason: "   ",
       }).ok,
       false,
     );
@@ -243,7 +230,6 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
       vendor: activeWithLink,
       referrerPersonId: PERSON_A,
       effectiveDate: "2026-11-27",
-      reason: "Đổi lại chính người cũ",
     });
     assert.equal(sameRef.ok, false);
 
@@ -251,7 +237,6 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
       vendor: activeWithLink,
       referrerPersonId: PERSON_B,
       effectiveDate: "2026-11-09",
-      reason: "Thay thế",
     });
     assert.equal(earlyDate.ok, false);
 
@@ -259,14 +244,12 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
       vendor: activeWithLink,
       referrerPersonId: PERSON_B,
       effectiveDate: "2026-11-10",
-      reason: "  Bàn giao phụ trách  ",
     });
     assert.deepEqual(validReplace, {
       ok: true,
       referrer_person_id: PERSON_B,
       effective_date: "2026-11-10",
       expected_current_link_id: LINK_ID,
-      reason: "Bàn giao phụ trách",
     });
   });
 
@@ -275,7 +258,6 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
       validateRevokeReferrerInput({
         vendor: { current_link: null },
         effectiveDate: "2026-11-27",
-        reason: "Thu hồi",
       }).ok,
       false,
     );
@@ -295,7 +277,6 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
       validateRevokeReferrerInput({
         vendor: { current_link: currentLink },
         effectiveDate: "2026-11-09",
-        reason: "Thu hồi",
       }).ok,
       false,
     );
@@ -304,13 +285,11 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
       validateRevokeReferrerInput({
         vendor: { current_link: currentLink },
         effectiveDate: "2026-11-27",
-        reason: " Ngừng hợp tác ",
       }),
       {
         ok: true,
         effective_date: "2026-11-27",
         expected_current_link_id: LINK_ID,
-        reason: "Ngừng hợp tác",
       },
     );
 
@@ -483,6 +462,8 @@ describe("Vendor Referrer UI server gates, wiring, and strict zero-compensation 
     assert.match(referrerPanel, /\/api\/admin\/vendor-referrals\/vendors/);
     assert.match(referrerPanel, /\/api\/admin\/vendor-referrals\/candidates/);
     assert.match(referrerPanel, /\/history/);
+    assert.match(referrerPanel, /projectVendorHistory\(rawData, "api"\)/);
+    assert.doesNotMatch(referrerPanel, /referrer-reason|Lý do thao tác/);
     assert.match(referrerPanel, /\/assign/);
     assert.match(referrerPanel, /\/revoke/);
     assert.match(referrerPanel, /crypto\.randomUUID/);

@@ -434,7 +434,9 @@ export async function assignVendorReferrer(
   const expectedCurrentLinkId = parseOptionalExpectedLinkId(body.value.expected_current_link_id);
   if (!expectedCurrentLinkId.ok) return expectedCurrentLinkId.response;
 
-  const reason = parseRequiredReason(body.value.reason);
+  const reason = body.value.reason === undefined
+    ? "Cập nhật người giới thiệu Vendor"
+    : parseRequiredReason(body.value.reason);
   if (reason === null) return fail("VENDOR_REFERRER_INVALID", 400);
 
   const idempotencyKey = resolveMutationIdempotencyKey(request, body.value.idempotency_key);
@@ -499,7 +501,9 @@ export async function revokeVendorReferrer(
   const expectedCurrentLinkId = parseOptionalExpectedLinkId(body.value.expected_current_link_id);
   if (!expectedCurrentLinkId.ok) return expectedCurrentLinkId.response;
 
-  const reason = parseRequiredReason(body.value.reason);
+  const reason = body.value.reason === undefined
+    ? "Thu hồi người giới thiệu Vendor"
+    : parseRequiredReason(body.value.reason);
   if (reason === null) return fail("VENDOR_REFERRER_INVALID", 400);
 
   const idempotencyKey = resolveMutationIdempotencyKey(request, body.value.idempotency_key);

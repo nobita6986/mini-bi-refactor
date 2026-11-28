@@ -690,7 +690,7 @@ export function projectVendorList(value: unknown): VendorListResponse | null {
   };
 }
 
-function projectReferrerLinkHistory(value: unknown): ReferrerLinkHistory | null {
+function projectReferrerLinkHistory(value: unknown, source: "rpc" | "api"): ReferrerLinkHistory | null {
   if (
     !isRecord(value) ||
     !exactKeys(value, [
@@ -704,10 +704,10 @@ function projectReferrerLinkHistory(value: unknown): ReferrerLinkHistory | null 
       "effective_to",
       "is_current",
       "reason",
-      "created_by_app_user_id",
+      ...(source === "rpc" ? ["created_by_app_user_id"] : []),
       "created_by_display_name",
       "created_at",
-      "ended_by_app_user_id",
+      ...(source === "rpc" ? ["ended_by_app_user_id"] : []),
       "ended_by_display_name",
       "ended_at",
       "ended_reason",
@@ -725,10 +725,8 @@ function projectReferrerLinkHistory(value: unknown): ReferrerLinkHistory | null 
   const effective_to = nullableIsoDateStr(value.effective_to);
   const is_current = bool(value.is_current);
   const reason = nonEmptyStr(value.reason);
-  const created_by_app_user_id = uuidStr(value.created_by_app_user_id);
   const created_by_display_name = nonEmptyStr(value.created_by_display_name);
   const created_at = nonEmptyStr(value.created_at);
-  const ended_by_app_user_id = nullableUuidStr(value.ended_by_app_user_id);
   const ended_by_display_name = nullableStr(value.ended_by_display_name);
   const ended_at = nullableStr(value.ended_at);
   const ended_reason = nullableStr(value.ended_reason);
@@ -743,10 +741,10 @@ function projectReferrerLinkHistory(value: unknown): ReferrerLinkHistory | null 
     effective_to === undefined ||
     is_current === null ||
     reason === null ||
-    created_by_app_user_id === null ||
+    (source === "rpc" && uuidStr(value.created_by_app_user_id) === null) ||
     created_by_display_name === null ||
     created_at === null ||
-    ended_by_app_user_id === undefined ||
+    (source === "rpc" && nullableUuidStr(value.ended_by_app_user_id) === undefined) ||
     ended_by_display_name === undefined ||
     ended_at === undefined ||
     ended_reason === undefined
@@ -772,7 +770,7 @@ function projectReferrerLinkHistory(value: unknown): ReferrerLinkHistory | null 
   };
 }
 
-function projectAuditEvent(value: unknown): AuditEvent | null {
+function projectAuditEvent(value: unknown, source: "rpc" | "api"): AuditEvent | null {
   if (
     !isRecord(value) ||
     !exactKeys(value, [
@@ -783,7 +781,7 @@ function projectAuditEvent(value: unknown): AuditEvent | null {
       "referrer_person_id",
       "previous_referrer_person_id",
       "effective_date",
-      "actor_app_user_id",
+      ...(source === "rpc" ? ["actor_app_user_id"] : []),
       "actor_display_name",
       "referrer_full_name",
       "previous_referrer_full_name",
@@ -803,7 +801,6 @@ function projectAuditEvent(value: unknown): AuditEvent | null {
   const referrer_person_id = nullableUuidStr(value.referrer_person_id);
   const previous_referrer_person_id = nullableUuidStr(value.previous_referrer_person_id);
   const effective_date = isoDateStr(value.effective_date);
-  const actor_app_user_id = uuidStr(value.actor_app_user_id);
   const actor_display_name = nonEmptyStr(value.actor_display_name);
   const referrer_full_name = nullableStr(value.referrer_full_name);
   const previous_referrer_full_name = nullableStr(value.previous_referrer_full_name);
@@ -817,7 +814,7 @@ function projectAuditEvent(value: unknown): AuditEvent | null {
     referrer_person_id === undefined ||
     previous_referrer_person_id === undefined ||
     effective_date === null ||
-    actor_app_user_id === null ||
+    (source === "rpc" && uuidStr(value.actor_app_user_id) === null) ||
     actor_display_name === null ||
     referrer_full_name === undefined ||
     previous_referrer_full_name === undefined ||
@@ -842,7 +839,10 @@ function projectAuditEvent(value: unknown): AuditEvent | null {
   };
 }
 
-export function projectVendorHistory(value: unknown): VendorHistoryResponse | null {
+export function projectVendorHistory(
+  value: unknown,
+  source: "rpc" | "api" = "rpc",
+): VendorHistoryResponse | null {
   if (containsForbiddenCompensationField(value)) return null;
   if (
     !isRecord(value) ||
@@ -886,13 +886,13 @@ export function projectVendorHistory(value: unknown): VendorHistoryResponse | nu
 
   const links: ReferrerLinkHistory[] = [];
   for (const rawLink of value.links) {
-    const projected = projectReferrerLinkHistory(rawLink);
+    const projected = projectReferrerLinkHistory(rawLink, source);
     if (!projected) return null;
     links.push(projected);
   }
   const audit_events: AuditEvent[] = [];
   for (const rawEvent of value.audit_events) {
-    const projected = projectAuditEvent(rawEvent);
+    const projected = projectAuditEvent(rawEvent, source);
     if (!projected) return null;
     audit_events.push(projected);
   }

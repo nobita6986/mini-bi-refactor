@@ -516,7 +516,7 @@ test("invalid inputs, disallowed authority/money fields, CSRF, and idempotency m
   assert.equal(mismatchX.status, 400);
   assert.equal((await mismatchX.json()).code, "IDEMPOTENCY_KEY_MISMATCH");
 
-  // Missing reason -> 400
+  // A supplied reason must still pass validation.
   const emptyReason = await revokeVendorReferrer(
     postReq(
       `/api/admin/vendor-referrals/vendors/${VENDOR_ID}/revoke`,
@@ -657,7 +657,6 @@ test("happy paths forward server actor only, support X-Idempotency-Key, and pars
         referrer_person_id: PERSON_ID,
         effective_date: "2026-11-15",
         expected_current_link_id: PREV_LINK_ID,
-        reason: "Chuyển giao từ tháng 11",
       },
       { "x-idempotency-key": IDEM_KEY },
     ),
@@ -675,6 +674,19 @@ test("happy paths forward server actor only, support X-Idempotency-Key, and pars
   assert.equal(calls.rpcs[0].args.p_auth_subject, AUTH_SUBJECT);
   assert.equal(calls.rpcs[0].args.p_app_user_id, APP_USER_ID);
   assert.equal(calls.rpcs[0].args.p_idempotency_key, IDEM_KEY);
+  assert.equal(calls.rpcs[0].args.p_reason, "Cập nhật người giới thiệu Vendor");
+
+  const historyRes = await getVendorReferrerHistory(
+    new Request(`https://bi.local/api/admin/vendor-referrals/vendors/${VENDOR_ID}/history`),
+    VENDOR_ID,
+    "true",
+    dependencies,
+  );
+  assert.equal(historyRes.status, 200);
+  const historyBody = await historyRes.json();
+  assert.deepEqual(projectVendorHistory(historyBody.data, "api"), historyBody.data);
+  assert.equal(projectVendorHistory(HISTORY_FIXTURE, "api"), null);
+  assert.equal(projectVendorHistory(historyBody.data), null);
 
   const reportRes = await getVendorReferrerMonthlyReport(
     new Request(`https://bi.local/api/admin/vendor-referrals/report?month=2026-11&referrer_person_id=${PERSON_ID}`),
@@ -694,7 +706,6 @@ test("happy paths forward server actor only, support X-Idempotency-Key, and pars
       `/api/admin/vendor-referrals/vendors/${VENDOR_ID}/revoke`,
       {
         expected_current_link_id: LINK_ID,
-        reason: "Ngừng hợp tác",
         idempotency_key: OTHER_IDEM_KEY,
       },
       { "idempotency-key": OTHER_IDEM_KEY },
@@ -707,6 +718,7 @@ test("happy paths forward server actor only, support X-Idempotency-Key, and pars
   const revokeBody = await revokeRes.json();
   assert.equal(revokeBody.data.action, "REVOKE");
   assert.equal(revokeBody.data.current_link, null);
+  assert.equal(calls.rpcs.at(-1).args.p_reason, "Thu hồi người giới thiệu Vendor");
 });
 
 test("navigation & page access gates isolate BoD vendor referrer surfaces from non-BoD Admin, HR, Accounting, TL, Employee", () => {
