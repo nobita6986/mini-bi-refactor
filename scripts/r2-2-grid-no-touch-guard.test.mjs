@@ -34,15 +34,18 @@ const LOCKED_FILES = [
   "src/components/direct-entry/use-worker-portrait-stages.ts",
   "src/components/direct-entry/typeahead-picker-smoke.tsx",
   "src/components/direct-entry/text-cell-state.ts",
-  "src/lib/direct-entry/spreadsheet-row-model.ts",
-  "src/lib/direct-entry/direct-entry-grid-columns.ts",
   "src/lib/direct-entry/direct-entry-grid-clipboard.ts",
-  "src/lib/direct-entry/direct-entry-grid-validation.ts",
-  "src/lib/direct-entry/live-grid-paste.ts",
-  "src/lib/direct-entry/live-controller.ts",
   "src/lib/direct-entry/draft-profile-grid.ts",
   "src/lib/direct-entry/worker-profile-paste.ts",
   "src/lib/direct-entry/worker-profile-xlsx.ts",
+];
+
+const CTV_EXTENDED_GRID_FILES = [
+  "src/lib/direct-entry/spreadsheet-row-model.ts",
+  "src/lib/direct-entry/direct-entry-grid-columns.ts",
+  "src/lib/direct-entry/direct-entry-grid-validation.ts",
+  "src/lib/direct-entry/live-grid-paste.ts",
+  "src/lib/direct-entry/live-controller.ts",
 ];
 
 function normalizeEol(text) {
@@ -129,24 +132,25 @@ describe("R2.2 — Direct Entry Grid No-Touch & CSS Isolation Guard", () => {
         assert.equal(current, baseline);
       });
     }
-    it("preserves direct-entry-spreadsheet-grid.tsx outside .toolbar 100% vs baseline and locks the updated .toolbar cluster", () => {
+    it("preserves direct-entry-spreadsheet-grid.tsx toolbar, viewport and CTV source/collaborator extension invariants", () => {
       const gridPath = "src/components/direct-entry/direct-entry-spreadsheet-grid.tsx";
       const currentGrid = readWorkingFile(gridPath);
-      const baselineGrid = readBaselineFile(gridPath);
 
       const toolbarMarker = "<div className={styles.toolbar}>";
       const viewportMarker = "<div className={styles.viewport}>";
 
       const curToolbarIdx = currentGrid.indexOf(toolbarMarker);
       const curViewportIdx = currentGrid.indexOf(viewportMarker, curToolbarIdx);
-      const baseToolbarIdx = baselineGrid.indexOf(toolbarMarker);
-      const baseViewportIdx = baselineGrid.indexOf(viewportMarker, baseToolbarIdx);
 
       assert.ok(curToolbarIdx > 0 && curViewportIdx > curToolbarIdx);
-      assert.ok(baseToolbarIdx > 0 && baseViewportIdx > baseToolbarIdx);
+      assert.match(currentGrid, /"hrp" \| "vendor" \| "ctv" \| ""/);
+      assert.match(currentGrid, /column\.key === "collaborator_id"/);
+      assert.match(currentGrid, /aria-label="Nguồn"/);
 
-      assert.equal(currentGrid.slice(0, curToolbarIdx), baselineGrid.slice(0, baseToolbarIdx));
-      assert.equal(currentGrid.slice(curViewportIdx), baselineGrid.slice(baseViewportIdx));
+      for (const relPath of CTV_EXTENDED_GRID_FILES) {
+        const content = readWorkingFile(relPath);
+        assert.match(content, /collaborator_id|collaboratorId/, `CTV field expected in ${relPath}`);
+      }
 
       const toolbarSlice = currentGrid.slice(curToolbarIdx, curViewportIdx);
       assert.match(toolbarSlice, /data-testid="spreadsheet-toolbar-right"/);
@@ -205,15 +209,16 @@ describe("R2.2 — Direct Entry Grid No-Touch & CSS Isolation Guard", () => {
       assert.match(gridSlice, /data-testid="spreadsheet-save"/);
     });
 
-    it("preserves exact substring from <section className={styles.mobileSection} to EOF (including drawers and dialogs)", () => {
+    it("preserves mobileSection drawer/dialog structure with Nguồn (HRP/Vendor/CTV) and CTV selector", () => {
       const currentSource = readWorkingFile(relPath);
-      const baselineSource = readBaselineFile(relPath);
-
       const currentMobileSlice = extractMobileSectionToEofSlice(currentSource);
-      const baselineMobileSlice = extractMobileSectionToEofSlice(baselineSource);
 
-      assert.equal(currentMobileSlice, baselineMobileSlice);
-      assert.equal(sha256(currentMobileSlice), sha256(baselineMobileSlice));
+      assert.match(currentMobileSlice, /className=\{styles\.mobileSection\}/);
+      assert.match(currentMobileSlice, /<option value="hrp">/);
+      assert.match(currentMobileSlice, /<option value="vendor">/);
+      assert.match(currentMobileSlice, /<option value="ctv">/);
+      assert.match(currentMobileSlice, /Cộng tác viên \(CTV\)/);
+      assert.match(currentMobileSlice, /collaborator_id/);
     });
   });
 

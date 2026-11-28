@@ -174,6 +174,7 @@ const TEST_WEIGHTS = {
   "test:wp-hr-bulletins-foundation": 10.0,
   "test:wp-hr-bulletins-api": 10.0,
   "test:wp-hr-bulletins-ui": 3.0,
+  "test:collaborators-ctv": 5.0,
 };
 
 const target = process.argv[2];

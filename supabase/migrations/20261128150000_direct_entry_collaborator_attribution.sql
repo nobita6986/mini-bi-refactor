@@ -3411,10 +3411,7 @@ do $align_and_verify_collaborator_attribution$
 declare
   v_service_rpcs text[] := array[
     'public.direct_entry_create_batch(uuid, uuid, jsonb, text)',
-    'public.direct_entry_create_draft_row(uuid, uuid, uuid, integer, jsonb, text)',
     'public.direct_entry_create_full_profile_batch(uuid, uuid, text, jsonb, text)',
-    'public.direct_entry_create_full_profile_batch_v2_unscoped_h03(uuid, uuid, text, jsonb, text)',
-    'public.direct_entry_update_draft_row(uuid, uuid, uuid, integer, jsonb, text)',
     'public.direct_entry_privileged_edit(uuid, uuid, uuid, integer, jsonb, text, text)',
     'public.direct_entry_create_change_request(uuid, uuid, jsonb, text, text)',
     'public.direct_entry_list_own_drafts(uuid, uuid)',
@@ -3423,6 +3420,9 @@ declare
     'public.direct_entry_export_workers(uuid, uuid, text, text, uuid, text, text, text, date, date, text, text)'
   ];
   v_internal_secdef_fns text[] := array[
+    'public.direct_entry_create_draft_row(uuid, uuid, uuid, integer, jsonb, text)',
+    'public.direct_entry_create_full_profile_batch_v2_unscoped_h03(uuid, uuid, text, jsonb, text)',
+    'public.direct_entry_update_draft_row(uuid, uuid, uuid, integer, jsonb, text)',
     'public.direct_entry_entry_snapshot(uuid)',
     'public.worker_edit_history_snapshot(uuid)',
     'public.direct_entry_resolve_entry_collaborator_id(text, text, boolean)',

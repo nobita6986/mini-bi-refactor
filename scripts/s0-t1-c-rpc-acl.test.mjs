@@ -141,6 +141,8 @@ import {
   VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
   HR_BULLETINS_MIGRATION_NAME,
   HR_BULLETINS_RPC_SIGNATURES,
+  COLLABORATORS_CATALOG_MIGRATION_NAME,
+  COLLABORATORS_CATALOG_RPC_SIGNATURES,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
@@ -1182,7 +1184,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
         ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
         ...VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
-        ...HR_BULLETINS_RPC_SIGNATURES);
+        ...HR_BULLETINS_RPC_SIGNATURES,
+        ...COLLABORATORS_CATALOG_RPC_SIGNATURES);
       for (let idx = expectedSignatures.length - 1; idx >= 0; idx -= 1) {
         if (
           PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx]) ||
@@ -1264,7 +1267,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
           ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
           ...VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
-          ...HR_BULLETINS_RPC_SIGNATURES]
+          ...HR_BULLETINS_RPC_SIGNATURES,
+          ...COLLABORATORS_CATALOG_RPC_SIGNATURES]
           .filter((sig) => !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
           .filter((sig) => !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig))
           .sort(),
@@ -1747,6 +1751,29 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `grant execute on function ${sig.toLowerCase()} to service_role;`,
           ),
           `HR bulletins RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const collaboratorsCatalogMigration = await readFile(
+        path.join(MIGRATION_DIR, COLLABORATORS_CATALOG_MIGRATION_NAME),
+        "utf8",
+      );
+      const collaboratorsCatalogNormalized = collaboratorsCatalogMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of COLLABORATORS_CATALOG_RPC_SIGNATURES) {
+        assert.ok(
+          collaboratorsCatalogNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `Collaborators catalog RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          collaboratorsCatalogNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `Collaborators catalog RPC ${sig} grants EXECUTE only to service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(

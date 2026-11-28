@@ -557,6 +557,15 @@ export const WP10_7_2B_MIGRATION_NAME =
   "20261126210000_wp10_7_2b_drop_leave_profile_unit_kind.sql";
 export const HR_BULLETINS_MIGRATION_NAME =
   "20261127060000_wp_hr_bulletins_foundation.sql";
+export const COLLABORATORS_CATALOG_MIGRATION_NAME =
+  "20261128140000_collaborators_catalog.sql";
+export const COLLABORATORS_CATALOG_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_list_collaborators_admin(uuid, uuid, text, boolean, integer, integer)",
+  "public.direct_entry_get_collaborator_admin(uuid, uuid, text)",
+  "public.direct_entry_create_collaborator(uuid, uuid, integer, text, text, text, text)",
+  "public.direct_entry_update_collaborator(uuid, uuid, text, integer, text, text, text)",
+  "public.direct_entry_set_collaborator_active(uuid, uuid, text, boolean, integer, text, text)",
+]);
 export const HR_BULLETINS_RPC_SIGNATURES = Object.freeze([
   "public.hr_bulletin_list_mobile_feed(uuid, uuid, text, integer, boolean, timestamp with time zone, uuid, integer)",
   "public.hr_bulletin_get_detail(uuid, uuid, uuid, boolean)",
@@ -913,6 +922,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
       VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
     ),
     hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
+    collaboratorsCatalogApplied: has(COLLABORATORS_CATALOG_MIGRATION_NAME),
   };
 }
 
@@ -992,6 +1002,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     hfBlockMoveUnassignTeamLeaderApplied = false,
     vendorReferrerAttributionApplied = false,
     hrBulletinsApplied = false,
+    collaboratorsCatalogApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1158,6 +1169,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       ? VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES
       : []),
     ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
+    ...(collaboratorsCatalogApplied ? COLLABORATORS_CATALOG_RPC_SIGNATURES : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
     .filter(

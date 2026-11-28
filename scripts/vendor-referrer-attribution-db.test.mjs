@@ -45,6 +45,7 @@ import { Client } from "pg";
 import { computeCreatePersonFingerprint } from "../src/lib/organization/person-contract.ts";
 import {
   buildS0T1CAppliedFlags,
+  COLLABORATORS_CATALOG_RPC_SIGNATURES,
   HR_BULLETINS_MIGRATION_NAME,
   HR_BULLETINS_RPC_SIGNATURES,
   runMigrationApply,
@@ -796,7 +797,8 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       buildS0T1CAppliedFlags(new Set(allMigs)),
     );
     assert.equal(postcond.ok, true, `S0-T1-C postcondition failed: ${postcond.reason}`);
-    const expectedServiceCount = 317 + HR_BULLETINS_RPC_SIGNATURES.length;
+    const expectedServiceCount =
+      317 + HR_BULLETINS_RPC_SIGNATURES.length + COLLABORATORS_CATALOG_RPC_SIGNATURES.length;
     assert.equal(postcond.details.expectedServiceCount, expectedServiceCount);
     assert.equal(postcond.details.actualServiceCount, expectedServiceCount);
     assert.equal(postcond.details.exposedClientOrPublicCount, 0);
@@ -2090,8 +2092,8 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     const preMigDir = path.join(tmpDir, "pre-259-migrations");
     await mkdir(preMigDir, { recursive: true });
     const allSqlFiles = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
-    for (const fileName of allSqlFiles) {
-      if (fileName === VENDOR_SNAPSHOT_MIGRATION_NAME) continue;
+    const preFiles = allSqlFiles.filter((f) => f < VENDOR_SNAPSHOT_MIGRATION_NAME);
+    for (const fileName of preFiles) {
       await copyFile(path.join(MIGRATION_DIR, fileName), path.join(preMigDir, fileName));
     }
 
@@ -2109,7 +2111,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       createClient: (url) => new Client({ connectionString: url }),
       log: () => {},
     });
-    assert.equal(preApply.appliedCount, allSqlFiles.length - 1);
+    assert.equal(preApply.appliedCount, preFiles.length);
 
     async function preRpc(fnName, args, casts) {
       const ph = args.map((_, i) => (casts[i] ? `$${i + 1}::${casts[i]}` : `$${i + 1}`)).join(", ");
@@ -2441,8 +2443,8 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       createClient: (url) => new Client({ connectionString: url }),
       log: () => {},
     });
-    assert.equal(apply259.appliedCount, 1, "Only migration #259 is newly applied");
-    assert.equal(apply259.skippedCount, allSqlFiles.length - 1);
+    assert.equal(apply259.appliedCount, allSqlFiles.length - preFiles.length, "Migrations from #259 onward are newly applied");
+    assert.equal(apply259.skippedCount, preFiles.length);
 
     // 3) Verify ONLY UNIQUE_MATCH rows were backfilled with version preserved; MISSING_EVIDENCE & CONFLICTING_EVIDENCE remain NULL
     const { rows: postEntries } = await preDb.query(
