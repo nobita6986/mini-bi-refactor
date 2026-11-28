@@ -15,7 +15,9 @@ function missing(relative) {
 }
 
 test("P1.7-H04: Pilot Basic Auth runtime da bi xoa hoan toan", () => {
-  assert.equal(missing("../../proxy.ts"), true, "src/proxy.ts phai bi xoa");
+  const proxySource = source("../../proxy.ts");
+  assert.match(proxySource, /resolvePortalProxyDecision/, "src/proxy.ts chi duoc dung cho portal host isolation");
+  assert.equal(/pilot-access|PILOT_ACCESS_|WWW-Authenticate|Mini BI Pilot|Authorization|\bBasic\b/.test(proxySource), false, "src/proxy.ts khong duoc chua Pilot Basic Auth");
   assert.equal(missing("../../proxy.test.mjs"), true, "src/proxy.test.mjs phai bi xoa");
   assert.equal(missing("./pilot-access.ts"), true, "pilot-access.ts phai bi xoa");
   assert.equal(missing("./pilot-access.test.mjs"), true, "pilot-access.test.mjs phai bi xoa");
@@ -24,7 +26,8 @@ test("P1.7-H04: Pilot Basic Auth runtime da bi xoa hoan toan", () => {
 test("P1.7-H04: khong con Basic challenge, realm cu hay body pilot trong source", () => {
   const guard = source("./api-session-guard.ts");
   const page = source("../../app/dashboard/page.tsx");
-  for (const [name, text] of [["api-session-guard", guard], ["dashboard page", page]]) {
+  const proxy = source("../../proxy.ts");
+  for (const [name, text] of [["api-session-guard", guard], ["dashboard page", page], ["proxy", proxy]]) {
     assert.equal(/WWW-Authenticate/i.test(text), false, name + " khong duoc tra Basic challenge");
     assert.equal(text.includes("Mini BI Pilot"), false, name + " khong duoc dung realm cu");
     assert.equal(text.includes("Pilot access unavailable"), false, name);
