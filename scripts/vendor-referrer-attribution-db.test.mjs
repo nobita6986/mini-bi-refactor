@@ -48,6 +48,7 @@ import {
   COLLABORATORS_CATALOG_RPC_SIGNATURES,
   HR_BULLETINS_MIGRATION_NAME,
   HR_BULLETINS_RPC_SIGNATURES,
+  PUBLIC_JOBS_PORTAL_RPC_SIGNATURES,
   runMigrationApply,
   S0_T1_C_MIGRATION_NAME,
   VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
@@ -802,7 +803,8 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       317 +
       Number(appliedFlags.assignmentAccessProbeApplied) +
       HR_BULLETINS_RPC_SIGNATURES.length +
-      COLLABORATORS_CATALOG_RPC_SIGNATURES.length;
+      COLLABORATORS_CATALOG_RPC_SIGNATURES.length +
+      (appliedFlags.publicJobsApplied ? PUBLIC_JOBS_PORTAL_RPC_SIGNATURES.length : 0);
     assert.equal(postcond.details.expectedServiceCount, expectedServiceCount);
     assert.equal(postcond.details.actualServiceCount, expectedServiceCount);
     assert.equal(postcond.details.exposedClientOrPublicCount, 0);

@@ -858,6 +858,28 @@ test("Real PostgreSQL concurrency (T-CONC-01..08): multi-post same pair create, 
           );
         }
       }
+      // Two operators import the same reconciled historical URL for different briefs.
+      // Hold the first transaction until the second has actually blocked on the unique key.
+      await c1.query(await readFile(path.join(MIGRATION_DIR,"20261128170000_public_jobs_portal.sql"),"utf8"));
+      await c1.query("begin");
+      const aliasSql="select public.recruitment_post_register_slug($1,$2)";
+      const alias="ancienne-url-123456";
+      await c1.query(aliasSql,[alias,ptCreatedIds[0]]);
+      const contender=Promise.allSettled([c2.query(aliasSql,[alias,ptCreatedIds[1]])]);
+      let blocked=false;
+      try {
+        for (let i=0;i<100;i++){
+          const observed=await c3.query("select cardinality(pg_blocking_pids($1))>0 as waiting",[c2.processID]);
+          if(observed.rows[0].waiting){blocked=true;break;}
+          await new Promise(resolve=>setTimeout(resolve,20));
+        }
+      } finally { await c1.query("commit"); }
+      const [loser]=await contender;
+      assert.ok(blocked,"alias writers must cross the same unique index");
+      assert.equal(loser.status,"rejected");assert.match(loser.reason.message,/SLUG_ALIAS_ALREADY_ASSIGNED/);
+      await c2.query(aliasSql,[alias,ptCreatedIds[0]]);
+      const canon=(await c3.query("select alias_slug from public.recruitment_project_brief_slug_aliases where brief_id=$1 and is_canonical",[ptCreatedIds[0]])).rows[0].alias_slug;
+      await assert.rejects(c2.query(aliasSql,[canon,ptCreatedIds[1]]),/SLUG_ALIAS_CONFLICTS_WITH_CANONICAL/);
     } finally {
       await Promise.all([c1.end(), c2.end(), c3.end(), c4.end()]);
     }

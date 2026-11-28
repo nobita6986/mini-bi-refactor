@@ -1,0 +1,1 @@
+export default function About(){return <main className="jobs-info"><h1>Giới thiệu</h1><p>Việc làm miền Bắc giới thiệu các vị trí đang tuyển do HR Partner công bố. Bạn có thể tìm theo tỉnh, khu công nghiệp và loại lao động.</p><a href="/viec-lam">Xem việc đang tuyển</a></main>}
