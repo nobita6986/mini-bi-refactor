@@ -30,6 +30,9 @@ export async function createDirectEntrySessionResponse(
       }
       return json({ ok: false, code: "ACTOR_NOT_AVAILABLE" }, 403);
     }
+    if (result.actor.actor.partner_account !== undefined) {
+      return json({ ok: false, code: "ACTOR_NOT_AVAILABLE" }, 403);
+    }
 
     const actor: Pick<
       DirectEntryActor,

@@ -1,13 +1,14 @@
 import { notFound, redirect } from "next/navigation";
 import { connection } from "next/server";
 
-import { AccountUnavailable } from "@/components/auth/access-denied";
+import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { BulletinWorkspace } from "@/components/bulletins/bulletin-workspace";
 import {
   canManageBulletins,
   decideBulletinsPageAccess,
 } from "@/lib/bulletins/bulletin-ui-model";
+import { resolveInternalBiPartnerBlock } from "@/lib/navigation/partner-page-guard";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,13 @@ export default async function BulletinsPage() {
     case "TEMPORARY_UNAVAILABLE":
       return <TemporaryUnavailable />;
     case "ALLOW": {
+      const partnerBlock = resolveInternalBiPartnerBlock(actor);
+      if (partnerBlock === "REDIRECT_CHANGE_PASSWORD") {
+        redirect("/partner/change-password");
+      }
+      if (partnerBlock === "ACCESS_DENIED") {
+        return <AccessDenied />;
+      }
       const canManage = canManageBulletins(actor && actor.ok ? actor.actor : null);
       return <BulletinWorkspace canManage={canManage} />;
     }

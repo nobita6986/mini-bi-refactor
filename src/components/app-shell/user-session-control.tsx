@@ -21,8 +21,15 @@ import { getDefaultFormSaveUploadJobManager } from "@/lib/direct-entry/form-save
 
 type SessionState = "loading" | "auth" | "anon" | "unavailable";
 
+type SessionPartnerAccount = {
+  partner_kind: "VENDOR" | "COLLABORATOR";
+  must_change_password: boolean;
+};
+
 const linkClass =
   "inline-flex h-11 items-center rounded-full border border-border/80 bg-surface px-4 text-sm font-medium text-foreground shadow-[var(--shadow-card)] hover:bg-surface-muted focus-visible:ring-2 focus-visible:ring-ring/40";
+const menuItemClass =
+  "flex h-11 cursor-pointer items-center rounded-xl px-3 text-sm text-foreground outline-none data-[highlighted]:bg-[var(--selected-bg)] data-[highlighted]:text-primary";
 
 export async function executeSessionLogout({
   fetchImpl = fetch,
@@ -61,11 +68,26 @@ function readDisplayName(payload: unknown): string | null {
   return name;
 }
 
+function readPartnerAccount(payload: unknown): SessionPartnerAccount | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const actor = (payload as { actor?: unknown }).actor;
+  if (typeof actor !== "object" || actor === null) return null;
+  const raw = (actor as { partner_account?: unknown }).partner_account;
+  if (typeof raw !== "object" || raw === null) return null;
+  const partnerKind = (raw as { partner_kind?: unknown }).partner_kind;
+  const mustChange = (raw as { must_change_password?: unknown }).must_change_password;
+  if ((partnerKind !== "VENDOR" && partnerKind !== "COLLABORATOR") || typeof mustChange !== "boolean") {
+    return null;
+  }
+  return { partner_kind: partnerKind, must_change_password: mustChange };
+}
+
 export function UserSessionControl() {
   const router = useRouter();
   const notify = useNotify();
   const [state, setState] = useState<SessionState>("loading");
   const [displayName, setDisplayName] = useState<string | null>(null);
+  const [partnerAccount, setPartnerAccount] = useState<SessionPartnerAccount | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,18 +110,22 @@ export function UserSessionControl() {
           const name = readDisplayName(payload);
           if (name === null) {
             setDisplayName(null);
+            setPartnerAccount(null);
             setState("unavailable");
             return;
           }
           setDisplayName(name);
+          setPartnerAccount(readPartnerAccount(payload));
           setState("auth");
           return;
         }
         setDisplayName(null);
+        setPartnerAccount(null);
         setState(res.status === 401 ? "anon" : "unavailable");
       } catch {
         if (cancelled) return;
         setDisplayName(null);
+        setPartnerAccount(null);
         setState("unavailable");
       }
     })();
@@ -144,14 +170,28 @@ export function UserSessionControl() {
           sideOffset={8}
           className="z-50 min-w-48 rounded-[18px] border border-border/80 bg-surface p-1.5 shadow-[var(--shadow-card-hover)]"
         >
-          <DropdownMenu.Item asChild>
-            <Link
-              href="/dashboard/account/password"
-              className="flex h-11 cursor-pointer items-center rounded-xl px-3 text-sm text-foreground outline-none data-[highlighted]:bg-[var(--selected-bg)] data-[highlighted]:text-primary"
-            >
-              Đổi mật khẩu
-            </Link>
-          </DropdownMenu.Item>
+          {partnerAccount ? (
+            <>
+              {!partnerAccount.must_change_password ? (
+                <DropdownMenu.Item asChild>
+                  <Link href="/partner/profile" className={menuItemClass}>
+                    Hồ sơ của tôi
+                  </Link>
+                </DropdownMenu.Item>
+              ) : null}
+              <DropdownMenu.Item asChild>
+                <Link href="/partner/change-password" className={menuItemClass}>
+                  Đổi mật khẩu
+                </Link>
+              </DropdownMenu.Item>
+            </>
+          ) : (
+            <DropdownMenu.Item asChild>
+              <Link href="/dashboard/account/password" className={menuItemClass}>
+                Đổi mật khẩu
+              </Link>
+            </DropdownMenu.Item>
+          )}
           <DropdownMenu.Item
             onSelect={(event) => {
               event.preventDefault();

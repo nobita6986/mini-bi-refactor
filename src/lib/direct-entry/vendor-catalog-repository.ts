@@ -1,7 +1,7 @@
 /**
- * P3.1-W02-B - Repository boundary cho vendor master catalog admin (#75).
+ * P3.1-W02-B + Partner Portal - Repository boundary cho vendor master catalog admin.
  *
- * - Chi goi 5 RPC canonical cua migration #75; KHONG doc/ghi table truc tiep.
+ * - Chi goi 5 RPC canonical cua migration #75 / 20261128190000; KHONG doc/ghi table truc tiep.
  * - auth_subject/app_user_id do server context truyen vao, khong bao gio tu client.
  * - DB guard (direct_entry_assert_catalog_operator tu #68) van la authority cuoi.
  * - Response duoc project chat; malformed => unavailable (khong bao gio success).
@@ -9,6 +9,7 @@
 import "server-only";
 
 import {
+  classifyPartnerCatalogError,
   vendorCatalogCreateResult,
   vendorCatalogItem,
   vendorCatalogList,
@@ -19,6 +20,7 @@ import type {
   AdminVendorCreateResult,
   AdminVendorList,
   AdminVendorMutation,
+  PartnerCatalogErrorKind,
 } from "./vendor-catalog-contract.ts";
 
 type Rpc = (name: string, args: Record<string, unknown>) => Promise<{
@@ -28,12 +30,11 @@ type Rpc = (name: string, args: Record<string, unknown>) => Promise<{
 
 export type AdminActorRef = { auth_subject: string; app_user_id: string };
 
+export type VendorCatalogErrorKind = PartnerCatalogErrorKind;
+
 export type VendorCatalogOutcome<T> =
   | { ok: true; data: T }
   | { ok: false; kind: VendorCatalogErrorKind };
-
-export type VendorCatalogErrorKind =
-  | "conflict" | "denied" | "invalid" | "not-found" | "unavailable";
 
 export type VendorCatalogRepository = {
   listVendors(input: AdminActorRef & {
@@ -42,10 +43,12 @@ export type VendorCatalogRepository = {
   getVendor(input: AdminActorRef & { vendor_id: string }): Promise<VendorCatalogOutcome<AdminVendor>>;
   createVendor(input: AdminActorRef & {
     expected_version: 0; vendor_id: string; display_name: string; valid_from: string;
+    address?: string | null; phone?: string | null;
     reason: string | null; idempotency_key: string;
   }): Promise<VendorCatalogOutcome<AdminVendorCreateResult>>;
   updateVendor(input: AdminActorRef & {
     vendor_id: string; expected_version: number; display_name: string;
+    address?: string | null; phone?: string | null;
     reason: string | null; idempotency_key: string;
   }): Promise<VendorCatalogOutcome<AdminVendorMutation>>;
   setVendorActive(input: AdminActorRef & {
@@ -62,26 +65,16 @@ function serviceRoleRpc(): Rpc {
 }
 
 /**
- * SQLSTATE -> kind. Chi nhan cac ma RPC #75 thuc su dung:
- *   PT409/40001 OCC stale (vendor version)
- *   23505 vendor_id trung (unique) hoac idempotency key
- *   42501 catalog operator / all scope denied
- *   P0002 vendor not found hoac reserved __system_vendor__
- *   23514 rang buoc du lieu
- *   22023 input sai; rieng message reuse-khac-payload la conflict
+ * SQLSTATE -> kind. Chi nhan cac ma RPC #75 / 20261128190000 thuc su dung:
+ *   PT409 PARTNER_CODE_CONFLICT / 23505 -> code-conflict
+ *   PT409 OCC / 40001 / 22023 reuse -> conflict
+ *   42501 -> denied, P0002 -> not-found, 23514 / 22023 -> invalid
  * Moi ma khac => unavailable (fail-closed).
  */
 export function classifyVendorCatalogError(
   error: { code?: string; message?: string },
 ): VendorCatalogErrorKind {
-  if (error.code === "PT409" || error.code === "40001" || error.code === "23505") return "conflict";
-  if (error.code === "42501") return "denied";
-  if (error.code === "P0002") return "not-found";
-  if (error.code === "23514") return "invalid";
-  if (error.code === "22023") {
-    return error.message === "idempotency key reused with different input" ? "conflict" : "invalid";
-  }
-  return "unavailable";
+  return classifyPartnerCatalogError(error);
 }
 
 function unavailable(): never {
@@ -139,6 +132,8 @@ export function createVendorCatalogRepository(rpc?: Rpc): VendorCatalogRepositor
         p_valid_from: input.valid_from,
         p_reason: input.reason,
         p_idempotency_key: input.idempotency_key,
+        p_address: input.address ?? null,
+        p_phone: input.phone ?? null,
       }, vendorCatalogCreateResult);
     },
     updateVendor(input) {
@@ -150,6 +145,8 @@ export function createVendorCatalogRepository(rpc?: Rpc): VendorCatalogRepositor
         p_display_name: input.display_name,
         p_reason: input.reason,
         p_idempotency_key: input.idempotency_key,
+        p_address: input.address ?? null,
+        p_phone: input.phone ?? null,
       }, vendorCatalogMutation);
     },
     setVendorActive(input) {

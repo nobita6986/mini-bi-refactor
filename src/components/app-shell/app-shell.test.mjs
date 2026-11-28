@@ -238,6 +238,14 @@ test("desktop-nav.tsx & mobile-nav.tsx: KHÔNG có chuỗi 'Google Sheets' hay '
   assert.ok(!/\bn8n\b/i.test(mobileNavSource), "mobile-nav không nhắc n8n");
 });
 
+test("app-shell.tsx: gates partner nav entries by DIRECT_ENTRY_API_ENABLED and links partner logo safely", () => {
+  assert.match(appShellSource, /partnerPortalEnabled = process\.env\.DIRECT_ENTRY_API_ENABLED === "true"/);
+  assert.match(appShellSource, /"partner-recruitment"/);
+  assert.match(appShellSource, /"partner-workers"/);
+  assert.match(appShellSource, /"partner-profile"/);
+  assert.match(appShellSource, /actor\?\.partner_account/);
+});
+
 test("desktop-nav.tsx & mobile-nav.tsx: KHÔNG có client-side role/filter giả (Admin/Kế toán/Leader)", () => {
   // Bảo đảm App Shell không hard-code UI role (đó là việc của P3 RBAC thật).
   for (const src of [desktopNavSource, mobileNavSource]) {

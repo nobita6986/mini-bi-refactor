@@ -134,6 +134,7 @@ async function resolveSalaryAdvanceActor(
   if (
     !actor ||
     actor.enabled !== true ||
+    actor.partner_account !== undefined ||
     !isUuid(actor.auth_subject) ||
     !isUuid(actor.app_user_id)
   ) {

@@ -122,6 +122,31 @@ export type PairedScopeTarget =
   | { kind: "department"; department_id: string }
   | { kind: "project"; project_id: string };
 
+export type PartnerKind = "VENDOR" | "COLLABORATOR";
+
+export type PartnerAccountState =
+  | "UNPROVISIONED"
+  | "PENDING_ACTIVATION"
+  | "ACTIVE_MUST_CHANGE_PASSWORD"
+  | "ACTIVE"
+  | "SUSPENDED";
+
+export type PartnerActorContext = {
+  partner_account_id: string;
+  partner_kind: PartnerKind;
+  vendor_id: string | null;
+  collaborator_id: string | null;
+  partner_id: string;
+  partner_display_name: string;
+  partner_active: boolean;
+  canonical_code: string;
+  username: string;
+  account_state: PartnerAccountState;
+  activated_at: string | null;
+  must_change_password: boolean;
+  password_changed_at: string | null;
+};
+
 export type DirectEntryActor = {
   auth_subject: string;
   app_user_id: string;
@@ -135,6 +160,7 @@ export type DirectEntryActor = {
   effective_report_review_scopes?: readonly EffectiveReportReviewScope[];
   self_recruiter_suggestion: string | null;
   allowed_worker_tabs?: readonly WorkerOperationsTabId[];
+  partner_account?: PartnerActorContext;
   session: {
     provider: "supabase";
     verification: "getUser";
@@ -166,6 +192,7 @@ export type ActorAuthorizationRecord = {
   allowed_worker_tabs?: unknown;
   effective_grants?: unknown;
   assigned_roles?: unknown;
+  partner_account?: unknown;
 };
 
 export type ActorRepository = {
@@ -180,6 +207,7 @@ export type ActorResolution =
         | "UNAUTHENTICATED"
         | "ACTOR_MAPPING_MISSING"
         | "ACTOR_DISABLED"
+        | "ACTOR_PENDING_ACTIVATION"
         | "ACTOR_REPOSITORY_MISSING"
         | "ACTOR_REPOSITORY_INVALID"
         | "AMBIGUOUS_RECRUITER_LINK"
@@ -447,7 +475,15 @@ async function resolveActorInternal(input: {
   if (record.auth_subject !== input.session.auth_subject) {
     return { ok: false, reason: "ACTOR_REPOSITORY_INVALID" };
   }
-  if (!record.enabled) return { ok: false, reason: "ACTOR_DISABLED" };
+  if (!record.enabled) {
+    const rawPartner = (record as Record<string, unknown>).partner_account;
+    if (isPartnerActorContext(rawPartner) &&
+        rawPartner.account_state === "PENDING_ACTIVATION" &&
+        rawPartner.partner_active !== false) {
+      return { ok: false, reason: "ACTOR_PENDING_ACTIVATION" };
+    }
+    return { ok: false, reason: "ACTOR_DISABLED" };
+  }
   if (hasDuplicateCurrentTeamScope(record.team_scope_grants as TeamScopeGrant[])) {
     return { ok: false, reason: "AMBIGUOUS_TEAM_MEMBERSHIP" };
   }
@@ -551,6 +587,11 @@ async function resolveActorInternal(input: {
     ? normalizeAllowedWorkerOperationsTabs(record.allowed_worker_tabs)
     : undefined;
 
+  const rawPartnerAccount = (record as Record<string, unknown>).partner_account;
+  const partnerAccount = isPartnerActorContext(rawPartnerAccount)
+    ? normalizePartnerActorContext(rawPartnerAccount)
+    : undefined;
+
   return {
     ok: true,
     actor: {
@@ -572,6 +613,9 @@ async function resolveActorInternal(input: {
       self_recruiter_suggestion: selfRecruiterId,
       ...(allowedWorkerTabs !== undefined
         ? { allowed_worker_tabs: allowedWorkerTabs }
+        : {}),
+      ...(partnerAccount !== undefined
+        ? { partner_account: partnerAccount }
         : {}),
       session: {
         provider: "supabase",
@@ -672,6 +716,65 @@ function isEffectiveReportReviewScope(value: unknown): value is EffectiveReportR
   return true;
 }
 
+const PARTNER_ACCOUNT_STATES = new Set<PartnerAccountState>([
+  "UNPROVISIONED",
+  "PENDING_ACTIVATION",
+  "ACTIVE_MUST_CHANGE_PASSWORD",
+  "ACTIVE",
+  "SUSPENDED",
+]);
+
+const PARTNER_USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function isPartnerActorContext(value: unknown): value is PartnerActorContext {
+  if (!isRecord(value)) return false;
+  if (!UUID.test(String(value.partner_account_id))) return false;
+  if (value.partner_kind !== "VENDOR" && value.partner_kind !== "COLLABORATOR") return false;
+  if (!isSafeProjectRef(value.partner_id)) return false;
+  if (value.partner_kind === "VENDOR") {
+    if (value.vendor_id !== value.partner_id || value.collaborator_id !== null) return false;
+  } else {
+    if (value.collaborator_id !== value.partner_id || value.vendor_id !== null) return false;
+  }
+  if (
+    typeof value.partner_display_name !== "string" ||
+    value.partner_display_name.trim().length < 1 ||
+    value.partner_display_name.trim().length > 256
+  ) {
+    return false;
+  }
+  if (typeof value.partner_active !== "boolean") return false;
+  if (!isSafeProjectRef(value.canonical_code) || value.canonical_code !== value.canonical_code.toLowerCase()) {
+    return false;
+  }
+  if (typeof value.username !== "string" || !PARTNER_USERNAME_PATTERN.test(value.username)) return false;
+  if (typeof value.account_state !== "string" || !PARTNER_ACCOUNT_STATES.has(value.account_state as PartnerAccountState)) {
+    return false;
+  }
+  if (value.activated_at !== null && typeof value.activated_at !== "string") return false;
+  if (typeof value.must_change_password !== "boolean") return false;
+  if (value.password_changed_at !== null && typeof value.password_changed_at !== "string") return false;
+  return true;
+}
+
+function normalizePartnerActorContext(value: PartnerActorContext): PartnerActorContext {
+  return {
+    partner_account_id: value.partner_account_id,
+    partner_kind: value.partner_kind,
+    vendor_id: value.vendor_id,
+    collaborator_id: value.collaborator_id,
+    partner_id: value.partner_id,
+    partner_display_name: value.partner_display_name.trim(),
+    partner_active: value.partner_active,
+    canonical_code: value.canonical_code,
+    username: value.username,
+    account_state: value.account_state,
+    activated_at: value.activated_at,
+    must_change_password: value.must_change_password,
+    password_changed_at: value.password_changed_at,
+  };
+}
+
 function isValidAuthorizationRecord(
   value: unknown,
 ): value is ActorAuthorizationRecord & {
@@ -687,6 +790,13 @@ function isValidAuthorizationRecord(
 } {
   if (!isRecord(value)) return false;
   const rawRecord = value as Record<string, unknown>;
+  if (
+    rawRecord.partner_account !== undefined &&
+    rawRecord.partner_account !== null &&
+    !isPartnerActorContext(rawRecord.partner_account)
+  ) {
+    return false;
+  }
   if (
     rawRecord.effective_grants !== undefined &&
     (!Array.isArray(rawRecord.effective_grants) || !rawRecord.effective_grants.every(isPairedEffectiveGrant))

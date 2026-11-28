@@ -1,12 +1,12 @@
 /**
- * P3.1-W02-B - API boundary cho vendor master catalog admin (RPC #75).
+ * P3.1-W02-B + Partner Portal - API boundary cho vendor master catalog admin.
  *
  * Pipeline thong nhat (giong team-catalog-api):
  *   1. DIRECT_ENTRY_API_ENABLED gate
  *   2. same-origin/CSRF (mutation)
  *   3. content-type + JSON bounded
  *   4. quet authority de quy (client khong duoc gui actor/role/capability/scope)
- *   5. strict request projection (optional action reason, OCC, idempotency)
+ *   5. strict request projection (optional reason/address/phone, OCC, idempotency)
  *   6. resolve session server-side -> actor CHI tu session
  *   7. repository/RPC
  *   8. response sanitized (khong forward raw DB message), no-store
@@ -22,6 +22,11 @@ import type { DirectEntrySessionResult } from "../auth/direct-entry-session-core
 import { readBoundedJson } from "./write-api.ts";
 import type { VendorCatalogRepository } from "./vendor-catalog-repository.ts";
 import { hasExactKeysWithOptionalReason, projectOptionalActionReason } from "./action-reason.ts";
+import {
+  hasRequiredAndOptionalKeys,
+  projectOptionalPartnerAddress,
+  projectOptionalPartnerPhone,
+} from "./vendor-catalog-contract.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REASON_MAX = 4000;
@@ -142,6 +147,7 @@ async function resolveTrustedActor(
 export function vendorCatalogErrorResponse(kind: string): Response {
   if (kind === "denied") return fail("VENDOR_DENIED", 403);
   if (kind === "not-found") return fail("VENDOR_NOT_FOUND", 404);
+  if (kind === "code-conflict") return fail("PARTNER_CODE_CONFLICT", 409);
   if (kind === "conflict") return fail("VENDOR_CONFLICT", 409);
   if (kind === "invalid") return fail("VENDOR_INVALID", 400);
   console.error("[vendor-catalog] unavailable");
@@ -192,49 +198,112 @@ export function vendorCatalogListQuery(url: URL): Parsed<ListVendorsQuery> {
 }
 
 export type CreateVendorRequest = {
-  expected_version: 0; vendor_id: string; display_name: string; valid_from: string;
-  reason: string | null; idempotency_key: string;
+  expected_version: 0;
+  vendor_id: string;
+  display_name: string;
+  valid_from: string;
+  address: string | null;
+  phone: string | null;
+  reason: string | null;
+  idempotency_key: string;
 };
 export function vendorCatalogCreateRequest(body: unknown): Parsed<CreateVendorRequest> {
   const value = record(body);
-  if (!value || !exact(value, ["expected_version", "vendor_id", "display_name", "valid_from",
-    "reason", "idempotency_key"])) {
+  if (
+    !value ||
+    !hasRequiredAndOptionalKeys(
+      value,
+      ["expected_version", "vendor_id", "display_name", "valid_from", "idempotency_key"],
+      ["reason", "address", "phone"],
+    )
+  ) {
     return { ok: false, response: fail("VENDOR_INVALID", 400) };
   }
   const expected_version = version(value.expected_version);
   const vendor_id = vendorId(value.vendor_id);
   const display_name = text(value.display_name, NAME_MAX);
   const valid_from = isoDate(value.valid_from);
+  const address = projectOptionalPartnerAddress(value.address);
+  const phone = projectOptionalPartnerPhone(value.phone);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
   // create mo mot aggregate moi: expected_version phai dung bang 0.
-  if (expected_version !== 0 || !vendor_id || !display_name || !valid_from || !reason.ok ||
-      !idempotency_key) {
+  if (
+    expected_version !== 0 ||
+    !vendor_id ||
+    !display_name ||
+    !valid_from ||
+    !address.ok ||
+    !phone.ok ||
+    !reason.ok ||
+    !idempotency_key
+  ) {
     return { ok: false, response: fail("VENDOR_INVALID", 400) };
   }
-  return { ok: true, value: { expected_version: 0, vendor_id, display_name, valid_from, reason: reason.value,
-    idempotency_key } };
+  return {
+    ok: true,
+    value: {
+      expected_version: 0,
+      vendor_id,
+      display_name,
+      valid_from,
+      address: address.value,
+      phone: phone.value,
+      reason: reason.value,
+      idempotency_key,
+    },
+  };
 }
 
-/** PATCH chi nhan display_name: vendor_id la identity bat bien va active co mutation rieng. */
+/** PATCH nhan display_name + optional address/phone: vendor_id la identity bat bien va active co mutation rieng. */
 export type UpdateVendorRequest = {
-  expected_version: number; display_name: string; reason: string | null; idempotency_key: string;
+  expected_version: number;
+  display_name: string;
+  address: string | null;
+  phone: string | null;
+  reason: string | null;
+  idempotency_key: string;
 };
 export function vendorCatalogUpdateRequest(body: unknown): Parsed<UpdateVendorRequest> {
   const value = record(body);
-  if (!value || !exact(value, ["expected_version", "display_name", "reason",
-    "idempotency_key"])) {
+  if (
+    !value ||
+    !hasRequiredAndOptionalKeys(
+      value,
+      ["expected_version", "display_name", "idempotency_key"],
+      ["reason", "address", "phone"],
+    )
+  ) {
     return { ok: false, response: fail("VENDOR_INVALID", 400) };
   }
   const expected_version = version(value.expected_version);
   const display_name = text(value.display_name, NAME_MAX);
+  const address = projectOptionalPartnerAddress(value.address);
+  const phone = projectOptionalPartnerPhone(value.phone);
   const reason = projectOptionalActionReason(value.reason, REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
-  if (expected_version === null || expected_version < 1 || !display_name || !reason.ok ||
-      !idempotency_key) {
+  if (
+    expected_version === null ||
+    expected_version < 1 ||
+    !display_name ||
+    !address.ok ||
+    !phone.ok ||
+    !reason.ok ||
+    !idempotency_key
+  ) {
     return { ok: false, response: fail("VENDOR_INVALID", 400) };
   }
-  return { ok: true, value: { expected_version, display_name, reason: reason.value, idempotency_key } };
+  return {
+    ok: true,
+    value: {
+      expected_version,
+      display_name,
+      address: address.value,
+      phone: phone.value,
+      reason: reason.value,
+      idempotency_key,
+    },
+  };
 }
 
 export type SetActiveVendorRequest = {

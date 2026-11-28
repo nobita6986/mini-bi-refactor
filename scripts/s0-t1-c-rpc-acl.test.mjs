@@ -143,6 +143,9 @@ import {
   HR_BULLETINS_RPC_SIGNATURES,
   COLLABORATORS_CATALOG_MIGRATION_NAME,
   COLLABORATORS_CATALOG_RPC_SIGNATURES,
+  PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_MIGRATION_NAME,
+  PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_ADDED_RPC_SIGNATURES,
+  PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_RETIRED_RPC_SIGNATURES,
   WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
@@ -162,7 +165,7 @@ const R1_2_MIGRATION = "20261021100000_r1_2_worker_management_uat_fixes.sql";
 const R2_1_MIGRATION = "20261021120000_r2_1_change_request_queues_and_project_team_guard.sql";
 const R1_2_SERVICE_RPC =
   "public.direct_entry_list_workers(uuid, uuid, text, text, uuid, text, text, integer, text)";
-const TARGET_PATTERN = "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|hr_bulletin_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
+const TARGET_PATTERN = "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|hr_bulletin_|partner_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
 
 function binary(name) {
   const binDir = process.env.P3_1_W02A_PG_BIN
@@ -1187,11 +1190,13 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
         ...HR_BULLETINS_RPC_SIGNATURES,
         ...COLLABORATORS_CATALOG_RPC_SIGNATURES,
+        ...PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_ADDED_RPC_SIGNATURES,
         WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE);
       for (let idx = expectedSignatures.length - 1; idx >= 0; idx -= 1) {
         if (
           PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx]) ||
-          HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx])
+          HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx]) ||
+          PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx])
         ) {
           expectedSignatures.splice(idx, 1);
         }
@@ -1271,9 +1276,11 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
           ...HR_BULLETINS_RPC_SIGNATURES,
           ...COLLABORATORS_CATALOG_RPC_SIGNATURES,
+          ...PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_ADDED_RPC_SIGNATURES,
           WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE]
           .filter((sig) => !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
           .filter((sig) => !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig))
+          .filter((sig) => !PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_RETIRED_RPC_SIGNATURES.includes(sig))
           .sort(),
         "only explicitly reviewed post-S0 RPCs add service_role grants after the S0 baseline",
       );
@@ -1778,6 +1785,36 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ),
           `Collaborators catalog RPC ${sig} grants EXECUTE only to service_role`,
         );
+      }
+      const partnerPortalMigration = await readFile(
+        path.join(MIGRATION_DIR, PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_MIGRATION_NAME),
+        "utf8",
+      );
+      const partnerPortalNormalized = partnerPortalMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .toLowerCase();
+      for (const sig of PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_ADDED_RPC_SIGNATURES) {
+        assert.ok(
+          partnerPortalNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `Partner accounts/vendor portal RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          partnerPortalNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `Partner accounts/vendor portal RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      for (const sig of PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_RETIRED_RPC_SIGNATURES) {
+        const { rows: dropped } = await client.query(
+          "select pg_catalog.to_regprocedure($1) as reg",
+          [sig],
+        );
+        assert.equal(dropped[0].reg, null, `Partner accounts migration dropped retired RPC ${sig}`);
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(
         path.join(MIGRATION_DIR, ATTENDANCE_SLOT_POLICY_AND_FOUR_SLOT_MATRIX_MIGRATION_NAME),
@@ -2511,6 +2548,52 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             ),
             (error) => error?.code === "42501",
             "PR28 group RPC must fail closed under FORCE RLS if owner lacks BYPASSRLS",
+          );
+        } finally {
+          await client.query("rollback");
+        }
+
+        // Partner tables & RPC security postconditions (RLS/FORCE RLS + BYPASSRLS fail-closed).
+        for (const tbl of ["public.partner_code_registry", "public.partner_accounts"]) {
+          const { rows: [tblInfo] } = await client.query(
+            `select relrowsecurity, relforcerowsecurity,
+                    pg_catalog.has_table_privilege('anon', $1, 'SELECT') as anon_sel,
+                    pg_catalog.has_table_privilege('authenticated', $1, 'SELECT') as auth_sel,
+                    pg_catalog.has_table_privilege('service_role', $1, 'SELECT') as svc_sel,
+                    pg_catalog.has_table_privilege('service_role', $1, 'INSERT') as svc_ins
+               from pg_catalog.pg_class
+              where oid = $1::pg_catalog.regclass`,
+            [tbl],
+          );
+          assert.equal(tblInfo.relrowsecurity, true, `${tbl} has RLS enabled`);
+          assert.equal(tblInfo.relforcerowsecurity, true, `${tbl} has FORCE RLS enabled`);
+          assert.equal(tblInfo.anon_sel, false, `${tbl} denies anon SELECT`);
+          assert.equal(tblInfo.auth_sel, false, `${tbl} denies authenticated SELECT`);
+          assert.equal(tblInfo.svc_sel, false, `${tbl} denies service_role direct SELECT`);
+          assert.equal(tblInfo.svc_ins, false, `${tbl} denies service_role direct INSERT`);
+        }
+
+        const partnerOwnerCheck = await client.query(
+          `select r.rolbypassrls
+             from pg_catalog.pg_proc p
+             join pg_catalog.pg_roles r on r.oid = p.proowner
+            where p.oid = 'public.partner_account_activate(text, text)'::pg_catalog.regprocedure`,
+        );
+        assert.equal(partnerOwnerCheck.rows[0]?.rolbypassrls, true, "partner_account_activate owner must have BYPASSRLS");
+
+        await client.query("begin");
+        try {
+          await client.query("alter role s0_t1c_runner nobypassrls");
+          await client.query(
+            "alter function public.partner_account_preflight_conflicts_admin(uuid, uuid) owner to s0_t1c_runner",
+          );
+          await client.query("set local role service_role");
+          await assert.rejects(
+            client.query(
+              "select public.partner_account_preflight_conflicts_admin('00000000-0000-4000-8000-000000000001'::uuid, '00000000-0000-4000-8000-000000000002'::uuid)",
+            ),
+            (error) => error?.code === "42501",
+            "Partner preflight RPC must fail closed if owner lacks BYPASSRLS / actor fails",
           );
         } finally {
           await client.query("rollback");

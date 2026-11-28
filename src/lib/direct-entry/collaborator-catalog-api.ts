@@ -6,7 +6,7 @@
  *   2. same-origin / CSRF guard (mutations)
  *   3. content-type + bounded JSON
  *   4. recursive client authority-field rejection
- *   5. strict request projection (optional reason, OCC, idempotency)
+ *   5. strict request projection (optional reason/address/phone, OCC, idempotency)
  *   6. server-side session resolution -> actor strictly from session
  *   7. repository / RPC
  *   8. sanitized response, private no-store
@@ -24,6 +24,11 @@ import {
   RESERVED_COLLABORATOR_ID,
 } from "./collaborator-catalog-contract.ts";
 import type { CollaboratorCatalogRepository } from "./collaborator-catalog-repository.ts";
+import {
+  hasRequiredAndOptionalKeys,
+  projectOptionalPartnerAddress,
+  projectOptionalPartnerPhone,
+} from "./vendor-catalog-contract.ts";
 import { readBoundedJson } from "./write-api.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -145,6 +150,7 @@ async function resolveTrustedActor(
 export function collaboratorCatalogErrorResponse(kind: string): Response {
   if (kind === "denied") return fail("COLLABORATOR_DENIED", 403);
   if (kind === "not-found") return fail("COLLABORATOR_NOT_FOUND", 404);
+  if (kind === "code-conflict") return fail("PARTNER_CODE_CONFLICT", 409);
   if (kind === "conflict") return fail("COLLABORATOR_CONFLICT", 409);
   if (kind === "invalid") return fail("COLLABORATOR_INVALID", 400);
   console.error("[collaborator-catalog] unavailable");
@@ -202,6 +208,8 @@ export type CreateCollaboratorRequest = {
   expected_version: 0;
   collaborator_id: string;
   display_name: string;
+  address: string | null;
+  phone: string | null;
   reason: string | null;
   idempotency_key: string;
 };
@@ -212,25 +220,27 @@ export function collaboratorCatalogCreateRequest(
   const value = record(body);
   if (
     !value ||
-    !hasExactKeysWithOptionalReason(value, [
-      "expected_version",
-      "collaborator_id",
-      "display_name",
-      "reason",
-      "idempotency_key",
-    ])
+    !hasRequiredAndOptionalKeys(
+      value,
+      ["expected_version", "collaborator_id", "display_name", "idempotency_key"],
+      ["reason", "address", "phone"],
+    )
   ) {
     return { ok: false, response: fail("COLLABORATOR_INVALID", 400) };
   }
   const expected_version = version(value.expected_version);
   const collaborator_id = collaboratorId(value.collaborator_id);
   const display_name = text(value.display_name, COLLABORATOR_NAME_MAX);
+  const address = projectOptionalPartnerAddress(value.address);
+  const phone = projectOptionalPartnerPhone(value.phone);
   const reason = projectOptionalActionReason(value.reason, COLLABORATOR_REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
   if (
     expected_version !== 0 ||
     !collaborator_id ||
     !display_name ||
+    !address.ok ||
+    !phone.ok ||
     !reason.ok ||
     !idempotency_key
   ) {
@@ -242,6 +252,8 @@ export function collaboratorCatalogCreateRequest(
       expected_version: 0,
       collaborator_id,
       display_name,
+      address: address.value,
+      phone: phone.value,
       reason: reason.value,
       idempotency_key,
     },
@@ -251,6 +263,8 @@ export function collaboratorCatalogCreateRequest(
 export type UpdateCollaboratorRequest = {
   expected_version: number;
   display_name: string;
+  address: string | null;
+  phone: string | null;
   reason: string | null;
   idempotency_key: string;
 };
@@ -261,23 +275,26 @@ export function collaboratorCatalogUpdateRequest(
   const value = record(body);
   if (
     !value ||
-    !hasExactKeysWithOptionalReason(value, [
-      "expected_version",
-      "display_name",
-      "reason",
-      "idempotency_key",
-    ])
+    !hasRequiredAndOptionalKeys(
+      value,
+      ["expected_version", "display_name", "idempotency_key"],
+      ["reason", "address", "phone"],
+    )
   ) {
     return { ok: false, response: fail("COLLABORATOR_INVALID", 400) };
   }
   const expected_version = version(value.expected_version);
   const display_name = text(value.display_name, COLLABORATOR_NAME_MAX);
+  const address = projectOptionalPartnerAddress(value.address);
+  const phone = projectOptionalPartnerPhone(value.phone);
   const reason = projectOptionalActionReason(value.reason, COLLABORATOR_REASON_MAX);
   const idempotency_key = uuid(value.idempotency_key);
   if (
     expected_version === null ||
     expected_version < 1 ||
     !display_name ||
+    !address.ok ||
+    !phone.ok ||
     !reason.ok ||
     !idempotency_key
   ) {
@@ -285,7 +302,14 @@ export function collaboratorCatalogUpdateRequest(
   }
   return {
     ok: true,
-    value: { expected_version, display_name, reason: reason.value, idempotency_key },
+    value: {
+      expected_version,
+      display_name,
+      address: address.value,
+      phone: phone.value,
+      reason: reason.value,
+      idempotency_key,
+    },
   };
 }
 

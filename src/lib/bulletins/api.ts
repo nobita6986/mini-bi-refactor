@@ -177,6 +177,7 @@ async function resolveBulletinActor(
   if (
     !actor ||
     actor.enabled !== true ||
+    actor.partner_account !== undefined ||
     !isUuid(actor.auth_subject) ||
     !isUuid(actor.app_user_id)
   ) {

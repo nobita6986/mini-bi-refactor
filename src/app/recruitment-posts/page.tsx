@@ -1,9 +1,10 @@
 import { notFound, redirect } from "next/navigation";
 import { connection } from "next/server";
 
-import { AccountUnavailable } from "@/components/auth/access-denied";
+import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { RecruitmentPostFeedWorkspace } from "@/components/recruitment-posts/recruitment-post-feed-workspace";
+import { resolveInternalBiPartnerBlock } from "@/lib/navigation/partner-page-guard";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 import {
   decideRecruitmentPostsPageAccess,
@@ -39,7 +40,15 @@ export default async function RecruitmentPostsPage({
       return <AccountUnavailable />;
     case "TEMPORARY_UNAVAILABLE":
       return <TemporaryUnavailable />;
-    case "ALLOW":
+    case "ALLOW": {
+      const partnerBlock = resolveInternalBiPartnerBlock(actor);
+      if (partnerBlock === "REDIRECT_CHANGE_PASSWORD") {
+        redirect("/partner/change-password");
+      }
+      if (partnerBlock === "ACCESS_DENIED") {
+        return <AccessDenied />;
+      }
       return <RecruitmentPostFeedWorkspace initialTab={initialTab} />;
+    }
   }
 }

@@ -17,7 +17,7 @@ const {
 const { isDirectEntryUiEnabled } = await import("../direct-entry/ui-model.ts");
 
 test("CURRENT_NAV_ENTRIES chứa các entry hiện hành trong một registry", () => {
-  assert.equal(CURRENT_NAV_ENTRIES.length, 15, "phải có đúng 15 entries current sau HR Bulletins");
+  assert.equal(CURRENT_NAV_ENTRIES.length, 18, "phải có đúng 18 entries current sau Partner Portal");
   const ids = CURRENT_NAV_ENTRIES.map((e) => e.id).sort();
   assert.deepEqual(
     ids,
@@ -31,6 +31,9 @@ test("CURRENT_NAV_ENTRIES chứa các entry hiện hành trong một registry", 
       "finance",
       "leave",
       "leave-admin",
+      "partner-profile",
+      "partner-recruitment",
+      "partner-workers",
       "project-operations",
       "recruitment-posts",
       "salary-advances",
@@ -61,6 +64,9 @@ test("Global IA nav groups enforce Tổng quan → Công việc của tôi → T
         "leave",
         "recruitment-posts",
         "bulletins",
+        "partner-recruitment",
+        "partner-workers",
+        "partner-profile",
       ],
     },
     {
@@ -202,6 +208,9 @@ test("Desktop viewport theo feature flag, luôn giữ Dashboard và không có P
       "leave",
       "recruitment-posts",
       "bulletins",
+      "partner-recruitment",
+      "partner-workers",
+      "partner-profile",
       "finance",
       "salary-advances",
       "leave-admin",
@@ -225,6 +234,9 @@ test("Mobile viewport theo feature flag, luôn giữ Dashboard và không có Pi
       "leave",
       "recruitment-posts",
       "bulletins",
+      "partner-recruitment",
+      "partner-workers",
+      "partner-profile",
       "finance",
       "salary-advances",
       "leave-admin",
@@ -243,6 +255,9 @@ test("feature flag Direct Entry chỉ mở với giá trị chính xác true", (
     "leave",
     "recruitment-posts",
     "bulletins",
+    "partner-recruitment",
+    "partner-workers",
+    "partner-profile",
     "finance",
     "salary-advances",
     "leave-admin",
@@ -308,6 +323,8 @@ test("registry: mỗi entry có id ổn định, label, path, icon, status, capa
         "leave",
         "leave_admin",
         "salary_advances",
+        "partner_vendor",
+        "partner_portal",
       ].includes(entry.capability),
       `entry '${entry.id}' capability không hợp lệ: ${entry.capability}`
     );
@@ -375,6 +392,10 @@ test("findEntryByPath('/work-reports') tách biệt 2 trang cá nhân với 5 nh
   assert.equal(findEntryByPath("/salary-advances")?.id, "salary-advances");
   assert.equal(findEntryByPath("/recruitment-posts")?.id, "recruitment-posts");
   assert.equal(findEntryByPath("/bulletins")?.id, "bulletins");
+  assert.equal(findEntryByPath("/partner/recruitment")?.id, "partner-recruitment");
+  assert.equal(findEntryByPath("/partner/workers")?.id, "partner-workers");
+  assert.equal(findEntryByPath("/partner/profile")?.id, "partner-profile");
+  assert.equal(findEntryByPath("/partner/change-password")?.id, "partner-profile");
   assert.equal(findEntryByPath("/admin/attendance")?.id, "attendance-report");
   assert.equal(findEntryByPath("/admin/catalog/personnel")?.id, "admin");
 });

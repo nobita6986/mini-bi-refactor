@@ -16,7 +16,7 @@
  *     AUTH_PASSWORD_TOO_WEAK, AUTH_UNAVAILABLE, CSRF_REJECTED.
  *   - No DML, no logging, no env mutation, no dep changes.
  */
-import type { ActorRepository, ActorResolution } from "./direct-entry-v2";
+import type { ActorRepository, ActorResolution, DirectEntryActor } from "./direct-entry-v2";
 import { isSameOriginAuthRequest } from "./same-origin-auth-request.ts";
 import { z } from "zod";
 
@@ -59,6 +59,11 @@ export type PasswordChangeDeps = {
     at: string;
   }): Promise<ActorResolution>;
   repository?: ActorRepository | null;
+  /** Optional hook to mark partner password changed in DB after Auth password update. */
+  markPartnerPasswordChanged?(input: {
+    auth_subject: string;
+    app_user_id: string;
+  }): Promise<{ ok: boolean }>;
 };
 
 function json(body: unknown, status: number): Response {
@@ -191,6 +196,7 @@ export async function createChangePasswordResponse(
     }
 
     // 2) Optional downstream check: ensure the session maps to a usable actor.
+    let resolvedActor: DirectEntryActor | null = null;
     if (dependencies.resolveActor) {
       const resolution = await dependencies.resolveActor({
         session: {
@@ -202,10 +208,15 @@ export async function createChangePasswordResponse(
         at: dependencies.now(),
       });
       if (!resolution.ok) {
-        return resolution.reason === "UNAUTHENTICATED"
-          ? failure("AUTH_UNAUTHENTICATED", 401)
-          : failure("ACCOUNT_NOT_AVAILABLE", 403);
+        if (resolution.reason === "UNAUTHENTICATED") {
+          return failure("AUTH_UNAUTHENTICATED", 401);
+        }
+        if (resolution.reason === "ACTOR_PENDING_ACTIVATION") {
+          return failure("ACCOUNT_PENDING_ACTIVATION", 403);
+        }
+        return failure("ACCOUNT_NOT_AVAILABLE", 403);
       }
+      resolvedActor = resolution.actor;
     }
 
     // 3) Re-authenticate with the supplied current password against the SAME
@@ -238,6 +249,21 @@ export async function createChangePasswordResponse(
         ? failure("AUTH_INVALID_CURRENT_PASSWORD", 401)
         : failure("AUTH_UNAVAILABLE", 503);
     }
+
+    // 5) Partner accounts must transition ACTIVE_MUST_CHANGE_PASSWORD -> ACTIVE in DB.
+    if (resolvedActor?.partner_account) {
+      if (!dependencies.markPartnerPasswordChanged) {
+        return failure("AUTH_UNAVAILABLE", 503);
+      }
+      const marked = await dependencies.markPartnerPasswordChanged({
+        auth_subject: resolvedActor.auth_subject,
+        app_user_id: resolvedActor.app_user_id,
+      });
+      if (!marked.ok) {
+        return failure("AUTH_UNAVAILABLE", 503);
+      }
+    }
+
     return json({ ok: true }, 200);
   } catch {
     return failure("AUTH_UNAVAILABLE", 503);

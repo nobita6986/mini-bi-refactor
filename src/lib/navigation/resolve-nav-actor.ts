@@ -334,6 +334,18 @@ export const resolveNavActorForAppShell = cache(
     }
     const actor = await resolveActorForRequest();
     if (!actor.ok) return null;
+    if (actor.actor.partner_account) {
+      return {
+        capabilities: [],
+        scopes: [],
+        partner_account: {
+          partner_kind: actor.actor.partner_account.partner_kind,
+          must_change_password:
+            actor.actor.partner_account.must_change_password ||
+            actor.actor.partner_account.account_state === "ACTIVE_MUST_CHANGE_PASSWORD",
+        },
+      };
+    }
     const projection: NavActorProjection & {
       effective_report_review_scopes?: typeof actor.actor.effective_report_review_scopes;
     } = {

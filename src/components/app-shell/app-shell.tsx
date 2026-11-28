@@ -83,13 +83,18 @@ export async function AppShell({
   const vendorFinanceEnabled = process.env.DIRECT_ENTRY_API_ENABLED === "true";
   const recruitmentPostsEnabled = process.env.DIRECT_ENTRY_API_ENABLED === "true";
   const bulletinsEnabled = process.env.DIRECT_ENTRY_API_ENABLED === "true";
+  const partnerPortalEnabled = process.env.DIRECT_ENTRY_API_ENABLED === "true";
   const isEntryFeatureEnabled = (entry: { id: string }) =>
     (!WORK_REPORTS_NAV_ENTRY_IDS.has(entry.id) || workReportsEnabled) &&
     (entry.id !== "finance" || vendorFinanceEnabled) &&
     ((entry.id !== "leave" && entry.id !== "leave-admin") || vendorFinanceEnabled) &&
     (entry.id !== "salary-advances" || vendorFinanceEnabled) &&
     (entry.id !== "recruitment-posts" || recruitmentPostsEnabled) &&
-    (entry.id !== "bulletins" || bulletinsEnabled);
+    (entry.id !== "bulletins" || bulletinsEnabled) &&
+    ((entry.id !== "partner-recruitment" &&
+      entry.id !== "partner-workers" &&
+      entry.id !== "partner-profile") ||
+      partnerPortalEnabled);
 
   // P3-W06A R1: phan tach ro rang tang viewport va tang capability.
   // - `filterEntriesForActor` chiu trach nhiem viewport/visibility: loc
@@ -142,7 +147,13 @@ export async function AppShell({
 
           {/* Logo HR Partner */}
           <Link
-            href="/dashboard"
+            href={
+              actor?.partner_account
+                ? actor.partner_account.must_change_password
+                  ? "/partner/change-password"
+                  : "/partner"
+                : "/dashboard"
+            }
             className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-[var(--navy)] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-full py-0.5"
           >
             <Image src="/brand/hrpartner-logo.png" alt="HR Partner" width={2166} height={1706} className="h-9 w-auto" />

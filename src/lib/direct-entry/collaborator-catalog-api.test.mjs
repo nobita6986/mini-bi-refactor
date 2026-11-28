@@ -29,6 +29,9 @@ const {
 } = await import("./collaborator-catalog-api.ts");
 
 const {
+  buildCollaboratorCreateRequest,
+  buildCollaboratorUpdateRequest,
+  classifyCollaboratorMutation,
   collaboratorCatalogItem,
   collaboratorCatalogList,
   collaboratorCatalogMutation,
@@ -47,28 +50,61 @@ const KEY = "55555555-5555-4555-8555-555555555555";
 const OTHER = "77777777-7777-4777-8777-777777777777";
 const CTV_ID = "CTV_ONE";
 const NOW = "2026-11-28T06:00:00Z";
+const PARTNER_ACCOUNT_ID = "33333333-3333-4333-8333-333333333333";
+const PARTNER_APP_USER_ID = "44444444-4444-4444-8444-444444444444";
+
+const PARTNER_ACCOUNT = {
+  partner_account_id: PARTNER_ACCOUNT_ID,
+  partner_kind: "COLLABORATOR",
+  vendor_id: null,
+  collaborator_id: CTV_ID,
+  partner_id: CTV_ID,
+  canonical_code: "ctv_one",
+  account_state: "ACTIVE",
+  app_user_id: PARTNER_APP_USER_ID,
+  username: "ctv_one",
+  activated_at: NOW,
+  must_change_password: false,
+  password_changed_at: NOW,
+  activation_expires_at: null,
+  activation_attempts: 0,
+  version: 3,
+};
 
 const ITEM = {
   collaborator_id: CTV_ID,
   display_name: "Nguyễn Văn CTV",
+  address: "25 Tran Hung Dao, Ha Noi",
+  phone: "0987 654 321",
   active: true,
   version: 2,
   created_at: NOW,
   updated_at: NOW,
+  partner_account: PARTNER_ACCOUNT,
 };
 
 const MUTATION = {
   collaborator_id: CTV_ID,
   display_name: "Nguyễn Văn CTV",
+  address: "25 Tran Hung Dao, Ha Noi",
+  phone: "0987 654 321",
   active: true,
   version: 3,
+  created_at: NOW,
+  updated_at: NOW,
+  partner_account: PARTNER_ACCOUNT,
 };
 
 const CREATE_RESULT = {
   collaborator_id: CTV_ID,
   display_name: "Nguyễn Văn CTV",
+  address: null,
+  phone: null,
   active: true,
   version: 1,
+  created_at: NOW,
+  updated_at: NOW,
+  partner_account: null,
 };
 
 const LIST = {
@@ -155,18 +191,58 @@ test("collaborator contract accepts exact projection shapes and fails closed on 
   assert.deepEqual(collaboratorCatalogMutation(MUTATION), MUTATION);
   assert.deepEqual(collaboratorCatalogMutation(CREATE_RESULT), CREATE_RESULT);
 
+  // Legacy 6-key item and 4-key mutation remain supported while partial key drift fails closed.
+  const legacyItem = {
+    collaborator_id: CTV_ID,
+    display_name: "Nguyễn Văn CTV",
+    active: true,
+    version: 2,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  assert.deepEqual(collaboratorCatalogItem(legacyItem), legacyItem);
+  assert.equal(collaboratorCatalogItem({ ...legacyItem, address: null }), null);
+
   assert.equal(collaboratorCatalogItem({ ...ITEM, extra: 1 }), null);
   assert.equal(collaboratorCatalogItem({ ...ITEM, collaborator_id: "__system_vendor__" }), null);
   assert.equal(collaboratorCatalogItem({ ...ITEM, active: "true" }), null);
   assert.equal(collaboratorCatalogItem({ ...ITEM, version: 0 }), null);
   assert.equal(collaboratorCatalogItem({ ...ITEM, created_at: "" }), null);
+  assert.equal(collaboratorCatalogItem({ ...ITEM, address: "bad\nline" }), null);
+  assert.equal(collaboratorCatalogItem({ ...ITEM, phone: "12345" }), null);
+  assert.equal(
+    collaboratorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, partner_kind: "VENDOR" } }),
+    null,
+  );
+  assert.equal(
+    collaboratorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, extra: 1 } }),
+    null,
+  );
   assert.equal(collaboratorCatalogItem(null), null);
 
   assert.equal(collaboratorCatalogList({ ...LIST, total: 0 }), null);
   assert.equal(collaboratorCatalogList({ ...LIST, page: 0 }), null);
   assert.equal(collaboratorCatalogList({ ...LIST, items: [{ ...ITEM, version: 1.5 }] }), null);
-  assert.equal(collaboratorCatalogMutation({ ...MUTATION, created_at: NOW }), null);
+  assert.equal(
+    collaboratorCatalogMutation({
+      collaborator_id: CTV_ID,
+      display_name: "Nguyễn Văn CTV",
+      active: true,
+      version: 3,
+      created_at: NOW,
+    }),
+    null,
+  );
   assert.equal(collaboratorCatalogMutation({ ...MUTATION, version: 0 }), null);
+
+  const conflictOutcome = classifyCollaboratorMutation(409, {
+    ok: false,
+    code: "PARTNER_CODE_CONFLICT",
+  });
+  assert.equal(conflictOutcome.kind, "conflict");
+  if (conflictOutcome.kind === "conflict") {
+    assert.match(conflictOutcome.message, /Nhà cung cấp hoặc Cộng tác viên/);
+  }
 });
 
 test("feature gate runs before session and repository", async () => {
@@ -234,16 +310,37 @@ test("content-type, body and client authority fields are rejected before session
   assert.equal(d.calls.rpc.length, 0);
 });
 
-test("request projections are strict; create has no valid_from and PATCH cannot change id or active", () => {
+test("request projections are strict; optional address and phone work cleanly", () => {
   const parsedCreate = collaboratorCatalogCreateRequest(CREATE_BODY);
   assert.equal(parsedCreate.ok, true);
   assert.deepEqual(parsedCreate.value, {
     expected_version: 0,
     collaborator_id: CTV_ID,
     display_name: "Nguyễn Văn CTV",
+    address: null,
+    phone: null,
     reason: "Synthetic reason",
     idempotency_key: KEY,
   });
+
+  const parsedWithContact = collaboratorCatalogCreateRequest({
+    ...CREATE_BODY,
+    address: "  12 Ly Thuong Kiet  ",
+    phone: " +84 912-345-678 ",
+  });
+  assert.equal(parsedWithContact.ok, true);
+  assert.equal(parsedWithContact.ok && parsedWithContact.value.address, "12 Ly Thuong Kiet");
+  assert.equal(parsedWithContact.ok && parsedWithContact.value.phone, "+84 912-345-678");
+
+  for (const badAddr of [123, "x".repeat(501), "line1\nline2", "del\x7f"]) {
+    assert.equal(collaboratorCatalogCreateRequest({ ...CREATE_BODY, address: badAddr }).ok, false);
+    assert.equal(collaboratorCatalogUpdateRequest({ ...UPDATE_BODY, address: badAddr }).ok, false);
+  }
+  for (const badPhone of [123, "12345", "1".repeat(33), "0901abc"]) {
+    assert.equal(collaboratorCatalogCreateRequest({ ...CREATE_BODY, phone: badPhone }).ok, false);
+    assert.equal(collaboratorCatalogUpdateRequest({ ...UPDATE_BODY, phone: badPhone }).ok, false);
+  }
+
   assert.equal(
     collaboratorCatalogCreateRequest({ ...CREATE_BODY, valid_from: "2026-11-28" }).ok,
     false,
@@ -270,12 +367,48 @@ test("request projections are strict; create has no valid_from and PATCH cannot 
   assert.equal(collaboratorCatalogCreateRequest({ ...CREATE_BODY, idempotency_key: "nope" }).ok, false);
 
   assert.equal(collaboratorCatalogUpdateRequest(UPDATE_BODY).ok, true);
+  const parsedUpdateWithContact = collaboratorCatalogUpdateRequest({
+    ...UPDATE_BODY,
+    address: "  99 Hai Phong ",
+    phone: "0988777666",
+  });
+  assert.deepEqual(parsedUpdateWithContact.ok && parsedUpdateWithContact.value, {
+    expected_version: 2,
+    display_name: "Nguyễn Văn CTV Mới",
+    address: "99 Hai Phong",
+    phone: "0988777666",
+    reason: "Synthetic reason",
+    idempotency_key: KEY,
+  });
   assert.equal(
     collaboratorCatalogUpdateRequest({ ...UPDATE_BODY, collaborator_id: "CTV_TWO" }).ok,
     false,
   );
   assert.equal(collaboratorCatalogUpdateRequest({ ...UPDATE_BODY, active: false }).ok, false);
   assert.equal(collaboratorCatalogUpdateRequest({ ...UPDATE_BODY, expected_version: 0 }).ok, false);
+
+  // UI request builders keep 5/6-key backward compat when address/phone are omitted and validate when provided.
+  const uiCreateWithContact = buildCollaboratorCreateRequest({
+    collaboratorId: CTV_ID,
+    displayName: "Nguyễn Văn CTV",
+    address: "  12 Ly Thuong Kiet ",
+    phone: "0987654321",
+    idempotencyKey: KEY,
+  });
+  assert.equal(uiCreateWithContact.ok, true);
+  if (uiCreateWithContact.ok) {
+    assert.equal(uiCreateWithContact.body.address, "12 Ly Thuong Kiet");
+    assert.equal(uiCreateWithContact.body.phone, "0987654321");
+  }
+  assert.equal(
+    buildCollaboratorUpdateRequest({
+      displayName: "Tên mới",
+      expectedVersion: 2,
+      phone: "123",
+      idempotencyKey: KEY,
+    }).ok,
+    false,
+  );
 
   assert.equal(collaboratorCatalogSetActiveRequest(ACTIVE_BODY).ok, true);
   assert.equal(
@@ -388,6 +521,7 @@ test("idempotency header mismatch, sanitized errors, and path key validation", a
     denied: [403, "COLLABORATOR_DENIED"],
     "not-found": [404, "COLLABORATOR_NOT_FOUND"],
     conflict: [409, "COLLABORATOR_CONFLICT"],
+    "code-conflict": [409, "PARTNER_CODE_CONFLICT"],
     invalid: [400, "COLLABORATOR_INVALID"],
     unavailable: [500, "COLLABORATOR_UNAVAILABLE"],
   };
@@ -465,7 +599,11 @@ test("idempotency header mismatch, sanitized errors, and path key validation", a
 test("repository maps SQLSTATEs and calls the 5 canonical collaborator RPCs", async () => {
   assert.equal(classifyCollaboratorCatalogError({ code: "40001" }), "conflict");
   assert.equal(classifyCollaboratorCatalogError({ code: "PT409" }), "conflict");
-  assert.equal(classifyCollaboratorCatalogError({ code: "23505" }), "conflict");
+  assert.equal(
+    classifyCollaboratorCatalogError({ code: "PT409", message: "PARTNER_CODE_CONFLICT" }),
+    "code-conflict",
+  );
+  assert.equal(classifyCollaboratorCatalogError({ code: "23505" }), "code-conflict");
   assert.equal(classifyCollaboratorCatalogError({ code: "42501" }), "denied");
   assert.equal(classifyCollaboratorCatalogError({ code: "P0002" }), "not-found");
   assert.equal(classifyCollaboratorCatalogError({ code: "23514" }), "invalid");
@@ -534,6 +672,8 @@ test("repository maps SQLSTATEs and calls the 5 canonical collaborator RPCs", as
       expected_version: 0,
       collaborator_id: CTV_ID,
       display_name: "Nguyễn Văn CTV",
+      address: "25 Tran Hung Dao",
+      phone: "0987654321",
       reason: null,
       idempotency_key: KEY,
     }),
@@ -549,6 +689,8 @@ test("repository maps SQLSTATEs and calls the 5 canonical collaborator RPCs", as
       p_display_name: "Nguyễn Văn CTV",
       p_reason: null,
       p_idempotency_key: KEY,
+      p_address: "25 Tran Hung Dao",
+      p_phone: "0987654321",
     },
   ]);
 
@@ -573,6 +715,8 @@ test("repository maps SQLSTATEs and calls the 5 canonical collaborator RPCs", as
       p_display_name: "Nguyễn Văn CTV Mới",
       p_reason: "Rename",
       p_idempotency_key: KEY,
+      p_address: null,
+      p_phone: null,
     },
   ]);
 
@@ -613,5 +757,21 @@ test("repository maps SQLSTATEs and calls the 5 canonical collaborator RPCs", as
       page_size: 25,
     }),
     { ok: false, kind: "unavailable" },
+  );
+
+  const codeConflict = createCollaboratorCatalogRepository(async () => ({
+    data: null,
+    error: { code: "PT409", message: "PARTNER_CODE_CONFLICT" },
+  }));
+  assert.deepEqual(
+    await codeConflict.createCollaborator({
+      ...ACTOR,
+      expected_version: 0,
+      collaborator_id: CTV_ID,
+      display_name: "Nguyễn Văn CTV",
+      reason: null,
+      idempotency_key: KEY,
+    }),
+    { ok: false, kind: "code-conflict" },
   );
 });

@@ -16,6 +16,10 @@ import {
   type AdminCollaboratorList,
   type AdminCollaboratorMutation,
 } from "./collaborator-catalog-contract.ts";
+import {
+  classifyPartnerCatalogError,
+  type PartnerCatalogErrorKind,
+} from "./vendor-catalog-contract.ts";
 
 type Rpc = (name: string, args: Record<string, unknown>) => Promise<{
   data: unknown;
@@ -24,12 +28,7 @@ type Rpc = (name: string, args: Record<string, unknown>) => Promise<{
 
 export type AdminActorRef = { auth_subject: string; app_user_id: string };
 
-export type CollaboratorCatalogErrorKind =
-  | "conflict"
-  | "denied"
-  | "invalid"
-  | "not-found"
-  | "unavailable";
+export type CollaboratorCatalogErrorKind = PartnerCatalogErrorKind;
 
 export type CollaboratorCatalogOutcome<T> =
   | { ok: true; data: T }
@@ -52,6 +51,8 @@ export type CollaboratorCatalogRepository = {
       expected_version: 0;
       collaborator_id: string;
       display_name: string;
+      address?: string | null;
+      phone?: string | null;
       reason: string | null;
       idempotency_key: string;
     },
@@ -61,6 +62,8 @@ export type CollaboratorCatalogRepository = {
       collaborator_id: string;
       expected_version: number;
       display_name: string;
+      address?: string | null;
+      phone?: string | null;
       reason: string | null;
       idempotency_key: string;
     },
@@ -91,14 +94,7 @@ export function classifyCollaboratorCatalogError(error: {
   code?: string;
   message?: string;
 }): CollaboratorCatalogErrorKind {
-  if (error.code === "PT409" || error.code === "40001" || error.code === "23505") return "conflict";
-  if (error.code === "42501") return "denied";
-  if (error.code === "P0002") return "not-found";
-  if (error.code === "23514") return "invalid";
-  if (error.code === "22023") {
-    return error.message === "idempotency key reused with different input" ? "conflict" : "invalid";
-  }
-  return "unavailable";
+  return classifyPartnerCatalogError(error);
 }
 
 function unavailable(): never {
@@ -165,6 +161,8 @@ export function createCollaboratorCatalogRepository(rpc?: Rpc): CollaboratorCata
           p_display_name: input.display_name,
           p_reason: input.reason,
           p_idempotency_key: input.idempotency_key,
+          p_address: input.address ?? null,
+          p_phone: input.phone ?? null,
         },
         collaboratorCatalogMutation,
       );
@@ -180,6 +178,8 @@ export function createCollaboratorCatalogRepository(rpc?: Rpc): CollaboratorCata
           p_display_name: input.display_name,
           p_reason: input.reason,
           p_idempotency_key: input.idempotency_key,
+          p_address: input.address ?? null,
+          p_phone: input.phone ?? null,
         },
         collaboratorCatalogMutation,
       );

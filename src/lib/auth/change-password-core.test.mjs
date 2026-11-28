@@ -337,3 +337,77 @@ test("change-password: every response carries the auth no-store / nosniff / no-r
     assert.equal(csrf.headers.get(name), expected, `CSRF response missing ${name}=${expected}`);
   }
 });
+
+test("change-password supports hrp@123 currentPassword for partners and calls markPartnerPasswordChanged", async () => {
+  const markedCalls = [];
+  const { client, calls } = clientRecorder({
+    getUser: async () => ({
+      data: { user: { id: SESSION_USER.id, email: "vnd_01@hrpartner.vn" } },
+      error: null,
+    }),
+  });
+  const partnerActor = {
+    auth_subject: SESSION_USER.id,
+    app_user_id: "22222222-2222-4222-8222-222222222222",
+    display_name: "Vendor 01",
+    enabled: true,
+    capabilities: [],
+    scopes: [{ kind: "own", reference: "22222222-2222-4222-8222-222222222222", valid_from: "0001-01-01", valid_to: null }],
+    self_recruiter_suggestion: null,
+    partner_account: {
+      partner_account_id: "33333333-3333-4333-8333-333333333333",
+      partner_kind: "VENDOR",
+      vendor_id: "VND_01",
+      collaborator_id: null,
+      partner_id: "VND_01",
+      partner_display_name: "Vendor 01",
+      partner_active: true,
+      canonical_code: "vnd_01",
+      username: "vnd_01",
+      account_state: "ACTIVE_MUST_CHANGE_PASSWORD",
+      activated_at: "2026-11-28T00:00:00.000Z",
+      must_change_password: true,
+      password_changed_at: null,
+    },
+    session: { provider: "supabase", verification: "getUser", authenticated_at: null },
+  };
+  const response = await createChangePasswordResponse(
+    post({
+      currentPassword: "hrp@123",
+      newPassword: "StrongPartnerPassword1!",
+      confirmPassword: "StrongPartnerPassword1!",
+    }),
+    {
+      createClient: async () => client,
+      now: () => "2026-11-28T01:00:00.000Z",
+      resolveActor: async () => ({ ok: true, actor: partnerActor }),
+      markPartnerPasswordChanged: async (input) => {
+        markedCalls.push(input);
+        return { ok: true };
+      },
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.deepEqual(calls.signInArg, { email: "vnd_01@hrpartner.vn", password: "hrp@123" });
+  assert.deepEqual(markedCalls, [
+    { auth_subject: SESSION_USER.id, app_user_id: "22222222-2222-4222-8222-222222222222" },
+  ]);
+
+  // Fail closed with 503 if markPartnerPasswordChanged fails
+  const failedMark = await createChangePasswordResponse(
+    post({
+      currentPassword: "hrp@123",
+      newPassword: "StrongPartnerPassword1!",
+      confirmPassword: "StrongPartnerPassword1!",
+    }),
+    {
+      createClient: async () => client,
+      now: () => "2026-11-28T01:00:00.000Z",
+      resolveActor: async () => ({ ok: true, actor: partnerActor }),
+      markPartnerPasswordChanged: async () => ({ ok: false }),
+    },
+  );
+  assert.equal(failedMark.status, 503);
+  assert.deepEqual(await failedMark.json(), { ok: false, code: "AUTH_UNAVAILABLE" });
+});

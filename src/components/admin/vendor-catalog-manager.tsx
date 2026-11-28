@@ -8,10 +8,17 @@ import { useNotify } from "@/components/ui/notify-provider";
 import { OffsetPager } from "@/components/ui/offset-pager";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
-import type {
-  AdminVendor,
-  AdminVendorList,
+import {
+  PartnerAccountCatalogCell,
+  PartnerCatalogConflictsPanel,
+  isPartnerRowConflicted,
+} from "@/components/admin/partner-account-admin-controls";
+import {
+  isPartnerCodeConflictPayload,
+  type AdminVendor,
+  type AdminVendorList,
 } from "@/lib/direct-entry/vendor-catalog-contract";
+import type { PartnerConflictsReport } from "@/lib/partner/contract";
 import {
   buildVendorCreateRequest,
   buildVendorListQuery,
@@ -36,7 +43,14 @@ type DialogState =
   | { kind: "edit"; vendor: AdminVendor }
   | { kind: "active"; vendor: AdminVendor; active: boolean };
 
-type FormState = { vendorId: string; displayName: string; validFrom: string; reason: string };
+type FormState = {
+  vendorId: string;
+  displayName: string;
+  address: string;
+  phone: string;
+  validFrom: string;
+  reason: string;
+};
 type MutationIntent = {
   url: string;
   method: "POST" | "PATCH";
@@ -47,7 +61,14 @@ type MutationIntent = {
   retry: boolean;
 };
 
-const EMPTY_FORM: FormState = { vendorId: "", displayName: "", validFrom: "", reason: "" };
+const EMPTY_FORM: FormState = {
+  vendorId: "",
+  displayName: "",
+  address: "",
+  phone: "",
+  validFrom: "",
+  reason: "",
+};
 const button = "inline-flex min-h-10 items-center justify-center rounded-md border border-border " +
   "bg-surface px-3 text-sm font-medium text-foreground focus-visible:outline-none " +
   "focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50";
@@ -79,6 +100,7 @@ export function VendorCatalogManager() {
   const [pendingIntent, setPendingIntent] = useState<MutationIntent | null>(null);
   const [conflictIntent, setConflictIntent] = useState<MutationIntent | null>(null);
   const [conflictError, setConflictError] = useState<string | null>(null);
+  const [conflictsReport, setConflictsReport] = useState<PartnerConflictsReport | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -155,7 +177,14 @@ export function VendorCatalogManager() {
   };
 
   const startEdit = (vendor: AdminVendor) => {
-    setForm({ vendorId: vendor.vendor_id, displayName: vendor.display_name, validFrom: "", reason: "" });
+    setForm({
+      vendorId: vendor.vendor_id,
+      displayName: vendor.display_name,
+      address: vendor.address ?? "",
+      phone: vendor.phone ?? "",
+      validFrom: "",
+      reason: "",
+    });
     setFormError(null);
     setDialog({ kind: "edit", vendor });
   };
@@ -245,6 +274,15 @@ export function VendorCatalogManager() {
       }
       const outcome = classifyVendorMutation(response.status, payload, intent.operation);
       if (outcome.kind === "applied" || outcome.kind === "conflict") {
+        if (
+          outcome.kind === "conflict" &&
+          isPartnerCodeConflictPayload(payload, ["VENDOR_CODE_CONFLICT"])
+        ) {
+          setPendingIntent(null);
+          setFormError(outcome.message);
+          notify.error({ title: outcome.message });
+          return;
+        }
         setPendingIntent(null);
         setConflictIntent(intent);
         setConflictError(null);
@@ -292,6 +330,8 @@ export function VendorCatalogManager() {
         vendorId: form.vendorId,
         displayName: form.displayName,
         effectiveDate: form.validFrom,
+        address: form.address,
+        phone: form.phone,
         reason: form.reason,
         idempotencyKey,
       });
@@ -307,6 +347,8 @@ export function VendorCatalogManager() {
       request = buildVendorUpdateRequest({
         displayName: form.displayName,
         expectedVersion: dialog.vendor.version,
+        address: form.address,
+        phone: form.phone,
         reason: form.reason,
         idempotencyKey,
       });
@@ -426,6 +468,10 @@ export function VendorCatalogManager() {
               )}
               <Field id="vendor-name" label="Tên nhà cung cấp" value={form.displayName}
                 maxLength={256} required onChange={(value) => changeForm("displayName", value)} />
+              <Field id="vendor-address" label="Địa chỉ (không bắt buộc)" value={form.address}
+                maxLength={500} required={false} onChange={(value) => changeForm("address", value)} />
+              <Field id="vendor-phone" label="Số điện thoại (không bắt buộc)" type="tel" value={form.phone}
+                maxLength={32} required={false} onChange={(value) => changeForm("phone", value)} />
               {dialog?.kind === "create" ? (
                 <Field id="vendor-valid-from" label="Ngày hiệu lực" type="date"
                   value={form.validFrom} maxLength={10} required
@@ -460,6 +506,11 @@ export function VendorCatalogManager() {
             if (ok) notify.success({ title: "Đã tải dữ liệu mới nhất từ máy chủ." });
           })} />
       ) : null}
+
+      <PartnerCatalogConflictsPanel
+        report={conflictsReport}
+        onReportLoaded={setConflictsReport}
+      />
 
       <Card>
         <CardHeader title="Danh sách nhà cung cấp"
@@ -516,18 +567,37 @@ export function VendorCatalogManager() {
                   <tr>
                     <th scope="col" className="px-3 py-3">Mã nhà cung cấp</th>
                     <th scope="col" className="px-3 py-3">Tên nhà cung cấp</th>
+                    <th scope="col" className="px-3 py-3">Địa chỉ / SĐT</th>
                     <th scope="col" className="px-3 py-3">Trạng thái</th>
+                    <th scope="col" className="px-3 py-3">Tài khoản đối tác</th>
                     <th scope="col" className="px-3 py-3 text-right">Thao tác</th>
                   </tr>
                 </thead>
                 <tbody>
                   {list.vendors.map((vendor) => {
                     const locked = busy || pendingIntent !== null || conflictIntent !== null;
+                    const hasConflict = isPartnerRowConflicted(conflictsReport, "VENDOR", vendor.vendor_id);
                     return (
                       <tr key={vendor.vendor_id} className="border-b border-border/70 last:border-0 hover:bg-surface-hover">
                         <td data-card-header="true" className="px-3 py-3 font-mono text-xs">{vendor.vendor_id}</td>
                         <td data-label="Tên nhà cung cấp" className="px-3 py-3 font-medium">{vendor.display_name}</td>
+                        <td data-label="Địa chỉ / SĐT" className="px-3 py-3 text-xs text-muted">
+                          <div>{vendor.address ?? "—"}</div>
+                          <div className="font-mono">{vendor.phone ?? "—"}</div>
+                        </td>
                         <td data-label="Trạng thái" className="px-3 py-3"><ActiveBadge active={vendor.active} /></td>
+                        <td data-label="Tài khoản đối tác" className="px-3 py-3">
+                          <PartnerAccountCatalogCell
+                            partnerKind="VENDOR"
+                            partnerCode={vendor.vendor_id}
+                            displayName={vendor.display_name}
+                            partnerActive={vendor.active}
+                            partnerAccount={vendor.partner_account}
+                            hasConflict={hasConflict}
+                            disabled={locked}
+                            onMutated={reloadList}
+                          />
+                        </td>
                         <td data-card-actions="true" className="px-3 py-3">
                           <div className="flex flex-wrap justify-end gap-2 whitespace-nowrap">
                             <button type="button" className={`${button} min-h-11 md:min-h-8 whitespace-nowrap shrink-0`} disabled={locked}
@@ -565,7 +635,7 @@ export function VendorCatalogManager() {
 
 function Field({ id, label, value, maxLength, required, type = "text", onChange }: {
   id: string; label: string; value: string; maxLength: number; required: boolean;
-  type?: "text" | "date";
+  type?: "text" | "date" | "tel";
   onChange(value: string): void;
 }) {
   return (

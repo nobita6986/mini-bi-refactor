@@ -93,7 +93,7 @@ async function resolveVerifiedActor(
   }
 
   const actor = session.actor.actor;
-  if (!actor || !isUuid(actor.auth_subject) || !isUuid(actor.app_user_id)) {
+  if (!actor || actor.partner_account !== undefined || !isUuid(actor.auth_subject) || !isUuid(actor.app_user_id)) {
     return { ok: false, response: reportError("ACTOR_NOT_AVAILABLE") };
   }
 

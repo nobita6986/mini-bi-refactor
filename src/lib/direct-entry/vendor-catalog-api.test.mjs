@@ -27,14 +27,59 @@ const VENDOR = "VENDOR_ONE";
 const REV = "99999999-9999-4999-8999-999999999999";
 const RECRUITER = "88888888-8888-4888-8888-888888888888";
 const OTHER = "77777777-7777-4777-8777-777777777777";
+const PARTNER_ACCOUNT_ID = "33333333-3333-4333-8333-333333333333";
+const PARTNER_APP_USER_ID = "44444444-4444-4444-8444-444444444444";
 
-const ITEM = { vendor_id: VENDOR, display_name: "Synthetic Vendor", active: true,
-  version: 2, revision_count: 2, recruiter_id: RECRUITER };
-const MUTATION = { vendor_id: VENDOR, display_name: "Synthetic Vendor", active: true,
-  version: 3, revision_id: REV, recruiter_id: RECRUITER };
+const PARTNER_ACCOUNT = {
+  partner_account_id: PARTNER_ACCOUNT_ID,
+  partner_kind: "VENDOR",
+  vendor_id: VENDOR,
+  collaborator_id: null,
+  partner_id: VENDOR,
+  canonical_code: "vendor_one",
+  account_state: "PENDING_ACTIVATION",
+  app_user_id: PARTNER_APP_USER_ID,
+  username: "vendor_one",
+  activated_at: null,
+  must_change_password: true,
+  password_changed_at: null,
+  activation_expires_at: "2026-12-05T10:00:00Z",
+  activation_attempts: 0,
+  version: 2,
+};
+
+const ITEM = {
+  vendor_id: VENDOR,
+  display_name: "Synthetic Vendor",
+  address: "123 Nguyen Trai, Q.1",
+  phone: "+84 901 234 567",
+  active: true,
+  version: 2,
+  revision_count: 2,
+  recruiter_id: RECRUITER,
+  partner_account: PARTNER_ACCOUNT,
+};
+const MUTATION = {
+  vendor_id: VENDOR,
+  display_name: "Synthetic Vendor",
+  address: "123 Nguyen Trai, Q.1",
+  phone: "+84 901 234 567",
+  active: true,
+  version: 3,
+  revision_id: REV,
+  recruiter_id: RECRUITER,
+  partner_account: PARTNER_ACCOUNT,
+};
 const CREATE = { ...MUTATION, created: true };
-const LIST = { authorization_date: "2026-10-09", include_inactive: true, search: null,
-  page: 1, page_size: 25, total: 1, vendors: [ITEM] };
+const LIST = {
+  authorization_date: "2026-10-09",
+  include_inactive: true,
+  search: null,
+  page: 1,
+  page_size: 25,
+  total: 1,
+  vendors: [ITEM],
+};
 
 function deps(result, session = { actor: { ok: true, actor: ACTOR } }) {
   const calls = { session: 0, rpc: [] };
@@ -72,18 +117,40 @@ test("the contract accepts exactly the reviewed projection shapes", () => {
   assert.deepEqual(vendorCatalogList(LIST), LIST);
   assert.deepEqual(vendorCatalogMutation(MUTATION), MUTATION);
   assert.deepEqual(vendorCatalogCreateResult(CREATE), CREATE);
-  // A legacy vendor without a canonical representation keeps a null recruiter.
-  const legacy = { ...ITEM, recruiter_id: null };
+
+  // Legacy vendor without representation recruiter, address, phone, or partner_account keeps nulls.
+  const legacy = { ...ITEM, address: null, phone: null, recruiter_id: null, partner_account: null };
   assert.deepEqual(vendorCatalogItem(legacy), legacy);
+
+  // Fail closed on missing/extra keys or malformed address/phone/partner_account.
   assert.equal(vendorCatalogItem({ ...ITEM, extra: 1 }), null);
   const withoutName = { ...ITEM };
   delete withoutName.display_name;
   assert.equal(vendorCatalogItem(withoutName), null);
+  const withoutAddress = { ...ITEM };
+  delete withoutAddress.address;
+  assert.equal(vendorCatalogItem(withoutAddress), null);
+  const withoutPartnerAccount = { ...ITEM };
+  delete withoutPartnerAccount.partner_account;
+  assert.equal(vendorCatalogItem(withoutPartnerAccount), null);
+
   assert.equal(vendorCatalogItem({ ...ITEM, active: "true" }), null);
   assert.equal(vendorCatalogItem({ ...ITEM, version: -1 }), null);
   assert.equal(vendorCatalogItem({ ...ITEM, revision_count: "2" }), null);
   assert.equal(vendorCatalogItem({ ...ITEM, recruiter_id: 42 }), null);
   assert.equal(vendorCatalogItem({ ...ITEM, recruiter_id: "" }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, address: "" }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, address: "  untrimmed " }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, address: "bad\nline" }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, address: "a".repeat(501) }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, phone: "12345" }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, phone: "090123abc" }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, phone: "1".repeat(33) }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, extra: 1 } }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, partner_kind: "COLLABORATOR" } }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, account_state: "BOGUS" } }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, version: 0 } }), null);
+  assert.equal(vendorCatalogItem({ ...ITEM, partner_account: { ...PARTNER_ACCOUNT, partner_id: "OTHER" } }), null);
   assert.equal(vendorCatalogItem(null), null);
   assert.equal(vendorCatalogList({ ...LIST, vendors: [{ ...ITEM, version: 1.5 }] }), null);
   assert.equal(vendorCatalogList({ ...LIST, total: 0 }), null,
@@ -137,11 +204,46 @@ test("content-type, body and client authority fields are rejected before session
   assert.equal(d.calls.rpc.length, 0);
 });
 
-test("request projections are strict; the generic update cannot reach vendor_id or active", () => {
+test("request projections are strict; optional address and phone normalize cleanly", () => {
   assert.equal(vendorCatalogCreateRequest(CREATE_BODY).ok, true);
-  assert.deepEqual(vendorCatalogCreateRequest(CREATE_BODY).value,
-    { expected_version: 0, vendor_id: VENDOR, display_name: "Synthetic Vendor",
-      valid_from: "2024-01-01", reason: "Synthetic reason", idempotency_key: KEY });
+  assert.deepEqual(vendorCatalogCreateRequest(CREATE_BODY).value, {
+    expected_version: 0,
+    vendor_id: VENDOR,
+    display_name: "Synthetic Vendor",
+    valid_from: "2024-01-01",
+    address: null,
+    phone: null,
+    reason: "Synthetic reason",
+    idempotency_key: KEY,
+  });
+
+  const createWithContact = vendorCatalogCreateRequest({
+    ...CREATE_BODY,
+    address: "  123 Le Loi, Da Nang  ",
+    phone: "  (028) 3822-1234 ",
+  });
+  assert.equal(createWithContact.ok, true);
+  assert.equal(createWithContact.ok && createWithContact.value.address, "123 Le Loi, Da Nang");
+  assert.equal(createWithContact.ok && createWithContact.value.phone, "(028) 3822-1234");
+
+  for (const blank of [null, "", "   "]) {
+    const parsed = vendorCatalogCreateRequest({ ...CREATE_BODY, address: blank, phone: blank });
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) {
+      assert.equal(parsed.value.address, null);
+      assert.equal(parsed.value.phone, null);
+    }
+  }
+
+  for (const badAddr of [123, "x".repeat(501), "line1\nline2", "tab\there", "del\x7f"]) {
+    assert.equal(vendorCatalogCreateRequest({ ...CREATE_BODY, address: badAddr }).ok, false);
+    assert.equal(vendorCatalogUpdateRequest({ ...UPDATE_BODY, address: badAddr }).ok, false);
+  }
+  for (const badPhone of [123, "12345", "1".repeat(33), "0901234abc", "0901234#5"]) {
+    assert.equal(vendorCatalogCreateRequest({ ...CREATE_BODY, phone: badPhone }).ok, false);
+    assert.equal(vendorCatalogUpdateRequest({ ...UPDATE_BODY, phone: badPhone }).ok, false);
+  }
+
   assert.equal(vendorCatalogCreateRequest({ ...CREATE_BODY, expected_version: 1 }).ok, false,
     "create must open the aggregate at version 0");
   assert.equal(vendorCatalogCreateRequest({ ...CREATE_BODY, vendor_id: "__system_vendor__" }).ok, false);
@@ -168,6 +270,20 @@ test("request projections are strict; the generic update cannot reach vendor_id 
   assert.equal(vendorCatalogCreateRequest({ ...CREATE_BODY, extra: 1 }).ok, false);
 
   assert.equal(vendorCatalogUpdateRequest(UPDATE_BODY).ok, true);
+  const updateWithContact = vendorCatalogUpdateRequest({
+    ...UPDATE_BODY,
+    address: "  456 Hai Ba Trung ",
+    phone: " 0909.888.777 ",
+  });
+  assert.deepEqual(updateWithContact.ok && updateWithContact.value, {
+    expected_version: 2,
+    display_name: "Synthetic Vendor",
+    address: "456 Hai Ba Trung",
+    phone: "0909.888.777",
+    reason: "Synthetic reason",
+    idempotency_key: KEY,
+  });
+
   // PATCH must not accept the immutable identity or the active flag.
   assert.equal(vendorCatalogUpdateRequest({ ...UPDATE_BODY, vendor_id: "VENDOR_TWO" }).ok, false);
   assert.equal(vendorCatalogUpdateRequest({ ...UPDATE_BODY, active: false }).ok, false);
@@ -255,15 +371,20 @@ test("idempotency header mismatch is rejected before the repository", async () =
   assert.equal(d.calls.rpc.length, 0);
 });
 
-test("mutations project strict responses and sanitized failures", async () => {
+test("mutations project strict responses and sanitized failures including PARTNER_CODE_CONFLICT", async () => {
   const ok = deps({ ok: true, data: CREATE });
   const created = await createVendorCatalog(jsonRequest(CREATE_BODY), "true", ok.dependencies);
   assert.equal(created.status, 200);
   assert.deepEqual(await created.json(), { ok: true, vendor: CREATE });
 
-  const expected = { denied: [403, "VENDOR_DENIED"], "not-found": [404, "VENDOR_NOT_FOUND"],
-    conflict: [409, "VENDOR_CONFLICT"], invalid: [400, "VENDOR_INVALID"],
-    unavailable: [500, "VENDOR_UNAVAILABLE"] };
+  const expected = {
+    denied: [403, "VENDOR_DENIED"],
+    "not-found": [404, "VENDOR_NOT_FOUND"],
+    conflict: [409, "VENDOR_CONFLICT"],
+    "code-conflict": [409, "PARTNER_CODE_CONFLICT"],
+    invalid: [400, "VENDOR_INVALID"],
+    unavailable: [500, "VENDOR_UNAVAILABLE"],
+  };
   for (const [kind, [status, code]] of Object.entries(expected)) {
     const d = deps({ ok: false, kind });
     const res = await updateVendorCatalog(
@@ -321,7 +442,8 @@ test("detail and set-active validate the path business key and project the respo
 test("repository maps SQLSTATE to sanitized kinds and calls the canonical RPCs", async () => {
   assert.equal(classifyVendorCatalogError({ code: "40001" }), "conflict");
   assert.equal(classifyVendorCatalogError({ code: "PT409" }), "conflict");
-  assert.equal(classifyVendorCatalogError({ code: "23505" }), "conflict");
+  assert.equal(classifyVendorCatalogError({ code: "PT409", message: "PARTNER_CODE_CONFLICT" }), "code-conflict");
+  assert.equal(classifyVendorCatalogError({ code: "23505" }), "code-conflict");
   assert.equal(classifyVendorCatalogError({ code: "42501" }), "denied");
   assert.equal(classifyVendorCatalogError({ code: "P0002" }), "not-found");
   assert.equal(classifyVendorCatalogError({ code: "23514" }), "invalid");
@@ -355,11 +477,13 @@ test("repository maps SQLSTATE to sanitized kinds and calls the canonical RPCs",
 
   assert.deepEqual(await repository.createVendor({ ...ACTOR, expected_version: 0,
     vendor_id: VENDOR, display_name: "Synthetic Vendor", valid_from: "2024-01-01",
+    address: "123 Nguyen Trai, Q.1", phone: "+84 901 234 567",
     reason: "Synthetic reason", idempotency_key: KEY }), { ok: true, data: CREATE });
   assert.deepEqual(calls[2], ["direct_entry_create_vendor",
     { p_auth_subject: ACTOR.auth_subject, p_app_user_id: ACTOR.app_user_id, p_expected_version: 0,
       p_vendor_id: VENDOR, p_display_name: "Synthetic Vendor", p_valid_from: "2024-01-01",
-      p_reason: "Synthetic reason", p_idempotency_key: KEY }]);
+      p_reason: "Synthetic reason", p_idempotency_key: KEY,
+      p_address: "123 Nguyen Trai, Q.1", p_phone: "+84 901 234 567" }]);
 
   assert.deepEqual(await repository.updateVendor({ ...ACTOR, vendor_id: VENDOR,
     expected_version: 2, display_name: "Synthetic Vendor Renamed", reason: "Synthetic reason",
@@ -367,7 +491,8 @@ test("repository maps SQLSTATE to sanitized kinds and calls the canonical RPCs",
   assert.deepEqual(calls[3], ["direct_entry_update_vendor",
     { p_auth_subject: ACTOR.auth_subject, p_app_user_id: ACTOR.app_user_id, p_vendor_id: VENDOR,
       p_expected_version: 2, p_display_name: "Synthetic Vendor Renamed",
-      p_reason: "Synthetic reason", p_idempotency_key: KEY }]);
+      p_reason: "Synthetic reason", p_idempotency_key: KEY,
+      p_address: null, p_phone: null }]);
   assert.equal(Object.keys(calls[3][1]).some((key) => key.includes("active")), false,
     "the generic update sends no active field");
   assert.equal(Object.keys(calls[3][1]).some((key) => key.includes("valid_from")), false,
@@ -397,4 +522,12 @@ test("repository maps SQLSTATE to sanitized kinds and calls the canonical RPCs",
   assert.deepEqual(await denied.setVendorActive({ ...ACTOR, vendor_id: VENDOR, active: false,
     expected_version: 2, reason: "Synthetic reason", idempotency_key: KEY }),
   { ok: false, kind: "not-found" });
+
+  const codeConflict = createVendorCatalogRepository(async () => ({
+    data: null, error: { code: "PT409", message: "PARTNER_CODE_CONFLICT" },
+  }));
+  assert.deepEqual(await codeConflict.createVendor({ ...ACTOR, expected_version: 0,
+    vendor_id: VENDOR, display_name: "Synthetic Vendor", valid_from: "2024-01-01",
+    reason: "Synthetic reason", idempotency_key: KEY }),
+  { ok: false, kind: "code-conflict" });
 });
