@@ -110,6 +110,7 @@ export interface FilterCriteriaInput {
   project?: string | null;
   recruiter?: string | null;
   provider?: string | null;
+  collaborator?: string | null;
   employment?: string | null;
   status?: string | null;
   source?: string | null;
@@ -117,7 +118,15 @@ export interface FilterCriteriaInput {
 
 /** Đếm tiêu chí đang áp dụng: date range (from/to) tính là MỘT tiêu chí. */
 export function countActiveFilterCriteria(f: FilterCriteriaInput): number {
-  const dimensions = [f.project, f.recruiter, f.provider, f.employment, f.status, f.source].filter(Boolean).length;
+  const dimensions = [
+    f.project,
+    f.recruiter,
+    f.provider,
+    f.collaborator,
+    f.employment,
+    f.status,
+    f.source,
+  ].filter(Boolean).length;
   return (f.from || f.to ? 1 : 0) + dimensions;
 }
 

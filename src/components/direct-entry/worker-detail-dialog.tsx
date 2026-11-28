@@ -264,6 +264,16 @@ function WorkerDetailBody({
             <dd>{row.labor_type_display}</dd>
             <dt>Người tuyển / nhà cung cấp</dt>
             <dd>{row.recruiter_display + " · " + detail.providerLabel}</dd>
+            {detail.collaboratorId && (
+              <>
+                <dt>Cộng tác viên (CTV)</dt>
+                <dd>
+                  {detail.collaboratorDisplayName
+                    ? `${detail.collaboratorDisplayName} (${detail.collaboratorId})`
+                    : detail.collaboratorId}
+                </dd>
+              </>
+            )}
             <dt>Trạng thái làm việc</dt>
             <dd>{workerStatusLabel(detail.employment.status) +
               " (hiệu lực " + detail.employment.effective_date + ")"}</dd>

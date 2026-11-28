@@ -201,6 +201,14 @@ function createHarness() {
         }),
       }),
     },
+    "@/lib/vendor-referrals/vendor-referrer-repository": {
+      createVendorReferrerRepository: () => ({
+        getActorAccess: async () => ({
+          ok: true,
+          data: { can_manage: false, can_view_report: false },
+        }),
+      }),
+    },
     "@/lib/work-reports/assignment-repository": {
       createAssignmentRepository: () => {
         if (state.createAssignmentRepoImpl) {

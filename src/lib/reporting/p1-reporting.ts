@@ -14,6 +14,8 @@ export interface ReportingSource {
   last_seen_at: string | null;
 }
 
+export type RecruitmentChannel = "hrp_direct" | "hrp_ctv" | "vendor";
+
 /** Fact của snapshot hiện hành (có cả key và display). */
 export interface ReportingFact {
   source_id: string;
@@ -31,6 +33,9 @@ export interface ReportingFact {
   team_code?: string | null;
   team_display_name?: string | null;
   team_active?: boolean | null;
+  collaborator_id?: string | null;
+  collaborator_display?: string | null;
+  recruitment_channel?: RecruitmentChannel | string | null;
 }
 
 export type ReportingSourceStatus =
@@ -99,6 +104,8 @@ export interface ReportingData {
   byProject: Record<string, ReportingBucket>;
   byRecruiter: Record<string, ReportingBucket>;
   byProvider: Record<string, ReportingBucket>;
+  byChannel: Record<string, ReportingBucket>;
+  byCollaborator: Record<string, ReportingBucket>;
   byEmployment: Record<string, ReportingBucket>;
   byTeam: Record<string, ReportingBucket>;
   /** Breakdown chéo project × provider, tính từ CHÍNH tập facts đã filter. */
@@ -119,6 +126,7 @@ export interface ReportingFactQuery {
   project?: string;
   recruiter?: string;
   provider?: string;
+  collaborator?: string;
   employment?: string;
 }
 
@@ -155,9 +163,51 @@ export function buildReportingFactQuery(
       project: filters.project,
       recruiter: filters.recruiter,
       provider: filters.provider,
+      collaborator: filters.collaborator,
       employment: filters.employment,
     },
   };
+}
+
+/** Chuẩn hóa kênh tuyển của một fact (`hrp_direct` | `hrp_ctv` | `vendor` | sentinel). */
+export function resolveFactRecruitmentChannel(
+  fact: Pick<ReportingFact, "provider_type_key" | "collaborator_id" | "recruitment_channel">
+): string {
+  if (typeof fact.recruitment_channel === "string" && fact.recruitment_channel !== "") {
+    return fact.recruitment_channel;
+  }
+  if (fact.provider_type_key === "vendor") return "vendor";
+  if (fact.provider_type_key === "hrp") {
+    return typeof fact.collaborator_id === "string" && fact.collaborator_id.trim() !== ""
+      ? "hrp_ctv"
+      : "hrp_direct";
+  }
+  return fact.provider_type_key;
+}
+
+/** Kiểm tra thuần một fact có khớp `ReportingFilters` (bao gồm kênh tuyển và CTV) hay không. */
+export function matchesReportingFilters(
+  fact: ReportingFact,
+  filters: ReportingFilters
+): boolean {
+  if (filters.source && fact.source_id !== filters.source) return false;
+  if (filters.from && fact.business_date < filters.from) return false;
+  if (filters.to && fact.business_date > filters.to) return false;
+  if (filters.project && fact.project_key !== filters.project) return false;
+  if (filters.recruiter && fact.recruiter_key !== filters.recruiter) return false;
+  if (filters.provider) {
+    if (filters.provider === "hrp_direct" || filters.provider === "hrp_ctv") {
+      if (resolveFactRecruitmentChannel(fact) !== filters.provider) return false;
+    } else if (fact.provider_type_key !== filters.provider) {
+      return false;
+    }
+  }
+  if (filters.collaborator) {
+    const collabId = typeof fact.collaborator_id === "string" ? fact.collaborator_id.trim() : "";
+    if (collabId !== filters.collaborator) return false;
+  }
+  if (filters.employment && fact.employment_type_key !== filters.employment) return false;
+  return true;
 }
 
 function sumBy(rows: ReportingFact[], key: keyof ReportingFact): Record<string, number> {
@@ -230,6 +280,57 @@ export function teamBucketKey(teamCode: string): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return "team." + btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const CHANNEL_DISPLAY_LABELS: Record<string, string> = {
+  hrp_direct: "HRP trực tiếp",
+  hrp_ctv: "Qua CTV",
+  vendor: "Vendor",
+  __unknown__: "Không xác định",
+  __invalid__: "Không hợp lệ",
+};
+
+function groupByChannel(rows: ReportingFact[]): Record<string, ReportingBucket> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const channel = resolveFactRecruitmentChannel(row);
+    counts.set(channel, (counts.get(channel) ?? 0) + row.recruited_count);
+  }
+  const out: Record<string, ReportingBucket> = {};
+  for (const key of [...counts.keys()].sort()) {
+    out[key] = {
+      key,
+      display: CHANNEL_DISPLAY_LABELS[key] ?? key,
+      recruitedCount: counts.get(key)!,
+    };
+  }
+  return out;
+}
+
+function groupByCollaborator(rows: ReportingFact[]): Record<string, ReportingBucket> {
+  const buckets = new Map<string, Map<string, number>>();
+  for (const row of rows) {
+    const key = typeof row.collaborator_id === "string" ? row.collaborator_id.trim() : "";
+    if (!key) continue;
+    const display =
+      typeof row.collaborator_display === "string" && row.collaborator_display.trim() !== ""
+        ? row.collaborator_display.trim()
+        : key;
+    let byDisplay = buckets.get(key);
+    if (!byDisplay) {
+      byDisplay = new Map();
+      buckets.set(key, byDisplay);
+    }
+    byDisplay.set(display, (byDisplay.get(display) ?? 0) + row.recruited_count);
+  }
+  const out: Record<string, ReportingBucket> = {};
+  for (const key of [...buckets.keys()].sort()) {
+    const byDisplay = buckets.get(key)!;
+    let total = 0;
+    for (const count of byDisplay.values()) total += count;
+    out[key] = { key, display: selectDisplay(key, byDisplay), recruitedCount: total };
+  }
+  return out;
 }
 
 function groupByTeam(rows: ReportingFact[]): Record<string, ReportingBucket> {
@@ -363,14 +464,7 @@ export function computeReporting(
 
   const scopeFacts = facts.filter((f) => scopeIds.has(f.source_id));
 
-  let rows = scopeFacts;
-  if (filters.source) rows = rows.filter((f) => f.source_id === filters.source);
-  if (filters.from) rows = rows.filter((f) => f.business_date >= filters.from!);
-  if (filters.to) rows = rows.filter((f) => f.business_date <= filters.to!);
-  if (filters.project) rows = rows.filter((f) => f.project_key === filters.project);
-  if (filters.recruiter) rows = rows.filter((f) => f.recruiter_key === filters.recruiter);
-  if (filters.provider) rows = rows.filter((f) => f.provider_type_key === filters.provider);
-  if (filters.employment) rows = rows.filter((f) => f.employment_type_key === filters.employment);
+  const rows = scopeFacts.filter((f) => matchesReportingFilters(f, filters));
 
   const recruitedTotal = rows.reduce((a, r) => a + r.recruited_count, 0);
 
@@ -418,6 +512,8 @@ export function computeReporting(
     byProject: groupByDimension(rows, "project_key", "project_display"),
     byRecruiter: groupByDimension(rows, "recruiter_key", "recruiter_display"),
     byProvider: groupByDimension(rows, "provider_type_key", "provider_type_display"),
+    byChannel: groupByChannel(rows),
+    byCollaborator: groupByCollaborator(rows),
     byEmployment: groupByDimension(rows, "employment_type_key", "employment_type_display"),
     byTeam: groupByTeam(rows),
     projectProviderMix: buildProjectProviderMix(rows),
@@ -451,6 +547,7 @@ export interface DimensionOptions {
   recruiters: DimensionOption[];
   providers: DimensionOption[];
   employments: DimensionOption[];
+  collaborators: DimensionOption[];
 }
 
 /**
@@ -465,6 +562,7 @@ export function buildDimensionOptions(rows: DimensionOptionRow[]): DimensionOpti
     recruiter: new Map(),
     provider: new Map(),
     employment: new Map(),
+    collaborator: new Map(),
   };
   for (const row of rows) {
     const byKey = groups[row.dimension];
@@ -485,5 +583,6 @@ export function buildDimensionOptions(rows: DimensionOptionRow[]): DimensionOpti
     recruiters: toArray(groups.recruiter),
     providers: toArray(groups.provider),
     employments: toArray(groups.employment),
+    collaborators: toArray(groups.collaborator),
   };
 }

@@ -18,12 +18,12 @@ const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // P2.5-HF-R2: CMT/CCCD theo dung quy tac canonical dung chung (xem contracts/national-id.ts).
 const ROOT_KEYS = new Set(["contract_version", "rows"]);
 const ROW_KEYS = new Set([
-  "project_id", "first_work_date", "employee_code", "recruiter_id", "labor_type",
+  "project_id", "first_work_date", "employee_code", "recruiter_id", "labor_type", "collaborator_id",
   "display_name", "worker", "general_note", "payment", "employment", "portrait_stage_id",
   "document_stage_ids",
 ]);
 const SERVER_GENERATED_ROW_KEYS = new Set([
-  "project_id", "first_work_date", "provider_type", "recruiter_id", "labor_type",
+  "project_id", "first_work_date", "provider_type", "recruiter_id", "labor_type", "collaborator_id",
   "display_name", "worker", "general_note", "payment", "employment", "portrait_stage_id",
   "document_stage_ids",
 ]);
@@ -51,6 +51,7 @@ export type FullProfileRpcRow = {
   employee_code: string;
   recruiter_id: string;
   labor_type: LaborType;
+  collaborator_id?: string | null;
   display_name: string;
   worker_details: {
     gender: OptionalText;
@@ -367,6 +368,22 @@ export function parseFullProfilePayload(value: unknown): FullProfileParseResult 
       project_id, first_work_date, employee_code, recruiter_id, labor_type, display_name,
     } = item;
     const provider_type = item.provider_type;
+    let collaboratorId: string | null | undefined;
+    if (Object.hasOwn(item, "collaborator_id")) {
+      if (item.collaborator_id === null) {
+        collaboratorId = null;
+      } else if (typeof item.collaborator_id === "string" &&
+                 CATALOG_ID.test(item.collaborator_id.trim())) {
+        collaboratorId = item.collaborator_id.trim();
+      } else {
+        issues.push({ code: "BATCH_INVALID", path: `${path}.collaborator_id` });
+        return;
+      }
+    }
+    if (generatedCodes && typeof collaboratorId === "string" && provider_type !== "hrp") {
+      issues.push({ code: "BATCH_INVALID", path: `${path}.collaborator_id` });
+      return;
+    }
     const portraitStageId = item.portrait_stage_id;
     const documentStageValue = item.document_stage_ids;
     let documentStageIds: Partial<Record<DocumentType, string>> | undefined;
@@ -435,6 +452,7 @@ export function parseFullProfilePayload(value: unknown): FullProfileParseResult 
       first_work_date,
       recruiter_id,
       labor_type: labor_type as LaborType,
+      ...(collaboratorId !== undefined ? { collaborator_id: collaboratorId } : {}),
       display_name: (display_name as string).trim(),
       worker_details: worker ?? {
         gender: { state: "omitted" },

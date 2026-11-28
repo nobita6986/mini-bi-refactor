@@ -50,6 +50,7 @@ export const DETAIL_KEYS = [
 export const DETAIL_ITEM_KEYS = [
   "entry_id", "target_kind", "expected_version", "proposal", "labor_type_display",
 ] as const;
+const DETAIL_ITEM_OPTIONAL_KEYS = ["collaborator_display"] as const;
 
 /** Cursor opaque do DB sinh: <yyyyMMddHH24MISSUS UTC>:<request_id>. */
 const CURSOR = /^[0-9]{20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -277,7 +278,7 @@ export const READ_PROPOSAL_KEYS: Readonly<Record<ChangeRequestTargetKind, readon
   Object.freeze({
     ENTRY_FIELD: [
       "project_id", "first_work_date", "employee_code", "recruiter_id", "labor_type",
-      "worker_details",
+      "collaborator_id", "worker_details",
     ],
     PAYMENT: ["state", "account_number", "bank_id", "account_holder_name"],
     WORK_STATUS: ["status", "effective_date", "leave_reason"],
@@ -286,7 +287,7 @@ export const READ_PROPOSAL_KEYS: Readonly<Record<ChangeRequestTargetKind, readon
   });
 
 const ENTRY_FIELD_NON_PII_KEYS = [
-  "project_id", "first_work_date", "employee_code", "recruiter_id", "labor_type",
+  "project_id", "first_work_date", "employee_code", "recruiter_id", "labor_type", "collaborator_id",
 ] as const;
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -335,6 +336,7 @@ export type ChangeRequestDetailItem = {
   proposal: Record<string, unknown>;
   /** Nhan cua proposal.labor_type; null khi item khong mang labor type. */
   labor_type_display: string | null;
+  collaborator_display?: string | null;
 };
 
 export type ChangeRequestDetail = {
@@ -349,7 +351,11 @@ export type ChangeRequestDetail = {
 };
 
 function projectDetailItem(value: unknown): ChangeRequestDetailItem | null {
-  if (!isRecord(value) || !hasExactKeys(value, DETAIL_ITEM_KEYS)) return null;
+  if (!isRecord(value)) return null;
+  const itemKeys = Object.keys(value);
+  const allowedItemKeys = new Set<string>([...DETAIL_ITEM_KEYS, ...DETAIL_ITEM_OPTIONAL_KEYS]);
+  if (!DETAIL_ITEM_KEYS.every((key) => Object.hasOwn(value, key)) ||
+      itemKeys.some((key) => !allowedItemKeys.has(key))) return null;
   if (typeof value.entry_id !== "string" || !UUID.test(value.entry_id)) return null;
   if (typeof value.target_kind !== "string") return null;
   if (!isPositiveVersion(value.expected_version)) return null;
@@ -357,6 +363,11 @@ function projectDetailItem(value: unknown): ChangeRequestDetailItem | null {
   if (findSensitiveProposalKey(value.proposal) !== null) return null;
   const proposal = projectReadProposal(kind, value.proposal);
   if (!proposal) return null;
+  if (Object.hasOwn(value, "collaborator_display") &&
+      value.collaborator_display !== null &&
+      (typeof value.collaborator_display !== "string" || value.collaborator_display.trim().length < 1)) {
+    return null;
+  }
 
   // P3.1-W02C-R2: item co labor type thi BAT BUOC co nhan khong rong; item khong co
   // labor type thi BAT BUOC la null. Lech mot trong hai => unavailable, khong render
@@ -376,6 +387,9 @@ function projectDetailItem(value: unknown): ChangeRequestDetailItem | null {
     expected_version: value.expected_version,
     proposal,
     labor_type_display: value.labor_type_display,
+    ...(Object.hasOwn(value, "collaborator_display")
+      ? { collaborator_display: value.collaborator_display as string | null }
+      : {}),
   };
 }
 

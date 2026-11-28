@@ -282,10 +282,10 @@ test("hidden XLSX CTAs retain import/template handlers and mobile staged editor 
   assert.match(live, /Máy chủ sẽ cấp mã khi lưu/);
   // P1.7-H06: quick editor co "Lưu trước để tải hồ sơ" hint.
   assert.match(live, /Lưu trước để tải hồ sơ/);
-  // P1.7-H05: HRP/Vendor dropdown chi co 2 option don gian (HRP, Vendor) theo
-  // yeu cau production UI; khong dung optgroup nhom.
-  assert.match(live, /<option value="hrp">HRP<\/option>/);
+  // P1.7-H05 / Branch B CTV: Nguon tuyen gom 3 option (HRP, Vendor, CTV)
+  assert.match(live, /<option value="hrp">HRP \(trực tiếp\)<\/option>/);
   assert.match(live, /<option value="vendor">Vendor<\/option>/);
+  assert.match(live, /<option value="ctv">CTV<\/option>/);
   assert.equal(live.includes('<optgroup label="HRP">'), false,
     "khong dung optgroup; HRP/Vendor chi co 2 option don gian");
   // P1.7-H06: mobile staged card list khong con nut × theo row.

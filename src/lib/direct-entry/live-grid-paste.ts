@@ -22,7 +22,7 @@ import type {
 } from "./write-repository.ts";
 
 export const DRAFT_EDITABLE_GRID_FIELDS = Object.freeze([
-  "project_id", "first_work_date", "display_name", "provider_type", "recruiter_id",
+  "project_id", "first_work_date", "display_name", "provider_type", "recruiter_id", "collaborator_id",
   "labor_type", "initial_status", "phone", "national_id", "gender", "date_of_birth",
   "national_id_issued_at", "address", "account_number", "bank_name",
   "account_holder_name", "general_note",
@@ -33,7 +33,7 @@ const WORK_STATUS_CODES: Record<string, "ON" | "UNCONFIRMED"> = {
   "Đang làm": "ON", "Đang làm việc": "ON", "Đang chờ việc": "UNCONFIRMED",
 };
 const STAGED_EDITABLE_FIELDS = Object.freeze([
-  "provider_type", ...SPREADSHEET_WRITABLE_FIELD_KEYS,
+  "provider_type", ...SPREADSHEET_WRITABLE_FIELD_KEYS, "collaborator_id",
 ]);
 
 type GridRow = {
@@ -86,13 +86,29 @@ export function patchLiveDraftRowFromGrid(
   if (safePatch.first_work_date !== undefined) draftPatch.firstWorkDate = safePatch.first_work_date;
   if (safePatch.display_name !== undefined) draftPatch.workerName = safePatch.display_name;
   if (safePatch.project_id !== undefined) draftPatch.projectId = safePatch.project_id;
-  if (safePatch.recruiter_id !== undefined) draftPatch.recruiterId = safePatch.recruiter_id;
+  if (safePatch.recruiter_id !== undefined) {
+    draftPatch.recruiterId = safePatch.recruiter_id;
+    const recruiter = recruiters.find((option) => option.recruiter_id === safePatch.recruiter_id);
+    if (recruiter) {
+      if (recruiter.provider_type === "vendor") {
+        draftPatch.providerType = recruiter.provider_type;
+        draftPatch.collaboratorId = null;
+      } else if (!row.collaboratorId && safePatch.collaborator_id === undefined) {
+        draftPatch.providerType = recruiter.provider_type;
+      }
+    }
+  }
   if (safePatch.labor_type !== undefined) draftPatch.laborType = safePatch.labor_type;
-  if (safePatch.provider_type === "hrp" || safePatch.provider_type === "vendor") {
-    const recruiter = recruiters.find((option) => option.provider_type === safePatch.provider_type);
+  if (safePatch.provider_type === "hrp" || safePatch.provider_type === "vendor" || safePatch.provider_type === "ctv") {
+    const targetRecruiterProvider = safePatch.provider_type === "ctv" ? "hrp" : safePatch.provider_type;
+    const recruiter = recruiters.find((option) => option.provider_type === targetRecruiterProvider);
     if (!recruiter) return row;
-    draftPatch.providerType = recruiter.provider_type;
+    draftPatch.providerType = safePatch.provider_type;
     draftPatch.recruiterId = recruiter.recruiter_id;
+    if (safePatch.provider_type !== "ctv") draftPatch.collaboratorId = null;
+  }
+  if (safePatch.collaborator_id !== undefined) {
+    draftPatch.collaboratorId = safePatch.collaborator_id.trim() || null;
   }
   const workerKeys = [
     "phone", "national_id", "gender", "date_of_birth", "national_id_issued_at",

@@ -53,11 +53,12 @@ const DUPLICATE_CCCD_TOKENS = ["duplicate_cccd_withdraw"];
 const WORKER_EDIT_HISTORY_MIGRATION = "20261031120000_worker_edit_history_admin.sql";
 const WORKER_EDIT_HISTORY_TOKENS = ["worker_edit_history_view"];
 const HR_BULLETINS_MIGRATION = "20261127060000_wp_hr_bulletins_foundation.sql";
-const POST_3D_CAPABILITY_TOKENS = ["bulletin_manage"];
+const GROUP_ONLY_TOKENS = ["vendor_referrer_manage"];
+const POST_3D_CAPABILITY_TOKENS = ["bulletin_manage", ...GROUP_ONLY_TOKENS];
 const LEGACY_TOKEN_COUNT = 21;
 const RETIRED_TOKENS = ["pii_view", "pii_export", "payment_view", "payment_edit"];
 const TOKEN_COUNT = 33;
-const ACTIVE_TOKEN_COUNT = 30;
+const ACTIVE_TOKEN_COUNT = 31;
 const UNKNOWN_TOKEN = "unknown_capability_probe";
 
 const AUTH_SUBJECT = "10000000-0000-4000-8000-00000000c001";
@@ -244,7 +245,7 @@ test("migration 67 is append-only: the frozen foundation vocabulary is untouched
   await db.close();
 
   // Post-3D HEAD verification: authz_role_capabilities_cap_chk & authz_user_group_capabilities_cap_chk
-  // must match the active CAPABILITIES vocabulary once HR_BULLETINS_MIGRATION is applied.
+  // share the active vocabulary except for capabilities reserved for permission groups.
   if (names.includes(HR_BULLETINS_MIGRATION)) {
     const headDb = new PGlite();
     await headDb.exec(AUTH_PROLOGUE);
@@ -264,11 +265,10 @@ test("migration 67 is append-only: the frozen foundation vocabulary is untouched
     assert.equal(post3dChecks.length, 2, "both post-3D authz capability CHECK constraints must exist");
     for (const row of post3dChecks) {
       const tokens = [...String(row.definition).matchAll(/'([^']+)'::text/g)].map((m) => m[1]);
-      assert.deepEqual(
-        [...tokens].sort(),
-        [...CAPABILITIES].sort(),
-        `${row.conname} must match active CAPABILITIES (30 tokens including bulletin_manage)`,
-      );
+      const expected = row.conname === "authz_role_capabilities_cap_chk"
+        ? CAPABILITIES.filter((token) => !GROUP_ONLY_TOKENS.includes(token))
+        : CAPABILITIES;
+      assert.deepEqual(tokens.sort(), [...expected].sort(), row.conname);
     }
     await headDb.close();
   }

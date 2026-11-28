@@ -49,6 +49,7 @@ import {
   canSelectQuickOffboardingWorker,
   buildDirectEditEntryFieldProposal,
   buildDirectEditPaymentPatch,
+  buildWorkerEditCollaboratorOptions,
   buildWorkerEditProjectOptions,
   buildWorkerEditRecruiterOptions,
   checkDirectEditDocumentFile,
@@ -1344,7 +1345,12 @@ function WorkerTable({
                   {row.first_work_date}
                 </td>
                 <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap font-medium"} data-label="Người tuyển">
-                  {row.recruiter_display}
+                  <div>{row.recruiter_display}</div>
+                  {row.collaborator_id ? (
+                    <div className="text-xs font-normal text-muted">
+                      CTV: {row.collaborator_display_name ?? row.collaborator_id}
+                    </div>
+                  ) : null}
                 </td>
                 <td className={DATA_TABLE_TD_CLASS + " whitespace-nowrap"} data-label="Trạng thái">
                   <StatusBadge tone={statusTone} dot>
@@ -1399,6 +1405,8 @@ type EntryBaseline = {
   firstWorkDate: string;
   employeeCode: string;
   recruiterId: string;
+  collaboratorId: string | null;
+  collaboratorDisplayName: string | null;
   laborType: string;
   laborTypeDisplay: string;
   workerDetails: WorkerDetails | null;
@@ -1461,6 +1469,11 @@ async function fetchBaseline(entryId: string): Promise<EntryBaseline | null> {
       firstWorkDate: row.first_work_date,
       employeeCode: row.employee_code,
       recruiterId: row.recruiter_id,
+      collaboratorId: typeof row.collaborator_id === "string" && row.collaborator_id.length > 0
+        ? row.collaborator_id : null,
+      collaboratorDisplayName: typeof row.collaborator_display_name === "string" &&
+        row.collaborator_display_name.length > 0
+        ? row.collaborator_display_name : null,
       laborType: row.labor_type,
       laborTypeDisplay: row.labor_type_display,
       workerDetails: details,
@@ -1551,6 +1564,7 @@ function ProposeDrawer({
             first_work_date: value.firstWorkDate,
             employee_code: value.employeeCode,
             recruiter_id: value.recruiterId,
+            collaborator_id: value.collaboratorId,
             labor_type: value.laborType,
             worker_details: value.workerDetails,
           };
@@ -1667,6 +1681,7 @@ function ProposeDrawer({
         first_work_date: baseline.firstWorkDate,
         employee_code: baseline.employeeCode,
         recruiter_id: baseline.recruiterId,
+        collaborator_id: baseline.collaboratorId,
         labor_type: baseline.laborType,
         worker_details: baseline.workerDetails,
       };
@@ -1801,6 +1816,12 @@ function ProposeDrawer({
               firstWorkDate: entryForm.first_work_date,
               employeeCode: entryForm.employee_code,
               recruiterId: entryForm.recruiter_id,
+              collaboratorId: entryForm.collaborator_id ?? null,
+              collaboratorDisplayName: entryForm.collaborator_id
+                ? (catalog?.collaborators?.find(
+                    (c) => c.collaborator_id === entryForm.collaborator_id,
+                  )?.display_name ?? prev.collaboratorDisplayName)
+                : null,
               laborType: entryForm.labor_type,
               workerDetails: nextWorkerDetails,
               status: nextStatus,
@@ -2014,8 +2035,21 @@ function ProposeDrawer({
                       ["Dự án", row.project_display],
                       ["Ngày bắt đầu làm việc", row.first_work_date],
                       ["Người tuyển / Vendor", row.recruiter_display],
-                      ["HRP/Vendor", baseline?.providerType === "hrp" ? "HRP"
-                        : baseline?.providerType === "vendor" ? "Vendor" : "—"],
+                      ["Nguồn tuyển", (baseline?.collaboratorId ?? row.collaborator_id)
+                        ? "CTV"
+                        : baseline?.providerType === "hrp"
+                          ? "HRP"
+                          : baseline?.providerType === "vendor"
+                            ? "Vendor"
+                            : "—"],
+                      ...((baseline?.collaboratorId ?? row.collaborator_id)
+                        ? [[
+                            "Cộng tác viên (CTV)",
+                            (baseline?.collaboratorDisplayName ?? row.collaborator_display_name)
+                              ? `${baseline?.collaboratorDisplayName ?? row.collaborator_display_name} (${baseline?.collaboratorId ?? row.collaborator_id})`
+                              : (baseline?.collaboratorId ?? row.collaborator_id ?? "—"),
+                          ]]
+                        : []),
                       ["Loại hình lao động", row.labor_type_display],
                       ["Trạng thái làm việc", workerStatusLabel(baseline?.status ?? row.employment_status)],
                     ].map(([label, value]) => (
@@ -2116,8 +2150,19 @@ function ProposeDrawer({
                     </label>
                     <select id="worker-recruiter" className={inputClass} value={entryForm.recruiter_id}
                       disabled={loading || catalog === undefined}
-                      onChange={(event) => setEntryForm({ ...entryForm,
-                        recruiter_id: event.target.value })}>
+                      onChange={(event) => {
+                        const nextRecruiterId = event.target.value;
+                        const nextRecruiter = catalog?.recruiters.find(
+                          (item) => item.recruiter_id === nextRecruiterId,
+                        );
+                        setEntryForm({
+                          ...entryForm,
+                          recruiter_id: nextRecruiterId,
+                          ...(nextRecruiter?.provider_type === "vendor"
+                            ? { collaborator_id: null }
+                            : {}),
+                        });
+                      }}>
                       {buildWorkerEditRecruiterOptions({
                         catalogRecruiters: catalog?.recruiters,
                         currentRecruiterId: baseline?.recruiterId ?? entryForm.recruiter_id,
@@ -2129,6 +2174,43 @@ function ProposeDrawer({
                       ))}
                     </select>
                   </div>
+                  {(() => {
+                    const currentRecruiter = catalog?.recruiters.find(
+                      (item) => item.recruiter_id === entryForm.recruiter_id,
+                    );
+                    const isVendor = currentRecruiter?.provider_type === "vendor" ||
+                      (currentRecruiter === undefined && baseline?.providerType === "vendor");
+                    return (
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="worker-collaborator" className="text-sm font-medium">
+                          Cộng tác viên (CTV)
+                        </label>
+                        <select
+                          id="worker-collaborator"
+                          className={inputClass}
+                          value={isVendor ? "" : (entryForm.collaborator_id ?? "")}
+                          disabled={loading || catalog === undefined || isVendor}
+                          onChange={(event) => setEntryForm({
+                            ...entryForm,
+                            collaborator_id: event.target.value === "" ? null : event.target.value,
+                          })}
+                        >
+                          {buildWorkerEditCollaboratorOptions({
+                            catalogCollaborators: catalog?.collaborators,
+                            currentCollaboratorId: isVendor
+                              ? null
+                              : (baseline?.collaboratorId ?? entryForm.collaborator_id ?? null),
+                            currentCollaboratorDisplay:
+                              baseline?.collaboratorDisplayName ?? row?.collaborator_display_name ?? null,
+                          }).map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })()}
                   <div className="flex flex-col gap-1.5">
                     <label htmlFor="worker-labor-type" className="text-sm font-medium">
                       Loại hình lao động

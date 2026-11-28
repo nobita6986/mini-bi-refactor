@@ -813,7 +813,8 @@ test("Q2: RecruitmentPostFeedWorkspace derives live tab from useSearchParams, av
 test("M1: AdminLayout delegates to resolveNavActorForAppShell({ directEntryEnabled, adminNavigationEnabled: true }) while keeping /admin gate independent", () => {
   const adminLayoutSrc = readRepo("src/app/admin/layout.tsx");
   assert.match(adminLayoutSrc, /resolveActorForRequest\(\)/);
-  assert.match(adminLayoutSrc, /decideAdminAreaAccess\(\{ actor \}\)/);
+  assert.match(adminLayoutSrc, /resolveVendorReferrerAccessForRequest\(\)/);
+  assert.match(adminLayoutSrc, /decideAdminAreaAccess\(\{\s*actor,\s*hasVendorReferrerAccess\s*\}\)/);
   assert.match(
     adminLayoutSrc,
     /resolveNavActorForAppShell\(\{\s*directEntryEnabled,\s*adminNavigationEnabled:\s*true,?\s*\}\)/,
@@ -919,6 +920,16 @@ test("M2: resolveAdminLandingPath covers all 4 authorized personas in exact prio
   assert.equal(decideAdminAreaAccess({ actor: workerHistoryOnly }), "ALLOW");
   assert.equal(resolveAdminLandingPath(workerHistoryOnly), "/admin/worker-edit-history");
   assert.equal(decideWorkerEditHistoryPageAccess({ actor: workerHistoryOnly }), "ALLOW");
+
+  // BoD-only vendor_referrer_manage (with server-verified hasVendorReferrerAccess)
+  const bodVendorReferrerOnly = makeFullActorResolution({
+    capabilities: ["vendor_referrer_manage"],
+    scopes: [{ kind: "all" }],
+    effective_grants: [makeGrant("vendor_referrer_manage", "ALL")],
+  });
+  assert.equal(decideAdminAreaAccess({ actor: bodVendorReferrerOnly, hasVendorReferrerAccess: false }), "ACCESS_DENIED");
+  assert.equal(decideAdminAreaAccess({ actor: bodVendorReferrerOnly, hasVendorReferrerAccess: true }), "ALLOW");
+  assert.equal(resolveAdminLandingPath(bodVendorReferrerOnly, { hasVendorReferrerAccess: true }), "/admin/catalog/vendors");
 
   // Unauthorized / wrong scope / unauthenticated / disabled / null -> null (zero loop)
   const wrongScopeHistory = makeFullActorResolution({

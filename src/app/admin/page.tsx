@@ -6,13 +6,26 @@ import {
   decideAdminAreaAccess,
   resolveAdminLandingPath,
 } from "@/lib/auth/direct-entry-page-access";
-import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
+import { hasVendorReferrerManageCapability } from "@/lib/navigation/registry-capability";
+import {
+  resolveActorForRequest,
+  resolveVendorReferrerAccessForRequest,
+} from "@/lib/navigation/resolve-nav-actor";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminPage() {
   const actor = await resolveActorForRequest().catch(() => null);
-  const accessDecision = decideAdminAreaAccess({ actor });
+  const referrerAccess =
+    actor?.ok && hasVendorReferrerManageCapability(actor.actor)
+      ? await resolveVendorReferrerAccessForRequest().catch(() => ({
+          canManage: false,
+          canViewReport: false,
+        }))
+      : { canManage: false, canViewReport: false };
+  const hasVendorReferrerAccess =
+    referrerAccess.canManage || referrerAccess.canViewReport;
+  const accessDecision = decideAdminAreaAccess({ actor, hasVendorReferrerAccess });
   switch (accessDecision) {
     case "REDIRECT_LOGIN":
       redirect("/login?next=/admin");
@@ -25,7 +38,7 @@ export default async function AdminPage() {
     case "NOT_FOUND":
       return <AccessDenied />;
     case "ALLOW": {
-      const target = resolveAdminLandingPath(actor);
+      const target = resolveAdminLandingPath(actor, { hasVendorReferrerAccess });
       if (!target) {
         return <AccessDenied />;
       }

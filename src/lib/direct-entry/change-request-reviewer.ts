@@ -164,6 +164,14 @@ export function catalogRecruiterLabel(
   return found ? found.display_name : null;
 }
 
+export function catalogCollaboratorLabel(
+  catalog: DraftCatalog | undefined,
+  collaboratorId: string,
+): string | null {
+  const found = catalog?.collaborators?.find((item) => item.collaborator_id === collaboratorId);
+  return found ? `${found.display_name} (${found.collaborator_id})` : null;
+}
+
 /**
  * De xuat chi duoc ho tro khi moi key deu nam trong 5 field non-PII va co it nhat mot key.
  * Danh sach duoc kiem theo allowlist tu PROPOSER_FIELD_ORDER, khong liet ke field bi cam.
@@ -181,7 +189,8 @@ export function isSupportedEntryFieldProposal(value: unknown): value is Record<s
  */
 export function buildReviewerEntryRows(input: {
   item: { entry_id: string; expected_version: number; target_kind: string;
-    proposal: Record<string, unknown>; labor_type_display?: string | null };
+    proposal: Record<string, unknown>; labor_type_display?: string | null;
+    collaborator_display?: string | null };
   entry: ProposerEntryProjection;
   format: ReviewerFieldFormatter;
 }): ReviewerFieldRow[] | null {
@@ -190,8 +199,25 @@ export function buildReviewerEntryRows(input: {
   for (const field of PROPOSER_FIELD_ORDER) {
     if (!(field in item.proposal)) continue;
     const proposed = item.proposal[field];
+    if (field === "collaborator_id") {
+      if (proposed !== null && typeof proposed !== "string") return null;
+      const currentCollab = entry.collaborator_id ?? null;
+      if (proposed === currentCollab) continue;
+      const formatCollab = (val: string | null, display: string | null | undefined): string | null => {
+        if (val === null) return "Không qua CTV";
+        const resolved = format(entry, "collaborator_id", val, display);
+        if (resolved !== null) return resolved;
+        return display ? `${display} (${val})` : val;
+      };
+      const before = formatCollab(currentCollab, entry.collaborator_display_name);
+      const after = formatCollab(proposed, item.collaborator_display);
+      if (before === null || after === null) return null;
+      rows.push({ field, label: PROPOSER_FIELD_LABELS[field], before, after });
+      continue;
+    }
     if (typeof proposed !== "string") return null;
     const current = entry[field];
+    if (typeof current !== "string") return null;
     if (proposed === current) continue;
     const before = format(entry, field, current,
       field === "labor_type" ? entry.labor_type_display : undefined);

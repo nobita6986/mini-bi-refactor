@@ -61,6 +61,7 @@ test("inactive persisted Own Draft keeps canonical key and separate server label
     recruiterId: "93000000-0000-4000-8000-000000000001",
     laborType: "PROBATION",
     providerType: "hrp",
+    collaboratorId: null,
     profile: projection.profile,
   });
   assert.match(controller, /laborTypeDisplay: draft\.labor_type_display/);

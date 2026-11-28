@@ -23,7 +23,7 @@ import {
   type PasteCatalogSource,
   type WorkerProfilePreview,
 } from "./worker-profile-preview.ts";
-import { workerProfileIssueMessage } from "./worker-profile-import-contract.ts";
+import { issue as profileIssue, workerProfileIssueMessage } from "./worker-profile-import-contract.ts";
 
 /** Cac cot vat ly duoc ghi vao payload, theo dung thu tu vat ly cua registry. */
 export const SPREADSHEET_WRITE_COLUMNS = Object.freeze(
@@ -144,7 +144,7 @@ export function buildSpreadsheetValidation(input: {
   if (dataRows.length === 0) return EMPTY_VALIDATION;
 
   const resolver = createPasteCatalogResolver(input.catalogFor);
-  const preview = buildWorkerProfilePreview({
+  const rawPreview = buildWorkerProfilePreview({
     text: serializeSpreadsheetRows(dataRows),
     referenceDate: input.referenceDate,
     resolver,
@@ -157,6 +157,61 @@ export function buildSpreadsheetValidation(input: {
     return dataRows[index]?.clientRowId ?? null;
   };
 
+  const stagedByClientId = new Map(dataRows.map((row) => [row.clientRowId, row] as const));
+  const enrichedPreviewRows = rawPreview.rows.map((previewRow) => {
+    const clientRowId = clientRowIdForSourceRow(previewRow.sourceRow);
+    const staged = clientRowId !== null ? stagedByClientId.get(clientRowId) : undefined;
+    if (!staged) return previewRow;
+
+    const extraIssues = [...previewRow.issues];
+    const catalog = input.catalogFor(previewRow.row.first_work_date || input.referenceDate);
+    let resolvedCollaboratorId: string | null = null;
+
+    if (staged.providerType === "ctv") {
+      const collabId = (staged.collaboratorId ?? "").trim();
+      if (collabId === "") {
+        extraIssues.push(profileIssue("CTV_REQUIRED", "error", previewRow.sourceRow, "collaborator_id"));
+      } else if (catalog?.collaborators &&
+                 !catalog.collaborators.some((item) => item.id === collabId && item.active)) {
+        extraIssues.push(profileIssue("PASTE_CATALOG_MISSING", "error", previewRow.sourceRow, "collaborator_id"));
+      } else {
+        resolvedCollaboratorId = collabId;
+      }
+      if (previewRow.resolved.provider_type === "vendor" &&
+          !extraIssues.some((item) => item.field === "recruiter_id")) {
+        extraIssues.push(profileIssue("PASTE_CATALOG_MISSING", "error", previewRow.sourceRow, "recruiter_id"));
+      }
+    }
+
+    const resolved = {
+      ...previewRow.resolved,
+      collaborator_id: staged.providerType === "ctv" ? resolvedCollaboratorId : null,
+    };
+    return {
+      ...previewRow,
+      resolved,
+      issues: extraIssues,
+      canProceed: extraIssues.length === 0,
+    };
+  });
+
+  const allPreviewIssues = [
+    ...rawPreview.headerIssues,
+    ...enrichedPreviewRows.flatMap((row) => [...row.issues, ...row.warnings]),
+  ];
+  const validRowsCount = enrichedPreviewRows.filter((row) => row.canProceed).length;
+  const previewErrorCount = allPreviewIssues.filter((item) => item.severity === "error").length;
+  const previewWarningCount = allPreviewIssues.filter((item) => item.severity === "warning").length;
+  const preview: WorkerProfilePreview = {
+    ...rawPreview,
+    rows: enrichedPreviewRows,
+    issues: allPreviewIssues,
+    validRows: validRowsCount,
+    errorCount: previewErrorCount,
+    warningCount: previewWarningCount,
+    canProceed: previewErrorCount === 0 && enrichedPreviewRows.length > 0,
+  };
+
   const cellIssues: SpreadsheetCellIssue[] = [];
   const headerIssues: SpreadsheetCellIssue[] = [];
   for (const issue of preview.issues) {
@@ -165,7 +220,11 @@ export function buildSpreadsheetValidation(input: {
       columnKey: issue.field === null ? null : issue.field,
       code: issue.code,
       severity: issue.severity,
-      message: workerProfileIssueMessage(issue.code),
+      message: issue.code === "CTV_REQUIRED"
+        ? "Vui lòng chọn CTV khi nguồn là CTV."
+        : issue.field === "collaborator_id" && issue.code === "PASTE_CATALOG_MISSING"
+          ? "CTV không tồn tại hoặc đã ngừng hoạt động."
+          : workerProfileIssueMessage(issue.code),
     });
     if (issue.row >= 2 && mapped.clientRowId !== null) cellIssues.push(mapped);
     else headerIssues.push(mapped);

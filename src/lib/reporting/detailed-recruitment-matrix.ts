@@ -15,7 +15,12 @@ import {
   type TrendResolution,
 } from "./p1-dashboard-period.ts";
 import { isRealCalendarDate, type ReportingFilters } from "./p1-filter.ts";
-import { selectDisplay, type ReportingFact } from "./p1-reporting.ts";
+import {
+  matchesReportingFilters,
+  resolveFactRecruitmentChannel,
+  selectDisplay,
+  type ReportingFact,
+} from "./p1-reporting.ts";
 import { P2_W04A_DIRECT_ENTRY_SOURCE_ID } from "./p2-w04a-cutover.ts";
 
 export const ALL_RECRUITERS_TEAM_FILTER = "all";
@@ -92,7 +97,9 @@ export type DetailedMatrixRecruiterRow = {
   workStartDate: string | null;
   workMonths: number | null;
   counts: number[];
+  ctvCounts: number[];
   total: number;
+  ctvTotal: number;
 };
 
 export type DetailedRecruitmentMatrixReport = {
@@ -105,7 +112,9 @@ export type DetailedRecruitmentMatrixReport = {
   buckets: TrendBucketPoint[];
   rows: DetailedMatrixRecruiterRow[];
   columnTotals: number[];
+  columnCtvTotals: number[];
   grandTotal: number;
+  grandCtvTotal: number;
 };
 
 function normalizeKey(value: string | null | undefined): string {
@@ -306,6 +315,35 @@ export function parseMatrixResolutionParam(
 }
 
 /**
+ * Chỉ hiển thị chú thích trong ngoặc `(ctv)` khi đang xem `Tổng tuyển của NVTD` (`hrp`).
+ * Khi xem `Qua CTV` (`hrp_ctv`), `HRP trực tiếp` (`hrp_direct`) hoặc `Vendor`, không hiển thị ngoặc.
+ */
+export function canShowDetailedMatrixCtvBreakdown(provider: string): boolean {
+  return provider === "hrp";
+}
+
+/**
+ * Format số hiển thị cho ô / cột Tổng / dòng Tổng cộng trên Báo cáo chi tiết.
+ * Khi checkbox `Hiện số tuyển qua CTV` bật và đang xem `Tổng tuyển của NVTD` (`hrp`),
+ * hiển thị `<total> (<ctv>)` nếu `total > 0 && ctv > 0`, ngược lại chỉ hiển thị `<total>`.
+ */
+export function formatDetailedMatrixMetricCell(
+  total: number,
+  ctvCount: number | undefined,
+  options: { showCtv: boolean; provider: string },
+): string {
+  if (!options.showCtv || !canShowDetailedMatrixCtvBreakdown(options.provider)) {
+    return String(total);
+  }
+  const ctv =
+    typeof ctvCount === "number" && Number.isFinite(ctvCount) ? ctvCount : 0;
+  if (total > 0 && ctv > 0) {
+    return `${total} (${ctv})`;
+  }
+  return String(total);
+}
+
+/**
  * Mirrors the exact row-level filter rules of `computeScopedReportingData` + `computeReporting`
  * in `p2-w04a-reporting-server.ts` / `p1-reporting.ts`.
  */
@@ -320,14 +358,7 @@ export function matchesDashboardReportingFact(
   ) {
     return false;
   }
-  if (filters.source && fact.source_id !== filters.source) return false;
-  if (filters.from && fact.business_date < filters.from) return false;
-  if (filters.to && fact.business_date > filters.to) return false;
-  if (filters.project && fact.project_key !== filters.project) return false;
-  if (filters.recruiter && fact.recruiter_key !== filters.recruiter) return false;
-  if (filters.provider && fact.provider_type_key !== filters.provider) return false;
-  if (filters.employment && fact.employment_type_key !== filters.employment) return false;
-  return true;
+  return matchesReportingFilters(fact, filters);
 }
 
 export function buildDetailedMatrixBuckets(
@@ -406,8 +437,11 @@ export function buildDetailedRecruitmentMatrix(input: {
       ? input.teamId.trim()
       : ALL_RECRUITERS_TEAM_FILTER;
 
-  // 1. Filter facts using the exact Dashboard predicate and accumulate by (recruiter_key, business_date).
-  const factsByRecruiterAndDate = new Map<string, Map<string, number>>();
+  // 1. Single-pass filter and accumulation of total & CTV counts by (recruiter_key, business_date).
+  const factsByRecruiterAndDate = new Map<
+    string,
+    Map<string, { total: number; ctv: number }>
+  >();
   const displayCountsByRecruiterKey = new Map<string, Map<string, number>>();
   const matchedFactByDate: Record<string, number> = {};
 
@@ -417,6 +451,9 @@ export function buildDetailedRecruitmentMatrix(input: {
 
     matchedFactByDate[row.business_date] =
       (matchedFactByDate[row.business_date] ?? 0) + row.recruited_count;
+
+    const ctvIncrement =
+      resolveFactRecruitmentChannel(row) === "hrp_ctv" ? row.recruited_count : 0;
 
     const rKey = row.recruiter_key;
     let dispMap = displayCountsByRecruiterKey.get(rKey);
@@ -431,13 +468,19 @@ export function buildDetailedRecruitmentMatrix(input: {
 
     let dateMap = factsByRecruiterAndDate.get(rKey);
     if (!dateMap) {
-      dateMap = new Map<string, number>();
+      dateMap = new Map<string, { total: number; ctv: number }>();
       factsByRecruiterAndDate.set(rKey, dateMap);
     }
-    dateMap.set(
-      row.business_date,
-      (dateMap.get(row.business_date) ?? 0) + row.recruited_count,
-    );
+    const existing = dateMap.get(row.business_date);
+    if (existing) {
+      existing.total += row.recruited_count;
+      existing.ctv += ctvIncrement;
+    } else {
+      dateMap.set(row.business_date, {
+        total: row.recruited_count,
+        ctv: ctvIncrement,
+      });
+    }
   }
 
   // 2. Build time buckets (day / week / month) identical to TrendChart.
@@ -501,22 +544,26 @@ export function buildDetailedRecruitmentMatrix(input: {
   function computeBucketCounts(
     recruiterKey: string,
     consumeFacts: boolean,
-  ): { counts: number[]; total: number } {
+  ): { counts: number[]; ctvCounts: number[]; total: number; ctvTotal: number } {
     const counts = new Array<number>(baseBuckets.length).fill(0);
+    const ctvCounts = new Array<number>(baseBuckets.length).fill(0);
     let total = 0;
-    if (!consumeFacts) return { counts, total };
+    let ctvTotal = 0;
+    if (!consumeFacts) return { counts, ctvCounts, total, ctvTotal };
 
     const dateMap = factsByRecruiterAndDate.get(recruiterKey);
-    if (!dateMap) return { counts, total };
+    if (!dateMap) return { counts, ctvCounts, total, ctvTotal };
 
-    for (const [date, count] of dateMap.entries()) {
+    for (const [date, entry] of dateMap.entries()) {
       const bucketIdx = dateToBucketIndex.get(date);
       if (bucketIdx !== undefined) {
-        counts[bucketIdx] += count;
-        total += count;
+        counts[bucketIdx] += entry.total;
+        ctvCounts[bucketIdx] += entry.ctv;
+        total += entry.total;
+        ctvTotal += entry.ctv;
       }
     }
-    return { counts, total };
+    return { counts, ctvCounts, total, ctvTotal };
   }
 
   // 4. Build candidate rows depending on `rawTeamId`.
@@ -537,7 +584,10 @@ export function buildDetailedRecruitmentMatrix(input: {
       const rKey = normalizeKey(member.recruiterKey || member.displayName);
       const shouldConsume = !consumedFactKeys.has(rKey);
       if (shouldConsume) consumedFactKeys.add(rKey);
-      const { counts, total } = computeBucketCounts(rKey, shouldConsume);
+      const { counts, ctvCounts, total, ctvTotal } = computeBucketCounts(
+        rKey,
+        shouldConsume,
+      );
       unsortedRows.push({
         recruiterId: member.recruiterId,
         recruiterKey: rKey,
@@ -546,7 +596,9 @@ export function buildDetailedRecruitmentMatrix(input: {
         workStartDate: member.workStartDate,
         workMonths: computeCompletedWorkMonths(member.workStartDate, asOfDate),
         counts,
+        ctvCounts,
         total,
+        ctvTotal,
       });
     }
   } else {
@@ -558,7 +610,10 @@ export function buildDetailedRecruitmentMatrix(input: {
 
       const shouldConsume = !consumedFactKeys.has(rKey);
       if (shouldConsume) consumedFactKeys.add(rKey);
-      const { counts, total } = computeBucketCounts(rKey, shouldConsume);
+      const { counts, ctvCounts, total, ctvTotal } = computeBucketCounts(
+        rKey,
+        shouldConsume,
+      );
       unsortedRows.push({
         recruiterId: rec.recruiterId,
         recruiterKey: rKey,
@@ -567,7 +622,9 @@ export function buildDetailedRecruitmentMatrix(input: {
         workStartDate: rec.workStartDate,
         workMonths: computeCompletedWorkMonths(rec.workStartDate, asOfDate),
         counts,
+        ctvCounts,
         total,
+        ctvTotal,
       });
     }
 
@@ -578,7 +635,10 @@ export function buildDetailedRecruitmentMatrix(input: {
       if (consumedFactKeys.has(rKey)) continue;
       consumedFactKeys.add(rKey);
 
-      const { counts, total } = computeBucketCounts(rKey, true);
+      const { counts, ctvCounts, total, ctvTotal } = computeBucketCounts(
+        rKey,
+        true,
+      );
       if (total <= 0) continue;
 
       const catalogMatch = primaryCatalogByRecruiterKey.get(rKey);
@@ -597,7 +657,9 @@ export function buildDetailedRecruitmentMatrix(input: {
         workStartDate,
         workMonths: computeCompletedWorkMonths(workStartDate, asOfDate),
         counts,
+        ctvCounts,
         total,
+        ctvTotal,
       });
     }
   }
@@ -620,13 +682,17 @@ export function buildDetailedRecruitmentMatrix(input: {
     ...row,
   }));
 
-  // 6. Compute columnTotals and grandTotal, and populate bucket totals.
+  // 6. Compute columnTotals, columnCtvTotals, grandTotal, grandCtvTotal, and populate bucket totals.
   const columnTotals = new Array<number>(baseBuckets.length).fill(0);
+  const columnCtvTotals = new Array<number>(baseBuckets.length).fill(0);
   let grandTotal = 0;
+  let grandCtvTotal = 0;
   for (const row of rows) {
     grandTotal += row.total;
+    grandCtvTotal += row.ctvTotal;
     for (let j = 0; j < baseBuckets.length; j += 1) {
       columnTotals[j] += row.counts[j] ?? 0;
+      columnCtvTotals[j] += row.ctvCounts[j] ?? 0;
     }
   }
 
@@ -645,6 +711,8 @@ export function buildDetailedRecruitmentMatrix(input: {
     buckets,
     rows,
     columnTotals,
+    columnCtvTotals,
     grandTotal,
+    grandCtvTotal,
   };
 }

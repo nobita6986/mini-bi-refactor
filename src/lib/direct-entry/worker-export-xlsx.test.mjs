@@ -44,13 +44,13 @@ async function reload(bytes) {
   return { excel, sheet: workbook.getWorksheet("Người lao động") };
 }
 
-test("the workbook has exactly the 20 headers in order", async () => {
+test("the workbook has exactly the 21 headers in order", async () => {
   const { sheet } = await reload(await buildWorkerExportXlsx([row()]));
   const header = sheet.getRow(1);
   assert.deepEqual(
     WORKER_EXPORT_COLUMNS.map((_, index) => header.getCell(index + 1).value),
     WORKER_EXPORT_COLUMNS.map((column) => column.header));
-  assert.equal(WORKER_EXPORT_COLUMNS.length, 20);
+  assert.equal(WORKER_EXPORT_COLUMNS.length, 21);
 });
 
 test("all exported columns use Excel text format and leading zeros survive", async () => {

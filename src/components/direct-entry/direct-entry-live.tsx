@@ -227,6 +227,11 @@ function spreadsheetCatalogOptions(catalog: DraftCatalog | undefined) {
       personnel_code: recruiter.personnel_code,
       vendor_id: recruiter.vendor_id,
     })),
+    collaborators: (catalog?.collaborators ?? []).map((collaborator) => ({
+      id: collaborator.collaborator_id,
+      label: `${collaborator.display_name} (${collaborator.collaborator_id})`,
+      active: collaborator.active,
+    })),
     labor_types: (catalog?.labor_types ?? []).map((option) => ({
       id: option.labor_type_key,
       label: option.display_name,
@@ -268,6 +273,7 @@ function createPayload(row: LiveDraftRow) {
     employee_code: row.employeeCode,
     worker: optionalWorker(row.workerName),
     recruiter_id: row.recruiterId,
+    ...(row.collaboratorId ? { collaborator_id: row.collaboratorId } : {}),
     labor_type: row.laborType,
   };
 }
@@ -968,10 +974,23 @@ export function DirectEntryLive() {
     }
     const validEmployeeCode = current.entryId !== null ||
       validateEmployeeCode(current.employeeCode, current.firstWorkDate).length === 0;
+    const selectedRecruiter = catalog.recruiters.find(
+      ({ recruiter_id }) => recruiter_id === current.recruiterId,
+    );
+    const collaboratorChanged = current.collaboratorId !== (current.saved?.collaboratorId ?? null);
+    const validCollaborator =
+      (current.providerType !== "ctv" || Boolean(current.collaboratorId)) &&
+      (current.collaboratorId === null ||
+        (selectedRecruiter?.provider_type === "hrp" &&
+          (!collaboratorChanged ||
+            (catalog.collaborators ?? []).some(
+              (c) => c.collaborator_id === current.collaboratorId && c.active,
+            ))));
     const valid = isRealCalendarDate(current.firstWorkDate) &&
       current.workerName.trim().length > 0 &&
       catalog.projects.some(({ project_id }) => project_id === current.projectId) &&
-      catalog.recruiters.some(({ recruiter_id }) => recruiter_id === current.recruiterId) &&
+      selectedRecruiter !== undefined &&
+      validCollaborator &&
       (catalog.labor_types ?? []).some(({ labor_type_key }) =>
         labor_type_key === current.laborType) &&
       validEmployeeCode;
@@ -1141,7 +1160,7 @@ export function DirectEntryLive() {
       const resolved = applyServerDraft(row);
       return {
         ...resolved,
-        providerType: recruiter?.provider_type ?? null,
+        providerType: resolved.collaboratorId ? "ctv" : (recruiter?.provider_type ?? null),
         teamId: recruiter?.team_id ?? null,
         teamDisplayName: recruiter?.team_display_name ?? "",
         recruiterDisplayName: recruiter?.display_name ?? "",
@@ -1333,6 +1352,11 @@ export function DirectEntryLive() {
         personnel_code: recruiter.personnel_code,
         vendor_id: recruiter.vendor_id,
       })),
+      collaborators: (currentCatalog.collaborators ?? []).map((collaborator) => ({
+        id: collaborator.collaborator_id,
+        label: `${collaborator.display_name} (${collaborator.collaborator_id})`,
+        active: collaborator.active,
+      })),
       labor_types: (currentCatalog.labor_types ?? []).map((option) => ({
         id: option.labor_type_key,
         label: option.display_name,
@@ -1498,6 +1522,7 @@ export function DirectEntryLive() {
           display_name: row.workerName,
           project_id: row.projectId,
           recruiter_id: row.recruiterId,
+          collaborator_id: row.collaboratorId ?? "",
           provider_hint: row.providerType?.toUpperCase() ?? "",
           team_hint: row.teamDisplayName,
           labor_type: row.laborType,
@@ -1505,13 +1530,17 @@ export function DirectEntryLive() {
         },
         editableFields: editable
           ? (draftEditActive ? DRAFT_EDITABLE_GRID_FIELDS : [
-              "first_work_date", "display_name", "project_id", "recruiter_id", "labor_type",
+              "first_work_date", "display_name", "project_id", "recruiter_id",
+              "collaborator_id", "labor_type",
             ])
           : [],
         employeeCode: row.employeeCode,
         displayName: row.workerName,
         projectLabel: projectLabelFor(row.projectId, row.projectDisplayName),
         recruiterLabel: displayRecruiter(row, fallbackCatalog ?? undefined),
+        collaboratorLabel: row.collaboratorDisplayName
+          ? `${row.collaboratorDisplayName} (${row.collaboratorId ?? ""})`
+          : (row.collaboratorId ?? ""),
         saveStatus: stateText(row.state),
       };
     });
@@ -1521,6 +1550,8 @@ export function DirectEntryLive() {
       const recruiter = catalog?.recruiters.find((option) =>
         option.recruiter_id === row.cells.recruiter_id ||
         option.label === row.cells.recruiter_id);
+      const collaborator = (catalog?.collaborators ?? []).find((option) =>
+        option.collaborator_id === row.cells.collaborator_id);
       const providerType = row.providerType || recruiter?.provider_type || "";
       // P3-W07C: lazy default placeholders. Neu row CHUA kich hoat, cell
       // default `first_work_date` hien placeholder mo (italic, color muted).
@@ -1549,14 +1580,20 @@ export function DirectEntryLive() {
       cccdStatus: "Chưa lưu",
       canManageCccd: false,
       catalogOptions: spreadsheetCatalogOptions(catalog),
-      cells: row.cells,
+      cells: {
+        ...row.cells,
+        ...(row.collaboratorId ? { collaborator_id: row.collaboratorId } : {}),
+      },
       displayValues: Object.keys(placeholderValues).length > 0
         ? placeholderValues : undefined,
-      editableFields: ["provider_type", ...SPREADSHEET_WRITABLE_FIELD_KEYS],
+      editableFields: ["provider_type", ...SPREADSHEET_WRITABLE_FIELD_KEYS, "collaborator_id"],
       employeeCode: row.cells.employee_code ?? "",
       displayName: row.cells.display_name ?? "",
       projectLabel: projectLabelFor(row.cells.project_id ?? ""),
       recruiterLabel: recruiter?.label ?? row.cells.recruiter_id ?? "",
+      collaboratorLabel: collaborator
+        ? `${collaborator.display_name} (${collaborator.collaborator_id})`
+        : (row.cells.collaborator_id ?? ""),
       saveStatus: spreadsheetRowIsBlank(row) ? "" : "Chưa lưu",
     }); });
     return [...persisted, ...staged];
@@ -1653,18 +1690,23 @@ export function DirectEntryLive() {
 
   const onStagedProviderTypeChange = useCallback((
     clientRowId: string,
-    providerType: "hrp" | "vendor" | "",
+    providerType: "hrp" | "vendor" | "ctv" | "",
   ) => {
     const persistedRow = rows.find((row) => row.rowId === clientRowId);
     if (persistedRow) {
       if (!providerType) return;
-      const recruiter = currentCatalog?.recruiters.find((option) =>
-        option.provider_type === providerType);
+      const targetRecruiterProvider = providerType === "ctv" ? "hrp" : providerType;
+      const existingRecruiter = currentCatalog?.recruiters.find((option) =>
+        option.recruiter_id === persistedRow.recruiterId &&
+        option.provider_type === targetRecruiterProvider);
+      const recruiter = existingRecruiter ?? currentCatalog?.recruiters.find((option) =>
+        option.provider_type === targetRecruiterProvider);
       if (!recruiter) return;
       invalidateStagedUndo();
       setRows((current) => updateLiveDraftRow(current, clientRowId, {
         providerType,
         recruiterId: recruiter.recruiter_id,
+        collaboratorId: providerType === "ctv" ? persistedRow.collaboratorId : null,
       }));
       return;
     }
@@ -3056,15 +3098,18 @@ export function DirectEntryLive() {
                           <input value={cells.phone ?? ""}
                             onChange={handleMobileStagedFieldChange(stagedRow.clientRowId, "phone")} />
                         </Field>
-                        <Field label={<><span>HRP/Vendor</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
+                        <Field label={<><span>Nguồn tuyển</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
                           <select value={stagedRow.providerType}
                             onChange={(event) => {
                               const next = event.currentTarget.value;
-                              const providerType = next === "hrp" || next === "vendor" ? next : "";
+                              const providerType =
+                                next === "hrp" || next === "vendor" || next === "ctv" ? next : "";
                               onStagedProviderTypeChange(stagedRow.clientRowId, providerType);
                             }}>
-                            <option value="hrp">HRP</option>
+                            <option value="">Chọn nguồn</option>
+                            <option value="hrp">HRP (trực tiếp)</option>
                             <option value="vendor">Vendor</option>
+                            <option value="ctv">CTV</option>
                           </select>
                         </Field>
                         <Field label={<><span>Người tuyển / Vendor</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
@@ -3073,9 +3118,25 @@ export function DirectEntryLive() {
                             onChange={handleMobileStagedFieldChange(stagedRow.clientRowId, "recruiter_id")}>
                             <option value="">—</option>
                             {(catalog?.recruiters ?? []).filter((recruiter) =>
-                              stagedRow.providerType === "" || recruiter.provider_type === stagedRow.providerType)
+                              stagedRow.providerType === "" ||
+                              recruiter.provider_type === (stagedRow.providerType === "ctv"
+                                ? "hrp" : stagedRow.providerType))
                               .map((recruiter) => <option key={recruiter.recruiter_id}
                                 value={recruiter.recruiter_id}>{recruiter.display_name}</option>)}
+                          </select>
+                        </Field>
+                        <Field label={<><span>CTV</span>{stagedRow.providerType === "ctv" && <span className={styles.requiredStar} aria-hidden="true"> *</span>}</>}>
+                          <select
+                            value={stagedRow.providerType === "ctv" ? (cells.collaborator_id ?? "") : ""}
+                            disabled={stagedRow.providerType !== "ctv"}
+                            onChange={handleMobileStagedFieldChange(stagedRow.clientRowId, "collaborator_id")}>
+                            <option value="">
+                              {stagedRow.providerType === "ctv" ? "Chọn CTV" : "Chỉ áp dụng khi nguồn là CTV"}
+                            </option>
+                            {(catalog?.collaborators ?? []).filter((c) => c.active)
+                              .map((c) => <option key={c.collaborator_id} value={c.collaborator_id}>
+                                {c.display_name} ({c.collaborator_id})
+                              </option>)}
                           </select>
                         </Field>
                         <Field label={<><span>Loại hình LĐ</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
@@ -3181,8 +3242,9 @@ export function DirectEntryLive() {
                     first_work_date: "Ngày bắt đầu làm việc",
                     display_name: "Họ và tên",
                     recruiter_id: "Người tuyển / Vendor",
+                    collaborator_id: "CTV",
                     labor_type: "Loại hình LĐ",
-                    provider_type: "HRP/Vendor",
+                    provider_type: "Nguồn tuyển",
                   };
                   return (
                     <ul className={styles.quickErrorList} role="alert"
@@ -3282,15 +3344,18 @@ export function DirectEntryLive() {
                     <input value={target.cells.phone ?? ""}
                       onChange={handleMobileStagedFieldChange(target.clientRowId, "phone")} />
                   </Field>
-                  <Field label={<><span>HRP/Vendor</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
+                  <Field label={<><span>Nguồn tuyển</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
                     <select value={target.providerType}
                       onChange={(event) => {
                         const next = event.currentTarget.value;
-                        const providerType = next === "hrp" || next === "vendor" ? next : "";
+                        const providerType =
+                          next === "hrp" || next === "vendor" || next === "ctv" ? next : "";
                         onStagedProviderTypeChange(target.clientRowId, providerType);
                       }}>
-                      <option value="hrp">HRP</option>
+                      <option value="">Chọn nguồn</option>
+                      <option value="hrp">HRP (trực tiếp)</option>
                       <option value="vendor">Vendor</option>
+                      <option value="ctv">CTV</option>
                     </select>
                   </Field>
                   <Field label={<><span>Người tuyển / Vendor</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
@@ -3300,9 +3365,24 @@ export function DirectEntryLive() {
                       <option value="">—</option>
                       {(rowCatalog?.recruiters ?? [])
                         .filter((recruiter) => target.providerType === "" ||
-                          recruiter.provider_type === target.providerType)
+                          recruiter.provider_type === (target.providerType === "ctv"
+                            ? "hrp" : target.providerType))
                         .map((recruiter) => <option key={recruiter.recruiter_id}
                           value={recruiter.recruiter_id}>{recruiter.display_name}</option>)}
+                    </select>
+                  </Field>
+                  <Field label={<><span>CTV</span>{target.providerType === "ctv" && <span className={styles.requiredStar} aria-hidden="true"> *</span>}</>}>
+                    <select
+                      value={target.providerType === "ctv" ? (target.cells.collaborator_id ?? "") : ""}
+                      disabled={target.providerType !== "ctv"}
+                      onChange={handleMobileStagedFieldChange(target.clientRowId, "collaborator_id")}>
+                      <option value="">
+                        {target.providerType === "ctv" ? "Chọn CTV" : "Chỉ áp dụng khi nguồn là CTV"}
+                      </option>
+                      {(rowCatalog?.collaborators ?? []).filter((c) => c.active)
+                        .map((c) => <option key={c.collaborator_id} value={c.collaborator_id}>
+                          {c.display_name} ({c.collaborator_id})
+                        </option>)}
                     </select>
                   </Field>
                   <Field label={<><span>Loại hình LĐ</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
@@ -3410,13 +3490,62 @@ export function DirectEntryLive() {
                     options={currentOptions}
                     value={selectedRow.recruiterId}
                     disabled={selectedRow.state === "saving" || selectedRow.state === "conflict" || selectedRowLocked}
-                    onChange={(recruiterId) => updateRow(selectedRow.rowId, { recruiterId })}
+                    onChange={(recruiterId) => {
+                      const nextRecruiter = selectedRowCatalog?.recruiters.find(
+                        (item) => item.recruiter_id === recruiterId,
+                      );
+                      updateRow(selectedRow.rowId, {
+                        recruiterId,
+                        ...(nextRecruiter?.provider_type === "vendor"
+                          ? { collaboratorId: null, providerType: "vendor" }
+                          : { providerType: selectedRow.collaboratorId ? "ctv" : "hrp" }),
+                      });
+                    }}
                   />
                 </div>
                 <p className={styles.derivedValue}>
-                  HRP/Vendor: <strong>{currentRecruiter?.provider_type.toUpperCase() ?? "Chưa chọn"}</strong>
+                  Nguồn: <strong>
+                    {selectedRow.collaboratorId
+                      ? "CTV"
+                      : currentRecruiter?.provider_type.toUpperCase() ?? "Chưa chọn"}
+                  </strong>
                   {" · "}Team: <strong>{currentRecruiter?.team_display_name ?? "—"}</strong>
                 </p>
+                {currentRecruiter?.provider_type !== "vendor" && (
+                  <Field label="Cộng tác viên (CTV)">
+                    <select
+                      aria-label="Cộng tác viên (CTV)"
+                      value={selectedRow.collaboratorId ?? ""}
+                      disabled={selectedRow.state === "saving" || selectedRow.state === "conflict" || selectedRowLocked}
+                      onChange={(event) => {
+                        const nextId = event.currentTarget.value === "" ? null : event.currentTarget.value;
+                        updateRow(selectedRow.rowId, {
+                          collaboratorId: nextId,
+                          providerType: nextId ? "ctv" : "hrp",
+                        });
+                      }}
+                    >
+                      <option value="">Không qua CTV</option>
+                      {selectedRow.collaboratorId !== null &&
+                        !(selectedRowCatalog?.collaborators ?? []).some(
+                          (c) => c.collaborator_id === selectedRow.collaboratorId && c.active,
+                        ) && (
+                        <option value={selectedRow.collaboratorId} disabled>
+                          {selectedRow.collaboratorDisplayName
+                            ? `${selectedRow.collaboratorDisplayName} (${selectedRow.collaboratorId}) — Ngừng hoạt động`
+                            : `${selectedRow.collaboratorId} — Ngừng hoạt động`}
+                        </option>
+                      )}
+                      {(selectedRowCatalog?.collaborators ?? [])
+                        .filter((c) => c.active)
+                        .map((c) => (
+                          <option key={c.collaborator_id} value={c.collaborator_id}>
+                            {c.display_name} ({c.collaborator_id})
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                )}
                 <Field label={<><span>Loại hình lao động</span><span className={styles.requiredStar} aria-hidden="true"> *</span></>}>
                   <select aria-label="Loại hình lao động"
                     value={(selectedRowCatalog?.labor_types ?? []).some((option) =>

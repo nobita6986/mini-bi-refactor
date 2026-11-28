@@ -27,6 +27,7 @@ import type { ChangeRequestDecision } from "@/lib/direct-entry/change-request-co
 import {
   buildDecisionRequest,
   buildReviewerViewModel,
+  catalogCollaboratorLabel,
   catalogProjectLabel,
   catalogRecruiterLabel,
   decisionIntentSignature,
@@ -74,7 +75,8 @@ const DECISION_RESULT_KEYS = ["request_id", "state", "version"] as const;
 const ENTRY_KEYS = ["entry"] as const;
 const HISTORY_FIELD_LABELS: Readonly<Record<string, string>> = {
   project_id: "Dự án", first_work_date: "Ngày bắt đầu làm việc", employee_code: "Mã người lao động",
-  recruiter_id: "Người tuyển", labor_type: "Loại hình lao động", worker_details: "Thông tin cá nhân",
+  recruiter_id: "Người tuyển", collaborator_id: "CTV", labor_type: "Loại hình lao động",
+  worker_details: "Thông tin cá nhân",
   status: "Trạng thái làm việc", effective_date: "Ngày hiệu lực", leave_reason: "Lý do nghỉ việc",
   state: "Trạng thái thanh toán", account_number: "Số tài khoản", bank_id: "Ngân hàng",
   account_holder_name: "Tên chủ tài khoản", document_type: "Loại tài liệu",
@@ -105,6 +107,15 @@ function historyRows(item: ChangeRequestDetailItem, catalog?: DraftCatalog): Arr
     }
     if (key === "project_id") return [[label, catalog?.projects.find((item) => item.project_id === value)?.display_name ?? "Dự án đã chọn"]];
     if (key === "recruiter_id") return [[label, catalog?.recruiters.find((item) => item.recruiter_id === value)?.display_name ?? "Người tuyển đã chọn"]];
+    if (key === "collaborator_id") {
+      if (value === null) return [[label, "Không qua CTV"]];
+      return [[
+        label,
+        item.collaborator_display ??
+          catalogCollaboratorLabel(catalog, String(value)) ??
+          "CTV đã chọn",
+      ]];
+    }
     if (key === "bank_id") return [[label, catalog?.banks.find((item) => item.bank_id === value)?.display_name ?? "Ngân hàng đã chọn"]];
     if (key === "status" && value === "ON") return [[label, "Đang làm việc"]];
     if (key === "status" && value === "UNCONFIRMED") return [[label, "Đang chờ việc"]];
@@ -166,6 +177,10 @@ export function DirectEntryChangeRequestReviewer({
       const catalog = catalogFor(hcmTodayDate());
       if (field === "project_id") return catalogProjectLabel(catalog, value);
       if (field === "recruiter_id") return catalogRecruiterLabel(catalog, value);
+      if (field === "collaborator_id") {
+        if (value === "") return "Không qua CTV";
+        return authoritativeDisplay ?? catalogCollaboratorLabel(catalog, value);
+      }
       if (field === "labor_type") return authoritativeDisplay ?? null;
       return value;
     },

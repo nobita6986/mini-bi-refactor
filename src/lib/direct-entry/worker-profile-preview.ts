@@ -22,10 +22,17 @@ import {
 
 export type { PasteCatalogOption };
 
+export type PasteCatalogCollaboratorOption = {
+  id: string;
+  label: string;
+  active: boolean;
+};
+
 export type PasteCatalogSource = {
   projects: readonly PasteCatalogOption[];
   recruiters: readonly PasteCatalogOption[];
   labor_types: readonly PasteCatalogOption[];
+  collaborators?: readonly PasteCatalogCollaboratorOption[];
 };
 
 /** Caller cung cap nguon catalog theo ngay hieu luc (co the la cache cua trang). */
@@ -77,6 +84,7 @@ export type WorkerProfilePreviewRow = {
     project_id: string | null;
     recruiter_id: string | null;
     provider_type: "hrp" | "vendor" | null;
+    collaborator_id?: string | null;
   };
   labels: { project: string; recruiter: string; laborType: string };
   issues: WorkerProfileIssue[];

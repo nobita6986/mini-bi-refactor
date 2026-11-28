@@ -10,18 +10,19 @@ import {
 const source = readFileSync(
   new URL("../../components/direct-entry/direct-entry-spreadsheet-grid.tsx", import.meta.url), "utf8");
 
-test("registry co dung 28 cot (27 contract + provider_type UI) va thu tu vat ly on dinh", () => {
-  // P1.7-H05: 28 cot tong (27 contract/derived/action + provider_type UI-only).
-  // 18 cot mac dinh tren grid; registry day du de drawer/projection/validation
+test("registry co dung 29 cot (27 contract + provider_type + collaborator_id UI) va thu tu vat ly on dinh", () => {
+  // P1.7-H05 + CTV: 29 cot tong (27 contract/derived/action + provider_type + collaborator_id).
+  // 19 cot mac dinh tren grid; registry day du de drawer/projection/validation
   // va mo rong sau nay.
-  assert.equal(DIRECT_ENTRY_GRID_COLUMNS.length, 28);
+  assert.equal(DIRECT_ENTRY_GRID_COLUMNS.length, 29);
   assert.equal(directEntryGridColumnIndex("project_id"), 1);
   assert.equal(directEntryGridColumnIndex("employee_code"), 3);
   assert.equal(directEntryGridColumnIndex("provider_type"), 14);
-  assert.equal(directEntryGridColumnIndex("row_actions"), 27);
+  assert.equal(directEntryGridColumnIndex("collaborator_id"), 16);
+  assert.equal(directEntryGridColumnIndex("row_actions"), 28);
   assert.equal(directEntryGridColumnIndex("khong_ton_tai"), -1);
   // Moi cot deu co khoa duy nhat.
-  assert.equal(new Set(DIRECT_ENTRY_GRID_COLUMNS.map((column) => column.key)).size, 28);
+  assert.equal(new Set(DIRECT_ENTRY_GRID_COLUMNS.map((column) => column.key)).size, 29);
 });
 
 test("grid render cot tu registry, khong hard-code danh sach cot", () => {

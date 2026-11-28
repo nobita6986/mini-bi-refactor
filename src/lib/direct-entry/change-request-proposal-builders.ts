@@ -90,6 +90,7 @@ export type WorkerEntryFieldBaseline = {
   first_work_date: string;
   employee_code: string;
   recruiter_id: string;
+  collaborator_id?: string | null;
   labor_type: LaborType;
   worker_details: WorkerDetails;
 };
@@ -146,6 +147,7 @@ export function workerEntryFormFromBaseline(
     first_work_date: baseline.first_work_date,
     employee_code: baseline.employee_code,
     recruiter_id: baseline.recruiter_id,
+    collaborator_id: baseline.collaborator_id ?? null,
     labor_type: baseline.labor_type,
     workerDetails: workerFormFromDetails(baseline.worker_details),
   };
@@ -242,6 +244,11 @@ export function buildEntryFieldProposal(input: {
     "project_id", "first_work_date", "employee_code", "recruiter_id", "labor_type",
   ] as const) {
     if (input.form[field] !== input.baseline[field]) proposal[field] = input.form[field];
+  }
+  const nextCollab = input.form.collaborator_id ?? null;
+  const prevCollab = input.baseline.collaborator_id ?? null;
+  if (nextCollab !== prevCollab) {
+    proposal.collaborator_id = nextCollab;
   }
   if (details.ok) proposal.worker_details = details.proposal.worker_details;
   if (Object.keys(proposal).length === 0) return { ok: false, code: "WORKER_UNCHANGED" };

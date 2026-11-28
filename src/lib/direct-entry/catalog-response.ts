@@ -36,6 +36,14 @@ function isRecruiter(value: unknown): boolean {
   return false;
 }
 
+function isCollaborator(value: unknown): boolean {
+  return isRecord(value) &&
+    Object.keys(value).length === 3 &&
+    typeof value.collaborator_id === "string" && CATALOG_ID.test(value.collaborator_id) &&
+    typeof value.display_name === "string" && value.display_name.trim().length > 0 &&
+    typeof value.active === "boolean";
+}
+
 /**
  * Validate the browser API envelope using the same HRP/Vendor discriminator
  * as the server projector. Vendor rows intentionally have no team.
@@ -49,5 +57,15 @@ export function parseDirectEntryCatalogResponse(
       !Array.isArray(value.catalog.projects) || !value.catalog.projects.every(isProject) ||
       !Array.isArray(value.catalog.recruiters) || !value.catalog.recruiters.every(isRecruiter) ||
       !Array.isArray(value.catalog.banks) || !value.catalog.banks.every(isBank)) return null;
-  return value.catalog as DraftCatalog;
+  if (Object.hasOwn(value.catalog, "collaborators")) {
+    if (!Array.isArray(value.catalog.collaborators) || !value.catalog.collaborators.every(isCollaborator)) {
+      return null;
+    }
+    const ids = value.catalog.collaborators.map((item) => (item as { collaborator_id: string }).collaborator_id);
+    if (new Set(ids).size !== ids.length) return null;
+  }
+  const catalog = value.catalog as DraftCatalog;
+  return Object.hasOwn(catalog, "collaborators")
+    ? catalog
+    : { ...catalog, collaborators: [] };
 }

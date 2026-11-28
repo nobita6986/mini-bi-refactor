@@ -215,8 +215,12 @@ function makePutRequest(
 test("Attendance Report navigation, Admin shell, and page-gate matrix enforces Admin & canonical BoD only", () => {
   const allSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
   const workerEditHistorySection = allSections.filter(({ id }) => id === "worker-edit-history");
-  const allSectionsWithoutWorkerHistory = allSections.filter(({ id }) => id !== "worker-edit-history");
-  const fullAdminSections = allSections.filter(({ id }) => id !== "teams");
+  const allSectionsWithoutWorkerHistory = allSections.filter(
+    ({ id }) => id !== "worker-edit-history",
+  );
+  const fullAdminSections = allSections.filter(
+    ({ id }) => id !== "teams",
+  );
   const fullAdminSectionsWithoutWorkerHistory = fullAdminSections.filter(
     ({ id }) => id !== "worker-edit-history",
   );
@@ -488,7 +492,7 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
     new URL("../../app/admin/page.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(adminRootSource, /resolveAdminLandingPath\(actor\)/);
+  assert.match(adminRootSource, /resolveAdminLandingPath\(actor,\s*\{\s*hasVendorReferrerAccess\s*\}\)/);
   assert.match(adminRootSource, /redirect\(target\)/);
 });
 

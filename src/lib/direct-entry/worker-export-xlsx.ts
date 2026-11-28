@@ -17,8 +17,8 @@ export const WORKER_EXPORT_XLSX_CONTENT_TYPE =
 
 export const WORKER_EXPORT_XLSX_LIMIT = 10000;
 
-function cellText(value: string | null): string {
-  return value === null ? "" : value;
+function cellText(value: string | null | undefined): string {
+  return value === null || value === undefined ? "" : value;
 }
 
 export async function buildWorkerExportXlsx(rows: readonly WorkerExportRow[]): Promise<Uint8Array> {

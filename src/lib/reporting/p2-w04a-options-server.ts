@@ -48,12 +48,33 @@ export async function fetchCutoverReportingOptions(
 
     const payload = (res.data ?? {}) as {
       dimensions?: DimensionOptionRow[];
+      collaborators?: { key: string; display: string }[];
       sources?: { id: string; file_name: string }[];
     };
+    const dimensions = buildDimensionOptions(payload.dimensions ?? []);
+    if (
+      dimensions.collaborators.length === 0 &&
+      Array.isArray(payload.collaborators) &&
+      payload.collaborators.length > 0
+    ) {
+      dimensions.collaborators = payload.collaborators
+        .filter(
+          (item): item is { key: string; display: string } =>
+            Boolean(item) && typeof item.key === "string" && item.key.trim() !== "",
+        )
+        .map((item) => ({
+          key: item.key,
+          display:
+            typeof item.display === "string" && item.display.trim() !== ""
+              ? item.display
+              : item.key,
+        }))
+        .sort((a, b) => a.display.localeCompare(b.display, "vi"));
+    }
     return {
       ok: true,
       options: {
-        dimensions: buildDimensionOptions(payload.dimensions ?? []),
+        dimensions,
         sources: buildSourceOptions(payload.sources ?? []),
       },
     };

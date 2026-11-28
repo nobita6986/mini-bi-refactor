@@ -51,7 +51,10 @@ export const DECISION_REQUEST_KEYS = ["decision", "expected_version", "reason", 
 export const ITEM_KEYS = ["entry_id", "target_kind", "expected_version", "proposal"] as const;
 
 export const PROPOSAL_KEYS: Readonly<Record<ChangeRequestTargetKind, readonly string[]>> = Object.freeze({
-  ENTRY_FIELD: ["project_id", "first_work_date", "employee_code", "worker_details", "recruiter_id", "labor_type"],
+  ENTRY_FIELD: [
+    "project_id", "first_work_date", "employee_code", "worker_details",
+    "recruiter_id", "labor_type", "collaborator_id",
+  ],
   PAYMENT: ["state", "account_number", "bank_id", "account_holder_name"],
   WORK_STATUS: ["status", "effective_date", "leave_reason"],
   DOCUMENT: ["document_type", "idempotency_key", "checksum_sha256", "size_bytes", "mime_type"],
@@ -268,6 +271,16 @@ function projectEntryFieldProposal(value: Record<string, unknown>): Record<strin
     if (typeof value.labor_type !== "string" ||
         !isCanonicalLaborTypeKey(value.labor_type)) return null;
     proposal.labor_type = value.labor_type;
+  }
+  if ("collaborator_id" in value) {
+    if (value.collaborator_id === null) {
+      proposal.collaborator_id = null;
+    } else if (typeof value.collaborator_id === "string" &&
+               SAFE_REF.test(value.collaborator_id.trim())) {
+      proposal.collaborator_id = value.collaborator_id.trim();
+    } else {
+      return null;
+    }
   }
   return proposal;
 }

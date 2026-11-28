@@ -9,7 +9,7 @@ import type { ReportingData } from "@/lib/reporting/p1-reporting";
  * `source` is never sent (team scope ignores it).
  */
 
-export const TEAM_REPORT_FILTER_KEYS = ["from", "to", "project", "recruiter", "provider", "employment", "status"] as const;
+export const TEAM_REPORT_FILTER_KEYS = ["from", "to", "project", "recruiter", "provider", "collaborator", "employment", "status"] as const;
 
 export function teamReportUrl(data: ReportingData, bucketKey: string, cursor: string | null): string {
   const params = new URLSearchParams({ bucket_key: bucketKey, limit: "25" });
@@ -29,6 +29,7 @@ export function teamReportDataSignature(data: ReportingData): string {
     project: data.applied.project ?? null,
     recruiter: data.applied.recruiter ?? null,
     provider: data.applied.provider ?? null,
+    collaborator: data.applied.collaborator ?? null,
     employment: data.applied.employment ?? null,
     status: data.applied.status ?? null,
     source: data.applied.source ?? null,

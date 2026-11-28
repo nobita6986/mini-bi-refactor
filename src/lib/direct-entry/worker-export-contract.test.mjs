@@ -164,11 +164,11 @@ test("the envelope accepts exactly ok/rows or too_many_rows/limit", () => {
   }
 });
 
-test("the XLSX column contract has 20 ordered text columns", () => {
-  assert.equal(WORKER_EXPORT_COLUMNS.length, 20);
+test("the XLSX column contract has 21 ordered text columns", () => {
+  assert.equal(WORKER_EXPORT_COLUMNS.length, 21);
   assert.deepEqual(WORKER_EXPORT_COLUMNS.map((c) => c.header), [
     "Mã NLĐ", "Họ và tên", "Ngày sinh", "CCCD", "Ngày cấp CCCD", "Số điện thoại", "Địa chỉ", "Dự án",
-    "Ngày bắt đầu", "Loại hình lao động", "Người tuyển", "Nhà cung cấp",
+    "Ngày bắt đầu", "Loại hình lao động", "Người tuyển", "Nhà cung cấp", "CTV",
     "Trạng thái làm việc", "Ngày nghỉ", "Lý do nghỉ", "Số tài khoản", "Ngân hàng",
     "Chủ tài khoản", "Ghi chú thanh toán", "Ghi chú",
   ]);

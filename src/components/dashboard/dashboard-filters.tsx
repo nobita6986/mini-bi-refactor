@@ -25,6 +25,7 @@ const parsers = {
   project: parseAsString,
   recruiter: parseAsString,
   provider: parseAsString,
+  collaborator: parseAsString,
   employment: parseAsString,
   status: parseAsString,
   source: parseAsString,
@@ -209,6 +210,14 @@ export function DashboardFilters({
             <select id="f-provider" className={inputClass} value={filters.provider ?? ""} onChange={(e) => applyFilters({ provider: e.target.value || null })}>
               <option value="">Tất cả</option>
               {PROVIDER_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.display}</option>)}
+            </select>
+          </Field>
+          <Field id="f-collaborator" label="Cộng tác viên">
+            <select id="f-collaborator" className={inputClass} value={filters.collaborator ?? ""} onChange={(e) => applyFilters({ collaborator: e.target.value || null })}>
+              <option value="">Tất cả cộng tác viên</option>
+              {options.dimensions.collaborators.map((o) => (
+                <option key={o.key} value={o.key}>{o.display}</option>
+              ))}
             </select>
           </Field>
           <Field id="f-employment" label="Loại hình làm việc">

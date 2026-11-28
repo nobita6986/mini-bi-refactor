@@ -7,8 +7,15 @@ function normalizeFilterKey(value: string): string | null {
   return collapsed.toLowerCase();
 }
 
-/** Giá trị hợp lệ cho filter `provider` (theo contract p1-reporting v0.1 §6). */
-export const PROVIDER_FILTER_VALUES = ["hrp", "vendor", "__unknown__", "__invalid__"] as const;
+/** Giá trị hợp lệ cho filter `provider` (mở rộng thêm kênh CTV). */
+export const PROVIDER_FILTER_VALUES = [
+  "hrp",
+  "hrp_direct",
+  "hrp_ctv",
+  "vendor",
+  "__unknown__",
+  "__invalid__",
+] as const;
 export type ProviderFilter = (typeof PROVIDER_FILTER_VALUES)[number];
 
 /** Giá trị hợp lệ cho filter `employment`. */
@@ -25,6 +32,7 @@ export interface ReportingFilters {
   project?: string;
   recruiter?: string;
   provider?: ProviderFilter;
+  collaborator?: string;
   employment?: EmploymentFilter;
   status?: WorkStatusFilter;
   source?: string;
@@ -38,6 +46,7 @@ export type FilterParseResult =
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const COLLABORATOR_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 
 /** Kiểm tra ngày lịch thật (2026-02-30 => false). */
 export function isRealCalendarDate(value: string): boolean {
@@ -68,6 +77,7 @@ export function parseReportingFilters(
   const project = firstString(params.project);
   const recruiter = firstString(params.recruiter);
   const provider = firstString(params.provider);
+  const collaborator = firstString(params.collaborator);
   const employment = firstString(params.employment);
   const status = firstString(params.status);
   const source = firstString(params.source);
@@ -99,9 +109,19 @@ export function parseReportingFilters(
 
   if (provider !== undefined && provider !== "") {
     if (!(PROVIDER_FILTER_VALUES as readonly string[]).includes(provider)) {
-      return fail("provider phải là hrp|vendor|__unknown__|__invalid__");
+      return fail("provider phải là hrp|hrp_direct|hrp_ctv|vendor|__unknown__|__invalid__");
     }
     filters.provider = provider as ProviderFilter;
+  }
+  if (collaborator !== undefined && collaborator !== "") {
+    const normalized = collaborator.normalize("NFC").trim();
+    if (
+      normalized === "__system_vendor__" ||
+      !COLLABORATOR_ID_RE.test(normalized)
+    ) {
+      return fail("collaborator không hợp lệ");
+    }
+    filters.collaborator = normalized;
   }
   if (employment !== undefined && employment !== "") {
     if (!(EMPLOYMENT_FILTER_VALUES as readonly string[]).includes(employment)) {

@@ -530,7 +530,7 @@ test("R23 empty stored value uses a real placeholder, so choosing the first busi
   }
   assert.match(
     gridSource,
-    /<option value="">—<\/option>\s*<option value="hrp">HRP<\/option>/,
-    "provider_type must render an explicit empty placeholder before HRP",
+    /<option value="">—<\/option>\s*<option value="hrp">HRP \(trực tiếp\)<\/option>\s*<option value="vendor">Vendor<\/option>\s*<option value="ctv">CTV<\/option>/,
+    "provider_type must render an explicit empty placeholder before HRP/Vendor/CTV",
   );
 });

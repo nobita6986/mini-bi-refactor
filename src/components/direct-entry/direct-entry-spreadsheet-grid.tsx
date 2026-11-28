@@ -100,7 +100,7 @@ export type SpreadsheetGridRow = {
   clientStaged: boolean;
   /** true khi submission state khoa dong (REVIEW/SUBMITTED). */
   locked: boolean;
-  providerType: "hrp" | "vendor" | "";
+  providerType: "hrp" | "vendor" | "ctv" | "";
   cells: Readonly<Record<string, string>>;
   catalogOptions?: SpreadsheetCatalogOptions;
   /** Sanitized display-only labels; these values are never copied or written. */
@@ -113,6 +113,7 @@ export type SpreadsheetGridRow = {
   displayName: string;
   projectLabel: string;
   recruiterLabel: string;
+  collaboratorLabel?: string;
   saveStatus: string;
 };
 
@@ -127,6 +128,11 @@ export type SpreadsheetCatalogOptions = {
     personnel_code: string | null;
     /** P3-W07A: vendor id for Vendor rows; null for HRP rows. */
     vendor_id: string | null;
+  }[];
+  collaborators?: readonly {
+    id: string;
+    label: string;
+    active?: boolean;
   }[];
 };
 
@@ -149,7 +155,7 @@ export type DirectEntrySpreadsheetGridProps = {
   validation: SpreadsheetValidation;
   catalogOptions?: SpreadsheetCatalogOptions;
   onCellsChange(clientRowId: string, patch: Readonly<Record<string, string>>): void;
-  onProviderTypeChange(clientRowId: string, providerType: "hrp" | "vendor" | ""): void;
+  onProviderTypeChange(clientRowId: string, providerType: "hrp" | "vendor" | "ctv" | ""): void;
   onPasteApplied(request: SpreadsheetPasteRequest): void;
   onPasteRejected(reason: SpreadsheetPasteRejection): void;
   onDeleteRow(clientRowId: string): void;
@@ -180,12 +186,12 @@ export type DirectEntrySpreadsheetGridProps = {
   toolbarActions?: ReactNode;
 };
 
-const PROVIDER_OPTIONS = ["hrp", "vendor"] as const;
+const PROVIDER_OPTIONS = ["hrp", "vendor", "ctv"] as const;
 
 export function spreadsheetSelectOptions(
   columnKey: string,
   catalogs: SpreadsheetCatalogOptions | undefined,
-  providerType: "hrp" | "vendor" | "" = "",
+  providerType: "hrp" | "vendor" | "ctv" | "" = "",
 ): readonly string[] | null {
   // The row model uses an empty string for an unselected cell. Native
   // <select> elements must therefore also have a matching empty option.
@@ -205,6 +211,11 @@ export function spreadsheetSelectOptions(
   }
   if (columnKey === "recruiter_id") {
     return recruitersForProvider(catalogs?.recruiters ?? [], providerType).map((option) => option.id);
+  }
+  if (columnKey === "collaborator_id") {
+    return providerType === "ctv"
+      ? (catalogs?.collaborators ?? []).filter((option) => option.active !== false).map((option) => option.id)
+      : [];
   }
   return null;
 }
@@ -250,16 +261,27 @@ function SelectCellEditor(
 
   if (props.columnKey === "provider_type") {
     return (
-      <select aria-label="HRP/Vendor" autoFocus value={value}
+      <select aria-label="Nguồn" autoFocus value={value}
         onChange={(event) => {
           const next = event.currentTarget.value;
-          const providerType = next === "hrp" || next === "vendor" ? next : "";
-          props.onRowChange({ ...props.row, providerType }, true);
+          const providerType =
+            next === "hrp" || next === "vendor" || next === "ctv" ? next : "";
+          props.onRowChange(
+            providerType === "ctv"
+              ? { ...props.row, providerType }
+              : {
+                  ...props.row,
+                  providerType,
+                  cells: { ...props.row.cells, collaborator_id: "" },
+                },
+            true,
+          );
         }}
         onBlur={commitBlur}>
         <option value="">—</option>
-        <option value="hrp">HRP</option>
+        <option value="hrp">HRP (trực tiếp)</option>
         <option value="vendor">Vendor</option>
+        <option value="ctv">CTV</option>
       </select>
     );
   }
@@ -341,7 +363,7 @@ function SelectCellEditor(
  */
 function SearchableCatalogCellEditor(
   props: RenderEditCellProps<SpreadsheetGridRow> & {
-    columnKey: "project_id" | "recruiter_id";
+    columnKey: "project_id" | "recruiter_id" | "collaborator_id";
     catalogs: SpreadsheetCatalogOptions | undefined;
   },
 ) {
@@ -353,6 +375,16 @@ function SearchableCatalogCellEditor(
       return (rowCatalogs?.projects ?? []).map((project) => ({
         id: project.id, label: project.label, keywords: project.keywords,
       }));
+    }
+    if (props.columnKey === "collaborator_id") {
+      if (props.row.providerType !== "ctv") return [];
+      return (rowCatalogs?.collaborators ?? [])
+        .filter((collaborator) => collaborator.active !== false)
+        .map((collaborator) => ({
+          id: collaborator.id,
+          label: collaborator.label,
+          keywords: collaborator.id,
+        }));
     }
     return recruitersForProvider(rowCatalogs?.recruiters ?? [], props.row.providerType)
       .map((recruiter) => ({
@@ -458,7 +490,13 @@ function SearchableCatalogCellEditor(
   return (
     <div className={styles.searchEditor}>
       <input
-        aria-label={props.columnKey === "project_id" ? "Dự án" : "Người tuyển / Vendor"}
+        aria-label={
+          props.columnKey === "project_id"
+            ? "Dự án"
+            : props.columnKey === "collaborator_id"
+              ? "CTV"
+              : "Người tuyển / Vendor"
+        }
         autoFocus
         role="combobox"
         aria-expanded="true"
@@ -711,7 +749,8 @@ export function DirectEntrySpreadsheetGrid(props: DirectEntrySpreadsheetGridProp
   const columns = useMemo<readonly Column<SpreadsheetGridRow>[]>(() => {
     const build = (column: DirectEntryGridColumn): Column<SpreadsheetGridRow> => {
       const editable = column.editor !== "readonly" && column.editor !== "action" &&
-        (column.key === "provider_type" || column.pasteMode === "write");
+        (column.key === "provider_type" || column.key === "collaborator_id" ||
+          column.pasteMode === "write");
       const headerLabel = column.required
         ? <span><span>{column.label}</span><span className={styles.requiredMark} aria-hidden="true"> *</span><span className={styles.srOnly}> (bắt buộc)</span></span>
         : column.label;
@@ -734,8 +773,20 @@ export function DirectEntrySpreadsheetGrid(props: DirectEntrySpreadsheetGridProp
           }
           if (column.key === "display_name") return row.displayName;
           if (column.key === "project_id") return row.projectLabel;
-          if (column.key === "provider_type") return row.providerType.toUpperCase();
+          if (column.key === "provider_type") {
+            if (row.providerType === "ctv") return "CTV";
+            if (row.providerType === "hrp") return "HRP";
+            if (row.providerType === "vendor") return "Vendor";
+            return "";
+          }
           if (column.key === "recruiter_id") return row.recruiterLabel;
+          if (column.key === "collaborator_id") {
+            const code = row.cells.collaborator_id ?? "";
+            if (code === "") return "";
+            const match = (row.catalogOptions?.collaborators ?? catalogOptions?.collaborators)
+              ?.find((item) => item.id === code);
+            return row.collaboratorLabel || match?.label || code;
+          }
           if (column.key === "labor_type") {
             const key = row.cells.labor_type ?? "";
             return key === ""
@@ -784,11 +835,13 @@ export function DirectEntrySpreadsheetGrid(props: DirectEntrySpreadsheetGridProp
         return {
           key: column.key, name: headerLabel, width: scaledWidth, resizable: true,
           editable: (row: SpreadsheetGridRow) => isEditable(row, column.key) &&
-            (column.key !== "recruiter_id" || row.providerType !== ""),
+            (column.key !== "recruiter_id" || row.providerType !== "") &&
+            (column.key !== "collaborator_id" || row.providerType === "ctv"),
           renderCell,
           renderEditCell: (editProps: RenderEditCellProps<SpreadsheetGridRow>) => (
-            column.key === "project_id" || column.key === "recruiter_id"
-              // P3-W07C-R4: hai cot nay doi sang dropdown co tim kiem.
+            column.key === "project_id" || column.key === "recruiter_id" ||
+            column.key === "collaborator_id"
+              // P3-W07C-R4: cac cot catalog dung dropdown co tim kiem.
               ? <SearchableCatalogCellEditor {...editProps} columnKey={column.key}
                   catalogs={catalogOptions} />
               : <SelectCellEditor {...editProps} columnKey={column.key} catalogs={catalogOptions} />

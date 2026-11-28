@@ -3,6 +3,7 @@ import {
   adminSecurityNavPredicate,
   attendanceReportNavPredicate,
   recruitmentLocationCatalogNavPredicate,
+  vendorReferrerNavPredicate,
   workerEditHistoryNavPredicate,
   type NavActorProjection,
   type NavCapabilityPredicate,
@@ -38,7 +39,8 @@ export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
   { id: "provinces", label: "Tỉnh/Thành", href: "/admin/catalog/provinces", visible: recruitmentLocationCatalogNavPredicate },
   { id: "industrial-parks", label: "Khu công nghiệp", href: "/admin/catalog/industrial-parks", visible: recruitmentLocationCatalogNavPredicate },
   { id: "project-team-scopes", label: "Phân công Dự án ↔ Tổ đội", href: "/admin/catalog/project-team-scopes", visible: adminSecurityNavPredicate },
-  { id: "vendors", label: "Vendor (NCC)", href: "/admin/catalog/vendors", visible: adminAreaNavPredicate },
+  { id: "vendors", label: "Vendor (NCC)", href: "/admin/catalog/vendors", visible: (actor) => adminAreaNavPredicate(actor) || vendorReferrerNavPredicate(actor) },
+  { id: "collaborators", label: "Cộng tác viên", href: "/admin/catalog/collaborators", visible: adminAreaNavPredicate },
   { id: "attendance", label: "Báo cáo chấm công", href: "/admin/attendance", visible: attendanceReportNavPredicate },
   { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ", href: "/admin/worker-edit-history", visible: workerEditHistoryNavPredicate },
 ];
@@ -51,6 +53,7 @@ const RECRUITMENT_SECTION_IDS = new Set([
   "industrial-parks",
   "project-team-scopes",
   "vendors",
+  "collaborators",
 ]);
 
 export function groupAdminSections(sections: readonly AdminSection[]): AdminSectionMenuItem[] {

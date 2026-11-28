@@ -298,6 +298,7 @@ test("registry: mỗi entry có id ổn định, label, path, icon, status, capa
         "change_requests",
         "admin_area",
         "attendance_report",
+        "vendor_referrals",
         "work_reports",
         "work_report_management",
         "work_report_assignments",

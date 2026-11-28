@@ -65,6 +65,7 @@ export type NavCapability =
   | "project_admin"
   | "admin_area"
   | "attendance_report"
+  | "vendor_referrals"
   | "worker_operations"
   | "change_requests"
   | "work_reports"

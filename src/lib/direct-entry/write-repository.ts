@@ -109,6 +109,12 @@ export type DraftCatalogLaborType = {
   sort_order: number;
 };
 
+export type DraftCatalogCollaborator = {
+  collaborator_id: string;
+  display_name: string;
+  active: boolean;
+};
+
 export type DraftCatalog = {
   effective_date: string;
   projects: Array<{ project_id: string; display_name: string }>;
@@ -122,6 +128,7 @@ export type DraftCatalog = {
    * absent means "no options supplied", never "any key is allowed".
    */
   labor_types?: DraftCatalogLaborType[];
+  collaborators?: DraftCatalogCollaborator[];
 };
 
 export type DirectEntryRepository = {
@@ -314,14 +321,17 @@ function projectDocumentFinalization(value: unknown, documentId: string): Docume
 // order); a payload without it still projects, because only the consumer
 // cutover lane is required to read the list.
 const CATALOG_BASE_KEYS = ["effective_date", "projects", "recruiters", "banks"];
-const CATALOG_LABOR_KEYS = [...CATALOG_BASE_KEYS, "labor_types"];
+const CATALOG_OPTIONAL_KEYS = ["labor_types", "collaborators"];
 
 export function projectDraftCatalog(value: unknown, expectedDate?: string): DraftCatalog | null {
   if (!isRecord(value)) return null;
-  const withLaborTypes = Object.hasOwn(value, "labor_types");
-  if (!hasExactKeys(value, withLaborTypes ? CATALOG_LABOR_KEYS : CATALOG_BASE_KEYS) ||
+  const keys = Object.keys(value);
+  const allowedKeys = new Set([...CATALOG_BASE_KEYS, ...CATALOG_OPTIONAL_KEYS]);
+  if (!CATALOG_BASE_KEYS.every((key) => Object.hasOwn(value, key)) ||
+      keys.some((key) => !allowedKeys.has(key)) ||
       typeof value.effective_date !== "string" || !Array.isArray(value.projects) ||
       !Array.isArray(value.recruiters) || !Array.isArray(value.banks)) return null;
+  const withLaborTypes = Object.hasOwn(value, "labor_types");
   let laborTypes: DraftCatalogLaborType[] | undefined;
   if (withLaborTypes) {
     if (!Array.isArray(value.labor_types)) return null;
@@ -342,6 +352,30 @@ export function projectDraftCatalog(value: unknown, expectedDate?: string): Draf
       });
     }
     if (new Set(laborTypes.map(({ labor_type_key }) => labor_type_key)).size !== laborTypes.length) {
+      return null;
+    }
+  }
+  let collaborators: DraftCatalogCollaborator[] | undefined;
+  if (Object.hasOwn(value, "collaborators")) {
+    if (!Array.isArray(value.collaborators)) return null;
+    collaborators = [];
+    for (const collaborator of value.collaborators) {
+      if (!isRecord(collaborator) ||
+          !hasExactKeys(collaborator, ["collaborator_id", "display_name", "active"]) ||
+          typeof collaborator.collaborator_id !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(collaborator.collaborator_id) ||
+          typeof collaborator.display_name !== "string" ||
+          collaborator.display_name.trim().length === 0 || collaborator.display_name.length > 256 ||
+          typeof collaborator.active !== "boolean") {
+        return null;
+      }
+      collaborators.push({
+        collaborator_id: collaborator.collaborator_id,
+        display_name: collaborator.display_name,
+        active: collaborator.active,
+      });
+    }
+    if (new Set(collaborators.map(({ collaborator_id }) => collaborator_id)).size !== collaborators.length) {
       return null;
     }
   }
@@ -430,6 +464,7 @@ export function projectDraftCatalog(value: unknown, expectedDate?: string): Draf
     banks,
   };
   if (laborTypes !== undefined) projected.labor_types = laborTypes;
+  if (collaborators !== undefined) projected.collaborators = collaborators;
   return projected;
 }
 

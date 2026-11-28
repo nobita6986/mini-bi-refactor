@@ -72,8 +72,9 @@ test("both Admin URL surfaces resolve actor server-side and use explicit access 
 test("/admin preserves its server gate then redirects via resolveAdminLandingPath (WP13 M2)", () => {
   const adminPage = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
   assert.match(adminPage, /resolveActorForRequest\(\)/);
-  assert.match(adminPage, /decideAdminAreaAccess\(\{ actor \}\)/);
-  assert.match(adminPage, /resolveAdminLandingPath\(actor\)/);
+  assert.match(adminPage, /resolveVendorReferrerAccessForRequest\(\)/);
+  assert.match(adminPage, /decideAdminAreaAccess\(\{\s*actor,\s*hasVendorReferrerAccess\s*\}\)/);
+  assert.match(adminPage, /resolveAdminLandingPath\(actor,\s*\{\s*hasVendorReferrerAccess\s*\}\)/);
   assert.match(adminPage, /redirect\(target\)/);
   assert.doesNotMatch(adminPage, /useEffect|useRouter/);
   assert.doesNotMatch(adminPage, /<h1[^>]*>Quản trị|Mở danh mục nhân sự|CardHeader|<Card/);

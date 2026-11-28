@@ -1509,6 +1509,14 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
       "@/lib/vendor-finance/vendor-finance-repository": {
         createVendorFinanceRepository: () => ({ getActorAccess: async () => ({ ok: true, data: { can_view: false, can_record: false, can_reconcile: false, can_manage_project_assignments: false } }) }),
       },
+      "@/lib/vendor-referrals/vendor-referrer-repository": {
+        createVendorReferrerRepository: () => ({
+          getActorAccess: async () => ({
+            ok: true,
+            data: { can_manage: false, can_view_report: false },
+          }),
+        }),
+      },
       "@/lib/work-reports/assignment-repository": {
         createAssignmentRepository: () => createAssignmentRepository(readOnlyRpcAdapter),
       },

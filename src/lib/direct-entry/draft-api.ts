@@ -19,9 +19,10 @@ import {
 import { readBoundedJson } from "./write-api.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PATCH_KEYS = new Set([
   "project_id", "first_work_date", "employee_code", "worker_details", "recruiter_id", "labor_type",
-  "general_note", "payment",
+  "collaborator_id", "general_note", "payment",
 ]);
 const WORKER_PATCH_KEYS = new Set([
   "display_name", "gender", "date_of_birth", "national_id", "national_id_issued_at",
@@ -40,6 +41,7 @@ type DraftPatch = Partial<{
   worker_details: Partial<WorkerDetails>;
   recruiter_id: string;
   labor_type: LaborType;
+  collaborator_id: string | null;
   general_note: string | null;
   payment: {
     state: "provided" | "unknown" | "intentionally_blank" | "omitted";
@@ -185,6 +187,16 @@ function projectPatch(value: unknown): {
   if (Object.hasOwn(patch, "labor_type")) {
     if (!isCanonicalLaborTypeKey(patch.labor_type)) return null;
     projectedPatch.labor_type = patch.labor_type;
+  }
+  if (Object.hasOwn(patch, "collaborator_id")) {
+    if (patch.collaborator_id === null) {
+      projectedPatch.collaborator_id = null;
+    } else if (typeof patch.collaborator_id === "string" &&
+               CATALOG_ID.test(patch.collaborator_id.trim())) {
+      projectedPatch.collaborator_id = patch.collaborator_id.trim();
+    } else {
+      return null;
+    }
   }
   if (Object.hasOwn(patch, "worker_details")) {
     const workerDetails = projectWorkerPatch(patch.worker_details);
@@ -337,7 +349,9 @@ export async function patchDraftEntry(
       if ((parsed.patch.project_id !== undefined &&
            !catalog.projects.some(({ project_id }) => project_id === parsed.patch.project_id)) ||
           (parsed.patch.recruiter_id !== undefined &&
-           !catalog.recruiters.some(({ recruiter_id }) => recruiter_id === parsed.patch.recruiter_id))) {
+           !catalog.recruiters.some(({ recruiter_id }) => recruiter_id === parsed.patch.recruiter_id)) ||
+          (typeof parsed.patch.collaborator_id === "string" &&
+           !(catalog.collaborators ?? []).some((item) => item.collaborator_id === parsed.patch.collaborator_id && item.active))) {
         return fail("DRAFT_MASTER_INVALID", 400);
       }
     }

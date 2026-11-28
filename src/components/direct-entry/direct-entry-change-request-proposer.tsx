@@ -126,6 +126,7 @@ function baselineOf(entry: ProposerEntryProjection): ProposerFields {
     first_work_date: entry.first_work_date,
     project_id: entry.project_id,
     recruiter_id: entry.recruiter_id,
+    collaborator_id: entry.collaborator_id,
     labor_type: entry.labor_type,
   };
 }
@@ -593,11 +594,61 @@ export function DirectEntryChangeRequestProposer({
                           options={optionsFor(catalog)}
                           value={draft.recruiter_id}
                           label={"Người tuyển của " + entry.employee_code}
-                          onChange={(recruiterId) => editEntry(entry.entry_id, {
-                            recruiter_id: recruiterId,
-                          })}
+                          onChange={(recruiterId) => {
+                            const selectedRecruiter = catalog?.recruiters.find(
+                              (item) => item.recruiter_id === recruiterId,
+                            );
+                            editEntry(entry.entry_id, {
+                              recruiter_id: recruiterId,
+                              ...(selectedRecruiter?.provider_type === "vendor"
+                                ? { collaborator_id: null }
+                                : {}),
+                            });
+                          }}
                         />
                       </div>
+                      {(() => {
+                        const selectedRecruiter = catalog?.recruiters.find(
+                          (item) => item.recruiter_id === draft.recruiter_id,
+                        );
+                        const isVendor = selectedRecruiter?.provider_type === "vendor";
+                        const activeCollaborators = (catalog?.collaborators ?? []).filter(
+                          (collaborator) => collaborator.active,
+                        );
+                        const currentId = isVendor ? "" : (draft.collaborator_id ?? "");
+                        const currentInActive = currentId !== "" &&
+                          activeCollaborators.some((c) => c.collaborator_id === currentId);
+                        return (
+                          <div className={styles.field}>
+                            <label htmlFor={"cr-collaborator-" + entry.entry_id}>Cộng tác viên (CTV)</label>
+                            <select
+                              id={"cr-collaborator-" + entry.entry_id}
+                              aria-label={"CTV của " + entry.employee_code}
+                              disabled={isVendor}
+                              value={currentId}
+                              onChange={(event) => editEntry(entry.entry_id, {
+                                collaborator_id: event.target.value === "" ? null : event.target.value,
+                              })}
+                            >
+                              <option value="">
+                                {isVendor ? "Vendor không gắn CTV" : "Không qua CTV"}
+                              </option>
+                              {!isVendor && currentId !== "" && !currentInActive && (
+                                <option value={currentId} disabled>
+                                  {entry.collaborator_display_name
+                                    ? `${entry.collaborator_display_name} (${currentId}) — Ngừng hoạt động`
+                                    : `${currentId} — Ngừng hoạt động`}
+                                </option>
+                              )}
+                              {activeCollaborators.map((collaborator) => (
+                                <option key={collaborator.collaborator_id} value={collaborator.collaborator_id}>
+                                  {collaborator.display_name} ({collaborator.collaborator_id})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        );
+                      })()}
                       <div className={styles.field}>
                         <label htmlFor={"cr-labor-" + entry.entry_id}>Loại hình lao động</label>
                         <select

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-
 import { Alert } from "@/components/ui/alert";
 import { Card, CardHeader } from "@/components/ui/card";
 import { FormDialog } from "@/components/ui/form-dialog";
@@ -347,7 +346,7 @@ export function VendorCatalogManager() {
     : 1;
 
   return (
-    <>
+    <div className="space-y-4">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Danh mục nhà cung cấp</h1>
@@ -560,7 +559,7 @@ export function VendorCatalogManager() {
           </>
         ) : null}
       </Card>
-    </>
+    </div>
   );
 }
 

@@ -380,11 +380,15 @@ export function workerStatusLabel(status: string | null): string {
 export const WORKER_PROVIDER_TYPE_LABELS: Readonly<Record<WorkerProviderType, string>> =
   Object.freeze({
     hrp: "HRP",
+    hrp_direct: "HRP trực tiếp",
+    hrp_ctv: "Qua CTV",
     vendor: "Vendor",
   });
 
 export function workerProviderTypeLabel(providerType: string | null | undefined): string {
   if (providerType === "hrp") return WORKER_PROVIDER_TYPE_LABELS.hrp;
+  if (providerType === "hrp_direct") return WORKER_PROVIDER_TYPE_LABELS.hrp_direct;
+  if (providerType === "hrp_ctv") return WORKER_PROVIDER_TYPE_LABELS.hrp_ctv;
   if (providerType === "vendor") return WORKER_PROVIDER_TYPE_LABELS.vendor;
   return "Tất cả";
 }
@@ -1657,6 +1661,11 @@ export function buildDirectEditEntryFieldProposal(input: {
       proposal[field] = input.form[field];
     }
   }
+  const nextCollab = input.form.collaborator_id ?? null;
+  const prevCollab = input.baseline.collaborator_id ?? null;
+  if (nextCollab !== prevCollab) {
+    proposal.collaborator_id = nextCollab;
+  }
   if (details.ok) {
     proposal.worker_details = details.proposal.worker_details;
   }
@@ -1722,6 +1731,30 @@ export function buildWorkerEditRecruiterOptions(input: {
     options.unshift({
       value: currentId,
       label: `${baseLabel} (hiện tại)`,
+      isCurrentFallback: true,
+    });
+  }
+  return options;
+}
+
+export function buildWorkerEditCollaboratorOptions(input: {
+  catalogCollaborators: readonly { collaborator_id: string; display_name: string; active: boolean }[] | undefined;
+  currentCollaboratorId: string | null | undefined;
+  currentCollaboratorDisplay?: string | null;
+}): readonly WorkerEditCatalogSelectOption[] {
+  const activeCollaborators = (input.catalogCollaborators ?? []).filter((item) => item.active);
+  const options: WorkerEditCatalogSelectOption[] = activeCollaborators.map((item) => ({
+    value: item.collaborator_id,
+    label: `${item.display_name} (${item.collaborator_id})`,
+    isCurrentFallback: false,
+  }));
+  const currentId = input.currentCollaboratorId?.trim() ?? "";
+  if (currentId !== "" && !activeCollaborators.some((item) => item.collaborator_id === currentId)) {
+    const inactiveMatch = (input.catalogCollaborators ?? []).find((item) => item.collaborator_id === currentId);
+    const baseLabel = input.currentCollaboratorDisplay?.trim() || inactiveMatch?.display_name || currentId;
+    options.unshift({
+      value: currentId,
+      label: `${baseLabel} (${currentId}) (hiện tại)`,
       isCurrentFallback: true,
     });
   }

@@ -8,7 +8,8 @@ export type EditableDraftFields = {
   projectId: string;
   recruiterId: string;
   laborType: LaborType;
-  providerType: "hrp" | "vendor" | null;
+  providerType: "hrp" | "vendor" | "ctv" | null;
+  collaboratorId: string | null;
   profile: DraftProfileProjection;
 };
 
@@ -49,6 +50,7 @@ export type LiveDraftRow = EditableDraftFields & {
   teamDisplayName: string;
   projectDisplayName: string;
   recruiterDisplayName: string;
+  collaboratorDisplayName: string | null;
   employmentStatus: "UNCONFIRMED" | "ON" | "OFF" | null;
   state: DraftSaveState;
   saved: EditableDraftFields | null;
@@ -65,7 +67,10 @@ export function draftRowFromProjection(draft: OwnDraft): LiveDraftRow {
     projectId: draft.project_id,
     recruiterId: draft.recruiter_id,
     laborType: draft.labor_type,
-    providerType: draft.provider_type,
+    providerType: draft.provider_type === "vendor"
+      ? "vendor"
+      : (draft.collaborator_id ? "ctv" : "hrp"),
+    collaboratorId: draft.collaborator_id ?? null,
     profile: draft.profile,
   };
   return {
@@ -80,6 +85,7 @@ export function draftRowFromProjection(draft: OwnDraft): LiveDraftRow {
     teamDisplayName: draft.team_display_name,
     projectDisplayName: draft.project_display_name,
     recruiterDisplayName: draft.recruiter_display_name,
+    collaboratorDisplayName: draft.collaborator_display_name ?? null,
     employmentStatus: draft.employment_status,
     state: "clean",
     saved: { ...fields },
@@ -104,10 +110,12 @@ export function newDraftRow(rowId: string, firstWorkDate: string): LiveDraftRow 
     recruiterId: "",
     laborType: "",
     providerType: null,
+    collaboratorId: null,
     teamId: null,
     teamDisplayName: "",
     projectDisplayName: "",
     recruiterDisplayName: "",
+    collaboratorDisplayName: null,
     employmentStatus: "ON",
     profile: {
       contract_version: "worker-profile/1.0",
@@ -142,6 +150,7 @@ export function editableFields(row: LiveDraftRow): EditableDraftFields {
     recruiterId: row.recruiterId,
     laborType: row.laborType,
     providerType: row.providerType,
+    collaboratorId: row.collaboratorId,
     profile: row.profile,
   };
 }
@@ -182,6 +191,7 @@ export function buildDraftUpdatePayload(
     },
     recruiter_id: fields.recruiterId,
     labor_type: fields.laborType,
+    collaborator_id: fields.providerType === "vendor" ? null : (fields.collaboratorId ?? null),
     general_note: text(fields.profile.general_note),
     ...(paymentChanged && paymentText ? { payment: {
       state: hasPaymentText ? "provided" : "intentionally_blank",
@@ -203,6 +213,7 @@ export function fieldsDiffer(
     left.recruiterId !== right.recruiterId ||
     left.laborType !== right.laborType ||
     left.providerType !== right.providerType ||
+    left.collaboratorId !== right.collaboratorId ||
     JSON.stringify(left.profile) !== JSON.stringify(right.profile);
 }
 
@@ -240,7 +251,8 @@ export function changedDraftFields(
     ["projectId", "Dự án"],
     ["recruiterId", "Người tuyển"],
     ["laborType", "Loại hình lao động"],
-    ["providerType", "HRP/Vendor"],
+    ["providerType", "Nguồn"],
+    ["collaboratorId", "CTV"],
     ["profile", "Thông tin hồ sơ"],
   ];
   return labels.filter(([key]) => local[key] !== server[key]).map(([, label]) => label);

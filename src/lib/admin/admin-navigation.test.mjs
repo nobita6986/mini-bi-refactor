@@ -100,6 +100,7 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "industrial-parks", href: "/admin/catalog/industrial-parks" },
     { id: "project-team-scopes", href: "/admin/catalog/project-team-scopes" },
     { id: "vendors", href: "/admin/catalog/vendors" },
+    { id: "collaborators", href: "/admin/catalog/collaborators" },
     { id: "attendance", href: "/admin/attendance" },
     { id: "worker-edit-history", href: "/admin/worker-edit-history" },
   ]);
@@ -114,6 +115,7 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "industrial-parks", label: "Khu công nghiệp" },
     { id: "project-team-scopes", label: "Phân công Dự án ↔ Tổ đội" },
     { id: "vendors", label: "Vendor (NCC)" },
+    { id: "collaborators", label: "Cộng tác viên" },
     { id: "attendance", label: "Báo cáo chấm công" },
     { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ" },
   ]);

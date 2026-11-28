@@ -181,6 +181,7 @@ export const CAPABILITY_PRESENTATION_MAP: Readonly<Record<Capability, Capability
   report_delegate: { label: "Ủy quyền duyệt / giao báo cáo", domain: "work_reports" },
   vendor_finance_view: { label: "Xem công nợ & sổ cái Vendor", domain: "vendor_finance" },
   vendor_finance_record: { label: "Ghi nhận thanh toán & tạm ứng Vendor", domain: "vendor_finance" },
+  vendor_referrer_manage: { label: "Quản lý người giới thiệu Vendor (BoD)", domain: "organization_catalog" },
   bulletin_manage: { label: "Quản trị Bản tin HRPartner", domain: "internal_bulletins" },
 };
 

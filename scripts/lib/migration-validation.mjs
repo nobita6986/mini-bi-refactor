@@ -542,6 +542,17 @@ export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME =
 export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_list_team_leaders_suspended(uuid, uuid, uuid, text, integer, integer)",
 ]);
+export const VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME =
+  "20261128090000_vendor_referrer_attribution.sql";
+export const VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_vendor_referrer_get_actor_access(uuid, uuid)",
+  "public.direct_entry_vendor_referrer_list_candidates(uuid, uuid, text, integer)",
+  "public.direct_entry_vendor_referrer_list_vendors(uuid, uuid, text, boolean, integer, integer)",
+  "public.direct_entry_vendor_referrer_get_history(uuid, uuid, text)",
+  "public.direct_entry_vendor_referrer_assign(uuid, uuid, text, uuid, date, uuid, text, text)",
+  "public.direct_entry_vendor_referrer_revoke(uuid, uuid, text, date, uuid, text, text)",
+  "public.direct_entry_vendor_referrer_monthly_report(uuid, uuid, text, uuid, text, text)",
+]);
 export const WP10_7_2B_MIGRATION_NAME =
   "20261126210000_wp10_7_2b_drop_leave_profile_unit_kind.sql";
 export const WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME =
@@ -550,6 +561,15 @@ export const WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE =
   "public.work_report_has_assignment_access(uuid, uuid)";
 export const HR_BULLETINS_MIGRATION_NAME =
   "20261127060000_wp_hr_bulletins_foundation.sql";
+export const COLLABORATORS_CATALOG_MIGRATION_NAME =
+  "20261128140000_collaborators_catalog.sql";
+export const COLLABORATORS_CATALOG_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_list_collaborators_admin(uuid, uuid, text, boolean, integer, integer)",
+  "public.direct_entry_get_collaborator_admin(uuid, uuid, text)",
+  "public.direct_entry_create_collaborator(uuid, uuid, integer, text, text, text, text)",
+  "public.direct_entry_update_collaborator(uuid, uuid, text, integer, text, text, text)",
+  "public.direct_entry_set_collaborator_active(uuid, uuid, text, boolean, integer, text, text)",
+]);
 export const HR_BULLETINS_RPC_SIGNATURES = Object.freeze([
   "public.hr_bulletin_list_mobile_feed(uuid, uuid, text, integer, boolean, timestamp with time zone, uuid, integer)",
   "public.hr_bulletin_get_detail(uuid, uuid, uuid, boolean)",
@@ -902,8 +922,12 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     hfBlockMoveUnassignTeamLeaderApplied: has(
       HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
     ),
+    vendorReferrerAttributionApplied: has(
+      VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME,
+    ),
     assignmentAccessProbeApplied: has(WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME),
     hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
+    collaboratorsCatalogApplied: has(COLLABORATORS_CATALOG_MIGRATION_NAME),
   };
 }
 
@@ -981,8 +1005,10 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     pr28CleanupApplied = false,
     hfWorkerEditHistoryNamesAndEmployeeCodeApplied = false,
     hfBlockMoveUnassignTeamLeaderApplied = false,
+    vendorReferrerAttributionApplied = false,
     assignmentAccessProbeApplied = false,
     hrBulletinsApplied = false,
+    collaboratorsCatalogApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1145,8 +1171,12 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     ...(hfBlockMoveUnassignTeamLeaderApplied
       ? HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES
       : []),
+    ...(vendorReferrerAttributionApplied
+      ? VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES
+      : []),
     ...(assignmentAccessProbeApplied ? [WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE] : []),
     ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
+    ...(collaboratorsCatalogApplied ? COLLABORATORS_CATALOG_RPC_SIGNATURES : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
     .filter(

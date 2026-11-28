@@ -177,6 +177,7 @@ export type Capability =
   | "report_delegate"
   | "vendor_finance_view"
   | "vendor_finance_record"
+  | "vendor_referrer_manage"
   | "duplicate_cccd_withdraw"
   | "worker_edit_history_view"
   | "bulletin_manage";

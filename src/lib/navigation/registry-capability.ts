@@ -44,6 +44,7 @@ export type NavActorProjection = {
   hasLeaveAdminAccess?: boolean;
   hasSalaryAdvanceAccess?: boolean;
   hasAttendanceDepartmentHeadAccess?: boolean;
+  hasVendorReferrerAccess?: boolean;
   allowed_worker_tabs?: readonly WorkerOperationsTabId[];
 };
 
@@ -246,9 +247,12 @@ export const attendanceReportNavPredicate: NavCapabilityPredicate = (actor) =>
   attendanceTeamLeaderReportNavPredicate(actor) ||
   attendanceDepartmentHeadReportNavPredicate(actor);
 
-/** Top-level Admin panel shell admits catalog operators, Full Admin, Attendance Report readers (BoD or Team Leader), or Worker Edit History readers. */
+/** Top-level Admin panel shell admits catalog operators, Full Admin, Attendance Report readers (BoD or Team Leader), Worker Edit History readers, or BoD Vendor Referrer managers. */
 export const adminPanelNavPredicate: NavCapabilityPredicate = (actor) =>
-  adminAreaNavPredicate(actor) || attendanceReportNavPredicate(actor) || workerEditHistoryNavPredicate(actor);
+  adminAreaNavPredicate(actor) ||
+  attendanceReportNavPredicate(actor) ||
+  workerEditHistoryNavPredicate(actor) ||
+  vendorReferrerNavPredicate(actor);
 
 /**
  * P2.5-W06A-R1 / WP8B-1 / WP8C-1: Project Operations authority chinh xac theo DB W02
@@ -554,12 +558,25 @@ export const salaryAdvanceNavPredicate: NavCapabilityPredicate = (actor) =>
   (hasNavAllCapability(actor, "report_analytics_view") &&
     hasNavAllCapability(actor, "report_view"));
 
+/**
+ * Vendor Referrer Attribution & BoD Report predicate (`/admin/vendor-referrals` & `/admin/catalog/vendors` referrer UI):
+ * Fail-closed: strictly requires server-verified BoD + `vendor_referrer_manage @ ALL` projection (`hasVendorReferrerAccess === true`).
+ * Non-BoD System Admin, HR, Accounting, Team Leader, and Employee remain denied even if `vendor_referrer_manage` is present.
+ */
+export const vendorReferrerNavPredicate: NavCapabilityPredicate = (actor) =>
+  actor.hasVendorReferrerAccess === true;
+
+/** Helper for server shell probe: checks whether actor even holds `vendor_referrer_manage @ ALL`. */
+export const hasVendorReferrerManageCapability: NavCapabilityPredicate = (actor) =>
+  hasNavAllCapability(actor, "vendor_referrer_manage");
+
 /** Bảng ánh xạ `entry.capability` metadata → predicate tương ứng. */
 export const NAV_CAPABILITY_PREDICATES: Readonly<Record<string, NavCapabilityPredicate>> = {
   any: () => true,
   owner: adminAuthorityNavPredicate,
   admin_area: adminAreaNavPredicate,
   attendance_report: attendanceReportNavPredicate,
+  vendor_referrals: vendorReferrerNavPredicate,
   finance: vendorFinanceNavPredicate,
   leave: leaveManagementNavPredicate,
   leave_admin: leaveAdminNavPredicate,
