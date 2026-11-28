@@ -181,7 +181,8 @@ function simulateAppShellMenu({
     (entry.id !== "finance" || directEntryApiEnabled) &&
     ((entry.id !== "leave" && entry.id !== "leave-admin") || directEntryApiEnabled) &&
     (entry.id !== "salary-advances" || directEntryApiEnabled) &&
-    (entry.id !== "recruitment-posts" || directEntryApiEnabled);
+    (entry.id !== "recruitment-posts" || directEntryApiEnabled) &&
+    (entry.id !== "bulletins" || directEntryApiEnabled);
 
   const filtered = filterEntriesForActor({
     viewport,
@@ -220,6 +221,13 @@ test("F1: 4 top-level groups order Tổng quan → Công việc của tôi → T
     assert.deepEqual(
       grouped.map((n) => (n.type === "entry" ? n.entry.label : `group:${n.label}`)),
       ["Tổng quan", "group:Công việc của tôi", "group:Tài chính", "group:Quản trị"],
+      viewport,
+    );
+    const myWorkGroup = grouped.find((n) => n.type === "group" && n.id === "my-work");
+    assert.ok(myWorkGroup && myWorkGroup.type === "group");
+    assert.equal(
+      myWorkGroup.entries.some((e) => e.id === "bulletins" && e.path === "/bulletins"),
+      true,
       viewport,
     );
     const financeGroup = grouped.find((n) => n.type === "group" && n.id === "finance");
