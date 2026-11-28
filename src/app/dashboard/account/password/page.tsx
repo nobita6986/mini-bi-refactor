@@ -28,6 +28,9 @@ export default async function ChangePasswordPage() {
     case "ALLOW":
       break;
   }
+  if (actor?.ok && actor.actor.partner_account) {
+    redirect("/partner/change-password");
+  }
 
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-6 py-12">

@@ -22,7 +22,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Dialog } from "radix-ui";
-import { Banknote, Building2, CalendarDays, ClipboardList, FileDiff, LayoutDashboard, Menu, Newspaper, NotebookPen, Receipt, ShieldCheck, Users, X } from "lucide-react";
+import { Banknote, Briefcase, Building2, CalendarDays, ClipboardList, FileDiff, LayoutDashboard, Menu, Newspaper, NotebookPen, Receipt, ShieldCheck, UserCheck, Users, X } from "lucide-react";
 
 import {
   findActiveNavEntry,
@@ -49,6 +49,9 @@ const NAV_ICONS: Record<string, typeof LayoutDashboard> = {
   "salary-advances": Banknote,
   "recruitment-posts": ClipboardList,
   bulletins: Newspaper,
+  "partner-recruitment": Briefcase,
+  "partner-workers": Users,
+  "partner-profile": UserCheck,
   admin: ShieldCheck,
 } as const;
 

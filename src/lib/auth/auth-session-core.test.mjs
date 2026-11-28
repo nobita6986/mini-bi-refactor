@@ -546,3 +546,140 @@ test("WP10-5: createAuthSessionResponse preserves team/all scope query-date meta
     { kind: "all", reference: "all", valid_from: queryDate, valid_to: null },
   ]);
 });
+
+test("Partner accounts: PENDING_ACTIVATION returns ACCOUNT_PENDING_ACTIVATION & signs out; ACTIVE projects partner_account", async () => {
+  const authSubject = "11111111-1111-4111-8111-111111111111";
+  const appUserId = "22222222-2222-4222-8222-222222222222";
+  const partnerAccountId = "33333333-3333-4333-8333-333333333333";
+
+  const makePartnerRecord = (overrides = {}) => ({
+    auth_subject: authSubject,
+    app_user_id: appUserId,
+    display_name: "Vendor Alpha",
+    enabled: false,
+    capabilities: [],
+    recruiter_links: [],
+    teams: [],
+    team_scope_grants: [],
+    all_scope_grants: [],
+    allowed_worker_tabs: [],
+    effective_grants: [],
+    assigned_roles: [],
+    partner_account: {
+      partner_account_id: partnerAccountId,
+      partner_kind: "VENDOR",
+      vendor_id: "VND_ALPHA",
+      collaborator_id: null,
+      partner_id: "VND_ALPHA",
+      partner_display_name: "Vendor Alpha",
+      partner_active: true,
+      canonical_code: "vnd_alpha",
+      username: "vnd_alpha",
+      account_state: "PENDING_ACTIVATION",
+      activated_at: null,
+      must_change_password: true,
+      password_changed_at: null,
+      ...overrides,
+    },
+  });
+
+  // 1) PENDING_ACTIVATION with active parent -> signs out locally + 403 ACCOUNT_PENDING_ACTIVATION
+  let signOutPending = null;
+  const pendingRes = await createAuthLoginResponse(
+    request("/api/auth/login", { email: "vnd_alpha", password: "hrp@123" }),
+    {
+      ...baseDependencies(),
+      createClient: async () =>
+        successClient({
+          signInWithPassword: async () => ({ data: { user: { id: authSubject } }, error: null }),
+          signOut: async (opts) => {
+            signOutPending = opts;
+            return { error: null };
+          },
+        }),
+      repository: { loadByAuthSubject: async () => makePartnerRecord() },
+      resolveActor,
+      now: () => "2026-11-28T10:00:00.000Z",
+    },
+  );
+  assert.equal(pendingRes.status, 403);
+  assert.deepEqual(signOutPending, { scope: "local" });
+  assert.deepEqual(await pendingRes.json(), { ok: false, code: "ACCOUNT_PENDING_ACTIVATION" });
+
+  // 2) PENDING_ACTIVATION with inactive parent -> generic 403 ACCOUNT_NOT_AVAILABLE
+  let signOutInactive = null;
+  const inactiveRes = await createAuthLoginResponse(
+    request("/api/auth/login", { email: "vnd_alpha", password: "hrp@123" }),
+    {
+      ...baseDependencies(),
+      createClient: async () =>
+        successClient({
+          signInWithPassword: async () => ({ data: { user: { id: authSubject } }, error: null }),
+          signOut: async (opts) => {
+            signOutInactive = opts;
+            return { error: null };
+          },
+        }),
+      repository: { loadByAuthSubject: async () => makePartnerRecord({ partner_active: false }) },
+      resolveActor,
+      now: () => "2026-11-28T10:00:00.000Z",
+    },
+  );
+  assert.equal(inactiveRes.status, 403);
+  assert.deepEqual(signOutInactive, { scope: "local" });
+  assert.deepEqual(await inactiveRes.json(), { ok: false, code: "ACCOUNT_NOT_AVAILABLE" });
+
+  // 3) ACTIVE_MUST_CHANGE_PASSWORD -> 200 with minimal partner_account projection (no auth_subject/email/tokens)
+  const activeRecord = {
+    ...makePartnerRecord({
+      account_state: "ACTIVE_MUST_CHANGE_PASSWORD",
+      activated_at: "2026-11-28T09:00:00.000Z",
+      must_change_password: true,
+    }),
+    enabled: true,
+  };
+  const activeLogin = await createAuthLoginResponse(
+    request("/api/auth/login", { email: "vnd_alpha", password: "hrp@123" }),
+    {
+      ...baseDependencies(),
+      createClient: async () =>
+        successClient({
+          signInWithPassword: async () => ({ data: { user: { id: authSubject } }, error: null }),
+        }),
+      repository: { loadByAuthSubject: async () => activeRecord },
+      resolveActor,
+      now: () => "2026-11-28T10:00:00.000Z",
+    },
+  );
+  assert.equal(activeLogin.status, 200);
+  const loginBody = await activeLogin.json();
+  assert.deepEqual(loginBody, {
+    ok: true,
+    actor: {
+      app_user_id: appUserId,
+      display_name: "Vendor Alpha",
+      capabilities: [],
+      scopes: [{ kind: "own", reference: appUserId, valid_from: "0001-01-01", valid_to: null }],
+      self_recruiter_suggestion: null,
+      partner_account: {
+        partner_kind: "VENDOR",
+        partner_code: "VND_ALPHA",
+        account_state: "ACTIVE_MUST_CHANGE_PASSWORD",
+        must_change_password: true,
+      },
+    },
+  });
+  const serialized = JSON.stringify(loginBody);
+  assert.equal(serialized.includes(authSubject), false);
+  assert.equal(serialized.includes("@hrpartner.vn"), false);
+
+  // 4) Session GET also projects partner_account when present
+  const resolved = await resolveActor({
+    session: { auth_subject: authSubject, provider: "supabase", authenticated_at: null },
+    repository: { loadByAuthSubject: async () => activeRecord },
+    at: "2026-11-28T10:00:00.000Z",
+  });
+  const sessionRes = await createAuthSessionResponse(async () => ({ actor: resolved }));
+  assert.equal(sessionRes.status, 200);
+  assert.deepEqual(await sessionRes.json(), loginBody);
+});

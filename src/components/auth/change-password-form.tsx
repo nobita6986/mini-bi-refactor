@@ -18,7 +18,15 @@ import { Check, Eye, EyeOff } from "lucide-react";
 import { useNotify } from "@/components/ui/notify-provider";
 import { authUiErrorMessage } from "@/lib/auth/auth-ui";
 
-export function ChangePasswordForm({ destination }: { destination: string }) {
+export function ChangePasswordForm({
+  destination,
+  successRedirectTo,
+  isFirstLogin = false,
+}: {
+  destination: string;
+  successRedirectTo?: string;
+  isFirstLogin?: boolean;
+}) {
   const router = useRouter();
   const notify = useNotify();
   const [currentPassword, setCurrentPassword] = useState("");
@@ -59,6 +67,9 @@ export function ChangePasswordForm({ destination }: { destination: string }) {
         reset();
         // Refresh so the AppShell picks up the rotated session tokens
         // and any user display that depends on `verified_at`.
+        if (successRedirectTo) {
+          router.replace(successRedirectTo);
+        }
         router.refresh();
         return;
       }
@@ -90,6 +101,11 @@ export function ChangePasswordForm({ destination }: { destination: string }) {
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
+      {isFirstLogin ? (
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+          Vui lòng nhập mật khẩu khởi tạo do quản trị viên cung cấp và thiết lập mật khẩu mới trước khi sử dụng cổng đối tác.
+        </p>
+      ) : null}
       <div className="flex flex-col gap-1.5">
         <label htmlFor="current-password" className="text-sm font-medium text-foreground">
           Mật khẩu hiện tại
@@ -101,11 +117,13 @@ export function ChangePasswordForm({ destination }: { destination: string }) {
             type={showCurrent ? "text" : "password"}
             autoComplete="current-password"
             spellCheck={false}
+            enterKeyHint="next"
             required
             value={currentPassword}
+            aria-invalid={error ? "true" : "false"}
             aria-describedby={error ? "change-password-error" : undefined}
             onChange={(event) => setCurrentPassword(event.target.value)}
-            className="min-h-11 h-11 w-full rounded-md border border-border bg-surface px-3 pr-11 text-base sm:text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="min-h-11 h-11 w-full rounded-md border border-border bg-surface px-3 pr-11 text-base sm:text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40 user-invalid:border-rose-600"
           />
           <button
             type="button"
@@ -129,11 +147,14 @@ export function ChangePasswordForm({ destination }: { destination: string }) {
             type={showNew ? "text" : "password"}
             autoComplete="new-password"
             spellCheck={false}
+            enterKeyHint="next"
+            minLength={8}
             required
             value={newPassword}
+            aria-invalid={error ? "true" : "false"}
             aria-describedby={error ? "change-password-error" : "change-password-hint"}
             onChange={(event) => setNewPassword(event.target.value)}
-            className="min-h-11 h-11 w-full rounded-md border border-border bg-surface px-3 pr-11 text-base sm:text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="min-h-11 h-11 w-full rounded-md border border-border bg-surface px-3 pr-11 text-base sm:text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40 user-invalid:border-rose-600"
           />
           <button
             type="button"
@@ -157,11 +178,14 @@ export function ChangePasswordForm({ destination }: { destination: string }) {
             type={showConfirm ? "text" : "password"}
             autoComplete="new-password"
             spellCheck={false}
+            enterKeyHint="done"
+            minLength={8}
             required
             value={confirmPassword}
+            aria-invalid={error ? "true" : "false"}
             aria-describedby={error ? "change-password-error" : undefined}
             onChange={(event) => setConfirmPassword(event.target.value)}
-            className="min-h-11 h-11 w-full rounded-md border border-border bg-surface px-3 pr-11 text-base sm:text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="min-h-11 h-11 w-full rounded-md border border-border bg-surface px-3 pr-11 text-base sm:text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40 user-invalid:border-rose-600"
           />
           <button
             type="button"

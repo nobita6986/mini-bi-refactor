@@ -29,7 +29,7 @@ async function trustedActor(deps: SubmissionApiDependencies): Promise<WorkReport
       return fail(unauthenticated ? "UNAUTHENTICATED" : "ACTOR_NOT_AVAILABLE", unauthenticated ? 401 : 403);
     }
     const actor = session.actor.actor;
-    if (!actor || !UUID.test(actor.auth_subject) || !UUID.test(actor.app_user_id)) return fail("ACTOR_NOT_AVAILABLE", 403);
+    if (!actor || actor.partner_account !== undefined || !UUID.test(actor.auth_subject) || !UUID.test(actor.app_user_id)) return fail("ACTOR_NOT_AVAILABLE", 403);
     return { auth_subject: actor.auth_subject, app_user_id: actor.app_user_id };
   } catch {
     console.error("[work-reports] submission session unavailable");

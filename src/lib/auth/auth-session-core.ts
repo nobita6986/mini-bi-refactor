@@ -55,12 +55,24 @@ function failure(code: string, status: number): Response {
 function actorProjection(actor: DirectEntryActor) {
   // P2.5-HF-R5: display_name is the only identity field added for the header.
   // Email, auth_subject, login metadata, and raw effective_grants are never projected.
-  return {
+  const base = {
     app_user_id: actor.app_user_id,
     display_name: actor.display_name,
     capabilities: projectClientCapabilities(actor),
     scopes: projectClientScopes(actor),
     self_recruiter_suggestion: actor.self_recruiter_suggestion,
+  };
+  if (!actor.partner_account) {
+    return base;
+  }
+  return {
+    ...base,
+    partner_account: {
+      partner_kind: actor.partner_account.partner_kind,
+      partner_code: actor.partner_account.partner_id,
+      account_state: actor.partner_account.account_state,
+      must_change_password: actor.partner_account.must_change_password,
+    },
   };
 }
 
@@ -169,7 +181,9 @@ export async function createAuthLoginResponse(
     if (!actor.ok) {
       const signedOut = await client.auth.signOut({ scope: "local" });
       if (signedOut.error) return failure("AUTH_UNAVAILABLE", 503);
-      return failure("ACCOUNT_NOT_AVAILABLE", 403);
+      return actor.reason === "ACTOR_PENDING_ACTIVATION"
+        ? failure("ACCOUNT_PENDING_ACTIVATION", 403)
+        : failure("ACCOUNT_NOT_AVAILABLE", 403);
     }
     return json({ ok: true, actor: actorProjection(actor.actor) }, 200);
   } catch {
@@ -201,9 +215,13 @@ export async function createAuthSessionResponse(
   try {
     const result = await resolveSession();
     if (!result.actor.ok) {
-      return result.actor.reason === "UNAUTHENTICATED"
-        ? failure("AUTH_UNAUTHENTICATED", 401)
-        : failure("ACCOUNT_NOT_AVAILABLE", 403);
+      if (result.actor.reason === "UNAUTHENTICATED") {
+        return failure("AUTH_UNAUTHENTICATED", 401);
+      }
+      if (result.actor.reason === "ACTOR_PENDING_ACTIVATION") {
+        return failure("ACCOUNT_PENDING_ACTIVATION", 403);
+      }
+      return failure("ACCOUNT_NOT_AVAILABLE", 403);
     }
     return json({ ok: true, actor: actorProjection(result.actor.actor) }, 200);
   } catch {

@@ -1,8 +1,14 @@
 /**
- * P3.1-W04-C Vendor Catalog UI projection and request helpers.
+ * P3.1-W04-C + Partner Portal - Vendor Catalog UI projection and request helpers.
  * The server/API remains the sole authority; this module validates UI payloads only.
  */
 import {
+  isPartnerCodeConflictPayload,
+  normalizeOptionalPartnerAddressValue,
+  normalizeOptionalPartnerPhoneValue,
+  PARTNER_CODE_CONFLICT_MESSAGE,
+  validatePartnerAddress,
+  validatePartnerPhone,
   vendorCatalogCreateResult,
   vendorCatalogItem,
   vendorCatalogList,
@@ -134,47 +140,64 @@ export function buildVendorCreateRequest(input: {
   vendorId: string;
   displayName: string;
   effectiveDate: string;
+  address?: string | null;
+  phone?: string | null;
   reason?: string | null;
   idempotencyKey: string;
 }): RequestResult {
   const failure = validateVendorId(input.vendorId) ?? validateDisplayName(input.displayName)
-    ?? validateISODate(input.effectiveDate) ?? validateReason(input.reason)
+    ?? validateISODate(input.effectiveDate)
+    ?? validatePartnerAddress(input.address)
+    ?? validatePartnerPhone(input.phone)
+    ?? validateReason(input.reason)
     ?? validateUuid(input.idempotencyKey);
   if (failure) return { ok: false, message: failure };
-  return {
-    ok: true,
-    body: {
-      expected_version: 0,
-      vendor_id: input.vendorId.trim(),
-      display_name: input.displayName.trim(),
-      valid_from: input.effectiveDate,
-      reason: normalizeOptionalActionReason(input.reason),
-      idempotency_key: input.idempotencyKey,
-    },
+  const body: Record<string, unknown> = {
+    expected_version: 0,
+    vendor_id: input.vendorId.trim(),
+    display_name: input.displayName.trim(),
+    valid_from: input.effectiveDate,
+    reason: normalizeOptionalActionReason(input.reason),
+    idempotency_key: input.idempotencyKey,
   };
+  if (input.address !== undefined) {
+    body.address = normalizeOptionalPartnerAddressValue(input.address);
+  }
+  if (input.phone !== undefined) {
+    body.phone = normalizeOptionalPartnerPhoneValue(input.phone);
+  }
+  return { ok: true, body };
 }
 
 export function buildVendorUpdateRequest(input: {
   displayName: string;
   expectedVersion: number;
+  address?: string | null;
+  phone?: string | null;
   reason?: string | null;
   idempotencyKey: string;
 }): RequestResult {
   const failure = validateDisplayName(input.displayName)
     ?? validateVersion(input.expectedVersion)
     ?? (input.expectedVersion < 1 ? "Dữ liệu chưa hợp lệ. Vui lòng tải lại." : null)
+    ?? validatePartnerAddress(input.address)
+    ?? validatePartnerPhone(input.phone)
     ?? validateReason(input.reason)
     ?? validateUuid(input.idempotencyKey);
   if (failure) return { ok: false, message: failure };
-  return {
-    ok: true,
-    body: {
-      expected_version: input.expectedVersion,
-      display_name: input.displayName.trim(),
-      reason: normalizeOptionalActionReason(input.reason),
-      idempotency_key: input.idempotencyKey,
-    },
+  const body: Record<string, unknown> = {
+    expected_version: input.expectedVersion,
+    display_name: input.displayName.trim(),
+    reason: normalizeOptionalActionReason(input.reason),
+    idempotency_key: input.idempotencyKey,
   };
+  if (input.address !== undefined) {
+    body.address = normalizeOptionalPartnerAddressValue(input.address);
+  }
+  if (input.phone !== undefined) {
+    body.phone = normalizeOptionalPartnerPhoneValue(input.phone);
+  }
+  return { ok: true, body };
 }
 
 export function buildVendorSetActiveRequest(input: {
@@ -215,7 +238,12 @@ export function classifyVendorMutation(
   if (status === 401) return { kind: "unauthenticated", message: "Phiên đăng nhập không còn hiệu lực." };
   if (status === 403) return { kind: "denied", message: "Bạn không có quyền thực hiện thao tác này." };
   if (status === 404) return { kind: "not-found", message: "Nhà cung cấp không còn khả dụng." };
-  if (status === 409) return { kind: "conflict", message: "Nhà cung cấp đã thay đổi ở nơi khác. Tải lại dữ liệu trước khi tiếp tục." };
+  if (status === 409) {
+    if (isPartnerCodeConflictPayload(payload, ["VENDOR_CODE_CONFLICT"])) {
+      return { kind: "conflict", message: PARTNER_CODE_CONFLICT_MESSAGE };
+    }
+    return { kind: "conflict", message: "Nhà cung cấp đã thay đổi ở nơi khác. Tải lại dữ liệu trước khi tiếp tục." };
+  }
   if (status === 400 || status === 422) return { kind: "invalid", message: "Thông tin gửi lên không hợp lệ. Kiểm tra lại các trường." };
   return { kind: "unavailable", message: "Dịch vụ hiện không khả dụng. Có thể thử lại cùng thao tác." };
 }

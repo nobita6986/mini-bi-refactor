@@ -1,9 +1,10 @@
 import { notFound, redirect } from "next/navigation";
-import { AccountUnavailable } from "@/components/auth/access-denied";
+import { AccessDenied, AccountUnavailable } from "@/components/auth/access-denied";
 import { TemporaryUnavailable } from "@/components/auth/temporary-unavailable";
 import { MyObligations } from "@/components/work-reports/renderer/my-obligations";
 import { WorkReportsShell } from "@/components/work-reports/work-reports-shell";
 import { decidePersonalWorkReportsPageAccess } from "@/lib/auth/direct-entry-page-access";
+import { resolveInternalBiPartnerBlock } from "@/lib/navigation/partner-page-guard";
 import {
   resolveActorForRequest,
   resolveWorkReportShellActorForRequest,
@@ -25,6 +26,13 @@ export default async function MyWorkReportsHistoryPage() {
     case "TEMPORARY_UNAVAILABLE":
       return <TemporaryUnavailable />;
     case "ALLOW": {
+      const partnerBlock = resolveInternalBiPartnerBlock(actor);
+      if (partnerBlock === "REDIRECT_CHANGE_PASSWORD") {
+        redirect("/partner/change-password");
+      }
+      if (partnerBlock === "ACCESS_DENIED") {
+        return <AccessDenied />;
+      }
       const shellActor = await resolveWorkReportShellActorForRequest().catch(() =>
         actor?.ok ? actor.actor : null,
       );

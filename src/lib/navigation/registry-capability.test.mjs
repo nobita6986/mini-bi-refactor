@@ -522,7 +522,7 @@ test("Admin catalog navigation remains available when Direct Entry UI is disable
 });
 
 test("CURRENT_NAV_ENTRIES giữ nguyên một registry duy nhất (không tạo registry thứ hai)", () => {
-  // Admin, Finance, Leave, Salary Advances, Recruitment Posts, Bulletins, Change Requests and Work Reports share one registry; hidden entries retain route metadata.
+  // Admin, Finance, Leave, Salary Advances, Recruitment Posts, Bulletins, Partner Portal, Change Requests and Work Reports share one registry; hidden entries retain route metadata.
   const ids = CURRENT_NAV_ENTRIES.map((e) => e.id).sort();
   assert.deepEqual(
     ids,
@@ -536,6 +536,9 @@ test("CURRENT_NAV_ENTRIES giữ nguyên một registry duy nhất (không tạo 
       "finance",
       "leave",
       "leave-admin",
+      "partner-profile",
+      "partner-recruitment",
+      "partner-workers",
       "project-operations",
       "recruitment-posts",
       "salary-advances",
@@ -544,6 +547,68 @@ test("CURRENT_NAV_ENTRIES giữ nguyên một registry duy nhất (không tạo 
       "worker-operations",
     ],
   );
+});
+
+test("Partner portal nav isolation: VENDOR vs COLLABORATOR vs must_change_password", () => {
+  const activeVendor = {
+    capabilities: [],
+    scopes: [],
+    partner_account: { partner_kind: "VENDOR", must_change_password: false },
+  };
+  const activeCollab = {
+    capabilities: [],
+    scopes: [],
+    partner_account: { partner_kind: "COLLABORATOR", must_change_password: false },
+  };
+  const mustChangeVendor = {
+    capabilities: [],
+    scopes: [],
+    partner_account: { partner_kind: "VENDOR", must_change_password: true },
+  };
+  const mustChangeCollab = {
+    capabilities: [],
+    scopes: [],
+    partner_account: { partner_kind: "COLLABORATOR", must_change_password: true },
+  };
+
+  for (const viewport of ["desktop", "mobile"]) {
+    assert.deepEqual(
+      filterEntriesForActor({
+        viewport,
+        directEntryEnabled: true,
+        actor: activeVendor,
+        decide: decideFor(activeVendor, viewport),
+      }).map((e) => e.id),
+      ["partner-recruitment", "partner-workers", "partner-profile"],
+    );
+    assert.deepEqual(
+      filterEntriesForActor({
+        viewport,
+        directEntryEnabled: true,
+        actor: activeCollab,
+        decide: decideFor(activeCollab, viewport),
+      }).map((e) => e.id),
+      ["partner-profile"],
+    );
+    assert.deepEqual(
+      filterEntriesForActor({
+        viewport,
+        directEntryEnabled: true,
+        actor: mustChangeVendor,
+        decide: decideFor(mustChangeVendor, viewport),
+      }).map((e) => e.id),
+      [],
+    );
+    assert.deepEqual(
+      filterEntriesForActor({
+        viewport,
+        directEntryEnabled: true,
+        actor: mustChangeCollab,
+        decide: decideFor(mustChangeCollab, viewport),
+      }).map((e) => e.id),
+      [],
+    );
+  }
 });
 
 test("Global IA representative actor matrix: Recruiter/Nhân viên, Team Leader, Trưởng phòng, Admin/BoD và Kế toán", () => {

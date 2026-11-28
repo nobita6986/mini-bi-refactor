@@ -17,7 +17,10 @@ test("login form: native form, mot POST, identifier trim, password khong trim", 
   assert.match(form, /method: "POST"/);
   assert.equal((form.match(/fetch\(/g) ?? []).length, 1);
   assert.match(form, /identifier\.trim\(\), password/);
-  assert.match(form, /Email hoặc ID/);
+  assert.match(form, /Mã đăng nhập hoặc Email/);
+  assert.match(form, /href="\/activate"/);
+  assert.match(form, /Kích hoạt tài khoản Vendor\/CTV lần đầu/);
+  assert.match(form, /resolvePostLoginDestination/);
   assert.match(form, /type="text"/);
   assert.match(form, /type=\{showPassword \? "text" : "password"\}/);
   assert.match(form, /aria-label=\{showPassword \? "Ẩn mật khẩu" : "Hiện mật khẩu"\}/);
@@ -40,6 +43,9 @@ test("login gate: session goi mot lan, safe redirect, khong auto-loop", () => {
   assert.match(gate, /\/api\/auth\/session/);
   assert.equal((gate.match(/fetch\("\/api\/auth\/session"/g) ?? []).length, 1);
   assert.match(gate, /resolveSafeAuthDestination\(searchParams\.get\("next"\)\)/);
+  assert.match(gate, /resolvePostLoginDestination/);
+  assert.match(gate, /ACCOUNT_PENDING_ACTIVATION/);
+  assert.match(gate, /href="\/activate"/);
   assert.match(gate, /router\.replace\(destination\)/);
   assert.match(gate, /res\.status === 401/);
   assert.match(gate, /res\.status === 403/);

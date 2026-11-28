@@ -511,7 +511,7 @@ describe("Collaborators (CTV) E2E — PG18 Integration Suite", () => {
     assert.equal(updatedAlt.display_name, "CTV Bảo Châu Mới");
     assert.equal(updatedAlt.version, 2);
 
-    // Independence: same code active simultaneously in vendors and collaborators, 0 shadow recruiter rows
+    // Cross-catalog uniqueness: same canonical code (including case-variants) cannot exist in both collaborators and vendors
     const SHARED_CODE = "SHARED_DUAL_01";
     const { rows: [recCountBefore] } = await setup.query("select count(*)::int as n from public.recruiters");
     const sharedCtv = await serviceRpc(
@@ -521,19 +521,29 @@ describe("Collaborators (CTV) E2E — PG18 Integration Suite", () => {
     );
     const { rows: [recCountAfterCtv] } = await setup.query("select count(*)::int as n from public.recruiters");
     assert.equal(recCountAfterCtv.n, recCountBefore.n, "Creating collaborator must NEVER create a recruiters shadow row");
+    assert.equal(sharedCtv.collaborator_id, SHARED_CODE);
 
-    const sharedVendor = await serviceRpc(
+    const crossCatalogConflict = await tryServiceRpc(
       "direct_entry_create_vendor",
-      [OWNER.auth, OWNER.app, 0, SHARED_CODE, "Vendor Trùng Mã", "2025-01-01", "Create shared code Vendor", nextKey("sc_v")],
+      [OWNER.auth, OWNER.app, 0, SHARED_CODE.toLowerCase(), "Vendor Trùng Mã CTV", "2025-01-01", "Attempt duplicate code Vendor", nextKey("sc_v_conflict")],
       ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
     );
-    assert.equal(sharedCtv.collaborator_id, SHARED_CODE);
-    assert.equal(sharedVendor.vendor_id, SHARED_CODE);
+    assert.equal(crossCatalogConflict.ok, false, "Creating Vendor with Collaborator code must fail closed");
+    assert.equal(crossCatalogConflict.code, "PT409");
+    assert.match(String(crossCatalogConflict.message), /PARTNER_CODE_CONFLICT/);
 
-    // Deactivating sharedVendor leaves sharedCtv active (zero cross-table coupling)
+    const DISTINCT_VENDOR_CODE = "VND_DUP_CHECK_01";
+    const distinctVendor = await serviceRpc(
+      "direct_entry_create_vendor",
+      [OWNER.auth, OWNER.app, 0, DISTINCT_VENDOR_CODE, "Vendor Riêng Mã", "2025-01-01", "Create distinct code Vendor", nextKey("sc_v")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+    assert.equal(distinctVendor.vendor_id, DISTINCT_VENDOR_CODE);
+
+    // Deactivating distinctVendor leaves sharedCtv active
     await serviceRpc(
       "direct_entry_set_vendor_active",
-      [OWNER.auth, OWNER.app, SHARED_CODE, false, sharedVendor.version, "Deactivate shared Vendor", nextKey("sc_vd")],
+      [OWNER.auth, OWNER.app, DISTINCT_VENDOR_CODE, false, distinctVendor.version, "Deactivate distinct Vendor", nextKey("sc_vd")],
       ["uuid", "uuid", "text", "boolean", "integer", "text", "text"],
     );
     const sharedCtvRead = await serviceRpc(
@@ -541,9 +551,9 @@ describe("Collaborators (CTV) E2E — PG18 Integration Suite", () => {
       [OWNER.auth, OWNER.app, SHARED_CODE],
       ["uuid", "uuid", "text"],
     );
-    assert.equal(sharedCtvRead.active, true, "Deactivating vendor leaves collaborator with same ID active");
+    assert.equal(sharedCtvRead.active, true, "Deactivating vendor leaves collaborator active");
 
-    // Deactivate sharedCtv -> omitted from direct_entry_input_catalog while CTV_MAIN/CTV_ALT/CTV_HIST remain active
+    // Deactivate sharedCtv -> omitted from direct_entry_input_catalog while CTV_01/CTV_02/CTV_HIST_03 remain active
     await serviceRpc(
       "direct_entry_set_collaborator_active",
       [HR_OP.auth, HR_OP.app, SHARED_CODE, false, sharedCtv.version, "Deactivate shared CTV", nextKey("sc_cd")],

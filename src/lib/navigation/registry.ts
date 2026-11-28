@@ -17,6 +17,7 @@
 import type { ComponentType, SVGProps } from "react";
 import {
   Banknote,
+  Briefcase,
   Building2,
   CalendarDays,
   ClipboardList,
@@ -26,6 +27,7 @@ import {
   NotebookPen,
   Receipt,
   ShieldCheck,
+  UserCheck,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -76,7 +78,9 @@ export type NavCapability =
   | "workforce_offboarding"
   | "leave"
   | "leave_admin"
-  | "salary_advances";
+  | "salary_advances"
+  | "partner_vendor"
+  | "partner_portal";
 
 /** Icon component type — accept cả LucideIcon và custom SVG component. */
 export type NavIcon = LucideIcon | ComponentType<SVGProps<SVGSVGElement>>;
@@ -262,6 +266,43 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     icon: Newspaper,
     status: "current",
     capability: "any",
+    group: "my-work",
+    visibility: { desktop: true, mobile: true },
+  },
+  {
+    id: "partner-recruitment",
+    label: "Tuyển dụng của tôi",
+    path: "/partner/recruitment",
+    description:
+      "Thống kê lượt tuyển dụng của Vendor theo dự án và theo thời gian.",
+    icon: Briefcase,
+    status: "current",
+    capability: "partner_vendor",
+    group: "my-work",
+    visibility: { desktop: true, mobile: true },
+  },
+  {
+    id: "partner-workers",
+    label: "Danh sách NLĐ",
+    path: "/partner/workers",
+    description:
+      "Danh sách người lao động đã nộp do Vendor giới thiệu.",
+    icon: Users,
+    status: "current",
+    capability: "partner_vendor",
+    group: "my-work",
+    visibility: { desktop: true, mobile: true },
+  },
+  {
+    id: "partner-profile",
+    label: "Hồ sơ của tôi",
+    path: "/partner/profile",
+    matchPaths: ["/partner/profile", "/partner/change-password"],
+    description:
+      "Thông tin hồ sơ đối tác và bảo mật tài khoản cổng đối tác.",
+    icon: UserCheck,
+    status: "current",
+    capability: "partner_portal",
     group: "my-work",
     visibility: { desktop: true, mobile: true },
   },

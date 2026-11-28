@@ -152,3 +152,11 @@ test("HF-R5: the AppShell keeps rendering the control without a second request",
   const calls = shell.match(/\/api\/auth\/session/g) ?? [];
   assert.equal(calls.length, 0, "AppShell must not fetch the session itself");
 });
+
+test("Partner Portal: user-session-control adapts menu links for partner_account safely", () => {
+  assert.match(source, /function readPartnerAccount/);
+  assert.match(source, /href="\/partner\/profile"/);
+  assert.match(source, /href="\/partner\/change-password"/);
+  assert.match(source, /Hồ sơ của tôi/);
+  assert.match(source, /!partnerAccount\.must_change_password/);
+});

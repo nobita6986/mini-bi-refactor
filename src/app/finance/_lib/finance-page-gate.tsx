@@ -12,6 +12,7 @@ import {
   vendorFinanceRecordNavPredicate,
   type NavActorProjection,
 } from "@/lib/navigation/registry-capability";
+import { resolveInternalBiPartnerBlock } from "@/lib/navigation/partner-page-guard";
 import { resolveActorForRequest } from "@/lib/navigation/resolve-nav-actor";
 import {
   decideVendorFinancePageAccess,
@@ -58,6 +59,13 @@ export async function renderVendorFinancePageGate(input: {
   }
 
   const actor = await resolveActorForRequest().catch(() => null);
+  const partnerBlock = resolveInternalBiPartnerBlock(actor);
+  if (partnerBlock === "REDIRECT_CHANGE_PASSWORD") {
+    redirect("/partner/change-password");
+  }
+  if (partnerBlock === "ACCESS_DENIED") {
+    return <AccessDenied />;
+  }
 
   let serverAccess: VendorFinanceServerAccessResult | null = null;
   let canRecord = false;

@@ -64,6 +64,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   if (!actor?.ok) {
     return <TemporaryUnavailable />;
   }
+  if (actor.actor.partner_account) {
+    redirect(
+      actor.actor.partner_account.must_change_password ||
+        actor.actor.partner_account.account_state === "ACTIVE_MUST_CHANGE_PASSWORD"
+        ? "/partner/change-password"
+        : "/partner",
+    );
+  }
 
   const params = await searchParams;
   const rawTab = params.tab;

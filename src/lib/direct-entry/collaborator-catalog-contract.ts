@@ -13,6 +13,23 @@ import {
   validateVersion,
   type RequestResult,
 } from "./project-operations-model.ts";
+import {
+  bool,
+  exactKeys,
+  int,
+  isPartnerCodeConflictPayload,
+  isRecord,
+  normalizeOptionalPartnerAddressValue,
+  normalizeOptionalPartnerPhoneValue,
+  nullablePartnerAccountSummary,
+  PARTNER_CODE_CONFLICT_MESSAGE,
+  projectedNullableAddress,
+  projectedNullablePhone,
+  str,
+  validatePartnerAddress,
+  validatePartnerPhone,
+  type PartnerAccountSummary,
+} from "./vendor-catalog-contract.ts";
 
 export const COLLABORATOR_ID_MAX = 128;
 export const COLLABORATOR_NAME_MAX = 256;
@@ -25,10 +42,13 @@ export const RESERVED_COLLABORATOR_ID = "__system_vendor__";
 export type AdminCollaborator = {
   collaborator_id: string;
   display_name: string;
+  address?: string | null;
+  phone?: string | null;
   active: boolean;
   version: number;
   created_at: string;
   updated_at: string;
+  partner_account?: PartnerAccountSummary | null;
 };
 
 export type AdminCollaboratorList = {
@@ -41,8 +61,13 @@ export type AdminCollaboratorList = {
 export type AdminCollaboratorMutation = {
   collaborator_id: string;
   display_name: string;
+  address?: string | null;
+  phone?: string | null;
   active: boolean;
   version: number;
+  created_at?: string;
+  updated_at?: string;
+  partner_account?: PartnerAccountSummary | null;
 };
 
 export type CollaboratorListQuery = {
@@ -60,27 +85,19 @@ export type CollaboratorMutationOutcome =
   | { kind: "invalid"; message: string }
   | { kind: "unavailable"; message: string };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+const ITEM_KEYS_V2 = [
+  "collaborator_id",
+  "display_name",
+  "address",
+  "phone",
+  "active",
+  "version",
+  "created_at",
+  "updated_at",
+  "partner_account",
+] as const;
 
-function str(value: unknown): string | null {
-  return typeof value === "string" && value.trim() !== "" ? value : null;
-}
-
-function int(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-function bool(value: unknown): boolean | null {
-  return typeof value === "boolean" ? value : null;
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).sort().join(",") === [...keys].sort().join(",");
-}
-
-const ITEM_KEYS = [
+const ITEM_KEYS_LEGACY = [
   "collaborator_id",
   "display_name",
   "active",
@@ -91,16 +108,64 @@ const ITEM_KEYS = [
 
 const LIST_KEYS = ["items", "total", "page", "page_size"] as const;
 
-const MUTATION_KEYS = [
+const MUTATION_KEYS_LEGACY = [
   "collaborator_id",
   "display_name",
   "active",
   "version",
 ] as const;
 
-/** Collaborator detail/list item projection (6 keys). */
+function parseFullCollaboratorProjection(
+  value: Record<string, unknown>,
+): (AdminCollaborator & AdminCollaboratorMutation) | null {
+  const collaborator_id = str(value.collaborator_id);
+  const display_name = str(value.display_name);
+  const address = projectedNullableAddress(value.address);
+  const phone = projectedNullablePhone(value.phone);
+  const active = bool(value.active);
+  const version = int(value.version);
+  const created_at = str(value.created_at);
+  const updated_at = str(value.updated_at);
+  const partner_account =
+    collaborator_id === null
+      ? undefined
+      : nullablePartnerAccountSummary(value.partner_account, "COLLABORATOR", collaborator_id);
+  if (
+    collaborator_id === null ||
+    !COLLABORATOR_ID_PATTERN.test(collaborator_id) ||
+    collaborator_id === RESERVED_COLLABORATOR_ID ||
+    display_name === null ||
+    address === undefined ||
+    phone === undefined ||
+    active === null ||
+    version === null ||
+    version < 1 ||
+    created_at === null ||
+    updated_at === null ||
+    partner_account === undefined
+  ) {
+    return null;
+  }
+  return {
+    collaborator_id,
+    display_name,
+    address,
+    phone,
+    active,
+    version,
+    created_at,
+    updated_at,
+    partner_account,
+  };
+}
+
+/** Collaborator detail/list item projection (9 keys in 20261128190000; 6-key legacy compat). */
 export function collaboratorCatalogItem(value: unknown): AdminCollaborator | null {
-  if (!isRecord(value) || !exactKeys(value, ITEM_KEYS)) return null;
+  if (!isRecord(value)) return null;
+  if (exactKeys(value, ITEM_KEYS_V2)) {
+    return parseFullCollaboratorProjection(value);
+  }
+  if (!exactKeys(value, ITEM_KEYS_LEGACY)) return null;
   const collaborator_id = str(value.collaborator_id);
   const display_name = str(value.display_name);
   const active = bool(value.active);
@@ -149,9 +214,13 @@ export function collaboratorCatalogList(value: unknown): AdminCollaboratorList |
   return { items, total, page, page_size };
 }
 
-/** Collaborator create/update/set_active projection (4 keys). */
+/** Collaborator create/update/set_active projection (9 keys in 20261128190000; 4-key legacy compat). */
 export function collaboratorCatalogMutation(value: unknown): AdminCollaboratorMutation | null {
-  if (!isRecord(value) || !exactKeys(value, MUTATION_KEYS)) return null;
+  if (!isRecord(value)) return null;
+  if (exactKeys(value, ITEM_KEYS_V2)) {
+    return parseFullCollaboratorProjection(value);
+  }
+  if (!exactKeys(value, MUTATION_KEYS_LEGACY)) return null;
   const collaborator_id = str(value.collaborator_id);
   const display_name = str(value.display_name);
   const active = bool(value.active);
@@ -241,30 +310,40 @@ function validateCollaboratorDisplayName(value: string): string | null {
 export function buildCollaboratorCreateRequest(input: {
   collaboratorId: string;
   displayName: string;
+  address?: string | null;
+  phone?: string | null;
   reason?: string | null;
   idempotencyKey: string;
 }): RequestResult {
   const failure =
     validateCollaboratorId(input.collaboratorId) ??
     validateCollaboratorDisplayName(input.displayName) ??
+    validatePartnerAddress(input.address) ??
+    validatePartnerPhone(input.phone) ??
     validateReason(input.reason) ??
     validateUuid(input.idempotencyKey);
   if (failure) return { ok: false, message: failure };
-  return {
-    ok: true,
-    body: {
-      expected_version: 0,
-      collaborator_id: input.collaboratorId.trim(),
-      display_name: input.displayName.trim(),
-      reason: normalizeOptionalActionReason(input.reason),
-      idempotency_key: input.idempotencyKey,
-    },
+  const body: Record<string, unknown> = {
+    expected_version: 0,
+    collaborator_id: input.collaboratorId.trim(),
+    display_name: input.displayName.trim(),
+    reason: normalizeOptionalActionReason(input.reason),
+    idempotency_key: input.idempotencyKey,
   };
+  if (input.address !== undefined) {
+    body.address = normalizeOptionalPartnerAddressValue(input.address);
+  }
+  if (input.phone !== undefined) {
+    body.phone = normalizeOptionalPartnerPhoneValue(input.phone);
+  }
+  return { ok: true, body };
 }
 
 export function buildCollaboratorUpdateRequest(input: {
   displayName: string;
   expectedVersion: number;
+  address?: string | null;
+  phone?: string | null;
   reason?: string | null;
   idempotencyKey: string;
 }): RequestResult {
@@ -272,18 +351,24 @@ export function buildCollaboratorUpdateRequest(input: {
     validateCollaboratorDisplayName(input.displayName) ??
     validateVersion(input.expectedVersion) ??
     (input.expectedVersion < 1 ? "Dữ liệu chưa hợp lệ. Vui lòng tải lại." : null) ??
+    validatePartnerAddress(input.address) ??
+    validatePartnerPhone(input.phone) ??
     validateReason(input.reason) ??
     validateUuid(input.idempotencyKey);
   if (failure) return { ok: false, message: failure };
-  return {
-    ok: true,
-    body: {
-      expected_version: input.expectedVersion,
-      display_name: input.displayName.trim(),
-      reason: normalizeOptionalActionReason(input.reason),
-      idempotency_key: input.idempotencyKey,
-    },
+  const body: Record<string, unknown> = {
+    expected_version: input.expectedVersion,
+    display_name: input.displayName.trim(),
+    reason: normalizeOptionalActionReason(input.reason),
+    idempotency_key: input.idempotencyKey,
   };
+  if (input.address !== undefined) {
+    body.address = normalizeOptionalPartnerAddressValue(input.address);
+  }
+  if (input.phone !== undefined) {
+    body.phone = normalizeOptionalPartnerPhoneValue(input.phone);
+  }
+  return { ok: true, body };
 }
 
 export function buildCollaboratorSetActiveRequest(input: {
@@ -324,7 +409,12 @@ export function classifyCollaboratorMutation(
   if (status === 401) return { kind: "unauthenticated", message: "Phiên đăng nhập không còn hiệu lực." };
   if (status === 403) return { kind: "denied", message: "Bạn không có quyền thực hiện thao tác này." };
   if (status === 404) return { kind: "not-found", message: "Cộng tác viên không còn khả dụng." };
-  if (status === 409) return { kind: "conflict", message: "Cộng tác viên đã thay đổi ở nơi khác. Tải lại dữ liệu trước khi tiếp tục." };
+  if (status === 409) {
+    if (isPartnerCodeConflictPayload(payload, ["COLLABORATOR_CODE_CONFLICT"])) {
+      return { kind: "conflict", message: PARTNER_CODE_CONFLICT_MESSAGE };
+    }
+    return { kind: "conflict", message: "Cộng tác viên đã thay đổi ở nơi khác. Tải lại dữ liệu trước khi tiếp tục." };
+  }
   if (status === 400 || status === 422) {
     return { kind: "invalid", message: "Thông tin gửi lên không hợp lệ. Kiểm tra lại các trường." };
   }

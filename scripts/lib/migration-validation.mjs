@@ -570,6 +570,30 @@ export const COLLABORATORS_CATALOG_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_update_collaborator(uuid, uuid, text, integer, text, text, text)",
   "public.direct_entry_set_collaborator_active(uuid, uuid, text, boolean, integer, text, text)",
 ]);
+export const PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_MIGRATION_NAME =
+  "20261128190000_partner_accounts_and_vendor_portal.sql";
+export const PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_ADDED_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_create_vendor(uuid, uuid, integer, text, text, date, text, text, text, text)",
+  "public.direct_entry_update_vendor(uuid, uuid, text, integer, text, text, text, text, text)",
+  "public.direct_entry_create_collaborator(uuid, uuid, integer, text, text, text, text, text, text)",
+  "public.direct_entry_update_collaborator(uuid, uuid, text, integer, text, text, text, text, text)",
+  "public.partner_account_preflight_conflicts_admin(uuid, uuid)",
+  "public.partner_account_provision_begin(uuid, uuid, text, text, text, text)",
+  "public.partner_account_provision_finalize(uuid, uuid, text, text, uuid, uuid, uuid, text, timestamp with time zone, text)",
+  "public.partner_account_rotate_activation_admin(uuid, uuid, text, text, text, timestamp with time zone, text, text)",
+  "public.partner_account_activate(text, text)",
+  "public.partner_account_mark_password_changed(uuid, uuid)",
+  "public.partner_portal_get_profile(uuid, uuid)",
+  "public.partner_portal_update_profile(uuid, uuid, text, text, text, integer, text)",
+  "public.partner_vendor_recruitment_summary(uuid, uuid, date, date, text, text)",
+  "public.partner_vendor_list_workers(uuid, uuid, text, text, date, date, integer, integer)",
+]);
+export const PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_RETIRED_RPC_SIGNATURES = Object.freeze([
+  "public.direct_entry_create_vendor(uuid, uuid, integer, text, text, date, text, text)",
+  "public.direct_entry_update_vendor(uuid, uuid, text, integer, text, text, text)",
+  "public.direct_entry_create_collaborator(uuid, uuid, integer, text, text, text, text)",
+  "public.direct_entry_update_collaborator(uuid, uuid, text, integer, text, text, text)",
+]);
 export const HR_BULLETINS_RPC_SIGNATURES = Object.freeze([
   "public.hr_bulletin_list_mobile_feed(uuid, uuid, text, integer, boolean, timestamp with time zone, uuid, integer)",
   "public.hr_bulletin_get_detail(uuid, uuid, uuid, boolean)",
@@ -628,7 +652,7 @@ export const F1_WORK_REPORTS_SERVICE_RPC_SIGNATURES = Object.freeze([
   "public.work_report_submit(uuid, uuid, uuid, jsonb, integer, text)",
 ]);
 export const S0_T1_C_TARGET_ROUTINE_PATTERN =
-  "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|hr_bulletin_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
+  "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|hr_bulletin_|partner_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
 
 export function migrationChecksum(text) {
   // Git may materialize SQL files as CRLF on Windows even though the same
@@ -928,6 +952,9 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     assignmentAccessProbeApplied: has(WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME),
     hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
     collaboratorsCatalogApplied: has(COLLABORATORS_CATALOG_MIGRATION_NAME),
+    partnerAccountsAndVendorPortalApplied: has(
+      PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_MIGRATION_NAME,
+    ),
   };
 }
 
@@ -1009,6 +1036,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     assignmentAccessProbeApplied = false,
     hrBulletinsApplied = false,
     collaboratorsCatalogApplied = false,
+    partnerAccountsAndVendorPortalApplied = false,
   } = flags ?? {};
 
   const rawBaseAllowlist = extractS0T1CAllowlistSignatures(migrationSql);
@@ -1177,12 +1205,20 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     ...(assignmentAccessProbeApplied ? [WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE] : []),
     ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
     ...(collaboratorsCatalogApplied ? COLLABORATORS_CATALOG_RPC_SIGNATURES : []),
+    ...(partnerAccountsAndVendorPortalApplied
+      ? PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_ADDED_RPC_SIGNATURES
+      : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
     .filter(
       (sig) =>
         !hfWorkerEditHistoryNamesAndEmployeeCodeApplied ||
         !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig),
+    )
+    .filter(
+      (sig) =>
+        !partnerAccountsAndVendorPortalApplied ||
+        !PARTNER_ACCOUNTS_AND_VENDOR_PORTAL_RETIRED_RPC_SIGNATURES.includes(sig),
     );
 }
 
@@ -1263,7 +1299,7 @@ export async function verifyS0T1CSecurityPostconditions(
           join pg_catalog.pg_namespace n on n.oid = p.pronamespace
          where n.nspname = 'public'
            and p.prokind in ('f', 'p')
-           and p.proname ~ '^(direct_entry_|worker_edit_history_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|recruitment_location_|recruitment_post_|administrative_province_|industrial_park_|hrp_sync_)'
+           and p.proname ~ '^(direct_entry_|worker_edit_history_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|recruitment_location_|recruitment_post_|administrative_province_|industrial_park_|hrp_sync_|partner_)'
            and p.prosecdef
            and not coalesce(
              'search_path=pg_catalog, public' = any(p.proconfig)

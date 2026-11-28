@@ -9,6 +9,11 @@ import { OffsetPager } from "@/components/ui/offset-pager";
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import {
+  PartnerAccountCatalogCell,
+  PartnerCatalogConflictsPanel,
+  isPartnerRowConflicted,
+} from "@/components/admin/partner-account-admin-controls";
+import {
   buildCollaboratorCreateRequest,
   buildCollaboratorListQuery,
   buildCollaboratorSetActiveRequest,
@@ -21,6 +26,8 @@ import {
   type AdminCollaborator,
   type AdminCollaboratorList,
 } from "@/lib/direct-entry/collaborator-catalog-contract";
+import { isPartnerCodeConflictPayload } from "@/lib/direct-entry/vendor-catalog-contract";
+import type { PartnerConflictsReport } from "@/lib/partner/contract";
 
 type ListState =
   | { kind: "loading" }
@@ -34,7 +41,13 @@ type DialogState =
   | { kind: "edit"; collaborator: AdminCollaborator }
   | { kind: "active"; collaborator: AdminCollaborator; active: boolean };
 
-type FormState = { collaboratorId: string; displayName: string; reason: string };
+type FormState = {
+  collaboratorId: string;
+  displayName: string;
+  address: string;
+  phone: string;
+  reason: string;
+};
 
 type MutationIntent = {
   url: string;
@@ -46,7 +59,13 @@ type MutationIntent = {
   retry: boolean;
 };
 
-const EMPTY_FORM: FormState = { collaboratorId: "", displayName: "", reason: "" };
+const EMPTY_FORM: FormState = {
+  collaboratorId: "",
+  displayName: "",
+  address: "",
+  phone: "",
+  reason: "",
+};
 const button =
   "inline-flex min-h-10 items-center justify-center rounded-md border border-border " +
   "bg-surface px-3 text-sm font-medium text-foreground focus-visible:outline-none " +
@@ -84,6 +103,7 @@ export function CollaboratorCatalogManager() {
   const [pendingIntent, setPendingIntent] = useState<MutationIntent | null>(null);
   const [conflictIntent, setConflictIntent] = useState<MutationIntent | null>(null);
   const [conflictError, setConflictError] = useState<string | null>(null);
+  const [conflictsReport, setConflictsReport] = useState<PartnerConflictsReport | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -165,6 +185,8 @@ export function CollaboratorCatalogManager() {
     setForm({
       collaboratorId: collaborator.collaborator_id,
       displayName: collaborator.display_name,
+      address: collaborator.address ?? "",
+      phone: collaborator.phone ?? "",
       reason: "",
     });
     setFormError(null);
@@ -269,6 +291,15 @@ export function CollaboratorCatalogManager() {
       }
       const outcome = classifyCollaboratorMutation(response.status, payload);
       if (outcome.kind === "applied" || outcome.kind === "conflict") {
+        if (
+          outcome.kind === "conflict" &&
+          isPartnerCodeConflictPayload(payload, ["COLLABORATOR_CODE_CONFLICT"])
+        ) {
+          setPendingIntent(null);
+          setFormError(outcome.message);
+          notify.error({ title: outcome.message });
+          return;
+        }
         setPendingIntent(null);
         setConflictIntent(intent);
         setConflictError(null);
@@ -315,6 +346,8 @@ export function CollaboratorCatalogManager() {
       request = buildCollaboratorCreateRequest({
         collaboratorId: form.collaboratorId,
         displayName: form.displayName,
+        address: form.address,
+        phone: form.phone,
         reason: form.reason,
         idempotencyKey,
       });
@@ -335,6 +368,8 @@ export function CollaboratorCatalogManager() {
       request = buildCollaboratorUpdateRequest({
         displayName: form.displayName,
         expectedVersion: dialog.collaborator.version,
+        address: form.address,
+        phone: form.phone,
         reason: form.reason,
         idempotencyKey,
       });
@@ -517,6 +552,23 @@ export function CollaboratorCatalogManager() {
                 required
                 onChange={(value) => changeForm("displayName", value)}
               />
+              <Field
+                id="collaborator-address"
+                label="Địa chỉ (không bắt buộc)"
+                value={form.address}
+                maxLength={500}
+                required={false}
+                onChange={(value) => changeForm("address", value)}
+              />
+              <Field
+                id="collaborator-phone"
+                label="Số điện thoại (không bắt buộc)"
+                type="tel"
+                value={form.phone}
+                maxLength={32}
+                required={false}
+                onChange={(value) => changeForm("phone", value)}
+              />
               <ReasonField value={form.reason} onChange={(value) => changeForm("reason", value)} />
               {formError ? (
                 <p role="alert" className="text-sm text-red-700">
@@ -573,6 +625,11 @@ export function CollaboratorCatalogManager() {
           }
         />
       ) : null}
+
+      <PartnerCatalogConflictsPanel
+        report={conflictsReport}
+        onReportLoaded={setConflictsReport}
+      />
 
       <Card>
         <CardHeader
@@ -672,7 +729,13 @@ export function CollaboratorCatalogManager() {
                         Tên cộng tác viên
                       </th>
                       <th scope="col" className="px-3 py-3">
+                        Địa chỉ / SĐT
+                      </th>
+                      <th scope="col" className="px-3 py-3">
                         Trạng thái
+                      </th>
+                      <th scope="col" className="px-3 py-3">
+                        Tài khoản đối tác
                       </th>
                       <th scope="col" className="px-3 py-3 text-right">
                         Thao tác
@@ -682,6 +745,11 @@ export function CollaboratorCatalogManager() {
                   <tbody>
                     {list.items.map((collaborator) => {
                       const locked = busy || pendingIntent !== null || conflictIntent !== null;
+                      const hasConflict = isPartnerRowConflicted(
+                        conflictsReport,
+                        "COLLABORATOR",
+                        collaborator.collaborator_id,
+                      );
                       return (
                         <tr
                           key={collaborator.collaborator_id}
@@ -693,8 +761,24 @@ export function CollaboratorCatalogManager() {
                           <td data-label="Tên cộng tác viên" className="px-3 py-3 font-medium">
                             {collaborator.display_name}
                           </td>
+                          <td data-label="Địa chỉ / SĐT" className="px-3 py-3 text-xs text-muted">
+                            <div>{collaborator.address ?? "—"}</div>
+                            <div className="font-mono">{collaborator.phone ?? "—"}</div>
+                          </td>
                           <td data-label="Trạng thái" className="px-3 py-3">
                             <ActiveBadge active={collaborator.active} />
+                          </td>
+                          <td data-label="Tài khoản đối tác" className="px-3 py-3">
+                            <PartnerAccountCatalogCell
+                              partnerKind="COLLABORATOR"
+                              partnerCode={collaborator.collaborator_id}
+                              displayName={collaborator.display_name}
+                              partnerActive={collaborator.active}
+                              partnerAccount={collaborator.partner_account}
+                              hasConflict={hasConflict}
+                              disabled={locked}
+                              onMutated={reloadList}
+                            />
                           </td>
                           <td data-card-actions="true" className="px-3 py-3">
                             <div className="flex flex-wrap justify-end gap-2 whitespace-nowrap">
@@ -748,6 +832,7 @@ function Field({
   value,
   maxLength,
   required,
+  type = "text",
   onChange,
 }: {
   id: string;
@@ -755,6 +840,7 @@ function Field({
   value: string;
   maxLength: number;
   required: boolean;
+  type?: "text" | "tel";
   onChange(value: string): void;
 }) {
   return (
@@ -762,7 +848,7 @@ function Field({
       {label}
       <input
         id={id}
-        type="text"
+        type={type}
         value={value}
         maxLength={maxLength}
         required={required}

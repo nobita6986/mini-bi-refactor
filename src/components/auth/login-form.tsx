@@ -4,13 +4,25 @@
  * P3-W03-S01B - Form dang nhap nho (client). Dung native form; khong dependency auth/state.
  */
 import { useState } from "react";
+import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
 import { useRouter } from "next/navigation";
 
-import { authUiErrorMessage } from "@/lib/auth/auth-ui";
+import {
+  authUiErrorMessage,
+  resolvePostLoginDestination,
+  type PostLoginActorInput,
+} from "@/lib/auth/auth-ui";
 
-export function LoginForm({ destination, onError }:
-  { destination: string; onError?: () => void }) {
+export function LoginForm({
+  destination,
+  rawNext,
+  onError,
+}: {
+  destination: string;
+  rawNext?: string | null;
+  onError?: () => void;
+}) {
   const router = useRouter();
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
@@ -31,7 +43,19 @@ export function LoginForm({ destination, onError }:
         body: JSON.stringify({ email: identifier.trim(), password }),
       });
       if (response.ok) {
-        router.replace(destination);
+        let payload: unknown = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        const target = payload
+          ? resolvePostLoginDestination(
+              payload as PostLoginActorInput,
+              rawNext ?? destination,
+            )
+          : destination;
+        router.replace(target);
         router.refresh();
         return;
       }
@@ -58,20 +82,22 @@ export function LoginForm({ destination, onError }:
   return (
     <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="login-email" className="text-xs font-medium uppercase tracking-wider text-muted">Email hoặc ID</label>
+        <label htmlFor="login-email" className="text-xs font-medium uppercase tracking-wider text-muted">Mã đăng nhập hoặc Email</label>
         <input
           id="login-email"
           name="email"
           type="text"
           autoComplete="username"
-          inputMode="email"
+          inputMode="text"
           autoCapitalize="none"
           spellCheck={false}
+          enterKeyHint="next"
           required
           value={identifier}
+          aria-invalid={error ? "true" : "false"}
           aria-describedby={error ? "login-error" : undefined}
           onChange={(event) => setIdentifier(event.target.value)}
-          className="min-h-11 h-11 rounded-lg border border-border bg-surface-muted px-3.5 text-base sm:text-sm text-foreground outline-none transition-colors focus:border-primary focus:bg-surface focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="min-h-11 h-11 rounded-lg border border-border bg-surface-muted px-3.5 text-base sm:text-sm text-foreground outline-none transition-colors focus:border-primary focus:bg-surface focus-visible:ring-2 focus-visible:ring-ring/40 user-invalid:border-rose-600 user-invalid:bg-rose-50/40"
         />
       </div>
       <div className="flex flex-col gap-1.5">
@@ -83,11 +109,13 @@ export function LoginForm({ destination, onError }:
             type={showPassword ? "text" : "password"}
             autoComplete="current-password"
             spellCheck={false}
+            enterKeyHint="done"
             required
             value={password}
+            aria-invalid={error ? "true" : "false"}
             aria-describedby={error ? "login-error" : undefined}
             onChange={(event) => setPassword(event.target.value)}
-            className="min-h-11 h-11 w-full rounded-lg border border-border bg-surface-muted px-3.5 pr-11 text-base sm:text-sm text-foreground outline-none transition-colors focus:border-primary focus:bg-surface focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="min-h-11 h-11 w-full rounded-lg border border-border bg-surface-muted px-3.5 pr-11 text-base sm:text-sm text-foreground outline-none transition-colors focus:border-primary focus:bg-surface focus-visible:ring-2 focus-visible:ring-ring/40 user-invalid:border-rose-600 user-invalid:bg-rose-50/40"
           />
           <button
             type="button"
@@ -113,6 +141,14 @@ export function LoginForm({ destination, onError }:
       >
         {busy ? "Đang đăng nhập…" : "Đăng nhập"}
       </button>
+      <div className="border-t border-border pt-3 text-center">
+        <Link
+          href="/activate"
+          className="inline-flex min-h-10 items-center justify-center text-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-md px-2"
+        >
+          Kích hoạt tài khoản Vendor/CTV lần đầu
+        </Link>
+      </div>
     </form>
   );
 }

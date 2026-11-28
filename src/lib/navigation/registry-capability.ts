@@ -25,8 +25,14 @@ import {
   type AssignedRoleSummary,
   type Capability,
   type PairedEffectiveGrant,
+  type PartnerKind,
   type WorkerOperationsTabId,
 } from "../auth/direct-entry-v2.ts";
+
+export type NavPartnerAccountProjection = {
+  partner_kind: PartnerKind;
+  must_change_password: boolean;
+};
 
 /** Subset các field mà nav cần từ actor projection. */
 export type NavActorProjection = {
@@ -46,6 +52,7 @@ export type NavActorProjection = {
   hasAttendanceDepartmentHeadAccess?: boolean;
   hasVendorReferrerAccess?: boolean;
   allowed_worker_tabs?: readonly WorkerOperationsTabId[];
+  partner_account?: NavPartnerAccountProjection | null;
 };
 
 /** Predicate phụ thuộc entry — registry.ts có metadata `capability`. */
@@ -570,6 +577,22 @@ export const vendorReferrerNavPredicate: NavCapabilityPredicate = (actor) =>
 export const hasVendorReferrerManageCapability: NavCapabilityPredicate = (actor) =>
   hasNavAllCapability(actor, "vendor_referrer_manage");
 
+/** Partner Portal predicates: isolated strictly to partner accounts that completed initial password change. */
+export const partnerVendorNavPredicate: NavCapabilityPredicate = (actor) =>
+  Boolean(
+    actor.partner_account &&
+    !actor.partner_account.must_change_password &&
+    actor.partner_account.partner_kind === "VENDOR",
+  );
+
+export const partnerPortalNavPredicate: NavCapabilityPredicate = (actor) =>
+  Boolean(actor.partner_account && !actor.partner_account.must_change_password);
+
+const PARTNER_NAV_CAPABILITY_KEYS = new Set([
+  "partner_vendor",
+  "partner_portal",
+]);
+
 /** Bảng ánh xạ `entry.capability` metadata → predicate tương ứng. */
 export const NAV_CAPABILITY_PREDICATES: Readonly<Record<string, NavCapabilityPredicate>> = {
   any: () => true,
@@ -594,6 +617,8 @@ export const NAV_CAPABILITY_PREDICATES: Readonly<Record<string, NavCapabilityPre
   work_report_reviews: workReportReviewPredicate,
   work_report_analytics: workReportAnalyticsPredicate,
   workforce_offboarding: workforceOffboardingNavPredicate,
+  partner_vendor: partnerVendorNavPredicate,
+  partner_portal: partnerPortalNavPredicate,
 };
 
 /** Resolver trung tâm — đảm bảo mỗi entry luôn có predicate. */
@@ -622,6 +647,16 @@ export function decideNavEntryVisibility(input: {
   // - capability khác: ẩn cho tới khi actor OK.
   if (input.actor === null) {
     return input.capabilityKey === "any";
+  }
+  // Partner accounts NEVER see BI internal navigation entries, and when
+  // must_change_password === true ALL nav entries are hidden.
+  if (input.actor.partner_account) {
+    if (input.actor.partner_account.must_change_password) {
+      return false;
+    }
+    if (!PARTNER_NAV_CAPABILITY_KEYS.has(input.capabilityKey)) {
+      return false;
+    }
   }
   return resolveNavCapabilityPredicate(input.capabilityKey)(input.actor);
 }
