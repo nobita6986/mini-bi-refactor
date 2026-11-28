@@ -927,6 +927,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     ),
     assignmentAccessProbeApplied: has(WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME),
     hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
+    publicJobsApplied: has("20261128170000_public_jobs_portal.sql"),
     collaboratorsCatalogApplied: has(COLLABORATORS_CATALOG_MIGRATION_NAME),
   };
 }
@@ -1008,6 +1009,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     vendorReferrerAttributionApplied = false,
     assignmentAccessProbeApplied = false,
     hrBulletinsApplied = false,
+    publicJobsApplied = false,
     collaboratorsCatalogApplied = false,
   } = flags ?? {};
 
@@ -1176,6 +1178,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(assignmentAccessProbeApplied ? [WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE] : []),
     ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
+    ...(publicJobsApplied ? ["public.recruitment_post_public_portal_list_v1(jsonb)", "public.recruitment_post_public_portal_get_v1(text)"] : []),
     ...(collaboratorsCatalogApplied ? COLLABORATORS_CATALOG_RPC_SIGNATURES : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
