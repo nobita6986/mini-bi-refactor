@@ -137,6 +137,8 @@ import {
   HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
   HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
   HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
+  HR_BULLETINS_MIGRATION_NAME,
+  HR_BULLETINS_RPC_SIGNATURES,
   RETIRE_AI_REPORTS_MIGRATION_NAME,
   RETIRED_AI_REPORTS_RPC_SIGNATURES,
   OFFBOARDING_REPORT_MIGRATION_NAME,
@@ -155,7 +157,7 @@ const R1_2_MIGRATION = "20261021100000_r1_2_worker_management_uat_fixes.sql";
 const R2_1_MIGRATION = "20261021120000_r2_1_change_request_queues_and_project_team_guard.sql";
 const R1_2_SERVICE_RPC =
   "public.direct_entry_list_workers(uuid, uuid, text, text, uuid, text, text, integer, text)";
-const TARGET_PATTERN = "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
+const TARGET_PATTERN = "^(direct_entry_|worker_edit_history_|work_report_|attendance_|org_department_|vendor_finance_|leave_management_|salary_advance_|hrp_sync_|ai_report_|ai_provider_config_|recruitment_|administrative_province_|industrial_park_|hr_bulletin_|(expand|replace|reject|upsert)_daily_recruitment|record_recruitment_source_failure_|set_updated_at$)";
 
 function binary(name) {
   const binDir = process.env.P3_1_W02A_PG_BIN
@@ -1176,7 +1178,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
         ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
         ...PR28_CLEANUP_ADDED_RPC_SIGNATURES,
         ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
-        ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES);
+        ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
+        ...HR_BULLETINS_RPC_SIGNATURES);
       for (let idx = expectedSignatures.length - 1; idx >= 0; idx -= 1) {
         if (
           PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(expectedSignatures[idx]) ||
@@ -1256,7 +1259,8 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
           ...PR28_PERMISSION_GROUPS_FOUNDATION_RPC_SIGNATURES,
           ...PR28_CLEANUP_ADDED_RPC_SIGNATURES,
           ...HF_WORKER_EDIT_HISTORY_ADDED_RPC_SIGNATURES,
-          ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES]
+          ...HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES,
+          ...HR_BULLETINS_RPC_SIGNATURES]
           .filter((sig) => !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))
           .filter((sig) => !HF_WORKER_EDIT_HISTORY_RETIRED_RPC_SIGNATURES.includes(sig))
           .sort(),
@@ -1692,6 +1696,30 @@ test("S0-T1-C revokes broad Mini BI RPC ACLs while preserving the server allowli
             `grant execute on function ${sig.toLowerCase()} to service_role;`,
           ),
           `HF block move/unassign TL RPC ${sig} grants EXECUTE only to service_role`,
+        );
+      }
+      const hrBulletinsMigration = await readFile(
+        path.join(MIGRATION_DIR, HR_BULLETINS_MIGRATION_NAME),
+        "utf8",
+      );
+      const hrBulletinsNormalized = hrBulletinsMigration
+        .replace(/\s+/g, " ")
+        .replace(/\(\s+/g, "(")
+        .replace(/\s+\)/g, ")")
+        .replace(/\btimestamptz\b/gi, "timestamp with time zone")
+        .toLowerCase();
+      for (const sig of HR_BULLETINS_RPC_SIGNATURES) {
+        assert.ok(
+          hrBulletinsNormalized.includes(
+            `revoke all on function ${sig.toLowerCase()} from public, anon, authenticated, service_role;`,
+          ),
+          `HR bulletins RPC ${sig} revokes inherited RPC grants`,
+        );
+        assert.ok(
+          hrBulletinsNormalized.includes(
+            `grant execute on function ${sig.toLowerCase()} to service_role;`,
+          ),
+          `HR bulletins RPC ${sig} grants EXECUTE only to service_role`,
         );
       }
       const attendanceSlotPolicyFourSlotMigration = await readFile(

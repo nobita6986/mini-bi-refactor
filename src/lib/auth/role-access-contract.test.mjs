@@ -52,7 +52,7 @@ function assertZeroEmailLeak(value, label) {
   }
 }
 
-test("canonical 8-role catalog has zero BOD aliases and partitions ADMIN 21 vs 8 non-auto tokens", () => {
+test("canonical 8-role catalog has zero BOD aliases and partitions ADMIN 22 vs 8 non-auto tokens", () => {
   assert.deepEqual(AUTHZ_GLOBAL_ROLE_CODES, [
     "EMPLOYEE_BASE",
     "RECRUITER",
@@ -77,12 +77,12 @@ test("canonical 8-role catalog has zero BOD aliases and partitions ADMIN 21 vs 8
   assert.equal(admin.display_name, "BoD/Admin");
   assert.equal(admin.assignment_mode, "GLOBAL");
   assert.equal(admin.is_assignable_global, true);
-  assert.equal(admin.capabilities.length, 21);
+  assert.equal(admin.capabilities.length, 22);
 
   const adminOwn = admin.capabilities.filter((c) => c.scope_template === "OWN");
   const adminAll = admin.capabilities.filter((c) => c.scope_template === "ALL");
   assert.deepEqual(adminOwn.map((c) => c.capability), ["entry_own"]);
-  assert.equal(adminAll.length, 20);
+  assert.equal(adminAll.length, 21);
 
   const adminCapSet = new Set(admin.capabilities.map((c) => c.capability));
   const excludedSet = new Set(ADMIN_NON_AUTO_GRANT_TOKENS);
@@ -91,14 +91,14 @@ test("canonical 8-role catalog has zero BOD aliases and partitions ADMIN 21 vs 8
     assert.equal(adminCapSet.has(excluded), false, `ADMIN must exclude ${excluded}`);
   }
   const union = new Set([...adminCapSet, ...excludedSet]);
-  assert.equal(union.size, 29);
+  assert.equal(union.size, 30);
   for (const cap of CAPABILITIES) {
-    assert.equal(union.has(cap), true, `21+8 partition missing active capability ${cap}`);
+    assert.equal(union.has(cap), true, `22+8 partition missing active capability ${cap}`);
   }
 
   assert.equal(AUTHZ_CANONICAL_ROLE_MAP.EMPLOYEE_BASE.capabilities.length, 0);
   assert.equal(AUTHZ_CANONICAL_ROLE_MAP.RECRUITER.capabilities.length, 7);
-  assert.equal(AUTHZ_CANONICAL_ROLE_MAP.HR_OPERATOR.capabilities.length, 5);
+  assert.equal(AUTHZ_CANONICAL_ROLE_MAP.HR_OPERATOR.capabilities.length, 6);
   assert.equal(AUTHZ_CANONICAL_ROLE_MAP.TEAM_LEADER.capabilities.length, 5);
   assert.equal(
     AUTHZ_CANONICAL_ROLE_MAP.TEAM_LEADER.capabilities.every((c) => c.scope_template === "CONTEXT_TEAM"),

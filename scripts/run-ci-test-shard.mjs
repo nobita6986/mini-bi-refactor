@@ -168,6 +168,7 @@ const TEST_WEIGHTS = {
   "test:wp10-6-pause-windows": 12.0,
   "test:hf-direct-entry-catalog-privileged-edit": 14.0,
   "test:hf-vpsttt-object-storage": 6.0,
+  "test:wp-hr-bulletins-foundation": 10.0,
 };
 
 const target = process.argv[2];
