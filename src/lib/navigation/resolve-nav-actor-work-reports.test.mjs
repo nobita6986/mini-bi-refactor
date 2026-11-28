@@ -112,7 +112,7 @@ function createHarness() {
   const state = {
     actorResult: { ok: true, actor: USER_A },
     workReportCalls: [],
-    assignmentOptionsCalls: [],
+    assignmentAccessCalls: [],
     listMineCalls: [],
     leaveCalls: [],
     createSubmissionRepoImpl: null,
@@ -121,7 +121,7 @@ function createHarness() {
       ok: true,
       data: { has_active_obligations: false },
     }),
-    listAssignmentOptionsImpl: async () => ({
+    hasAssignmentAccessImpl: async () => ({
       ok: false,
       kind: "denied",
     }),
@@ -207,9 +207,10 @@ function createHarness() {
           return state.createAssignmentRepoImpl();
         }
         return {
-          listOptions: async (input) => {
-            state.assignmentOptionsCalls.push(input);
-            return state.listAssignmentOptionsImpl(input);
+          listOptions: async () => { throw new Error("FORBIDDEN_LIST_OPTIONS_PROBE"); },
+          hasAssignmentAccess: async (input) => {
+            state.assignmentAccessCalls.push(input);
+            return state.hasAssignmentAccessImpl(input);
           },
         };
       },
@@ -446,33 +447,14 @@ test("WP8D nav runtime: zero cross-request or cross-user cache leakage", async (
 
 test("WP8D-2 R1 nav runtime: pure report_assign delegate projects request-cached boolean across AppShell, page probe & WorkReportsShell without leaking PII or triggering obligations probe", async () => {
   const { state, navModule, registryCapability } = createHarness();
-  const tplId = "11111111-1111-4111-8111-111111111111";
-  const verId = "22222222-2222-4222-8222-222222222222";
-  const teamId = "33333333-3333-4333-8333-333333333333";
-
-  state.listAssignmentOptionsImpl = async () => ({
-    ok: true,
-    data: {
-      templates: [
-        {
-          template_id: tplId,
-          template_code: "T1",
-          display_name: "Template 1",
-          default_frequency: "DAILY",
-          current_published_version_id: verId,
-        },
-      ],
-      teams: [{ team_id: teamId, code: "TEAM_A", display_name: "Team A" }],
-      users: [],
-    },
-  });
+  state.hasAssignmentAccessImpl = async () => ({ ok: true, data: true });
 
   // Feature flag off -> 0 assignment probe calls
   await withEnv({ WORK_REPORTS_API_ENABLED: "false", DIRECT_ENTRY_API_ENABLED: "false" }, async () => {
     const offProjection = await runInRequest(() =>
       navModule.resolveNavActorForAppShell({ directEntryEnabled: true }),
     );
-    assert.equal(state.assignmentOptionsCalls.length, 0);
+    assert.equal(state.assignmentAccessCalls.length, 0);
     assert.equal(offProjection.hasWorkReportAssignmentAccess, undefined);
   });
 
@@ -491,14 +473,13 @@ test("WP8D-2 R1 nav runtime: pure report_assign delegate projects request-cached
       assert.equal(registryCapability.workReportsNavPredicate(appShellProjection), true);
       assert.equal(registryCapability.workReportAssignmentPredicate(shellActor), true);
       assert.equal(
-        state.assignmentOptionsCalls.length,
+        state.assignmentAccessCalls.length,
         1,
-        "React cache deduplicates read-only listOptions probe across AppShell, page, and WorkReportsShell",
+        "React cache deduplicates read-only assignment access probe across AppShell, page, and WorkReportsShell",
       );
-      assert.deepEqual(state.assignmentOptionsCalls[0], {
+      assert.deepEqual(state.assignmentAccessCalls[0], {
         auth_subject: USER_A.auth_subject,
         app_user_id: USER_A.app_user_id,
-        team_id: null,
       });
       assert.equal(
         state.workReportCalls.length,
@@ -513,14 +494,14 @@ test("WP8D-2 R1 nav runtime: pure report_assign delegate projects request-cached
 
     // Direct report_assign actor short-circuits BOTH listOptions and hasActiveObligations
     state.actorResult = { ok: true, actor: REPORT_ADMIN };
-    const beforeCalls = state.assignmentOptionsCalls.length;
+    const beforeCalls = state.assignmentAccessCalls.length;
     await runInRequest(async () => {
       const directProj = await navModule.resolveNavActorForAppShell({ directEntryEnabled: true });
       const directProbe = await navModule.resolveWorkReportAssignmentAccessForRequest();
       assert.equal(directProbe.status, "allowed");
       assert.equal(directProbe.hasAssignmentAccess, true);
       assert.equal(registryCapability.workReportAssignmentPredicate(directProj), true);
-      assert.equal(state.assignmentOptionsCalls.length, beforeCalls, "direct report_assign never calls listOptions probe");
+      assert.equal(state.assignmentAccessCalls.length, beforeCalls, "direct report_assign never calls assignment access probe");
     });
   });
 });
@@ -528,24 +509,24 @@ test("WP8D-2 R1 nav runtime: pure report_assign delegate projects request-cached
 test("WP8D-2 R1 nav runtime: assignment probe errors/malformed responses fail closed without crashing AppShell and preserve unavailable page status + zero cross-user cache", async () => {
   const failureCases = [
     {
-      name: "listOptions denied (42501)",
+      name: "assignment access denied (42501)",
       expectedStatus: "denied",
       setup: (state) => {
-        state.listAssignmentOptionsImpl = async () => ({ ok: false, kind: "denied" });
+        state.hasAssignmentAccessImpl = async () => ({ ok: false, kind: "denied" });
       },
     },
     {
-      name: "listOptions unavailable",
+      name: "assignment access unavailable",
       expectedStatus: "unavailable",
       setup: (state) => {
-        state.listAssignmentOptionsImpl = async () => ({ ok: false, kind: "unavailable" });
+        state.hasAssignmentAccessImpl = async () => ({ ok: false, kind: "unavailable" });
       },
     },
     {
-      name: "listOptions throws",
+      name: "assignment access throws",
       expectedStatus: "unavailable",
       setup: (state) => {
-        state.listAssignmentOptionsImpl = async () => {
+        state.hasAssignmentAccessImpl = async () => {
           throw new Error("DB timeout");
         };
       },
@@ -571,33 +552,10 @@ test("WP8D-2 R1 nav runtime: assignment probe errors/malformed responses fail cl
       },
     },
     {
-      name: "empty templates array fails closed as denied",
+      name: "false access is denied",
       expectedStatus: "denied",
       setup: (state) => {
-        state.listAssignmentOptionsImpl = async () => ({
-          ok: true,
-          data: { templates: [], teams: [], users: [] },
-        });
-      },
-    },
-    {
-      name: "non-array templates shape fails closed as unavailable",
-      expectedStatus: "unavailable",
-      setup: (state) => {
-        state.listAssignmentOptionsImpl = async () => ({
-          ok: true,
-          data: { templates: "bad", teams: [], users: [] },
-        });
-      },
-    },
-    {
-      name: "non-empty templates with empty template_id fails closed as unavailable",
-      expectedStatus: "unavailable",
-      setup: (state) => {
-        state.listAssignmentOptionsImpl = async () => ({
-          ok: true,
-          data: { templates: [{ template_id: "" }], teams: [], users: [] },
-        });
+        state.hasAssignmentAccessImpl = async () => ({ ok: true, data: false });
       },
     },
   ];
@@ -627,17 +585,10 @@ test("WP8D-2 R1 nav runtime: assignment probe errors/malformed responses fail cl
   // Zero cross-user / cross-request leakage for assignment access probe
   const { state, navModule } = createHarness();
   const delegatedUsers = new Set([USER_A.app_user_id]);
-  state.listAssignmentOptionsImpl = async (input) =>
-    delegatedUsers.has(input.app_user_id)
-      ? {
-          ok: true,
-          data: {
-            templates: [{ template_id: "11111111-1111-4111-8111-111111111111", template_code: "T1", display_name: "T1", default_frequency: "DAILY", current_published_version_id: "22222222-2222-4222-8222-222222222222" }],
-            teams: [{ team_id: "33333333-3333-4333-8333-333333333333", code: "TEAM_A", display_name: "Team A" }],
-            users: [],
-          },
-        }
-      : { ok: false, kind: "denied" };
+  state.hasAssignmentAccessImpl = async (input) => ({
+    ok: true,
+    data: delegatedUsers.has(input.app_user_id),
+  });
 
   await withEnv({ WORK_REPORTS_API_ENABLED: "true", DIRECT_ENTRY_API_ENABLED: "false" }, async () => {
     state.actorResult = { ok: true, actor: USER_A };
@@ -653,7 +604,7 @@ test("WP8D-2 R1 nav runtime: assignment probe errors/malformed responses fail cl
     const a2 = await runInRequest(() => navModule.resolveNavActorForAppShell({ directEntryEnabled: true }));
     assert.equal(a2.hasWorkReportAssignmentAccess, undefined);
     assert.deepEqual(
-      state.assignmentOptionsCalls.map((c) => c.app_user_id),
+      state.assignmentAccessCalls.map((c) => c.app_user_id),
       [USER_A.app_user_id, USER_B.app_user_id, USER_A.app_user_id],
     );
   });
