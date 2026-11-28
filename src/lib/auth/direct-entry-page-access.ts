@@ -77,7 +77,7 @@ export type AdminLandingPath =
   | "/admin/catalog/personnel"
   | "/admin/attendance"
   | "/admin/worker-edit-history"
-  | "/admin/vendor-referrals";
+  | "/admin/catalog/vendors";
 
 /**
  * WP13 M2: Resolves the canonical default landing page for `/admin` strictly from
@@ -87,7 +87,7 @@ export type AdminLandingPath =
  * 2) Catalog / HR Operator -> `/admin/catalog/personnel`
  * 3) Attendance Report viewer (BoD / Team Leader / Department Head) -> `/admin/attendance`
  * 4) `worker_edit_history_view`-only -> `/admin/worker-edit-history`
- * 5) BoD Vendor Referrer manager -> `/admin/vendor-referrals`
+ * 5) BoD Vendor Referrer manager -> `/admin/catalog/vendors`
  */
 export function resolveAdminLandingPath(
   actor: ActorResolution | null,
@@ -106,7 +106,7 @@ export function resolveAdminLandingPath(
         : {}),
     })
   ) {
-    return "/admin/vendor-referrals";
+    return "/admin/catalog/vendors";
   }
   return null;
 }
@@ -150,7 +150,7 @@ export function decideVendorCatalogPageAccess(input: {
 }
 
 /**
- * Separate direct-URL gate for `/admin/vendor-referrals` (BoD with `vendor_referrer_manage` only).
+ * Page gate for the Vendor recruitment report (BoD with `vendor_referrer_manage` only).
  * Non-BoD Admin, HR, Accounting, Team Leader, and Employee receive `ACCESS_DENIED`.
  */
 export function decideVendorReferrerReportPageAccess(input: {

@@ -537,7 +537,6 @@ test("CURRENT_NAV_ENTRIES giữ nguyên một registry duy nhất (không tạo 
       "project-operations",
       "recruitment-posts",
       "salary-advances",
-      "vendor-referrals",
       "work-report-management",
       "work-reports",
       "worker-operations",

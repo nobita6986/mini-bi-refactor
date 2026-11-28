@@ -764,7 +764,7 @@ test("navigation & page access gates isolate BoD vendor referrer surfaces from n
   );
   assert.equal(
     resolveAdminLandingPath(bodActor, { hasVendorReferrerAccess: true }),
-    "/admin/vendor-referrals",
+    "/admin/catalog/vendors",
   );
   assert.equal(
     vendorReferrerNavPredicate({
@@ -797,7 +797,7 @@ test("navigation & page access gates isolate BoD vendor referrer surfaces from n
       scopes: [{ kind: "all" }],
       hasVendorReferrerAccess: true,
     }).map((s) => s.id),
-    ["vendors", "vendor-referrals"],
+    ["vendors"],
   );
 
   // Non-BoD Admin (even with vendor_referrer_manage capability from SYSTEM_ADMIN), HR, Accounting, TL, Employee -> DENIED
@@ -812,13 +812,13 @@ test("navigation & page access gates isolate BoD vendor referrer surfaces from n
     );
   }
 
-  // Without hasVendorReferrerAccess, non-BoD Admin/Accounting cannot see vendor-referrals section
   assert.equal(
     visibleAdminSections({
       capabilities: ["entry_admin", "recruiter_master_manage", "team_master_manage", "vendor_referrer_manage"],
       scopes: [{ kind: "all" }],
       hasVendorReferrerAccess: false,
-    }).some((s) => s.id === "vendor-referrals"),
-    false,
+    }).some((s) => s.id === "vendors"),
+    true,
+    "Full Admin can still open the Vendor catalog",
   );
 });

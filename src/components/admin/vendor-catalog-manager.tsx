@@ -1,11 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import Link from "next/link";
-
-import { VendorReferrerPanel } from "@/components/admin/vendor-referrer-panel";
 import { Alert } from "@/components/ui/alert";
-import { buttonClasses } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { useNotify } from "@/components/ui/notify-provider";
@@ -69,17 +65,8 @@ function ActiveBadge({ active }: { active: boolean }) {
   );
 }
 
-export function VendorCatalogManager({
-  canManageVendorCatalog = true,
-  canManageReferrers = false,
-}: {
-  canManageVendorCatalog?: boolean;
-  canManageReferrers?: boolean;
-} = {}) {
+export function VendorCatalogManager() {
   const notify = useNotify();
-  const [activeTab, setActiveTab] = useState<"catalog" | "referrers">(() =>
-    canManageVendorCatalog ? "catalog" : "referrers",
-  );
   const [listState, setListState] = useState<ListState>({ kind: "loading" });
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -95,7 +82,6 @@ export function VendorCatalogManager({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!canManageVendorCatalog || activeTab !== "catalog") return;
     const controller = new AbortController();
     void (async () => {
       const query = buildVendorListQuery({ search, includeInactive, page });
@@ -146,7 +132,7 @@ export function VendorCatalogManager({
       }
     })();
     return () => controller.abort();
-  }, [activeTab, canManageVendorCatalog, includeInactive, page, reloadToken, search]);
+  }, [includeInactive, page, reloadToken, search]);
 
   const reloadList = () => {
     setListState({ kind: "loading" });
@@ -359,61 +345,9 @@ export function VendorCatalogManager({
     ? Math.min(1000, Math.max(1, Math.ceil(list.total / Math.max(1, list.page_size))))
     : 1;
 
-  const showReferrersOnly = canManageReferrers && !canManageVendorCatalog;
-  const resolvedTab = canManageReferrers
-    ? showReferrersOnly
-      ? "referrers"
-      : activeTab
-    : "catalog";
-
   return (
     <div className="space-y-4">
-      {canManageReferrers ? (
-        <div className="flex flex-col gap-3 rounded-[22px] border border-border/80 bg-surface p-3 shadow-[var(--shadow-card)] sm:flex-row sm:items-center sm:justify-between">
-          <div role="tablist" aria-label="Phân hệ quản lý Vendor" className="flex flex-wrap gap-2">
-            {canManageVendorCatalog ? (
-              <button
-                type="button"
-                role="tab"
-                aria-selected={resolvedTab === "catalog"}
-                onClick={() => setActiveTab("catalog")}
-                className={
-                  resolvedTab === "catalog"
-                    ? "inline-flex min-h-10 items-center rounded-full border border-primary bg-primary/10 px-4 text-sm font-semibold text-primary"
-                    : "inline-flex min-h-10 items-center rounded-full border border-border bg-surface px-4 text-sm font-medium text-muted hover:text-foreground"
-                }
-              >
-                Danh mục Vendor
-              </button>
-            ) : null}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={resolvedTab === "referrers"}
-              onClick={() => setActiveTab("referrers")}
-              className={
-                resolvedTab === "referrers"
-                  ? "inline-flex min-h-10 items-center rounded-full border border-primary bg-primary/10 px-4 text-sm font-semibold text-primary"
-                  : "inline-flex min-h-10 items-center rounded-full border border-border bg-surface px-4 text-sm font-medium text-muted hover:text-foreground"
-              }
-            >
-              Người giới thiệu
-            </button>
-          </div>
-          <Link
-            href="/admin/vendor-referrals"
-            className={buttonClasses({ variant: "outline", size: "sm" })}
-          >
-            Xem báo cáo sản lượng Vendor giới thiệu
-          </Link>
-        </div>
-      ) : null}
-
-      {resolvedTab === "referrers" && canManageReferrers ? (
-        <VendorReferrerPanel />
-      ) : (
-        <>
-          <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Danh mục nhà cung cấp</h1>
           <p className="mt-1 text-sm text-muted">Quản lý thông tin hiển thị và trạng thái nhà cung cấp.</p>
@@ -625,8 +559,6 @@ export function VendorCatalogManager({
           </>
         ) : null}
       </Card>
-        </>
-      )}
     </div>
   );
 }

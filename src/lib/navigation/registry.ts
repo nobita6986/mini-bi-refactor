@@ -25,7 +25,6 @@ import {
   NotebookPen,
   Receipt,
   ShieldCheck,
-  UserCheck,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -332,18 +331,6 @@ export const NAV_ENTRIES: ReadonlyArray<NavEntry> = [
     icon: CalendarDays,
     status: "current",
     capability: "attendance_report",
-    group: "management",
-    visibility: { desktop: true, mobile: true },
-  },
-  {
-    id: "vendor-referrals",
-    label: "Người giới thiệu Vendor",
-    path: "/admin/vendor-referrals",
-    description:
-      "Gắn, theo dõi người giới thiệu Vendor và báo cáo lượt tuyển dụng Vendor theo tháng dành riêng cho Ban Giám đốc.",
-    icon: UserCheck,
-    status: "current",
-    capability: "vendor_referrals",
     group: "management",
     visibility: { desktop: true, mobile: true },
   },

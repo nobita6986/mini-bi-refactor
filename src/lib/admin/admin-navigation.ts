@@ -40,7 +40,6 @@ export const ADMIN_SECTIONS: readonly AdminSectionConfig[] = [
   { id: "industrial-parks", label: "Khu công nghiệp", href: "/admin/catalog/industrial-parks", visible: recruitmentLocationCatalogNavPredicate },
   { id: "project-team-scopes", label: "Phân công Dự án ↔ Tổ đội", href: "/admin/catalog/project-team-scopes", visible: adminSecurityNavPredicate },
   { id: "vendors", label: "Vendor (NCC)", href: "/admin/catalog/vendors", visible: (actor) => adminAreaNavPredicate(actor) || vendorReferrerNavPredicate(actor) },
-  { id: "vendor-referrals", label: "Người giới thiệu Vendor", href: "/admin/vendor-referrals", visible: vendorReferrerNavPredicate },
   { id: "attendance", label: "Báo cáo chấm công", href: "/admin/attendance", visible: attendanceReportNavPredicate },
   { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ", href: "/admin/worker-edit-history", visible: workerEditHistoryNavPredicate },
 ];

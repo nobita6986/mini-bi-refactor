@@ -216,10 +216,10 @@ test("Attendance Report navigation, Admin shell, and page-gate matrix enforces A
   const allSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
   const workerEditHistorySection = allSections.filter(({ id }) => id === "worker-edit-history");
   const allSectionsWithoutWorkerHistory = allSections.filter(
-    ({ id }) => id !== "worker-edit-history" && id !== "vendor-referrals",
+    ({ id }) => id !== "worker-edit-history",
   );
   const fullAdminSections = allSections.filter(
-    ({ id }) => id !== "teams" && id !== "vendor-referrals",
+    ({ id }) => id !== "teams",
   );
   const fullAdminSectionsWithoutWorkerHistory = fullAdminSections.filter(
     ({ id }) => id !== "worker-edit-history",

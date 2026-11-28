@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
-import Link from "next/link";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { Alert } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/ui/badge";
-import { Button, buttonClasses } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import {
   CatalogFilterCombobox,
@@ -32,6 +31,8 @@ import {
   projectMonthlyReport,
   type MonthlyReportReconciliation,
   type MonthlyReportResponse,
+  type MonthlyReportRow,
+  type VendorHistoryVendorSummary,
 } from "@/lib/vendor-referrals/vendor-referrer-contract";
 
 type ReportState =
@@ -141,13 +142,13 @@ export function classifyVendorReferralReportError(
   }
   return {
     kind: "unavailable",
-    message: "Dịch vụ báo cáo sản lượng Vendor giới thiệu hiện không khả dụng. Vui lòng thử lại.",
+    message: "Dịch vụ báo cáo lượt tuyển qua Vendor hiện không khả dụng. Vui lòng thử lại.",
   };
 }
 
 export function formatPeriodLabel(report: MonthlyReportResponse): string {
   if (report.month === "ALL") {
-    return "Toàn bộ thời gian (Đối soát toàn bộ REQ)";
+    return "Toàn bộ thời gian";
   }
   if (report.period_from && report.period_to) {
     return `Tháng ${report.month} (${report.period_from} → ${report.period_to})`;
@@ -195,7 +196,41 @@ function ReferrerKpiCard({
   );
 }
 
-export function VendorReferralReportView() {
+export function summarizeReferralPairs(rows: readonly MonthlyReportRow[]) {
+  const pairs = new Map<string, {
+    key: string;
+    referrer: string;
+    employeeCode: string;
+    vendor: string;
+    vendorId: string;
+    turns: number;
+  }>();
+  for (const row of rows) {
+    const key = JSON.stringify([row.referrer_person_id, row.vendor_id]);
+    const existing = pairs.get(key);
+    if (existing) {
+      existing.turns += row.turns;
+    } else {
+      pairs.set(key, {
+        key,
+        referrer: row.referrer_full_name,
+        employeeCode: row.referrer_employee_code,
+        vendor: row.vendor_display_name,
+        vendorId: row.vendor_id,
+        turns: row.turns,
+      });
+    }
+  }
+  return Array.from(pairs.values()).sort((a, b) => b.turns - a.turns);
+}
+
+export function VendorReferralReportView({
+  selectedVendor = null,
+}: {
+  selectedVendor?: VendorHistoryVendorSummary | null;
+}) {
+  const selectedLink = selectedVendor?.current_link;
+
   const monthInputId = useId();
   const referrerComboId = useId();
   const vendorComboId = useId();
@@ -204,8 +239,8 @@ export function VendorReferralReportView() {
   const [requestedMonth, setRequestedMonth] = useState("");
   const [serverMonth, setServerMonth] = useState("");
   const [allTime, setAllTime] = useState(false);
-  const [referrerFilter, setReferrerFilter] = useState("");
-  const [vendorFilter, setVendorFilter] = useState("");
+  const [referrerFilter, setReferrerFilter] = useState(selectedLink?.referrer_person_id ?? "");
+  const [vendorFilter, setVendorFilter] = useState(selectedVendor?.vendor_id ?? "");
   const [projectFilter, setProjectFilter] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
   const [state, setState] = useState<ReportState>({ kind: "loading" });
@@ -245,7 +280,7 @@ export function VendorReferralReportView() {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setState({
           kind: "unavailable",
-          message: "Không thể tải báo cáo sản lượng Vendor giới thiệu do lỗi kết nối mạng.",
+          message: "Không thể tải báo cáo lượt tuyển qua Vendor do lỗi kết nối mạng.",
         });
         return;
       }
@@ -283,21 +318,31 @@ export function VendorReferralReportView() {
 
   const referrerOptions = useMemo<CatalogFilterOption[]>(() => {
     if (!report) return [];
-    return report.filter_options.referrers.map((item) => ({
+    const options = report.filter_options.referrers.map((item) => ({
       id: item.person_id,
       label: `${item.full_name} · ${item.employee_code}${item.department_name ? ` · ${item.department_name}` : ""}`,
       keywords: `${item.full_name} ${item.employee_code} ${item.department_name ?? ""}`,
     }));
-  }, [report]);
+    if (selectedLink && !options.some((item) => item.id === selectedLink.referrer_person_id)) {
+      const name = `${selectedLink.referrer_full_name} · ${selectedLink.referrer_employee_code}`;
+      options.push({ id: selectedLink.referrer_person_id, label: name, keywords: name });
+    }
+    return options;
+  }, [report, selectedLink]);
 
   const vendorOptions = useMemo<CatalogFilterOption[]>(() => {
     if (!report) return [];
-    return report.filter_options.vendors.map((item) => ({
+    const options = report.filter_options.vendors.map((item) => ({
       id: item.vendor_id,
       label: `${item.display_name} (${item.vendor_id})`,
       keywords: `${item.display_name} ${item.vendor_id}`,
     }));
-  }, [report]);
+    if (selectedVendor && !options.some((item) => item.id === selectedVendor.vendor_id)) {
+      const name = `${selectedVendor.display_name} (${selectedVendor.vendor_id})`;
+      options.push({ id: selectedVendor.vendor_id, label: name, keywords: name });
+    }
+    return options;
+  }, [report, selectedVendor]);
 
   const projectOptions = useMemo<CatalogFilterOption[]>(() => {
     if (!report) return [];
@@ -310,27 +355,23 @@ export function VendorReferralReportView() {
 
   const hasDimensionFilter = Boolean(referrerFilter || vendorFilter || projectFilter);
   const conservation = report ? checkReconciliationConservation(report.reconciliation) : null;
+  const pairs = useMemo(() => summarizeReferralPairs(report?.rows ?? []), [report]);
+  const viewingSelection = selectedVendor && selectedLink
+    && vendorFilter === selectedVendor.vendor_id && referrerFilter === selectedLink.referrer_person_id;
+  const showZeroPair = viewingSelection && pairs.length === 0;
 
   return (
     <PageShell className="px-0 py-0">
       <PageHeader
-        eyebrow="Báo cáo điều hành Ban Giám đốc"
-        title="Báo cáo sản lượng Vendor giới thiệu"
+        title="Lượt tuyển qua Vendor"
         badge={
           report ? (
             <StatusBadge tone="primary">{formatPeriodLabel(report)}</StatusBadge>
           ) : null
         }
-        description="Theo dõi số lượt tuyển Vendor theo NVTD giới thiệu có hiệu lực tại ngày vào làm (first_work_date) và đối soát bảo toàn 100% tổng lượt tuyển Vendor."
+        description="Chọn tháng, nhân viên tuyển dụng và Vendor để xem số lượt được ghi nhận theo ngày vào làm của người lao động."
         actions={
           <>
-            <Link
-              href="/admin/catalog/vendors"
-              className={buttonClasses({ variant: "secondary", size: "md" })}
-            >
-              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-              Quản lý người giới thiệu Vendor
-            </Link>
             <Button
               type="button"
               variant="outline"
@@ -349,13 +390,9 @@ export function VendorReferralReportView() {
           report ? (
             <>
               <span>
-                Ngày hệ thống (GMT+7):{" "}
-                <strong className="font-mono text-foreground">{report.authorization_date}</strong>
-              </span>
-              <span>
                 Đang hiển thị:{" "}
                 <strong className="text-foreground">
-                  {formatTurnCount(report.filtered_summary.attributed_turns)} lượt đã gán NVTD
+                  {formatTurnCount(report.filtered_summary.attributed_turns)} lượt tuyển được ghi nhận
                 </strong>{" "}
                 ({report.filtered_summary.referrer_count} NVTD · {report.filtered_summary.vendor_count}{" "}
                 Vendor · {report.filtered_summary.project_count} dự án)
@@ -377,7 +414,7 @@ export function VendorReferralReportView() {
                 setProjectFilter("");
               }}
             >
-              Xóa bộ lọc chiều
+              Xóa bộ lọc
             </Button>
           ) : null
         }
@@ -385,7 +422,7 @@ export function VendorReferralReportView() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <div className="flex flex-col gap-1 text-sm">
             <label htmlFor={monthInputId} className="font-medium text-muted">
-              Tháng (YYYY-MM)
+              Tháng
             </label>
             <input
               id={monthInputId}
@@ -412,7 +449,7 @@ export function VendorReferralReportView() {
                 }
               }}
             />
-            Tất cả (Đối soát toàn bộ REQ)
+            Toàn bộ thời gian
           </label>
 
           <CatalogFilterCombobox
@@ -452,7 +489,7 @@ export function VendorReferralReportView() {
 
       {state.kind === "loading" ? (
         <p role="status" className="py-10 text-center text-sm text-muted">
-          Đang tải báo cáo sản lượng Vendor giới thiệu…
+          Đang tải báo cáo lượt tuyển qua Vendor…
         </p>
       ) : null}
 
@@ -480,129 +517,53 @@ export function VendorReferralReportView() {
 
       {report && conservation ? (
         <div className="space-y-5">
-          <section
-            aria-label="Chỉ số tổng hợp sản lượng Vendor giới thiệu"
-            className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
-          >
-            <ReferrerKpiCard
-              label="Tổng lượt tuyển Vendor"
-              value={report.reconciliation.total_vendor_turns}
-              hint="Dùng cùng đơn vị lượt tuyển trên first_work_date của hồ sơ đã nộp, chưa xóa, chưa hủy như Dashboard."
-              accent="var(--chart-1)"
-            />
-            <ReferrerKpiCard
-              label="Lượt đã gán NVTD giới thiệu"
-              value={
-                hasDimensionFilter
-                  ? report.filtered_summary.attributed_turns
-                  : report.reconciliation.attributed_turns
-              }
-              hint={
-                hasDimensionFilter
-                  ? `Theo bộ lọc (${report.filtered_summary.referrer_count} NVTD · ${report.filtered_summary.vendor_count} Vendor · ${report.filtered_summary.project_count} dự án); toàn kỳ: ${formatTurnCount(report.reconciliation.attributed_turns)} lượt.`
-                  : "Các lượt tuyển từ Vendor có liên kết NVTD giới thiệu hiệu lực tại first_work_date."
-              }
-              accent="var(--chart-5)"
-            />
-            <ReferrerKpiCard
-              label="Vendor chưa có người giới thiệu"
-              value={report.reconciliation.unassigned_vendor_turns}
-              hint="Đã xác định được Vendor nhưng chưa có NVTD giới thiệu tại ngày first_work_date."
-              accent="var(--chart-3)"
-            />
-            <ReferrerKpiCard
-              label="Chưa xác định được Vendor"
-              value={report.reconciliation.unresolved_vendor_turns}
-              hint="Hồ sơ trước mốc lịch sử gắn Vendor trên recruiter_provider_memberships."
-              accent="var(--chart-6)"
-            />
-          </section>
-
-          <Alert
-            tone={conservation.balanced ? "info" : "warning"}
-            title="Đối soát bảo toàn sản lượng (không tính trùng)"
-          >
-            <p className="font-mono text-xs sm:text-sm tabular-nums">
-              {formatTurnCount(conservation.attributed)} (Đã gán NVTD) +{" "}
-              {formatTurnCount(conservation.unassigned)} (Vendor chưa có người giới thiệu) +{" "}
-              {formatTurnCount(conservation.unresolved)} (Chưa xác định được Vendor) ={" "}
-              {formatTurnCount(conservation.sum)} /{" "}
-              {formatTurnCount(conservation.total)} (Tổng lượt tuyển Vendor)
-            </p>
-            <p className="text-xs">
-              Mỗi lượt tuyển thuộc duy nhất một trong ba nhóm trên tại ngày vào làm ({" "}
-              <span className="font-mono">first_work_date</span>); lịch sử thay thế trong cùng ngày
-              được xử lý theo khoảng nửa mở <span className="font-mono">[effective_from, effective_to)</span>.
-            </p>
-          </Alert>
-
           <Card>
             <CardHeader
-              title="Tổng hợp theo NVTD giới thiệu"
-              description={`${report.by_referrer.length} NVTD có lượt tuyển trong phạm vi bộ lọc.`}
+              title="Lượt tuyển theo NVTD và Vendor"
+              description="Mỗi dòng là tổng lượt của một NVTD qua một Vendor trong kỳ đã chọn."
             />
-            {report.by_referrer.length === 0 ? (
+            {viewingSelection ? (
+              <p className="mb-3 text-sm text-muted">
+                Đang gán cho <strong>{selectedLink.referrer_full_name}</strong> từ {selectedLink.effective_from}.
+                {showZeroPair ? " Chưa có lượt tuyển phù hợp tính cho người này trong kỳ." : ""}
+              </p>
+            ) : null}
+            {pairs.length === 0 && !showZeroPair ? (
               <EmptyState
-                title="Chưa có lượt tuyển nào được gán NVTD giới thiệu trong bộ lọc hiện tại"
-                description="Kiểm tra bảng Vendor chưa có người giới thiệu bên dưới hoặc thay đổi bộ lọc kỳ/chiều."
+                title="Chưa có lượt tuyển được ghi nhận trong kỳ"
+                description="Một Vendor đã gán vẫn có thể có 0 lượt. Mở mục Gán người giới thiệu và chọn Xem lượt tuyển bên cạnh Vendor cần kiểm tra."
               />
             ) : (
               <DataTableContainer>
                 <table className={DATA_TABLE_CLASS}>
-                  <caption className="sr-only">
-                    Bảng tổng hợp sản lượng theo NVTD giới thiệu
-                  </caption>
+                  <caption className="sr-only">Lượt tuyển theo NVTD và Vendor</caption>
                   <thead className={DATA_TABLE_HEAD_CLASS}>
                     <tr>
-                      <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                        NVTD giới thiệu
-                      </th>
-                      <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                        Mã NV
-                      </th>
-                      <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                        Phòng ban
-                      </th>
-                      <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
-                        Số Vendor
-                      </th>
-                      <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
-                        Số dự án
-                      </th>
-                      <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
-                        Lượt tuyển
-                      </th>
+                      <th scope="col" className={DATA_TABLE_TH_CLASS}>NVTD giới thiệu</th>
+                      <th scope="col" className={DATA_TABLE_TH_CLASS}>Vendor</th>
+                      <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>Lượt tuyển</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {report.by_referrer.map((item) => (
-                      <tr key={item.referrer_person_id} className={DATA_TABLE_ROW_CLASS}>
-                        <td data-card-header="true" className={`${DATA_TABLE_TD_CLASS} font-medium`}>
-                          {item.referrer_full_name}
+                    {(showZeroPair ? [{
+                      key: "selected",
+                      referrer: selectedLink.referrer_full_name,
+                      employeeCode: selectedLink.referrer_employee_code,
+                      vendor: selectedVendor.display_name,
+                      vendorId: selectedVendor.vendor_id,
+                      turns: 0,
+                    }] : pairs).map((pair) => (
+                      <tr key={pair.key} className={DATA_TABLE_ROW_CLASS}>
+                        <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
+                          <div className="font-medium">{pair.referrer}</div>
+                          <div className="text-xs text-muted">{pair.employeeCode}</div>
                         </td>
-                        <td data-label="Mã NV" className={`${DATA_TABLE_TD_CLASS} font-mono text-xs`}>
-                          {item.referrer_employee_code}
+                        <td data-label="Vendor" className={DATA_TABLE_TD_CLASS}>
+                          <div>{pair.vendor}</div>
+                          <div className="text-xs text-muted">{pair.vendorId}</div>
                         </td>
-                        <td data-label="Phòng ban" className={DATA_TABLE_TD_CLASS}>
-                          {item.referrer_department_name ?? "—"}
-                        </td>
-                        <td
-                          data-label="Số Vendor"
-                          className={`${DATA_TABLE_TD_CLASS} text-right font-mono tabular-nums`}
-                        >
-                          {formatTurnCount(item.vendor_count)}
-                        </td>
-                        <td
-                          data-label="Số dự án"
-                          className={`${DATA_TABLE_TD_CLASS} text-right font-mono tabular-nums`}
-                        >
-                          {formatTurnCount(item.project_count)}
-                        </td>
-                        <td
-                          data-label="Lượt tuyển"
-                          className={`${DATA_TABLE_TD_CLASS} text-right font-mono font-semibold tabular-nums text-[var(--navy)]`}
-                        >
-                          {formatTurnCount(item.turns)}
+                        <td data-label="Lượt tuyển" className={`${DATA_TABLE_TD_CLASS} text-right font-semibold tabular-nums`}>
+                          {formatTurnCount(pair.turns)}
                         </td>
                       </tr>
                     ))}
@@ -614,12 +575,12 @@ export function VendorReferralReportView() {
 
           <Card>
             <CardHeader
-              title="Chi tiết NVTD × Vendor × Dự án"
-              description={`${report.rows.length} dòng chi tiết được ghi nhận theo đúng NVTD giữ liên kết tại first_work_date.`}
+              title="Chi tiết theo dự án"
+              description="Xem các dự án đóng góp vào số lượt ở bảng trên."
             />
             {report.rows.length === 0 ? (
               <EmptyState
-                title="Không có dòng chi tiết NVTD × Vendor × Dự án"
+                title="Chưa có lượt tuyển theo dự án"
                 description="Thay đổi bộ lọc hoặc kiểm tra các nhóm đối soát chưa gán bên dưới."
               />
             ) : (
@@ -685,123 +646,173 @@ export function VendorReferralReportView() {
             )}
           </Card>
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <Card>
-              <CardHeader
-                title="Vendor chưa có người giới thiệu"
-                description={`Tổng cộng ${formatTurnCount(report.reconciliation.unassigned_vendor_turns)} lượt trong kỳ chưa có liên kết NVTD hiệu lực tại first_work_date.`}
-              />
-              {report.unassigned_vendors.length === 0 ? (
-                <EmptyState
-                  title="Tất cả Vendor phát sinh lượt tuyển đã có người giới thiệu"
-                  description="Không có lượt tuyển nào rơi vào nhóm chưa gán người giới thiệu trong kỳ."
+          <details className="rounded-[20px] border border-border bg-surface p-4">
+            <summary className="cursor-pointer font-semibold text-foreground">
+              Đối soát kỳ đã chọn · {formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt chưa biết Vendor
+            </summary>
+            <div className="mt-4 space-y-4">
+              <section
+                aria-label="Chỉ số tổng hợp sản lượng Vendor giới thiệu"
+                className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
+              >
+                <ReferrerKpiCard
+                  label="Tổng lượt tuyển từ Vendor"
+                  value={report.reconciliation.total_vendor_turns}
+                  hint="Đếm các hồ sơ nguồn Vendor đã nộp trong kỳ theo ngày vào làm."
+                  accent="var(--chart-1)"
                 />
-              ) : (
-                <DataTableContainer>
-                  <table className={DATA_TABLE_CLASS}>
-                    <caption className="sr-only">
-                      Danh sách Vendor chưa có người giới thiệu trong kỳ
-                    </caption>
-                    <thead className={DATA_TABLE_HEAD_CLASS}>
-                      <tr>
-                        <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                          Vendor
-                        </th>
-                        <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
-                          Số dự án
-                        </th>
-                        <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
-                          Lượt tuyển
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.unassigned_vendors.map((item) => (
-                        <tr key={item.vendor_id} className={DATA_TABLE_ROW_CLASS}>
-                          <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
-                            <div className="font-medium text-foreground">
-                              {item.vendor_display_name}
-                            </div>
-                            <div className="font-mono text-xs text-muted">{item.vendor_id}</div>
-                          </td>
-                          <td
-                            data-label="Số dự án"
-                            className={`${DATA_TABLE_TD_CLASS} text-right font-mono tabular-nums`}
-                          >
-                            {formatTurnCount(item.project_count)}
-                          </td>
-                          <td
-                            data-label="Lượt tuyển"
-                            className={`${DATA_TABLE_TD_CLASS} text-right font-mono font-semibold tabular-nums`}
-                          >
-                            {formatTurnCount(item.turns)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </DataTableContainer>
-              )}
-            </Card>
+                <ReferrerKpiCard
+                  label="Đã tính cho người giới thiệu"
+                  value={report.reconciliation.attributed_turns}
+                  hint="Đã xác định Vendor và có người giới thiệu tại ngày vào làm."
+                  accent="var(--chart-5)"
+                />
+                <ReferrerKpiCard
+                  label="Vendor chưa có người giới thiệu"
+                  value={report.reconciliation.unassigned_vendor_turns}
+                  hint="Đã biết Vendor, nhưng tại ngày vào làm chưa có phân công người giới thiệu."
+                  accent="var(--chart-3)"
+                />
+                <ReferrerKpiCard
+                  label="Chưa biết Vendor của lượt tuyển"
+                  value={report.reconciliation.unresolved_vendor_turns}
+                  hint="Hồ sơ ghi nguồn Vendor nhưng chưa tra được người tuyển thuộc Vendor nào tại ngày vào làm."
+                  accent="var(--chart-6)"
+                />
+              </section>
 
-            <Card>
-              <CardHeader
-                title="Chưa xác định được Vendor"
-                description={`Tổng cộng ${formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt thuộc hồ sơ trước mốc lịch sử gắn Vendor trên recruiter_provider_memberships.`}
-              />
-              {report.unresolved_vendor_breakdown.length === 0 ? (
-                <EmptyState
-                  title="Không có lượt tuyển chưa xác định Vendor"
-                  description="Mọi lượt tuyển Vendor trong kỳ đều đã ánh xạ được về Vendor cụ thể."
-                />
-              ) : (
-                <DataTableContainer>
-                  <table className={DATA_TABLE_CLASS}>
-                    <caption className="sr-only">
-                      Chi tiết các lượt tuyển chưa xác định được Vendor
-                    </caption>
-                    <thead className={DATA_TABLE_HEAD_CLASS}>
-                      <tr>
-                        <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                          Tài khoản tuyển dụng Vendor
-                        </th>
-                        <th scope="col" className={DATA_TABLE_TH_CLASS}>
-                          Dự án
-                        </th>
-                        <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
-                          Lượt tuyển
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.unresolved_vendor_breakdown.map((item) => (
-                        <tr
-                          key={`${item.recruiter_id}:${item.project_id}`}
-                          className={DATA_TABLE_ROW_CLASS}
-                        >
-                          <td data-card-header="true" className={`${DATA_TABLE_TD_CLASS} font-medium`}>
-                            {item.recruiter_display_name}
-                          </td>
-                          <td data-label="Dự án" className={DATA_TABLE_TD_CLASS}>
-                            <div className="font-medium text-foreground">
-                              {item.project_display_name}
-                            </div>
-                            <div className="font-mono text-xs text-muted">{item.project_id}</div>
-                          </td>
-                          <td
-                            data-label="Lượt tuyển"
-                            className={`${DATA_TABLE_TD_CLASS} text-right font-mono font-semibold tabular-nums`}
-                          >
-                            {formatTurnCount(item.turns)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </DataTableContainer>
-              )}
-            </Card>
-          </div>
+              <Alert
+                tone={conservation.balanced ? "info" : "warning"}
+                title="Đối soát lượt tuyển theo ngày vào làm"
+              >
+                <p className="font-mono text-xs sm:text-sm tabular-nums">
+                  {formatTurnCount(conservation.attributed)} (Đã gán NVTD) +{" "}
+                  {formatTurnCount(conservation.unassigned)} (Vendor chưa có người giới thiệu) +{" "}
+                  {formatTurnCount(conservation.unresolved)} (Chưa biết Vendor của lượt tuyển) ={" "}
+                  {formatTurnCount(conservation.sum)} /{" "}
+                  {formatTurnCount(conservation.total)} (Tổng lượt tuyển từ Vendor)
+                </p>
+              </Alert>
+
+              <div className="grid gap-5 lg:grid-cols-2">
+                <Card>
+                  <CardHeader
+                    title="Vendor chưa có người giới thiệu"
+                    description={`Tổng cộng ${formatTurnCount(report.reconciliation.unassigned_vendor_turns)} lượt trong kỳ đã biết Vendor nhưng chưa có người giới thiệu tại ngày vào làm.`}
+                  />
+                  {report.unassigned_vendors.length === 0 ? (
+                    <EmptyState
+                      title="Tất cả Vendor phát sinh lượt tuyển đã có người giới thiệu"
+                      description="Không có lượt tuyển nào rơi vào nhóm chưa gán người giới thiệu trong kỳ."
+                    />
+                  ) : (
+                    <DataTableContainer>
+                      <table className={DATA_TABLE_CLASS}>
+                        <caption className="sr-only">
+                          Danh sách Vendor chưa có người giới thiệu trong kỳ
+                        </caption>
+                        <thead className={DATA_TABLE_HEAD_CLASS}>
+                          <tr>
+                            <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                              Vendor
+                            </th>
+                            <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
+                              Số dự án
+                            </th>
+                            <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
+                              Lượt tuyển
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {report.unassigned_vendors.map((item) => (
+                            <tr key={item.vendor_id} className={DATA_TABLE_ROW_CLASS}>
+                              <td data-card-header="true" className={DATA_TABLE_TD_CLASS}>
+                                <div className="font-medium text-foreground">
+                                  {item.vendor_display_name}
+                                </div>
+                                <div className="font-mono text-xs text-muted">{item.vendor_id}</div>
+                              </td>
+                              <td
+                                data-label="Số dự án"
+                                className={`${DATA_TABLE_TD_CLASS} text-right font-mono tabular-nums`}
+                              >
+                                {formatTurnCount(item.project_count)}
+                              </td>
+                              <td
+                                data-label="Lượt tuyển"
+                                className={`${DATA_TABLE_TD_CLASS} text-right font-mono font-semibold tabular-nums`}
+                              >
+                                {formatTurnCount(item.turns)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </DataTableContainer>
+                  )}
+                </Card>
+
+                <Card>
+                  <CardHeader
+                    title="Chưa biết Vendor của lượt tuyển"
+                    description={`Tổng cộng ${formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt có nguồn Vendor nhưng chưa xác định được Vendor cụ thể tại ngày vào làm.`}
+                  />
+                  {report.unresolved_vendor_breakdown.length === 0 ? (
+                    <EmptyState
+                      title="Không có lượt tuyển chưa xác định Vendor"
+                      description="Mọi lượt tuyển Vendor trong kỳ đều đã ánh xạ được về Vendor cụ thể."
+                    />
+                  ) : (
+                    <DataTableContainer>
+                      <table className={DATA_TABLE_CLASS}>
+                        <caption className="sr-only">
+                          Chi tiết các lượt tuyển chưa xác định được Vendor
+                        </caption>
+                        <thead className={DATA_TABLE_HEAD_CLASS}>
+                          <tr>
+                            <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                              Tài khoản tuyển dụng Vendor
+                            </th>
+                            <th scope="col" className={DATA_TABLE_TH_CLASS}>
+                              Dự án
+                            </th>
+                            <th scope="col" className={`${DATA_TABLE_TH_CLASS} text-right`}>
+                              Lượt tuyển
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {report.unresolved_vendor_breakdown.map((item) => (
+                            <tr
+                              key={`${item.recruiter_id}:${item.project_id}`}
+                              className={DATA_TABLE_ROW_CLASS}
+                            >
+                              <td data-card-header="true" className={`${DATA_TABLE_TD_CLASS} font-medium`}>
+                                {item.recruiter_display_name}
+                              </td>
+                              <td data-label="Dự án" className={DATA_TABLE_TD_CLASS}>
+                                <div className="font-medium text-foreground">
+                                  {item.project_display_name}
+                                </div>
+                                <div className="font-mono text-xs text-muted">{item.project_id}</div>
+                              </td>
+                              <td
+                                data-label="Lượt tuyển"
+                                className={`${DATA_TABLE_TD_CLASS} text-right font-mono font-semibold tabular-nums`}
+                              >
+                                {formatTurnCount(item.turns)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </DataTableContainer>
+                  )}
+                </Card>
+              </div>
+            </div>
+          </details>
         </div>
       ) : null}
     </PageShell>

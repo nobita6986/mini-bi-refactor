@@ -1,12 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { EmptyState } from "@/components/reporting/empty-state";
 import { ErrorState } from "@/components/reporting/error-state";
 import { Alert } from "@/components/ui/alert";
 import { StatusBadge, type BadgeTone } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClasses } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import {
   DATA_TABLE_CLASS,
@@ -916,6 +917,14 @@ export function VendorReferrerPanel() {
                               Gán người giới thiệu
                             </Button>
                           )}
+                          {vendor.current_link ? (
+                            <Link
+                              href={"/admin/catalog/vendors?tab=referral-report&vendor_id=" + encodeURIComponent(vendor.vendor_id)}
+                              className={buttonClasses({ variant: "outline", size: "sm" })}
+                            >
+                              Xem lượt tuyển
+                            </Link>
+                          ) : null}
                           <Button
                             size="sm"
                             variant="outline"

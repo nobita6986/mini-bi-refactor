@@ -102,6 +102,7 @@ const {
   checkReconciliationConservation,
   classifyVendorReferralReportError,
   formatPeriodLabel,
+  summarizeReferralPairs,
 } = await import("@/components/admin/vendor-referral-report-view");
 
 const {
@@ -345,6 +346,20 @@ describe("Vendor Referrer Panel pure UI helpers", () => {
 });
 
 describe("Vendor Referral Monthly Report pure UI helpers", () => {
+  it("adds project turns for the same NVTD and Vendor, keeping other pairs separate", () => {
+    const first = {
+      referrer_person_id: PERSON_A, referrer_full_name: "NVTD A", referrer_employee_code: "A",
+      vendor_id: "abc", vendor_display_name: "Vendor ABC", project_id: "p1", turns: 2,
+    };
+    const rows = summarizeReferralPairs([
+      first,
+      { ...first, project_id: "p2", turns: 3 },
+      { ...first, referrer_person_id: PERSON_B, referrer_full_name: "NVTD B", turns: 1 },
+    ]);
+    assert.deepEqual(rows.map(({ referrer, vendorId, turns }) => [referrer, vendorId, turns]), [
+      ["NVTD A", "abc", 5], ["NVTD B", "abc", 1],
+    ]);
+  });
   it("builds report query params cleanly and rejects invalid filters", () => {
     const defaultQuery = buildVendorReferralReportQuery({ month: "", allTime: false });
     assert.equal(defaultQuery?.toString(), "");
@@ -407,7 +422,7 @@ describe("Vendor Referral Monthly Report pure UI helpers", () => {
         period_to: null,
         authorization_date: "2026-11-27",
       }),
-      /Đối soát toàn bộ REQ/,
+      /Toàn bộ thời gian/,
     );
     assert.match(
       formatPeriodLabel({
@@ -428,40 +443,25 @@ describe("Vendor Referrer UI server gates, wiring, and strict zero-compensation 
   const reportPage = readRel("src/app/admin/vendor-referrals/page.tsx");
   const reportView = readRel("src/components/admin/vendor-referral-report-view.tsx");
 
-  it("enforces server-side page gates on /admin/catalog/vendors and /admin/vendor-referrals", () => {
+  it("keeps the report under Vendor navigation and guards direct access", () => {
     assert.match(vendorsPage, /resolveActorForRequest\(\)/);
-    assert.match(vendorsPage, /resolveVendorReferrerAccessForRequest\(\)/);
     assert.match(vendorsPage, /decideVendorCatalogPageAccess\(/);
-    assert.match(vendorsPage, /canManageVendorCatalog/);
-    assert.match(vendorsPage, /canManageReferrers/);
-
-    assert.match(reportPage, /export const dynamic = "force-dynamic"/);
-    assert.match(reportPage, /resolveActorForRequest\(\)/);
-    assert.match(reportPage, /resolveVendorReferrerAccessForRequest\(\)/);
-    assert.match(reportPage, /decideVendorReferrerReportPageAccess\(/);
-    assert.match(reportPage, /redirect\("\/login\?next=\/admin\/vendor-referrals"\)/);
-    assert.match(reportPage, /<AccountUnavailable \/>/);
-    assert.match(reportPage, /<TemporaryUnavailable \/>/);
-    assert.match(reportPage, /<AccessDenied \/>/);
-    assert.match(reportPage, /<VendorReferralReportView \/>/);
-  });
-
-  it("wires VendorCatalogManager tabs, default referrer view for BoD-only, and link to /admin/vendor-referrals", () => {
-    assert.match(catalogManager, /canManageVendorCatalog = true/);
-    assert.match(catalogManager, /canManageReferrers = false/);
-    assert.match(catalogManager, /canManageVendorCatalog \? "catalog" : "referrers"/);
-    assert.match(catalogManager, /if \(!canManageVendorCatalog \|\| activeTab !== "catalog"\) return;/);
-    assert.match(catalogManager, /Danh mục Vendor/);
-    assert.match(catalogManager, /Người giới thiệu/);
-    assert.match(catalogManager, /href="\/admin\/vendor-referrals"/);
-    assert.match(catalogManager, /Xem báo cáo sản lượng Vendor giới thiệu/);
-    assert.match(catalogManager, /<VendorReferrerPanel \/>/);
+    assert.match(vendorsPage, /decideVendorReferrerReportPageAccess\(\{ actor, hasVendorReferrerAccess: access\.canViewReport \}\)/);
+    assert.match(vendorsPage, /Danh mục Vendor/);
+    assert.match(vendorsPage, /Gán người giới thiệu/);
+    assert.match(vendorsPage, /Lượt tuyển qua Vendor/);
+    assert.match(vendorsPage, /aria-current/);
+    assert.match(vendorsPage, /<VendorReferrerPanel \/>/);
+    assert.match(vendorsPage, /<VendorReferralReportView/);
+    assert.match(catalogManager, /Danh mục nhà cung cấp/);
+    assert.match(reportPage, /redirect\("\/admin\/catalog\/vendors\?tab=referral-report"\)/);
   });
 
   it("wires VendorReferrerPanel endpoints, idempotency, OCC, inactive guard, and history audit trail", () => {
     assert.match(referrerPanel, /\/api\/admin\/vendor-referrals\/vendors/);
     assert.match(referrerPanel, /\/api\/admin\/vendor-referrals\/candidates/);
     assert.match(referrerPanel, /\/history/);
+    assert.match(referrerPanel, /tab=referral-report&vendor_id=/);
     assert.match(referrerPanel, /projectVendorHistory\(rawData, "api"\)/);
     assert.doesNotMatch(referrerPanel, /referrer-reason|Lý do thao tác/);
     assert.match(referrerPanel, /\/assign/);
@@ -476,20 +476,16 @@ describe("Vendor Referrer UI server gates, wiring, and strict zero-compensation 
     assert.doesNotMatch(referrerPanel, /new Date\(\)|toISOString\(\)/);
   });
 
-  it("wires VendorReferralReportView KPIs, conservation banner, ALL toggle, and 4 breakdown tables", () => {
+  it("shows a selected zero-result assignment and makes reconciliation optional", () => {
     assert.match(reportView, /\/api\/admin\/vendor-referrals\/report/);
-    assert.match(reportView, /Tất cả \(Đối soát toàn bộ REQ\)/);
-    assert.match(reportView, /Tổng lượt tuyển Vendor/);
-    assert.match(reportView, /Lượt đã gán NVTD giới thiệu/);
-    assert.match(reportView, /Vendor chưa có người giới thiệu/);
-    assert.match(reportView, /Chưa xác định được Vendor/);
-    assert.match(reportView, /Đối soát bảo toàn sản lượng/);
-    assert.match(reportView, /Tổng hợp theo NVTD giới thiệu/);
-    assert.match(reportView, /Chi tiết NVTD × Vendor × Dự án/);
-    assert.match(reportView, /href="\/admin\/catalog\/vendors"/);
-    assert.match(reportView, /Quản lý người giới thiệu Vendor/);
+    assert.match(reportView, /Toàn bộ thời gian/);
+    assert.match(reportView, /Lượt tuyển theo NVTD và Vendor/);
+    assert.match(reportView, /Chi tiết theo dự án/);
+    assert.match(reportView, /showZeroPair[\s\S]*turns: 0/);
+    assert.match(reportView, /<details[\s\S]*Đối soát/);
+    assert.match(reportView, /chưa xác định được Vendor cụ thể tại ngày vào làm/);
     assert.match(reportView, /setServerMonth\(projected\.month\)/);
-    assert.doesNotMatch(reportView, /new Date\(\)|toISOString\(\)/);
+    assert.doesNotMatch(reportView, /first_work_date|recruiter_provider_memberships|toàn bộ REQ/);
   });
 
   it("exposes vendor_referrer_manage ONLY for MANAGEMENT_BOD (or SYSTEM_ADMIN) non-team groups and strips on dept/team switch", () => {

@@ -100,7 +100,6 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "industrial-parks", href: "/admin/catalog/industrial-parks" },
     { id: "project-team-scopes", href: "/admin/catalog/project-team-scopes" },
     { id: "vendors", href: "/admin/catalog/vendors" },
-    { id: "vendor-referrals", href: "/admin/vendor-referrals" },
     { id: "attendance", href: "/admin/attendance" },
     { id: "worker-edit-history", href: "/admin/worker-edit-history" },
   ]);
@@ -115,14 +114,13 @@ test("Admin internal navigation exposes mapping, departments, organization perso
     { id: "industrial-parks", label: "Khu công nghiệp" },
     { id: "project-team-scopes", label: "Phân công Dự án ↔ Tổ đội" },
     { id: "vendors", label: "Vendor (NCC)" },
-    { id: "vendor-referrals", label: "Người giới thiệu Vendor" },
     { id: "attendance", label: "Báo cáo chấm công" },
     { id: "worker-edit-history", label: "Lịch sử chỉnh sửa NLĐ" },
   ]);
   const serializableSections = ADMIN_SECTIONS.map(({ id, label, href }) => ({ id, label, href }));
-  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "permission-groups", "provinces", "industrial-parks", "departments", "project-team-scopes", "vendor-referrals", "attendance", "worker-edit-history"].includes(id));
+  const catalogOnly = serializableSections.filter(({ id }) => !["organization-persons", "permission-groups", "provinces", "industrial-parks", "departments", "project-team-scopes", "attendance", "worker-edit-history"].includes(id));
   const bodSections = serializableSections.filter(({ id }) => ["provinces", "industrial-parks", "attendance"].includes(id));
-  const departmentAdmin = serializableSections.filter(({ id }) => id !== "teams" && id !== "vendor-referrals");
+  const departmentAdmin = serializableSections.filter(({ id }) => id !== "teams");
   const fullAdminWithoutHistory = departmentAdmin.filter(({ id }) => id !== "worker-edit-history");
   const allowlistedAdmin = makeNavActor(
     [...fullAdmin.capabilities, "worker_edit_history_view"],

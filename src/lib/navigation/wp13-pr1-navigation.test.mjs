@@ -921,7 +921,7 @@ test("M2: resolveAdminLandingPath covers all 4 authorized personas in exact prio
   });
   assert.equal(decideAdminAreaAccess({ actor: bodVendorReferrerOnly, hasVendorReferrerAccess: false }), "ACCESS_DENIED");
   assert.equal(decideAdminAreaAccess({ actor: bodVendorReferrerOnly, hasVendorReferrerAccess: true }), "ALLOW");
-  assert.equal(resolveAdminLandingPath(bodVendorReferrerOnly, { hasVendorReferrerAccess: true }), "/admin/vendor-referrals");
+  assert.equal(resolveAdminLandingPath(bodVendorReferrerOnly, { hasVendorReferrerAccess: true }), "/admin/catalog/vendors");
 
   // Unauthorized / wrong scope / unauthenticated / disabled / null -> null (zero loop)
   const wrongScopeHistory = makeFullActorResolution({
