@@ -791,14 +791,18 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
 
     const s0Sql = await readFile(path.join(MIGRATION_DIR, S0_T1_C_MIGRATION_NAME), "utf8");
     const allMigs = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    const appliedFlags = buildS0T1CAppliedFlags(new Set(allMigs));
     const postcond = await verifyS0T1CSecurityPostconditions(
       setup,
       s0Sql,
-      buildS0T1CAppliedFlags(new Set(allMigs)),
+      appliedFlags,
     );
     assert.equal(postcond.ok, true, `S0-T1-C postcondition failed: ${postcond.reason}`);
     const expectedServiceCount =
-      317 + HR_BULLETINS_RPC_SIGNATURES.length + COLLABORATORS_CATALOG_RPC_SIGNATURES.length;
+      317 +
+      Number(appliedFlags.assignmentAccessProbeApplied) +
+      HR_BULLETINS_RPC_SIGNATURES.length +
+      COLLABORATORS_CATALOG_RPC_SIGNATURES.length;
     assert.equal(postcond.details.expectedServiceCount, expectedServiceCount);
     assert.equal(postcond.details.actualServiceCount, expectedServiceCount);
     assert.equal(postcond.details.exposedClientOrPublicCount, 0);
