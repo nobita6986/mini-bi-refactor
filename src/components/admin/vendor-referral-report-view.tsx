@@ -648,7 +648,7 @@ export function VendorReferralReportView({
 
           <details className="rounded-[20px] border border-border bg-surface p-4">
             <summary className="cursor-pointer font-semibold text-foreground">
-              Đối soát kỳ đã chọn · {formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt chưa biết Vendor
+              Đối soát kỳ đã chọn · {formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt chưa đủ dữ liệu xác định Vendor
             </summary>
             <div className="mt-4 space-y-4">
               <section
@@ -664,31 +664,31 @@ export function VendorReferralReportView({
                 <ReferrerKpiCard
                   label="Đã tính cho người giới thiệu"
                   value={report.reconciliation.attributed_turns}
-                  hint="Đã xác định Vendor và có người giới thiệu tại ngày vào làm."
+                  hint="Đã xác định Vendor và có NVTD giới thiệu hiệu lực tại ngày vào làm."
                   accent="var(--chart-5)"
                 />
                 <ReferrerKpiCard
                   label="Vendor chưa có người giới thiệu"
                   value={report.reconciliation.unassigned_vendor_turns}
-                  hint="Đã biết Vendor, nhưng tại ngày vào làm chưa có phân công người giới thiệu."
+                  hint="Đã biết Vendor nhưng chưa có NVTD giới thiệu hiệu lực tại ngày vào làm."
                   accent="var(--chart-3)"
                 />
                 <ReferrerKpiCard
-                  label="Chưa biết Vendor của lượt tuyển"
+                  label="Chưa đủ dữ liệu xác định Vendor"
                   value={report.reconciliation.unresolved_vendor_turns}
-                  hint="Hồ sơ ghi nguồn Vendor nhưng chưa tra được người tuyển thuộc Vendor nào tại ngày vào làm."
+                  hint="Hồ sơ ghi nguồn Vendor nhưng chưa đủ dữ liệu xác định Vendor từ dữ liệu hồ sơ."
                   accent="var(--chart-6)"
                 />
               </section>
 
               <Alert
                 tone={conservation.balanced ? "info" : "warning"}
-                title="Đối soát lượt tuyển theo ngày vào làm"
+                title="Đối soát lượt tuyển nguồn Vendor"
               >
                 <p className="font-mono text-xs sm:text-sm tabular-nums">
                   {formatTurnCount(conservation.attributed)} (Đã gán NVTD) +{" "}
                   {formatTurnCount(conservation.unassigned)} (Vendor chưa có người giới thiệu) +{" "}
-                  {formatTurnCount(conservation.unresolved)} (Chưa biết Vendor của lượt tuyển) ={" "}
+                  {formatTurnCount(conservation.unresolved)} (Chưa đủ dữ liệu xác định Vendor) ={" "}
                   {formatTurnCount(conservation.sum)} /{" "}
                   {formatTurnCount(conservation.total)} (Tổng lượt tuyển từ Vendor)
                 </p>
@@ -698,7 +698,7 @@ export function VendorReferralReportView({
                 <Card>
                   <CardHeader
                     title="Vendor chưa có người giới thiệu"
-                    description={`Tổng cộng ${formatTurnCount(report.reconciliation.unassigned_vendor_turns)} lượt trong kỳ đã biết Vendor nhưng chưa có người giới thiệu tại ngày vào làm.`}
+                    description={`Tổng cộng ${formatTurnCount(report.reconciliation.unassigned_vendor_turns)} lượt trong kỳ đã biết Vendor nhưng chưa có NVTD giới thiệu hiệu lực tại ngày vào làm.`}
                   />
                   {report.unassigned_vendors.length === 0 ? (
                     <EmptyState
@@ -755,19 +755,19 @@ export function VendorReferralReportView({
 
                 <Card>
                   <CardHeader
-                    title="Chưa biết Vendor của lượt tuyển"
-                    description={`Tổng cộng ${formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt có nguồn Vendor nhưng chưa xác định được Vendor cụ thể tại ngày vào làm.`}
+                    title="Chưa đủ dữ liệu xác định Vendor"
+                    description={`Tổng cộng ${formatTurnCount(report.reconciliation.unresolved_vendor_turns)} lượt có nguồn Vendor nhưng chưa đủ dữ liệu xác định Vendor từ dữ liệu hồ sơ.`}
                   />
                   {report.unresolved_vendor_breakdown.length === 0 ? (
                     <EmptyState
-                      title="Không có lượt tuyển chưa xác định Vendor"
-                      description="Mọi lượt tuyển Vendor trong kỳ đều đã ánh xạ được về Vendor cụ thể."
+                      title="Không có lượt tuyển chưa đủ dữ liệu xác định Vendor"
+                      description="Mọi lượt tuyển Vendor trong kỳ đều đã xác định được Vendor cụ thể từ dữ liệu hồ sơ."
                     />
                   ) : (
                     <DataTableContainer>
                       <table className={DATA_TABLE_CLASS}>
                         <caption className="sr-only">
-                          Chi tiết các lượt tuyển chưa xác định được Vendor
+                          Chi tiết các lượt tuyển chưa đủ dữ liệu xác định Vendor từ dữ liệu hồ sơ
                         </caption>
                         <thead className={DATA_TABLE_HEAD_CLASS}>
                           <tr>

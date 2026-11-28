@@ -483,7 +483,9 @@ describe("Vendor Referrer UI server gates, wiring, and strict zero-compensation 
     assert.match(reportView, /Chi tiết theo dự án/);
     assert.match(reportView, /showZeroPair[\s\S]*turns: 0/);
     assert.match(reportView, /<details[\s\S]*Đối soát/);
-    assert.match(reportView, /chưa xác định được Vendor cụ thể tại ngày vào làm/);
+    assert.match(reportView, /Đã biết Vendor nhưng chưa có NVTD giới thiệu hiệu lực tại ngày vào làm/);
+    assert.match(reportView, /Chưa đủ dữ liệu xác định Vendor/);
+    assert.match(reportView, /chưa đủ dữ liệu xác định Vendor từ dữ liệu hồ sơ/);
     assert.match(reportView, /setServerMonth\(projected\.month\)/);
     assert.doesNotMatch(reportView, /first_work_date|recruiter_provider_memberships|toàn bộ REQ/);
   });

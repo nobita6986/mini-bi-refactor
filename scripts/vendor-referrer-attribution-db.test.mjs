@@ -22,14 +22,20 @@
  *      idempotency replay + conflict (`22023`), OCC mismatch (`PT409`), real 2-connection race (`0`
  *      `40P01`, `0` overlapping intervals), and direct SQL trigger overlap (`23P01`) + immutability (`55000`).
  *   5. Monthly report counting, exclusions (draft, deleted, voided, `hrp`), two unallocated buckets
- *      (`unassigned_vendor_turns` vs `unresolved_vendor_turns` when `first_work_date < rpm.valid_from`),
+ *      (`unassigned_vendor_turns` vs `unresolved_vendor_turns` when `vendor_id IS NULL`),
  *      exact conservation equation, filters (`month`/`referrer_person_id`/`vendor_id`/`project_id`),
  *      and Dashboard parity (`direct_entries` + `direct_entry_reporting_facts_v01` untouched).
+ *   6. 01/11–11/11–12/11 snapshot semantics via real write RPCs (`create_full_profile_batch_v2`,
+ *      `create_batch`, `create_draft_row`, `transition_submission`).
+ *   7. Authorized source vs non-source edits (`update_draft_row`, `privileged_edit`, `apply_change_item`),
+ *      vendor rename/deactivation preservation, and direct trigger protections (`23514`).
+ *   8. Historical pre-#259 -> dry-run (`reconcile-vendor-entry-backfill.mjs`) -> apply #259 ->
+ *      post-apply dry-run & idempotent backfill re-run on an isolated DB.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -47,6 +53,9 @@ import {
   VENDOR_REFERRER_ATTRIBUTION_RPC_SIGNATURES,
   verifyS0T1CSecurityPostconditions,
 } from "./lib/migration-validation.mjs";
+import { runVendorEntryBackfillDryRun } from "./reconcile-vendor-entry-backfill.mjs";
+
+const VENDOR_SNAPSHOT_MIGRATION_NAME = "20261128120000_vendor_referrer_entry_vendor_snapshot.sql";
 
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
@@ -334,6 +343,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     recruiterId,
     teamId,
     providerType,
+    vendorId = null,
     submissionState = "SUBMITTED",
     deletedAt = null,
     voidedAt = null,
@@ -359,9 +369,9 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
         await setup.query(
           `insert into public.direct_entries (
              entry_id, submission_id, candidate_id, created_by_user_id, project_id, first_work_date,
-             employee_code, worker_details, recruiter_id, team_id, provider_type, labor_type,
+             employee_code, worker_details, recruiter_id, team_id, provider_type, vendor_id, labor_type,
              voided_at, voided_by_user_id
-           ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::date, $7, $8::jsonb, $9::uuid, $10::uuid, $11, 'TEMPORARY', $12::timestamptz, $13::uuid)`,
+           ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::date, $7, $8::jsonb, $9::uuid, $10::uuid, $11, $12, 'TEMPORARY', $13::timestamptz, $14::uuid)`,
           [
             entryId,
             subId,
@@ -380,6 +390,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
             recruiterId,
             teamId,
             providerType,
+            providerType === "vendor" ? vendorId : null,
             voidedAt,
             voidedAt ? creatorAppUserId : null,
           ],
@@ -460,8 +471,10 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     assert.equal(applyRes.appliedCount, allMigs.length, "Full migration chain must apply cleanly from scratch");
     assert.equal(applyRes.skippedCount, 0);
     assert.ok(allMigs.includes(VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME));
+    assert.ok(allMigs.includes(VENDOR_SNAPSHOT_MIGRATION_NAME));
     assert.ok(allMigs.indexOf(HR_BULLETINS_MIGRATION_NAME) >= 0);
     assert.ok(allMigs.indexOf(HR_BULLETINS_MIGRATION_NAME) < allMigs.indexOf(VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME));
+    assert.ok(allMigs.indexOf(VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME) < allMigs.indexOf(VENDOR_SNAPSHOT_MIGRATION_NAME));
 
     // Idempotent second run skips all applied migrations & verifies checksums/postconditions
     const rerunRes = await runMigrationApply({
@@ -673,12 +686,33 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
   });
 
   it("1. Migration hygiene, FORCE RLS, 0 policies/grants, 7 service_role RPCs, and combined S0-T1-C allowlist", async () => {
-    const sqlText = await readFile(path.join(MIGRATION_DIR, VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME), "utf8");
-    assert.equal(sqlText.includes("\r"), false, "Vendor referrer migration must use strict LF");
-    assert.equal(sqlText.replace(/--[^\n]*/g, "").includes("@"), false, "Zero literal '@' in migration SQL");
-    assert.equal(/\bsavepoint\b/i.test(sqlText), false, "Zero SAVEPOINT in migration SQL");
-    assert.equal(/\balter\s+default\s+privileges\b/i.test(sqlText), false, "Zero ALTER DEFAULT PRIVILEGES");
-    assert.equal(/\bbtree_gist\b/i.test(sqlText), false, "Zero btree_gist dependency");
+    for (const migName of [VENDOR_REFERRER_ATTRIBUTION_MIGRATION_NAME, VENDOR_SNAPSHOT_MIGRATION_NAME]) {
+      const sqlText = await readFile(path.join(MIGRATION_DIR, migName), "utf8");
+      assert.equal(sqlText.includes("\r"), false, `${migName} must use strict LF`);
+      assert.equal(sqlText.replace(/--[^\n]*/g, "").includes("@"), false, `Zero literal '@' in ${migName}`);
+      assert.equal(/\bsavepoint\b/i.test(sqlText), false, `Zero SAVEPOINT in ${migName}`);
+      assert.equal(/\balter\s+default\s+privileges\b/i.test(sqlText), false, `Zero ALTER DEFAULT PRIVILEGES in ${migName}`);
+      assert.equal(/\bbtree_gist\b/i.test(sqlText), false, `Zero btree_gist dependency in ${migName}`);
+    }
+
+    const { rows: [snapCol] } = await setup.query(
+      `select exists (
+         select 1
+           from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'direct_entries'
+            and column_name = 'vendor_id'
+       ) as has_col,
+       exists (
+         select 1
+           from pg_catalog.pg_indexes
+          where schemaname = 'public'
+            and tablename = 'direct_entries'
+            and indexname = 'direct_entries_vendor_reporting_idx'
+       ) as has_idx`,
+    );
+    assert.equal(snapCol.has_col, true, "direct_entries.vendor_id column present");
+    assert.equal(snapCol.has_idx, true, "direct_entries_vendor_reporting_idx index present");
 
     const { rows: tables } = await setup.query(
       `select c.relname,
@@ -975,6 +1009,44 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
         assert.equal(res.ok, false, `${p.label}: ${fn} must reject`);
         assert.equal(res.code, "42501", `${p.label}: ${fn} expected 42501, got ${res.code} (${res.message})`);
       }
+    }
+
+    // Dynamic BoD double-key revocation: ending MANAGEMENT_BOD membership immediately revokes all 7 RPCs
+    const tempBodUser = await seedPersonWithAccount({
+      slug: "bod_temp_revoke",
+      displayName: "Temp BoD User",
+      deptId: deptByKey.MANAGEMENT_BOD,
+      withRecruiter: false,
+      groupId: bodGroup.group_id,
+      actorForCreate: OWNER,
+    });
+    const tempBefore = await serviceRpc("direct_entry_vendor_referrer_get_actor_access", [tempBodUser.auth, tempBodUser.app], ["uuid", "uuid"]);
+    assert.equal(tempBefore.can_manage, true);
+    await setup.query(
+      `update public.organization_person_department_memberships
+          set ended_at = now(),
+              ended_reason = 'Transfer out of BoD',
+              ended_by_app_user_id = $2::uuid,
+              version = version + 1
+        where person_id = $1::uuid and ended_at is null`,
+      [tempBodUser.personId, OWNER.app],
+    );
+    const tempAfter = await serviceRpc("direct_entry_vendor_referrer_get_actor_access", [tempBodUser.auth, tempBodUser.app], ["uuid", "uuid"]);
+    assert.equal(tempAfter.can_manage, false);
+    assert.equal(tempAfter.can_view_report, false);
+    assert.equal(tempAfter.has_capability, true);
+    assert.equal(tempAfter.is_active_bod, false);
+    for (const [fn, args, casts] of [
+      ["direct_entry_vendor_referrer_list_candidates", [tempBodUser.auth, tempBodUser.app, null, 50], ["uuid", "uuid", "text", "integer"]],
+      ["direct_entry_vendor_referrer_list_vendors", [tempBodUser.auth, tempBodUser.app, null, false, 1, 25], ["uuid", "uuid", "text", "boolean", "integer", "integer"]],
+      ["direct_entry_vendor_referrer_get_history", [tempBodUser.auth, tempBodUser.app, VENDOR_A.vendor_id], ["uuid", "uuid", "text"]],
+      ["direct_entry_vendor_referrer_assign", [tempBodUser.auth, tempBodUser.app, VENDOR_A.vendor_id, NVTD_REC.personId, today, null, "Revoked BoD", nextKey("bod_rev_a")], ["uuid", "uuid", "text", "uuid", "date", "uuid", "text", "text"]],
+      ["direct_entry_vendor_referrer_revoke", [tempBodUser.auth, tempBodUser.app, VENDOR_A.vendor_id, today, null, "Revoked BoD", nextKey("bod_rev_r")], ["uuid", "uuid", "text", "date", "uuid", "text", "text"]],
+      ["direct_entry_vendor_referrer_monthly_report", [tempBodUser.auth, tempBodUser.app, "ALL", null, null, null], ["uuid", "uuid", "text", "uuid", "text", "text"]],
+    ]) {
+      const res = await tryServiceRpc(fn, args, casts);
+      assert.equal(res.ok, false, `Ended BoD user: ${fn} must fail closed`);
+      assert.equal(res.code, "42501");
     }
   });
 
@@ -1289,6 +1361,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_A.vendor_id,
       submissionState: "SUBMITTED",
     });
     // D-2 -> NVTD_MKT (PRJ_2)
@@ -1299,6 +1372,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_A.vendor_id,
       submissionState: "SUBMITTED",
     });
     // today (D) -> exclusively 1 turn for NVTD_4 (same-day double replace, zero double-count!)
@@ -1309,6 +1383,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_A.vendor_id,
       submissionState: "SUBMITTED",
     });
 
@@ -1320,6 +1395,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_B.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_B.vendor_id,
       submissionState: "SUBMITTED",
     });
     await seedDirectEntry({
@@ -1329,6 +1405,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_B.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_B.vendor_id,
       submissionState: "SUBMITTED",
     });
 
@@ -1340,10 +1417,11 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_C.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_C.vendor_id,
       submissionState: "SUBMITTED",
     });
 
-    // Unresolved Vendor turn: first_work_date (D-15) predates recruiter_provider_memberships.valid_from (D-10)
+    // Unresolved legacy Vendor turn: pre-#259 entry whose vendor_id snapshot remains NULL
     await seedDirectEntry({
       creatorAppUserId: OWNER.app,
       projectId: PRJ_1,
@@ -1351,6 +1429,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: null,
       submissionState: "SUBMITTED",
       bypassValidationTrigger: true,
     });
@@ -1363,6 +1442,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_A.vendor_id,
       submissionState: "DRAFT",
     });
     await seedDirectEntry({
@@ -1372,6 +1452,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_A.vendor_id,
       submissionState: "SUBMITTED",
       deletedAt: `${today}T01:00:00Z`,
     });
@@ -1382,6 +1463,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: VENDOR_A.recruiter_id,
       teamId: SYS_VENDOR_TEAM_ID,
       providerType: "vendor",
+      vendorId: VENDOR_A.vendor_id,
       submissionState: "SUBMITTED",
       voidedAt: `${today}T02:00:00Z`,
     });
@@ -1392,6 +1474,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       recruiterId: NVTD_REC.rec,
       teamId: TEAM_A,
       providerType: "hrp",
+      vendorId: null,
       submissionState: "SUBMITTED",
     });
 
@@ -1414,7 +1497,7 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
     assert.equal(allReport.reconciliation.total_vendor_turns, 7);
     assert.equal(allReport.reconciliation.attributed_turns, 4, "NVTD_REC(2) + NVTD_MKT(1) + NVTD_4(1) = 4");
     assert.equal(allReport.reconciliation.unassigned_vendor_turns, 2, "VENDOR_B post-revoke + VENDOR_C");
-    assert.equal(allReport.reconciliation.unresolved_vendor_turns, 1, "D-15 entry before valid_from");
+    assert.equal(allReport.reconciliation.unresolved_vendor_turns, 1, "Legacy entry with null vendor_id snapshot");
     assert.equal(
       allReport.reconciliation.attributed_turns +
         allReport.reconciliation.unassigned_vendor_turns +
@@ -1488,5 +1571,844 @@ describe("Vendor Referrer Attribution — PG18 Acceptance Suite", () => {
       monthReport.reconciliation.total_vendor_turns,
       "Month conservation equation holds",
     );
+  });
+
+  it("6. 01/11-11/11-12/11 snapshot semantics via real write RPCs (full_profile_v2, create_batch, create_draft_row)", async () => {
+    // Timeline: first_work_date = D-11 ("01/11"), Vendor created valid_from = D-1 ("11/11"), Entry saved today ("12/11")
+    const dMinus11 = addDaysIso(today, -11);
+    const dMinus1 = addDaysIso(today, -1);
+
+    const vX1 = await serviceRpc(
+      "direct_entry_create_vendor",
+      [OWNER.auth, OWNER.app, 0, "VND_X1", "Vendor X1 Snapshot", dMinus1, "Vendor X1 created D-1", nextKey("vx1")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+    const vX2 = await serviceRpc(
+      "direct_entry_create_vendor",
+      [OWNER.auth, OWNER.app, 0, "VND_X2", "Vendor X2 Snapshot", dMinus1, "Vendor X2 created D-1", nextKey("vx2")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+
+    // 1) Save via direct_entry_create_full_profile_batch_v2 + submit
+    const fullBatch = await serviceRpc(
+      "direct_entry_create_full_profile_batch_v2",
+      [
+        OWNER.auth,
+        OWNER.app,
+        "worker-profile/1.1",
+        JSON.stringify([
+          {
+            project_id: PRJ_1,
+            first_work_date: dMinus11,
+            provider_type: "vendor",
+            recruiter_id: vX1.recruiter_id,
+            labor_type: "TEMPORARY",
+            display_name: "Worker X1 Snapshot",
+            worker_details: {
+              date_of_birth: { state: "unknown" },
+              national_id: { state: "omitted" },
+              address: { state: "unknown" },
+              phone: { state: "unknown" },
+            },
+            general_note: { state: "omitted" },
+            payment: { state: "omitted" },
+            employment: { initial_status: "ON" },
+          },
+        ]),
+        nextUuid(),
+      ],
+      ["uuid", "uuid", "text", "jsonb", "text"],
+    );
+    const entryX1Id = fullBatch.entry_ids[0];
+    await serviceRpc(
+      "direct_entry_transition_submission",
+      [OWNER.auth, OWNER.app, fullBatch.submission_id, 1, "SUBMITTED", nextUuid()],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+
+    const { rows: [rowX1] } = await setup.query(
+      `select e.vendor_id, e.first_work_date::text as first_work_date, rpm.valid_from::text as rpm_valid_from,
+              (select after_snapshot->>'vendor_id' from public.direct_entry_revisions rev where rev.entry_id = e.entry_id order by version desc limit 1) as snap_vendor_id
+         from public.direct_entries e
+         join public.recruiter_provider_memberships rpm on rpm.recruiter_id = e.recruiter_id and rpm.is_current = true
+        where e.entry_id = $1::uuid`,
+      [entryX1Id],
+    );
+    assert.equal(rowX1.vendor_id, vX1.vendor_id);
+    assert.equal(rowX1.first_work_date, dMinus11, "first_work_date preserved at D-11");
+    assert.equal(rowX1.rpm_valid_from, dMinus1, "original rpm.valid_from preserved at D-1");
+    assert.equal(rowX1.snap_vendor_id, vX1.vendor_id, "revision snapshot captures vendor_id");
+
+    // 2) Save via direct_entry_create_batch + direct_entry_create_draft_row + submit
+    const batchX2 = await serviceRpc(
+      "direct_entry_create_batch",
+      [
+        OWNER.auth,
+        OWNER.app,
+        JSON.stringify([
+          {
+            project_id: PRJ_1,
+            first_work_date: dMinus11,
+            employee_code: `hrp-${dMinus11.slice(0, 4)}-880001`,
+            worker_details: {
+              display_name: "Worker X2 Snapshot",
+              date_of_birth: { state: "unknown" },
+              national_id: { state: "omitted" },
+              address: { state: "unknown" },
+              phone: { state: "unknown" },
+            },
+            recruiter_id: vX2.recruiter_id,
+            labor_type: "TEMPORARY",
+          },
+        ]),
+        nextKey("cb_x2"),
+      ],
+      ["uuid", "uuid", "jsonb", "text"],
+    );
+    const { rows: [draftRowRes] } = await setup.query(
+      `select public.direct_entry_create_draft_row(
+         $1::uuid, $2::uuid, $3::uuid, $4::integer, $5::jsonb, $6::text
+       ) as data`,
+      [
+        OWNER.auth,
+        OWNER.app,
+        batchX2.submission_id,
+        1,
+        JSON.stringify({
+          project_id: PRJ_2,
+          first_work_date: dMinus11,
+          employee_code: `hrp-${dMinus11.slice(0, 4)}-880002`,
+          worker_details: {
+            display_name: "Worker X2 Draft Row",
+            date_of_birth: { state: "unknown" },
+            national_id: { state: "omitted" },
+            address: { state: "unknown" },
+            phone: { state: "unknown" },
+          },
+          recruiter_id: vX2.recruiter_id,
+          labor_type: "TEMPORARY",
+        }),
+        nextKey("dr_x2"),
+      ],
+    );
+    assert.ok(draftRowRes.data.entry_id);
+    await serviceRpc(
+      "direct_entry_transition_submission",
+      [OWNER.auth, OWNER.app, batchX2.submission_id, 2, "SUBMITTED", nextUuid()],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+    const { rows: x2Entries } = await setup.query(
+      "select vendor_id, first_work_date::text as first_work_date from public.direct_entries where submission_id = $1::uuid",
+      [batchX2.submission_id],
+    );
+    assert.equal(x2Entries.length, 2);
+    for (const r of x2Entries) {
+      assert.equal(r.vendor_id, vX2.vendor_id);
+      assert.equal(r.first_work_date, dMinus11);
+    }
+
+    // 3) Assign NVTD_IT to vX1 starting D-1 ("11/11"): entry at D-11 ("01/11") remains in unassigned_vendors (1 turn), 0 attributed to NVTD_IT
+    await serviceRpc(
+      "direct_entry_vendor_referrer_assign",
+      [OWNER.auth, OWNER.app, vX1.vendor_id, NVTD_IT.personId, dMinus1, null, "Assign from vendor start D-1", nextKey("as_x1")],
+      ["uuid", "uuid", "text", "uuid", "date", "uuid", "text", "text"],
+    );
+    const repX1 = await serviceRpc(
+      "direct_entry_vendor_referrer_monthly_report",
+      [OWNER.auth, OWNER.app, "ALL", null, vX1.vendor_id, null],
+      ["uuid", "uuid", "text", "uuid", "text", "text"],
+    );
+    assert.equal(repX1.filtered_summary.attributed_turns, 0, "effective_from D-1 does not attribute D-11 entry");
+    const unassX1 = repX1.unassigned_vendors.find((u) => u.vendor_id === vX1.vendor_id);
+    assert.equal(unassX1?.turns, 1, "Vendor X1 still shows 1 unassigned turn");
+
+    // 4) Assign NVTD_IT to vX2 starting D-11 ("01/11"): both D-11 entries count as attributed turns for NVTD_IT!
+    await serviceRpc(
+      "direct_entry_vendor_referrer_assign",
+      [OWNER.auth, OWNER.app, vX2.vendor_id, NVTD_IT.personId, dMinus11, null, "Assign from entry work date D-11", nextKey("as_x2")],
+      ["uuid", "uuid", "text", "uuid", "date", "uuid", "text", "text"],
+    );
+    const repX2 = await serviceRpc(
+      "direct_entry_vendor_referrer_monthly_report",
+      [OWNER.auth, OWNER.app, "ALL", NVTD_IT.personId, vX2.vendor_id, null],
+      ["uuid", "uuid", "text", "uuid", "text", "text"],
+    );
+    assert.equal(repX2.filtered_summary.attributed_turns, 2, "effective_from D-11 attributes both Vendor X2 turns to NVTD_IT");
+    assert.equal(repX2.unassigned_vendors.some((u) => u.vendor_id === vX2.vendor_id), false);
+  });
+
+  it("7. Source vs non-source edits (update_draft_row, privileged_edit, apply_change_item), vendor rename/deactivation & trigger guards", async () => {
+    // Part A: direct_entry_update_draft_row (via direct_entry_update_own_draft_row)
+    const draftBatch = await serviceRpc(
+      "direct_entry_create_batch",
+      [
+        OWNER.auth,
+        OWNER.app,
+        JSON.stringify([
+          {
+            project_id: PRJ_1,
+            first_work_date: today,
+            employee_code: `hrp-${today.slice(0, 4)}-880101`,
+            worker_details: {
+              display_name: "Worker Draft Edit",
+              date_of_birth: { state: "unknown" },
+              national_id: { state: "omitted" },
+              address: { state: "unknown" },
+              phone: { state: "unknown" },
+            },
+            recruiter_id: VENDOR_A.recruiter_id,
+            labor_type: "TEMPORARY",
+          },
+        ]),
+        nextKey("dr_edit_init"),
+      ],
+      ["uuid", "uuid", "jsonb", "text"],
+    );
+    const draftEntryId = draftBatch.entry_ids[0];
+
+    // Vendor A -> Vendor B
+    await serviceRpc(
+      "direct_entry_update_own_draft_row",
+      [OWNER.auth, OWNER.app, draftEntryId, 1, JSON.stringify({ recruiter_id: VENDOR_B.recruiter_id }), nextKey("dr_v2b")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text"],
+    );
+    // first_work_date-only edit preserves Vendor B
+    await serviceRpc(
+      "direct_entry_update_own_draft_row",
+      [OWNER.auth, OWNER.app, draftEntryId, 2, JSON.stringify({ first_work_date: dMinus4 }), nextKey("dr_dt")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text"],
+    );
+    const { rows: [draftAfterB] } = await setup.query(
+      `select e.provider_type, e.vendor_id, e.team_id::text as team_id, e.first_work_date::text as first_work_date,
+              (select after_snapshot->>'vendor_id' from public.direct_entry_revisions rev where rev.entry_id = e.entry_id order by version desc limit 1) as latest_snap_vendor_id
+         from public.direct_entries e where e.entry_id = $1::uuid`,
+      [draftEntryId],
+    );
+    assert.equal(draftAfterB.provider_type, "vendor");
+    assert.equal(draftAfterB.vendor_id, VENDOR_B.vendor_id);
+    assert.equal(draftAfterB.latest_snap_vendor_id, VENDOR_B.vendor_id);
+    assert.equal(draftAfterB.first_work_date, dMinus4);
+
+    // Vendor B -> HRP clears vendor_id
+    await serviceRpc(
+      "direct_entry_update_own_draft_row",
+      [OWNER.auth, OWNER.app, draftEntryId, 3, JSON.stringify({ recruiter_id: NVTD_REC.rec }), nextKey("dr_hrp")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text"],
+    );
+    const { rows: [draftAfterHrp] } = await setup.query(
+      "select provider_type, vendor_id, team_id::text as team_id from public.direct_entries where entry_id = $1::uuid",
+      [draftEntryId],
+    );
+    assert.equal(draftAfterHrp.provider_type, "hrp");
+    assert.equal(draftAfterHrp.vendor_id, null);
+    assert.equal(draftAfterHrp.team_id, TEAM_A);
+
+    // Part B: direct_entry_privileged_edit & direct_entry_apply_change_item + rename & deactivation
+    const vDisp = await serviceRpc(
+      "direct_entry_create_vendor",
+      [OWNER.auth, OWNER.app, 0, "VND_DISP", "Vendor Disposable Original", dMinus10, "Seed disposable vendor", nextKey("vdisp")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+    await serviceRpc(
+      "direct_entry_vendor_referrer_assign",
+      [OWNER.auth, OWNER.app, vDisp.vendor_id, NVTD_REC.personId, dMinus10, null, "Assign NVTD_REC to VND_DISP", nextKey("as_disp")],
+      ["uuid", "uuid", "text", "uuid", "date", "uuid", "text", "text"],
+    );
+
+    const subDisp = await serviceRpc(
+      "direct_entry_create_batch",
+      [
+        OWNER.auth,
+        OWNER.app,
+        JSON.stringify([
+          {
+            project_id: PRJ_1,
+            first_work_date: dMinus8,
+            employee_code: `hrp-${dMinus8.slice(0, 4)}-880201`,
+            worker_details: {
+              display_name: "Worker Disp Priv",
+              date_of_birth: { state: "unknown" },
+              national_id: { state: "omitted" },
+              address: { state: "unknown" },
+              phone: { state: "unknown" },
+            },
+            recruiter_id: vDisp.recruiter_id,
+            labor_type: "TEMPORARY",
+          },
+          {
+            project_id: PRJ_1,
+            first_work_date: dMinus8,
+            employee_code: `hrp-${dMinus8.slice(0, 4)}-880202`,
+            worker_details: {
+              display_name: "Worker Disp CR",
+              date_of_birth: { state: "unknown" },
+              national_id: { state: "omitted" },
+              address: { state: "unknown" },
+              phone: { state: "unknown" },
+            },
+            recruiter_id: vDisp.recruiter_id,
+            labor_type: "TEMPORARY",
+          },
+        ]),
+        nextKey("sub_disp"),
+      ],
+      ["uuid", "uuid", "jsonb", "text"],
+    );
+    await serviceRpc(
+      "direct_entry_transition_submission",
+      [OWNER.auth, OWNER.app, subDisp.submission_id, 1, "SUBMITTED", nextUuid()],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+    const privEntryId = subDisp.entry_ids[0];
+    const crEntryId = subDisp.entry_ids[1];
+
+    // Rename vDisp -> verify stable vendor_id, updated display_name in monthly report & worker_edit_history_snapshot
+    const renamedDisp = await serviceRpc(
+      "direct_entry_update_vendor",
+      [OWNER.auth, OWNER.app, vDisp.vendor_id, vDisp.version, "Vendor Disposable Renamed", "Rename vendor display name", nextKey("ren_disp")],
+      ["uuid", "uuid", "text", "integer", "text", "text", "text"],
+    );
+    const { rows: [histSnapRenamed] } = await setup.query(
+      "select public.worker_edit_history_snapshot($1::uuid) as snap",
+      [privEntryId],
+    );
+    assert.equal(histSnapRenamed.snap.vendor_id, vDisp.vendor_id);
+    assert.equal(histSnapRenamed.snap.vendor_name, "Vendor Disposable Renamed");
+
+    // On privEntryId before deactivation: test Vendor -> Vendor B -> HRP -> back to vDisp via direct_entry_privileged_edit
+    await serviceRpc(
+      "direct_entry_privileged_edit",
+      [OWNER.auth, OWNER.app, privEntryId, 1, JSON.stringify({ recruiter_id: VENDOR_B.recruiter_id }), "Priv edit Vendor->B", nextKey("pe_v2b")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text", "text"],
+    );
+    const { rows: [peB] } = await setup.query(
+      "select vendor_id, provider_type from public.direct_entries where entry_id = $1::uuid",
+      [privEntryId],
+    );
+    assert.equal(peB.vendor_id, VENDOR_B.vendor_id);
+    await serviceRpc(
+      "direct_entry_privileged_edit",
+      [OWNER.auth, OWNER.app, privEntryId, 2, JSON.stringify({ recruiter_id: NVTD_REC.rec }), "Priv edit B->HRP", nextKey("pe_b2h")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text", "text"],
+    );
+    const { rows: [peHrp] } = await setup.query(
+      "select vendor_id, provider_type from public.direct_entries where entry_id = $1::uuid",
+      [privEntryId],
+    );
+    assert.equal(peHrp.provider_type, "hrp");
+    assert.equal(peHrp.vendor_id, null);
+    await serviceRpc(
+      "direct_entry_privileged_edit",
+      [OWNER.auth, OWNER.app, privEntryId, 3, JSON.stringify({ recruiter_id: vDisp.recruiter_id }), "Priv edit HRP->vDisp", nextKey("pe_h2d")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text", "text"],
+    );
+
+    // Deactivate vDisp
+    await serviceRpc(
+      "direct_entry_set_vendor_active",
+      [OWNER.auth, OWNER.app, vDisp.vendor_id, false, renamedDisp.version, "Deactivate disposable vendor", nextKey("deact_disp")],
+      ["uuid", "uuid", "text", "boolean", "integer", "text", "text"],
+    );
+
+    // New entry creation on deactivated vendor must fail closed
+    const newEntryDeactErr = await tryServiceRpc(
+      "direct_entry_create_full_profile_batch_v2",
+      [
+        OWNER.auth,
+        OWNER.app,
+        "worker-profile/1.1",
+        JSON.stringify([
+          {
+            project_id: PRJ_1,
+            first_work_date: today,
+            provider_type: "vendor",
+            recruiter_id: vDisp.recruiter_id,
+            labor_type: "TEMPORARY",
+            display_name: "Blocked Deactivated Vendor Worker",
+            worker_details: {
+              date_of_birth: { state: "unknown" },
+              national_id: { state: "omitted" },
+              address: { state: "unknown" },
+              phone: { state: "unknown" },
+            },
+            general_note: { state: "omitted" },
+            payment: { state: "omitted" },
+            employment: { initial_status: "ON" },
+          },
+        ]),
+        nextUuid(),
+      ],
+      ["uuid", "uuid", "text", "jsonb", "text"],
+    );
+    assert.equal(newEntryDeactErr.ok, false);
+    assert.ok(
+      (newEntryDeactErr.code === "23514" && /provider vendor_id invalid/.test(newEntryDeactErr.message)) ||
+        (newEntryDeactErr.code === "22023" && /RECRUITER_MEMBERSHIP_INVALID/.test(newEntryDeactErr.message)),
+      `Unexpected deactivated vendor error: ${newEntryDeactErr.code} ${newEntryDeactErr.message}`,
+    );
+
+    // Non-source first_work_date edit via direct_entry_privileged_edit AFTER deactivation succeeds & keeps vDisp.vendor_id
+    await serviceRpc(
+      "direct_entry_privileged_edit",
+      [OWNER.auth, OWNER.app, privEntryId, 4, JSON.stringify({ first_work_date: dMinus4 }), "Date-only edit after vendor deactivation", nextKey("pe_dt_deact")],
+      ["uuid", "uuid", "uuid", "integer", "jsonb", "text", "text"],
+    );
+    const { rows: [peAfterDeact] } = await setup.query(
+      "select vendor_id, provider_type, first_work_date::text as first_work_date from public.direct_entries where entry_id = $1::uuid",
+      [privEntryId],
+    );
+    assert.equal(peAfterDeact.vendor_id, vDisp.vendor_id, "privileged_edit date-only preserves deactivated vendor_id");
+    assert.equal(peAfterDeact.first_work_date, dMinus4);
+
+    // direct_entry_apply_change_item (ENTRY_FIELD via create_change_request + decide_change_request):
+    // Seed an assigned Project Manager proposer with change_request_create @ ALL (distinct from OWNER reviewer)
+    const pmProposer = await seedPersonWithAccount({
+      slug: "pm_cr_prop",
+      displayName: "PM Change Proposer",
+      deptId: deptByKey.RECRUITMENT,
+      teamId: TEAM_A,
+      groupId: grpByCode.SYSTEM_ADMIN,
+      actorForCreate: OWNER,
+    });
+    await setup.query(
+      `insert into public.direct_entry_project_manager_assignments (project_id, manager_recruiter_id, valid_from, is_current, created_by_user_id)
+       values ($1, $2::uuid, '2025-01-01', true, $3::uuid)`,
+      [PRJ_1, pmProposer.rec, OWNER.app],
+    );
+
+    // 1) first_work_date-only change AFTER deactivation keeps vDisp.vendor_id
+    const crDate = await serviceRpc(
+      "direct_entry_create_change_request",
+      [
+        pmProposer.auth,
+        pmProposer.app,
+        JSON.stringify([
+          {
+            entry_id: crEntryId,
+            target_kind: "ENTRY_FIELD",
+            expected_version: 1,
+            proposal: { first_work_date: dMinus4 },
+          },
+        ]),
+        "Change date only on deactivated vendor entry",
+        nextKey("cr_dt"),
+      ],
+      ["uuid", "uuid", "jsonb", "text", "text"],
+    );
+    await serviceRpc(
+      "direct_entry_approve_change_request",
+      [OWNER.auth, OWNER.app, crDate.request_id, 1, "Approve date-only change", nextKey("cr_dt_ok")],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+    const { rows: [crAfterDate] } = await setup.query(
+      "select vendor_id, first_work_date::text as first_work_date, version from public.direct_entries where entry_id = $1::uuid",
+      [crEntryId],
+    );
+    assert.equal(crAfterDate.vendor_id, vDisp.vendor_id, "apply_change_item date-only preserves deactivated vendor_id");
+    assert.equal(crAfterDate.first_work_date, dMinus4);
+
+    // 2) recruiter_id change via ENTRY_FIELD updates vendor_id -> VENDOR_B, then HRP -> null
+    const crRecB = await serviceRpc(
+      "direct_entry_create_change_request",
+      [
+        pmProposer.auth,
+        pmProposer.app,
+        JSON.stringify([
+          {
+            entry_id: crEntryId,
+            target_kind: "ENTRY_FIELD",
+            expected_version: crAfterDate.version,
+            proposal: { recruiter_id: VENDOR_B.recruiter_id },
+          },
+        ]),
+        "Switch deactivated vendor to Vendor B",
+        nextKey("cr_vb"),
+      ],
+      ["uuid", "uuid", "jsonb", "text", "text"],
+    );
+    await serviceRpc(
+      "direct_entry_approve_change_request",
+      [OWNER.auth, OWNER.app, crRecB.request_id, 1, "Approve Vendor B change", nextKey("cr_vb_ok")],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+    const { rows: [crAfterB] } = await setup.query(
+      "select vendor_id, provider_type, version from public.direct_entries where entry_id = $1::uuid",
+      [crEntryId],
+    );
+    assert.equal(crAfterB.vendor_id, VENDOR_B.vendor_id);
+
+    const crHrp = await serviceRpc(
+      "direct_entry_create_change_request",
+      [
+        pmProposer.auth,
+        pmProposer.app,
+        JSON.stringify([
+          {
+            entry_id: crEntryId,
+            target_kind: "ENTRY_FIELD",
+            expected_version: crAfterB.version,
+            proposal: { recruiter_id: NVTD_REC.rec },
+          },
+        ]),
+        "Switch Vendor B to HRP",
+        nextKey("cr_hrp"),
+      ],
+      ["uuid", "uuid", "jsonb", "text", "text"],
+    );
+    await serviceRpc(
+      "direct_entry_approve_change_request",
+      [OWNER.auth, OWNER.app, crHrp.request_id, 1, "Approve HRP change", nextKey("cr_hrp_ok")],
+      ["uuid", "uuid", "uuid", "integer", "text", "text"],
+    );
+    const { rows: [crAfterHrp] } = await setup.query(
+      "select vendor_id, provider_type from public.direct_entries where entry_id = $1::uuid",
+      [crEntryId],
+    );
+    assert.equal(crAfterHrp.provider_type, "hrp");
+    assert.equal(crAfterHrp.vendor_id, null);
+
+    // Monthly report still resolves deactivated + renamed vDisp on privEntryId
+    const dispReport = await serviceRpc(
+      "direct_entry_vendor_referrer_monthly_report",
+      [OWNER.auth, OWNER.app, "ALL", null, vDisp.vendor_id, null],
+      ["uuid", "uuid", "text", "uuid", "text", "text"],
+    );
+    assert.equal(dispReport.filtered_summary.attributed_turns, 1);
+    assert.equal(dispReport.rows[0].vendor_display_name, "Vendor Disposable Renamed");
+
+    // Direct SQL trigger rejects standalone vendor_id tampering on already-snapshotted entry
+    await assert.rejects(
+      setup.query("update public.direct_entries set vendor_id = $2 where entry_id = $1::uuid", [
+        privEntryId,
+        VENDOR_B.vendor_id,
+      ]),
+      (err) => err?.code === "23514" && /provider vendor_id invalid/.test(err.message),
+    );
+  });
+
+  it("8. Historical backfill & dry-run reconciliation (pre-#259 -> dry-run -> apply #259 -> idempotent re-run)", async () => {
+    const preMigDir = path.join(tmpDir, "pre-259-migrations");
+    await mkdir(preMigDir, { recursive: true });
+    const allSqlFiles = (await readdir(MIGRATION_DIR)).filter((f) => f.endsWith(".sql")).sort();
+    for (const fileName of allSqlFiles) {
+      if (fileName === VENDOR_SNAPSHOT_MIGRATION_NAME) continue;
+      await copyFile(path.join(MIGRATION_DIR, fileName), path.join(preMigDir, fileName));
+    }
+
+    await setup.query("create database vr_backfill_test");
+    const preDb = await connect(port, "vr-backfill-pre259", "vr_backfill_test");
+    clients.push(preDb);
+
+    await preDb.query(
+      "create schema auth; create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb default '{}'::jsonb);",
+    );
+    const preUrl = `postgres://postgres@127.0.0.1:${port}/vr_backfill_test`;
+    const preApply = await runMigrationApply({
+      directory: preMigDir,
+      loadConfig: async () => ({ databaseUrl: preUrl, projectRef: "pg18pre", usesPooler: false }),
+      createClient: (url) => new Client({ connectionString: url }),
+      log: () => {},
+    });
+    assert.equal(preApply.appliedCount, allSqlFiles.length - 1);
+
+    async function preRpc(fnName, args, casts) {
+      const ph = args.map((_, i) => (casts[i] ? `$${i + 1}::${casts[i]}` : `$${i + 1}`)).join(", ");
+      await preDb.query("begin; set local role service_role");
+      try {
+        const res = await preDb.query(`select public.${fnName}(${ph}) as data`, args);
+        await preDb.query("commit");
+        return res.rows[0]?.data;
+      } catch (err) {
+        await preDb.query("rollback").catch(() => {});
+        throw err;
+      }
+    }
+
+    // Seed Owner, Project, Team & Vendors in vr_backfill_test
+    const { rows: preDepts } = await preDb.query(
+      "select department_id::text, system_key from public.organization_departments where is_active = true",
+    );
+    const preDept = Object.fromEntries(preDepts.map((d) => [d.system_key, d.department_id]));
+    const { rows: preGrps } = await preDb.query(
+      "select group_id::text, code from public.authz_user_groups where active = true",
+    );
+    const preGrp = Object.fromEntries(preGrps.map((g) => [g.code, g.group_id]));
+
+    const preOwnerAuth = nextUuid();
+    const preOwnerApp = nextUuid();
+    const preOwnerPerson = nextUuid();
+    await preDb.query("insert into auth.users (id, email) values ($1::uuid, 'preowner@hrpartner.local')", [preOwnerAuth]);
+    await preDb.query(
+      "insert into public.direct_entry_app_users (app_user_id, auth_subject, display_name, enabled, authz_managed, version) values ($1::uuid, $2::uuid, 'Pre Owner', true, true, 1)",
+      [preOwnerApp, preOwnerAuth],
+    );
+    await preDb.query(
+      "insert into public.organization_persons (person_id, employee_code, full_name, joined_on, status, version) values ($1::uuid, 'EMP-PRE-OWN', 'Pre Owner', '2025-01-01', 'ACTIVE', 1)",
+      [preOwnerPerson],
+    );
+    await preDb.query(
+      "insert into public.organization_account_person_links (app_user_id, person_id, started_at, reason) values ($1::uuid, $2::uuid, '2025-01-01T00:00:00Z', 'Seed pre-owner')",
+      [preOwnerApp, preOwnerPerson],
+    );
+    await preDb.query(
+      "insert into public.organization_person_department_memberships (person_id, department_id, started_at, reason) values ($1::uuid, $2::uuid, '2025-01-01T00:00:00Z', 'Seed pre-owner BoD')",
+      [preOwnerPerson, preDept.MANAGEMENT_BOD],
+    );
+    await preDb.query(
+      "insert into public.authz_user_group_members (group_id, app_user_id, source_kind, reason, is_protected, protected_reason) values ($1::uuid, $2::uuid, 'ADMIN_ASSIGNMENT', 'Seed pre-owner', true, 'PROTECTED_OWNER_ADMIN')",
+      [preGrp.SYSTEM_ADMIN, preOwnerApp],
+    );
+
+    const prePrj = "vr-pre-prj";
+    await preDb.query(
+      "insert into public.direct_entry_projects (project_id, display_name, active, version) values ($1, 'Pre Project', true, 1)",
+      [prePrj],
+    );
+    const { rows: [preSvt] } = await preDb.query("select public.direct_entry_system_vendor_team_id()::text as team_id");
+    const preSysTeamId = preSvt.team_id;
+
+    const vPreA = await preRpc(
+      "direct_entry_create_vendor",
+      [preOwnerAuth, preOwnerApp, 0, "PRE_VA", "Pre Vendor A", "2026-11-01", "Seed Pre Vendor A", nextKey("pva")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+    const vPreB = await preRpc(
+      "direct_entry_create_vendor",
+      [preOwnerAuth, preOwnerApp, 0, "PRE_VB", "Pre Vendor B", "2026-11-05", "Seed Pre Vendor B", nextKey("pvb")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+    const vPreLate = await preRpc(
+      "direct_entry_create_vendor",
+      [preOwnerAuth, preOwnerApp, 0, "PRE_VLATE", "Pre Vendor Late", "2026-11-20", "Seed Pre Vendor Late", nextKey("pvl")],
+      ["uuid", "uuid", "integer", "text", "text", "date", "text", "text"],
+    );
+
+    // Pin rpm.created_at timestamps cleanly
+    await preDb.query(
+      "update public.recruiter_provider_memberships set created_at = '2026-11-01T01:00:00Z' where recruiter_id = $1::uuid",
+      [vPreA.recruiter_id],
+    );
+    await preDb.query(
+      "update public.recruiter_provider_memberships set created_at = '2026-11-05T01:00:00Z' where recruiter_id = $1::uuid",
+      [vPreB.recruiter_id],
+    );
+    await preDb.query(
+      "update public.recruiter_provider_memberships set created_at = '2026-11-20T01:00:00Z' where recruiter_id = $1::uuid",
+      [vPreLate.recruiter_id],
+    );
+
+    async function seedPreEntry({ employeeCode, firstWorkDate, createdAt, recruiterId, bypassTrigger = false }) {
+      const candId = nextUuid();
+      const subId = nextUuid();
+      const entryId = nextUuid();
+      await preDb.query("begin");
+      try {
+        await preDb.query("insert into public.direct_entry_candidates (candidate_id) values ($1::uuid)", [candId]);
+        await preDb.query(
+          "insert into public.direct_entry_submissions (submission_id, created_by_user_id, state) values ($1::uuid, $2::uuid, 'DRAFT')",
+          [subId, preOwnerApp],
+        );
+        if (bypassTrigger) {
+          await preDb.query("alter table public.direct_entries disable trigger direct_entry_validate_identity");
+        }
+        try {
+          await preDb.query(
+            `insert into public.direct_entries (
+               entry_id, submission_id, candidate_id, created_by_user_id, project_id, first_work_date,
+               employee_code, worker_details, recruiter_id, team_id, provider_type, labor_type, created_at
+             ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::date, $7, $8::jsonb, $9::uuid, $10::uuid, 'vendor', 'TEMPORARY', $11::timestamptz)`,
+            [
+              entryId,
+              subId,
+              candId,
+              preOwnerApp,
+              prePrj,
+              firstWorkDate,
+              employeeCode,
+              JSON.stringify({
+                display_name: `Pre Worker ${employeeCode}`,
+                date_of_birth: { state: "unknown" },
+                national_id: { state: "omitted" },
+                address: { state: "unknown" },
+                phone: { state: "unknown" },
+              }),
+              recruiterId,
+              preSysTeamId,
+              createdAt,
+            ],
+          );
+        } finally {
+          if (bypassTrigger) {
+            await preDb.query("alter table public.direct_entries enable trigger direct_entry_validate_identity");
+          }
+        }
+        await preDb.query(
+          "update public.direct_entry_submissions set state = 'SUBMITTED', submitted_at = $2::timestamptz, version = version + 1 where submission_id = $1::uuid",
+          [subId, createdAt],
+        );
+        await preDb.query("commit");
+      } catch (err) {
+        await preDb.query("rollback").catch(() => {});
+        throw err;
+      }
+      return entryId;
+    }
+
+    // (a) hrp-2026-003553-style UNIQUE_MATCH (no revisions; rpm.created_at <= direct_entries.created_at)
+    const eUniqueA = await seedPreEntry({
+      employeeCode: "hrp-2026-003553",
+      firstWorkDate: "2026-11-01",
+      createdAt: "2026-11-12T04:00:00Z",
+      recruiterId: vPreA.recruiter_id,
+    });
+
+    // (b) Revised entry UNIQUE_MATCH (changed from vPreA -> vPreB in rev 2 at 2026-11-13T05:00:00Z)
+    const eUniqueRevB = await seedPreEntry({
+      employeeCode: "hrp-2026-003554",
+      firstWorkDate: "2026-11-13",
+      createdAt: "2026-11-13T02:00:00Z",
+      recruiterId: vPreB.recruiter_id,
+    });
+    await preDb.query(
+      `insert into public.direct_entry_revisions (revision_id, entry_id, actor_user_id, before_snapshot, after_snapshot, version, created_at)
+       values
+         ($1::uuid, $2::uuid, $3::uuid, null, $4::jsonb, 1, '2026-11-13T02:00:00Z'),
+         ($5::uuid, $2::uuid, $3::uuid, $4::jsonb, $6::jsonb, 2, '2026-11-13T05:00:00Z')`,
+      [
+        nextUuid(),
+        eUniqueRevB,
+        preOwnerApp,
+        JSON.stringify({ recruiter_id: vPreA.recruiter_id, provider_type: "vendor" }),
+        nextUuid(),
+        JSON.stringify({ recruiter_id: vPreB.recruiter_id, provider_type: "vendor" }),
+      ],
+    );
+
+    // (c) MISSING_EVIDENCE: entry created 2026-11-10T04:00:00Z before vPreLate rpm.created_at (2026-11-20)
+    const eMissing = await seedPreEntry({
+      employeeCode: "hrp-2026-003555",
+      firstWorkDate: "2026-11-10",
+      createdAt: "2026-11-10T04:00:00Z",
+      recruiterId: vPreLate.recruiter_id,
+      bypassTrigger: true,
+    });
+
+    // (d) CONFLICTING_EVIDENCE: latest revision after_snapshot disagrees with current entry recruiter_id
+    const eConflict = await seedPreEntry({
+      employeeCode: "hrp-2026-003556",
+      firstWorkDate: "2026-11-14",
+      createdAt: "2026-11-14T04:00:00Z",
+      recruiterId: vPreA.recruiter_id,
+    });
+    await preDb.query(
+      `insert into public.direct_entry_revisions (revision_id, entry_id, actor_user_id, before_snapshot, after_snapshot, version, created_at)
+       values ($1::uuid, $2::uuid, $3::uuid, $4::jsonb, $5::jsonb, 1, '2026-11-14T05:00:00Z')`,
+      [
+        nextUuid(),
+        eConflict,
+        preOwnerApp,
+        JSON.stringify({ recruiter_id: vPreA.recruiter_id, provider_type: "vendor" }),
+        JSON.stringify({ recruiter_id: vPreB.recruiter_id, provider_type: "vendor" }),
+      ],
+    );
+
+    // 1) Dry-run BEFORE #259
+    const dryBefore = await runVendorEntryBackfillDryRun(preDb, {
+      employeeCode: "hrp-2026-003553",
+      manageTransaction: true,
+    });
+    assert.equal(dryBefore.schema.mode, "pre_259");
+    assert.equal(dryBefore.schema.has_vendor_id_column, false);
+    assert.deepEqual(dryBefore.groups, {
+      already_snapshotted: { entries: 0, active_submitted_turns: 0 },
+      unique_match: { entries: 2, active_submitted_turns: 2 },
+      missing_evidence: { entries: 1, active_submitted_turns: 1 },
+      conflicting_evidence: { entries: 1, active_submitted_turns: 1 },
+    });
+    assert.equal(dryBefore.summary.conservation.entries_conserved, true);
+    assert.equal(dryBefore.summary.conservation.active_submitted_turns_conserved, true);
+    assert.equal(dryBefore.employee_lookup.found, true);
+    assert.equal(dryBefore.employee_lookup.employee_code, "hrp-2026-003553");
+    assert.equal(dryBefore.employee_lookup.classification, "UNIQUE_MATCH");
+    assert.equal(dryBefore.employee_lookup.matched_vendor_id, vPreA.vendor_id);
+    assert.equal(dryBefore.employee_lookup.existing_vendor_id, null);
+
+    const preReport = await preRpc(
+      "direct_entry_vendor_referrer_monthly_report",
+      [preOwnerAuth, preOwnerApp, "ALL", null, null, null],
+      ["uuid", "uuid", "text", "uuid", "text", "text"],
+    );
+    const totalTurnsBefore = preReport.reconciliation.total_vendor_turns;
+    assert.equal(totalTurnsBefore, 4);
+
+    // 2) Apply #259 onto vr_backfill_test
+    const apply259 = await runMigrationApply({
+      directory: MIGRATION_DIR,
+      loadConfig: async () => ({ databaseUrl: preUrl, projectRef: "pg18post", usesPooler: false }),
+      createClient: (url) => new Client({ connectionString: url }),
+      log: () => {},
+    });
+    assert.equal(apply259.appliedCount, 1, "Only migration #259 is newly applied");
+    assert.equal(apply259.skippedCount, allSqlFiles.length - 1);
+
+    // 3) Verify ONLY UNIQUE_MATCH rows were backfilled; MISSING_EVIDENCE & CONFLICTING_EVIDENCE remain NULL
+    const { rows: postEntries } = await preDb.query(
+      "select entry_id::text, vendor_id from public.direct_entries order by employee_code",
+    );
+    const postByEntry = Object.fromEntries(postEntries.map((r) => [r.entry_id, r.vendor_id]));
+    assert.equal(postByEntry[eUniqueA], vPreA.vendor_id);
+    assert.equal(postByEntry[eUniqueRevB], vPreB.vendor_id);
+    assert.equal(postByEntry[eMissing], null);
+    assert.equal(postByEntry[eConflict], null);
+
+    const { rows: backfillAudits } = await preDb.query(
+      `select resource_ref, outcome, changed_fields
+         from public.direct_entry_audit_events
+        where action = 'vendor_entry_snapshot_backfill'
+        order by resource_ref`,
+    );
+    assert.deepEqual(
+      backfillAudits.map((a) => a.resource_ref).sort(),
+      [eUniqueA, eUniqueRevB].sort(),
+    );
+
+    const postReport = await preRpc(
+      "direct_entry_vendor_referrer_monthly_report",
+      [preOwnerAuth, preOwnerApp, "ALL", null, null, null],
+      ["uuid", "uuid", "text", "uuid", "text", "text"],
+    );
+    assert.equal(postReport.reconciliation.total_vendor_turns, totalTurnsBefore, "total_vendor_turns BEFORE == AFTER");
+    assert.equal(postReport.reconciliation.unassigned_vendor_turns, 2);
+    assert.equal(postReport.reconciliation.unresolved_vendor_turns, 2);
+    assert.equal(
+      postReport.unresolved_vendor_breakdown.reduce((acc, r) => acc + r.turns, 0),
+      2,
+    );
+
+    // 4) Dry-run AFTER #259
+    const dryAfter = await runVendorEntryBackfillDryRun(preDb, {
+      employeeCode: "hrp-2026-003553",
+      manageTransaction: true,
+    });
+    assert.equal(dryAfter.schema.mode, "post_259");
+    assert.equal(dryAfter.schema.has_vendor_id_column, true);
+    assert.deepEqual(dryAfter.groups, {
+      already_snapshotted: { entries: 2, active_submitted_turns: 2 },
+      unique_match: { entries: 0, active_submitted_turns: 0 },
+      missing_evidence: { entries: 1, active_submitted_turns: 1 },
+      conflicting_evidence: { entries: 1, active_submitted_turns: 1 },
+    });
+    assert.equal(dryAfter.employee_lookup.classification, "ALREADY_SNAPSHOTTED");
+    assert.equal(dryAfter.employee_lookup.existing_vendor_id, vPreA.vendor_id);
+
+    // 5) Re-run Section 5 backfill SQL block -> 0 updates, 0 new audit events
+    const mig259Sql = await readFile(path.join(MIGRATION_DIR, VENDOR_SNAPSHOT_MIGRATION_NAME), "utf8");
+    const backfillBlockMatch = mig259Sql.match(/do \$backfill_vendor_entry_snapshots\$[\s\S]*?\$backfill_vendor_entry_snapshots\$;/);
+    assert.ok(backfillBlockMatch, "Extract Section 5 backfill DO block");
+    await preDb.query(backfillBlockMatch[0]);
+    const { rows: [auditCountAfter] } = await preDb.query(
+      "select count(*)::int as n from public.direct_entry_audit_events where action = 'vendor_entry_snapshot_backfill'",
+    );
+    assert.equal(auditCountAfter.n, 2, "Idempotent backfill re-run writes 0 additional audit rows");
   });
 });
