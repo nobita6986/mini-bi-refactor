@@ -570,6 +570,12 @@ export const COLLABORATORS_CATALOG_RPC_SIGNATURES = Object.freeze([
   "public.direct_entry_update_collaborator(uuid, uuid, text, integer, text, text, text)",
   "public.direct_entry_set_collaborator_active(uuid, uuid, text, boolean, integer, text, text)",
 ]);
+export const PUBLIC_JOBS_PORTAL_MIGRATION_NAME =
+  "20261128170000_public_jobs_portal.sql";
+export const PUBLIC_JOBS_PORTAL_RPC_SIGNATURES = Object.freeze([
+  "public.recruitment_post_public_portal_list_v1(jsonb)",
+  "public.recruitment_post_public_portal_get_v1(text)",
+]);
 export const HR_BULLETINS_RPC_SIGNATURES = Object.freeze([
   "public.hr_bulletin_list_mobile_feed(uuid, uuid, text, integer, boolean, timestamp with time zone, uuid, integer)",
   "public.hr_bulletin_get_detail(uuid, uuid, uuid, boolean)",
@@ -927,7 +933,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     ),
     assignmentAccessProbeApplied: has(WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME),
     hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
-    publicJobsApplied: has("20261128170000_public_jobs_portal.sql"),
+    publicJobsApplied: has(PUBLIC_JOBS_PORTAL_MIGRATION_NAME),
     collaboratorsCatalogApplied: has(COLLABORATORS_CATALOG_MIGRATION_NAME),
   };
 }
@@ -1178,7 +1184,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
       : []),
     ...(assignmentAccessProbeApplied ? [WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE] : []),
     ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
-    ...(publicJobsApplied ? ["public.recruitment_post_public_portal_list_v1(jsonb)", "public.recruitment_post_public_portal_get_v1(text)"] : []),
+    ...(publicJobsApplied ? PUBLIC_JOBS_PORTAL_RPC_SIGNATURES : []),
     ...(collaboratorsCatalogApplied ? COLLABORATORS_CATALOG_RPC_SIGNATURES : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))

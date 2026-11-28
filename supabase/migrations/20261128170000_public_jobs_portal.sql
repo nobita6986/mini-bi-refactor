@@ -39,7 +39,7 @@ begin
     raise exception using errcode='23505', message=case when existing.is_canonical or p_canonical then 'SLUG_ALIAS_CONFLICTS_WITH_CANONICAL' else 'SLUG_ALIAS_ALREADY_ASSIGNED' end;
   end if;
 end $$;
-create function public.recruitment_post_register_canonical() returns trigger language plpgsql security definer set search_path=pg_catalog,public as $$
+create function public.recruitment_post_register_canonical() returns trigger language plpgsql security definer set search_path = pg_catalog, public as $$
 begin
   perform public.recruitment_post_register_slug(public.recruitment_post_build_public_slug(new.customer_name,
     (select display_name from public.industrial_parks where industrial_park_id=new.industrial_park_id),new.brief_id),new.brief_id,true);
@@ -52,7 +52,7 @@ insert into public.recruitment_project_brief_slug_aliases(alias_slug,brief_id,is
   from public.recruitment_project_briefs b join public.industrial_parks ip using(industrial_park_id);
 
 -- Explicit jobs.v1 allowlist, plus the canonical URL. Only invoked for the requested page/detail.
-create function public.recruitment_post_portal_item(p_brief_id uuid) returns jsonb language sql stable set search_path=pg_catalog,public as $$
+create function public.recruitment_post_portal_item(p_brief_id uuid) returns jsonb language sql stable set search_path = pg_catalog, public as $$
   select pg_catalog.jsonb_build_object(
           'id', b.brief_id,
           'brief_id', b.brief_id,
@@ -160,7 +160,7 @@ create function public.recruitment_post_portal_item(p_brief_id uuid) returns jso
 $$;
 
 create function public.recruitment_post_public_portal_list_v1(p_filters jsonb)
-returns jsonb language sql stable security definer set search_path=pg_catalog,public as $$
+returns jsonb language sql stable security definer set search_path = pg_catalog, public as $$
   with settings as (
     select (p_filters->>'page')::integer as page, (p_filters->>'page_size')::integer as size
   ), published as materialized (
@@ -176,7 +176,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,pu
       and (p_filters->>'labor_type_key' is null or exists(select 1 from public.recruitment_project_brief_labor_types lt where lt.brief_id=p.brief_id and lt.labor_type_key=p_filters->>'labor_type_key'))
       and (p_filters->>'shift_pattern' is null or p.shift_pattern=p_filters->>'shift_pattern')
       and (p_filters->>'gender_requirement' is null or p.gender_requirement=p_filters->>'gender_requirement')
-      and (p_filters->>'salary_advance_available' is null or p.salary_advance_available)
+      and (p_filters->>'salary_advance_available' is null or p.salary_advance_available = (p_filters->>'salary_advance_available')::boolean)
   ), page_items as (
     select brief_id,case when p_filters->>'sort'='published_desc' then published_at else updated_at end as stamp from filtered
     order by stamp desc,brief_id desc limit (select least(greatest(size,1),50) from settings) offset (select (page::bigint-1)*size from settings)
@@ -193,7 +193,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,pu
 $$;
 
 create function public.recruitment_post_public_portal_get_v1(p_slug_or_code text)
-returns jsonb language sql stable security definer set search_path=pg_catalog,public as $$
+returns jsonb language sql stable security definer set search_path = pg_catalog, public as $$
   with input as (select lower(trim(p_slug_or_code)) k), target as (
     select b.brief_id,b.industrial_park_id,s.alias_slug as canonical from input i
     join public.recruitment_project_briefs b on b.brief_id=coalesce(
@@ -209,18 +209,128 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,pu
     from target t
 $$;
 
+revoke all on function public.recruitment_post_build_public_slug(text, text, uuid) from public, anon, authenticated, service_role;
+revoke all on function public.recruitment_post_register_slug(text, uuid, boolean) from public, anon, authenticated, service_role;
+revoke all on function public.recruitment_post_register_canonical() from public, anon, authenticated, service_role;
+revoke all on function public.recruitment_post_portal_item(uuid) from public, anon, authenticated, service_role;
+revoke all on function public.recruitment_post_public_portal_list_v1(jsonb) from public, anon, authenticated, service_role;
+revoke all on function public.recruitment_post_public_portal_get_v1(text) from public, anon, authenticated, service_role;
+
+grant execute on function public.recruitment_post_public_portal_list_v1(jsonb) to service_role;
+grant execute on function public.recruitment_post_public_portal_get_v1(text) to service_role;
+
 do $owner_align$
-declare fn regprocedure; target_owner name;
+declare
+  v_service_rpcs text[] := array[
+    'public.recruitment_post_public_portal_list_v1(jsonb)',
+    'public.recruitment_post_public_portal_get_v1(text)'
+  ];
+  v_internal_fns text[] := array[
+    'public.recruitment_post_build_public_slug(text, text, uuid)',
+    'public.recruitment_post_register_slug(text, uuid, boolean)',
+    'public.recruitment_post_register_canonical()',
+    'public.recruitment_post_portal_item(uuid)'
+  ];
+  v_sig text;
+  v_oid oid;
+  v_proc_owner oid;
+  v_rel_owner oid;
+  v_target_owner_oid oid;
+  v_target_owner name;
+  v_can_set_owner boolean := false;
+  v_rec record;
+  v_expected_search_path text;
 begin
-  select pg_get_userbyid(relowner) into strict target_owner from pg_class where oid='public.direct_entries'::regclass;
-  foreach fn in array array['public.recruitment_post_build_public_slug(text,text,uuid)'::regprocedure,
-    'public.recruitment_post_register_slug(text,uuid,boolean)'::regprocedure,'public.recruitment_post_register_canonical()'::regprocedure,
-    'public.recruitment_post_portal_item(uuid)'::regprocedure,'public.recruitment_post_public_portal_list_v1(jsonb)'::regprocedure,
-    'public.recruitment_post_public_portal_get_v1(text)'::regprocedure] loop
-    execute format('alter function %s owner to %I', fn, target_owner);
-    execute format('revoke all on function %s from public,anon,authenticated,service_role',fn);
+  select c.relowner, r.rolname
+    into v_target_owner_oid, v_target_owner
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_roles r on r.oid = c.relowner
+   where c.oid = 'public.direct_entries'::pg_catalog.regclass;
+
+  if v_target_owner_oid is null or v_target_owner is null then
+    raise exception 'Public jobs portal postcheck failed: base owner missing' using errcode = '55000';
+  end if;
+
+  v_can_set_owner := pg_catalog.pg_has_role(current_user, v_target_owner_oid, 'SET');
+
+  select c.relowner
+    into v_rel_owner
+    from pg_catalog.pg_class c
+   where c.oid = 'public.recruitment_project_brief_slug_aliases'::pg_catalog.regclass;
+
+  if v_rel_owner is null then
+    raise exception 'Public jobs portal postcheck failed: slug alias table missing' using errcode = '55000';
+  end if;
+
+  if v_can_set_owner and v_rel_owner is distinct from v_target_owner_oid then
+    execute pg_catalog.format('alter table public.recruitment_project_brief_slug_aliases owner to %I', v_target_owner);
+  end if;
+
+  foreach v_sig in array v_service_rpcs loop
+    v_oid := pg_catalog.to_regprocedure(v_sig);
+    if v_oid is null then
+      raise exception 'Public jobs portal postcheck failed: missing service RPC %', v_sig using errcode = '55000';
+    end if;
+
+    select p.proowner into v_proc_owner from pg_catalog.pg_proc p where p.oid = v_oid;
+    if v_can_set_owner and v_proc_owner is distinct from v_target_owner_oid then
+      execute pg_catalog.format('alter function %s owner to %I', v_sig, v_target_owner);
+    end if;
+
+    select p.prosecdef, p.proconfig
+      into v_rec
+      from pg_catalog.pg_proc p
+     where p.oid = v_oid;
+
+    if not coalesce(v_rec.prosecdef, false)
+       or not ('search_path=pg_catalog, public' = any(coalesce(v_rec.proconfig, array[]::text[]))) then
+      raise exception 'Public jobs portal postcheck failed: definer/search_path invalid on %', v_sig using errcode = '55000';
+    end if;
+
+    if not pg_catalog.has_function_privilege('service_role', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('public', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('anon', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('authenticated', v_oid, 'EXECUTE') then
+      raise exception 'Public jobs portal postcheck failed: RPC ACL invalid on %', v_sig using errcode = '55000';
+    end if;
   end loop;
-  execute format('alter table public.recruitment_project_brief_slug_aliases owner to %I',target_owner);
-end $owner_align$;
-grant execute on function public.recruitment_post_public_portal_list_v1(jsonb),public.recruitment_post_public_portal_get_v1(text) to service_role;
+
+  foreach v_sig in array v_internal_fns loop
+    v_oid := pg_catalog.to_regprocedure(v_sig);
+    if v_oid is null then
+      raise exception 'Public jobs portal postcheck failed: missing internal fn %', v_sig using errcode = '55000';
+    end if;
+
+    select p.proowner into v_proc_owner from pg_catalog.pg_proc p where p.oid = v_oid;
+    if v_can_set_owner and v_proc_owner is distinct from v_target_owner_oid then
+      execute pg_catalog.format('alter function %s owner to %I', v_sig, v_target_owner);
+    end if;
+
+    select p.prosecdef, p.proconfig
+      into v_rec
+      from pg_catalog.pg_proc p
+     where p.oid = v_oid;
+
+    v_expected_search_path := case
+      when v_sig = 'public.recruitment_post_build_public_slug(text, text, uuid)' then 'search_path=pg_catalog'
+      else 'search_path=pg_catalog, public'
+    end;
+
+    if not (v_expected_search_path = any(coalesce(v_rec.proconfig, array[]::text[]))) then
+      raise exception 'Public jobs portal postcheck failed: search_path invalid on %', v_sig using errcode = '55000';
+    end if;
+
+    if v_sig = 'public.recruitment_post_register_canonical()' and not coalesce(v_rec.prosecdef, false) then
+      raise exception 'Public jobs portal postcheck failed: trigger fn % must be SECURITY DEFINER', v_sig using errcode = '55000';
+    end if;
+
+    if pg_catalog.has_function_privilege('service_role', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('public', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('anon', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('authenticated', v_oid, 'EXECUTE') then
+      raise exception 'Public jobs portal postcheck failed: internal ACL invalid on %', v_sig using errcode = '55000';
+    end if;
+  end loop;
+end
+$owner_align$;
 commit;

@@ -1937,7 +1937,45 @@ test("T-MINE-01..07: recruitment_post_list_mine creator-only PUBLISHED + WITHDRA
     "public.recruitment_post_public_feed_v1()",
   ]);
 
-  // T-PUB-01: anon and authenticated cannot execute recruitment_post_public_feed_v1; service_role can
+  // Exercise the additive portal reader on the same lifecycle fixtures as the legacy feed.
+  await db.exec(await readFile(path.join(MIGRATION_DIR, "20261128170000_public_jobs_portal.sql"), "utf8"));
+  for (const role of ["anon", "authenticated", "service_role"]) {
+    const { rows: [access] } = await db.query(
+      "select has_function_privilege($1,'public.recruitment_post_public_portal_list_v1(jsonb)','execute') as list, has_function_privilege($1,'public.recruitment_post_public_portal_get_v1(text)','execute') as detail, has_table_privilege($1,'public.recruitment_project_brief_slug_aliases','select') as registry", [role],
+    );
+    assert.deepEqual(access, {list: role==="service_role", detail: role==="service_role", registry:false});
+  }
+  for (const internalSig of [
+    "public.recruitment_post_build_public_slug(text, text, uuid)",
+    "public.recruitment_post_register_slug(text, uuid, boolean)",
+    "public.recruitment_post_register_canonical()",
+    "public.recruitment_post_portal_item(uuid)",
+  ]) {
+    for (const role of ["public", "anon", "authenticated", "service_role"]) {
+      const { rows: [priv] } = await db.query(
+        "select has_function_privilege($1, $2::regprocedure, 'execute') as allowed",
+        [role, internalSig],
+      );
+      assert.equal(priv.allowed, false, `${internalSig} must deny ${role}`);
+    }
+  }
+  const readList = async (filters={}) => {
+    await db.exec("set role service_role");
+    try {
+      return (await db.query("select public.recruitment_post_public_portal_list_v1($1::jsonb) v",[JSON.stringify({page:1,page_size:12,...filters})])).rows[0].v;
+    } finally {
+      await db.exec("reset role");
+    }
+  };
+  const readJob = async (slug) => {
+    await db.exec("set role service_role");
+    try {
+      return (await db.query("select public.recruitment_post_public_portal_get_v1($1) v",[slug])).rows[0].v;
+    } finally {
+      await db.exec("reset role");
+    }
+  };
+  // T-PUB-01: anon and authenticated cannot execute recruitment_post_public_feed_v1 or portal readers; service_role can
   for (const deniedRole of ["anon", "authenticated"]) {
     await db.exec(`set role ${deniedRole}`);
     try {
@@ -1947,6 +1985,22 @@ test("T-MINE-01..07: recruitment_post_list_mine creator-only PUBLISHED + WITHDRA
         "42501",
         `${deniedRole} must be denied EXECUTE on recruitment_post_public_feed_v1`,
       );
+      for (const [label, sql, params] of [
+        ["recruitment_post_public_portal_list_v1", "select public.recruitment_post_public_portal_list_v1($1::jsonb)", ["{}"]],
+        ["recruitment_post_public_portal_get_v1", "select public.recruitment_post_public_portal_get_v1($1)", ["missing"]],
+      ]) {
+        let portalErr = null;
+        try {
+          await db.query(sql, params);
+        } catch (err) {
+          portalErr = err;
+        }
+        assert.equal(
+          portalErr?.code,
+          "42501",
+          `${deniedRole} must be denied EXECUTE on ${label}`,
+        );
+      }
     } finally {
       await db.exec("reset role");
     }
@@ -2007,6 +2061,24 @@ test("T-MINE-01..07: recruitment_post_list_mine creator-only PUBLISHED + WITHDRA
     await db.exec("set local role service_role");
     const feedAfterCreate = await rpc(db, "recruitment_post_public_feed_v1");
     await db.exec("reset role");
+    const listed = await readList();
+    assert.equal(listed.pagination.total_count,1);
+    assert.equal(listed.facets.total_published_count,1);
+    const {public_slug: publicSlug, ...publicBase} = listed.items[0];
+    assert.equal(publicSlug.endsWith(pubBriefId),true);
+    assert.ok(publicSlug.startsWith("cong-ty-dien-tu-public-feed-"));
+    assert.deepEqual(publicBase,feedAfterCreate.jobs[0]);
+    assert.equal((await readList({page:2,page_size:1})).items.length,0);
+    assert.equal((await readList({q:"khong khop"})).pagination.total_count,0);
+    assert.equal((await readList({province_code:publicBase.location.province_code,industrial_park_code:publicBase.location.industrial_park_code,labor_type_key:publicBase.general.labor_types[0].labor_type_key})).items.length,1);
+    assert.equal((await readList({salary_advance_available:true})).items.length,1);
+    assert.equal((await readList({salary_advance_available:false})).items.length,0);
+    for (let n=0;n<2;n++) await db.query("select public.recruitment_post_register_slug('ten-cu-da-doi-soat',$1)",[pubBriefId]);
+    for(const key of [publicSlug,"ten-cu-da-doi-soat","BI-"+pubBriefId,pubBriefId]) {
+      const result=await readJob(key);
+      assert.equal(result.match_status,key===publicSlug?"FOUND_CANONICAL":"FOUND_ALIAS");
+      assert.deepEqual(result.item,listed.items[0]);
+    }
     const projectedCreateFeed = projectRecruitmentPostPublicFeedV1(feedAfterCreate);
     assert.ok(projectedCreateFeed !== null, "Public feed after create must pass contract projection");
     assert.equal(projectedCreateFeed.schema_version, 1);
@@ -2053,6 +2125,7 @@ test("T-MINE-01..07: recruitment_post_list_mine creator-only PUBLISHED + WITHDRA
     await db.exec("set local role service_role");
     const feedAfterUpdate = await rpc(db, "recruitment_post_public_feed_v1");
     await db.exec("reset role");
+    assert.equal((await readJob(publicSlug)).item.version,2);
     const projectedUpdateFeed = projectRecruitmentPostPublicFeedV1(feedAfterUpdate);
     assert.ok(projectedUpdateFeed !== null);
     assert.equal(projectedUpdateFeed.jobs.length, 1);
@@ -2076,6 +2149,8 @@ test("T-MINE-01..07: recruitment_post_list_mine creator-only PUBLISHED + WITHDRA
     await db.exec("set local role service_role");
     const feedAfterWithdraw = await rpc(db, "recruitment_post_public_feed_v1");
     await db.exec("reset role");
+    for(const key of [publicSlug,"ten-cu-da-doi-soat","BI-"+pubBriefId,pubBriefId]) assert.equal(await readJob(key),null);
+    assert.equal((await readList()).facets.total_published_count,0);
     assert.deepEqual(feedAfterWithdraw, {
       schema_version: 1,
       jobs: [],
