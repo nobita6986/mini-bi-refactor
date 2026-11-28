@@ -544,6 +544,10 @@ export const HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES = Object.freeze([
 ]);
 export const WP10_7_2B_MIGRATION_NAME =
   "20261126210000_wp10_7_2b_drop_leave_profile_unit_kind.sql";
+export const WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME =
+  "20261127183000_hf_work_report_assignment_access_probe.sql";
+export const WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE =
+  "public.work_report_has_assignment_access(uuid, uuid)";
 export const HR_BULLETINS_MIGRATION_NAME =
   "20261127060000_wp_hr_bulletins_foundation.sql";
 export const HR_BULLETINS_RPC_SIGNATURES = Object.freeze([
@@ -898,6 +902,7 @@ export function buildS0T1CAppliedFlags(appliedMapOrSet) {
     hfBlockMoveUnassignTeamLeaderApplied: has(
       HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_MIGRATION_NAME,
     ),
+    assignmentAccessProbeApplied: has(WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_MIGRATION_NAME),
     hrBulletinsApplied: has(HR_BULLETINS_MIGRATION_NAME),
   };
 }
@@ -976,6 +981,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     pr28CleanupApplied = false,
     hfWorkerEditHistoryNamesAndEmployeeCodeApplied = false,
     hfBlockMoveUnassignTeamLeaderApplied = false,
+    assignmentAccessProbeApplied = false,
     hrBulletinsApplied = false,
   } = flags ?? {};
 
@@ -1139,6 +1145,7 @@ export function buildExpectedS0T1CAllowlist(migrationSql, flagsOrAppliedMap = {}
     ...(hfBlockMoveUnassignTeamLeaderApplied
       ? HF_BLOCK_MOVE_UNASSIGN_TEAM_LEADER_RPC_SIGNATURES
       : []),
+    ...(assignmentAccessProbeApplied ? [WORK_REPORT_ASSIGNMENT_ACCESS_PROBE_RPC_SIGNATURE] : []),
     ...(hrBulletinsApplied ? HR_BULLETINS_RPC_SIGNATURES : []),
   ]
     .filter((sig) => !pr28CleanupApplied || !PR28_CLEANUP_RETIRED_RPC_SIGNATURES.includes(sig))

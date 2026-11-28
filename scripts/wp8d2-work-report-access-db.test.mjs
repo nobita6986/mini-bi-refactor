@@ -1434,19 +1434,21 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
     };
 
     let currentAuthSubject = STAFF_A2.auth;
-    let listOptionsReadOnlyCalls = 0;
+    let assignmentProbeCalls = 0;
     let obligationsReadOnlyCalls = 0;
     let injectProbeFault = null;
 
+    await db.exec(await readFile(path.join(MIGRATION_DIR, "20261127183000_hf_work_report_assignment_access_probe.sql"), "utf8"));
+
     const readOnlyRpcAdapter = async (fnName, args) => {
-      if (fnName === "work_report_list_assignment_options") {
-        listOptionsReadOnlyCalls += 1;
+      if (fnName === "work_report_has_assignment_access") {
+        assignmentProbeCalls += 1;
         if (injectProbeFault) return injectProbeFault();
         await db.exec("begin transaction read only;");
         try {
           const { rows } = await db.query(
-            "select public.work_report_list_assignment_options($1::uuid, $2::uuid, $3::uuid) as res",
-            [args.p_auth_subject, args.p_app_user_id, args.p_team_id ?? null],
+            "select public.work_report_has_assignment_access($1::uuid, $2::uuid) as res",
+            [args.p_auth_subject, args.p_app_user_id],
           );
           await db.exec("commit;");
           return { data: rows[0]?.res, error: null };
@@ -1518,7 +1520,7 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
     const evaluateUiFlow = async (user) => {
       currentAuthSubject = user.auth;
       const beforeObs = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
-      const beforeListCalls = listOptionsReadOnlyCalls;
+      const beforeListCalls = assignmentProbeCalls;
       const out = await runInRequest(async () => {
         const appShellActor = await navMod.resolveNavActorForAppShell({ directEntryEnabled: true, adminNavigationEnabled: true });
         const actorRes = await navMod.resolveActorForRequest();
@@ -1581,7 +1583,7 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
       });
       const afterObs = (await db.query("select count(*)::int as n from public.work_report_obligations")).rows[0].n;
       assert.equal(afterObs, beforeObs, "Menu/page probe MUST NEVER write or materialize obligations");
-      assert.ok(listOptionsReadOnlyCalls - beforeListCalls <= 1, "At most 1 read-only listOptions call per request");
+      assert.ok(assignmentProbeCalls - beforeListCalls <= 1, "At most 1 read-only assignment access call per request");
       return out;
     };
 
@@ -1590,6 +1592,7 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
     assert.equal(unauthA2.appShellShowsAssignments, false);
     assert.equal(unauthA2.moduleShowsAssignments, false);
     assert.equal(unauthA2.pageDecision, "ACCESS_DENIED");
+    assert.deepEqual(unauthA2.assignProbe, { status: "denied", hasAssignmentAccess: false });
     const unauthB1 = await evaluateUiFlow(STAFF_B1);
     assert.equal(unauthB1.appShellShowsAssignments, false);
     assert.equal(unauthB1.moduleShowsAssignments, false);
@@ -1700,7 +1703,7 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
     assert.equal(grantorLostFlow.pageDecision, "ACCESS_DENIED");
 
     // 9. Independent direct role preserved: ADMIN_AND_TL (direct TL on TEAM_B) receives ALL delegation from OWNER,
-    //    then delegation is revoked -> still keeps direct TEAM_B access (0 listOptions probe calls needed!) while losing TEAM_A!
+    //    then delegation is revoked -> still keeps direct TEAM_B access (0 assignment access probe calls needed!) while losing TEAM_A!
     const { rows: [{ res: delTl }] } = await db.query(
       "select public.work_report_create_delegation($1::uuid, $2::uuid, 'report_assign', $3::uuid, $4::uuid, 'all', null, null, null, $5) as res",
       [OWNER.auth, OWNER.app, ADMIN_AND_TL.app, t1.template_id, nextKey("r1_del_tlb")],
@@ -1709,12 +1712,12 @@ test("WP8D-2 [6/6] R1 E2E: Pure report_assign delegate opens AppShell + WorkRepo
       "select public.work_report_revoke_delegation($1::uuid, $2::uuid, $3::uuid, $4, $5)",
       [OWNER.auth, OWNER.app, delTl.delegation_id, delTl.version, nextKey("r1_rev_tlb")],
     );
-    const callsBeforeDirectTl = listOptionsReadOnlyCalls;
+    const callsBeforeDirectTl = assignmentProbeCalls;
     const directTlFlow = await evaluateUiFlow(ADMIN_AND_TL);
     assert.equal(directTlFlow.appShellShowsAssignments, true);
     assert.equal(directTlFlow.moduleShowsAssignments, true);
     assert.equal(directTlFlow.pageDecision, "ALLOW");
-    assert.equal(listOptionsReadOnlyCalls, callsBeforeDirectTl, "Direct TL short-circuits listOptions probe");
+    assert.equal(assignmentProbeCalls, callsBeforeDirectTl, "Direct TL short-circuits assignment access probe");
     // Direct TL still assigns TEAM_B cleanly, denied TEAM_A after delegation revoke
     const { rows: [{ res: tlTeamBAsg }] } = await db.query(
       "select public.work_report_create_assignment($1::uuid, $2::uuid, $3::uuid, 'TEAM', null, $4::uuid, null, 'DAILY', true, 0, '23:59:59'::time, false, $5::date, null, $6) as res",

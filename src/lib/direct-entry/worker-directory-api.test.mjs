@@ -193,3 +193,20 @@ test("success returns the exact page projection with no-store", async () => {
   assert.equal(teamResponse.status, 200);
   assert.equal(team.calls[0].input.scope, "team");
 });
+
+test("uses allowed worker tabs for early denial while keeping the directory scope check", async () => {
+  const deps = dependencies();
+  deps.resolveSession = async () => ({
+    actor: { ok: true, actor: { ...actor, allowed_worker_tabs: ["recruited"] } },
+    response_headers: {},
+  });
+  for (const scope of ["all", "team", "managed"]) {
+    const res = await listWorkers(request("/api/direct-entry/workers?scope=" + scope), "true", deps);
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).code, "WORKER_DIRECTORY_DENIED");
+  }
+  assert.equal(deps.calls.length, 0);
+  const res = await listWorkers(request("/api/direct-entry/workers?scope=recruited"), "true", deps);
+  assert.equal(res.status, 200);
+  assert.equal(deps.calls[0]?.input.scope, "recruited");
+});
