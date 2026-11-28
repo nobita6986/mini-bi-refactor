@@ -1461,6 +1461,7 @@ test("T1A-8: forged scope request to API/RPC is rejected with HTTP 403 and clien
     assert.equal(body.ok, false);
     assert.equal(body.code, "WORKER_DIRECTORY_DENIED");
   }
+  assert.equal(observedCalls.length, 0, "denied tabs never call the worker directory RPC");
 
   // 3. Client without submission_create/PM authority calls /api/direct-entry/submissions -> returns HTTP 403 SUBMISSION_READ_DENIED
   const subRes = await listOwnSubmissions(
@@ -1473,12 +1474,10 @@ test("T1A-8: forged scope request to API/RPC is rejected with HTTP 403 and clien
   assert.equal(subBody.ok, false);
   assert.equal(subBody.code, "SUBMISSION_READ_DENIED");
 
-  // Verify every repository call received the trusted SESSION_ACTOR
-  assert.equal(observedCalls.length, 4);
-  for (const call of observedCalls) {
-    assert.equal(call.query.auth_subject, SESSION_ACTOR.auth_subject);
-    assert.equal(call.query.app_user_id, SESSION_ACTOR.app_user_id);
-  }
+  assert.equal(observedCalls.length, 1);
+  assert.equal(observedCalls[0].fn, "listOwnSubmissions");
+  assert.equal(observedCalls[0].query.auth_subject, SESSION_ACTOR.auth_subject);
+  assert.equal(observedCalls[0].query.app_user_id, SESSION_ACTOR.app_user_id);
 });
 
 test("T1A-9: uploader tab authority matches direct_entry_list_own_submissions in R1 (submission_create capability, exactly 1 current own scope with team_id=null, valid_from/valid_to inert metadata, or project assignment)", () => {

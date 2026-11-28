@@ -37,6 +37,7 @@ import { Client } from "pg";
 const ROOT = process.cwd();
 const MIGRATION_DIR = path.join(ROOT, "supabase", "migrations");
 const PERF_MIGRATION = "20261127180000_hf_dashboard_reporting_options_perf.sql";
+const SUBMISSIONS_PERF_MIGRATION = "20261127183100_hf_direct_entry_own_submissions_project_scope_perf.sql";
 
 function uuid(group, n) {
   return `98${String(group).padStart(2, "0")}0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -372,6 +373,7 @@ test(
       }
 
       const uniqueSubs = [...new Set(rowSpecs.map((r) => r.subId))];
+      const ownDraft = rowSpecs.find((row) => row.state === "DRAFT").subId;
       await client.query(
         `insert into public.direct_entry_candidates (candidate_id)
          select x::uuid from unnest($1::uuid[]) as x`,
@@ -379,8 +381,9 @@ test(
       );
       await client.query(
         `insert into public.direct_entry_submissions (submission_id, created_by_user_id, state)
-         select s, $2::uuid, 'DRAFT' from unnest($1::uuid[]) as s`,
-        [uniqueSubs, ACTORS.all.app],
+         select s, case when s = $3::uuid then $4::uuid else $2::uuid end, 'DRAFT'
+           from unnest($1::uuid[]) as s`,
+        [uniqueSubs, ACTORS.all.app, ownDraft, ACTORS.ownData.app],
       );
       await client.query(
         `insert into public.direct_entries (
@@ -390,7 +393,7 @@ test(
            deleted_at, voided_at, voided_by_user_id, void_reason_id
          )
          select
-           t.entry_id, t.sub_id, t.cand_id, $13::uuid,
+           t.entry_id, t.sub_id, t.cand_id, case when t.sub_id = $15::uuid then $16::uuid else $13::uuid end,
            t.project_id, t.first_work_date, t.code,
            jsonb_build_object(
              'display_name', 'Worker ' || t.code,
@@ -428,6 +431,8 @@ test(
           rowSpecs.map((r) => r.isVoided),
           ACTORS.all.app,
           reasonId,
+          ownDraft,
+          ACTORS.ownData.app,
         ],
       );
 
@@ -752,6 +757,71 @@ test(
           `ACL mismatch for ${sig}`,
         );
       }
+
+      await client.query(
+        `insert into public.direct_entry_project_manager_assignments
+           (project_id, manager_recruiter_id, valid_from, is_current)
+         values
+           ('proj_std', $1, '2020-01-01', true),
+           ('proj_dup_a', $1, '2020-01-01', true),
+           ('proj_dup_b', $1, public.direct_entry_authorization_date() + 7, true),
+           ('proj_std', $2, '2020-01-01', true)`,
+        [REC_EMPTY, REC_A1],
+      );
+      await client.query(
+        `insert into public.authz_user_group_capabilities (group_id, capability, started_at, reason)
+         values ($1, 'submission_create', '2020-01-01', 'Perf own submissions')`,
+        [grpOwn],
+      );
+      await client.query(
+        `update public.authz_user_group_members
+            set ended_at = now(), ended_by_app_user_id = $3
+          where group_id = $1 and app_user_id = $2`,
+        [grpOwn, ACTORS.ownEmpty.app, ACTORS.all.app],
+      );
+      async function listSubmissions(actor, state, cursor = null) {
+        await client.query("begin; set local role service_role;");
+        try {
+          const { rows: [{ data }] } = await client.query(
+            "select public.direct_entry_list_own_submissions($1, $2, 20, $3, $4) as data",
+            [actor.auth, actor.app, cursor, state],
+          );
+          return data;
+        } finally {
+          await client.query("rollback");
+        }
+      }
+
+      async function captureSubmissions() {
+        const first = await listSubmissions(ACTORS.ownEmpty, "HISTORY");
+        assert.equal(first.has_more, true);
+        const next = await listSubmissions(ACTORS.ownEmpty, "HISTORY", first.next_cursor);
+        const managed = new Set(rowSpecs.filter((row) =>
+          !row.isDeleted && ["proj_std", "proj_dup_a"].includes(row.projectId)
+        ).map((row) => row.subId));
+        for (const item of [...first.items, ...next.items]) {
+          assert.equal(managed.has(item.submission_id), true);
+          assert.equal(item.project_scoped, true);
+          assert.equal(item.entry_count, 1);
+        }
+        const combined = await listSubmissions(ACTORS.ownData, null);
+        assert.ok(combined.items.some((item) =>
+          item.submission_id === ownDraft && !item.project_scoped && item.state === "DRAFT"
+        ));
+        assert.ok(combined.items.some((item) => item.project_scoped));
+        return { first, next, combined, active: await listSubmissions(ACTORS.ownData, "ACTIVE") };
+      }
+
+      const submissionsBefore = await captureSubmissions();
+      await client.query(await readFile(path.join(MIGRATION_DIR, SUBMISSIONS_PERF_MIGRATION), "utf8"));
+      assert.deepEqual(await captureSubmissions(), submissionsBefore);
+      await resetUserFunctionStats(client);
+      await listSubmissions(ACTORS.ownEmpty, "HISTORY");
+      const pmChecks = "direct_entry_actor_is_assigned_project_manager";
+      const pmStats = await readUserFunctionCalls(client, [pmChecks]);
+      assert.equal(pmStats[pmChecks], 3, "checks each candidate project once across the entire page");
+      await assert.rejects(() => listSubmissions(ACTORS.forged, "HISTORY"), { code: "42501" });
+      await assert.rejects(() => listSubmissions(ACTORS.disabled, "HISTORY"), { code: "42501" });
     } finally {
       if (client) await client.end().catch(() => {});
       if (started) {
