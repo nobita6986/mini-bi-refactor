@@ -154,7 +154,7 @@ function projectPrivilegedEditPaymentPatch(
 // quyet dinh; ton tai/active do DB active-catalog guard quyet dinh.
 const BODY_KEYS = ["expected_entry_version", "patch", "reason"] as const;
 export const PRIVILEGED_EDIT_PATCH_KEYS = [
-  "employee_code", "first_work_date", "labor_type", "project_id", "recruiter_id", "worker_details",
+  "collaborator_id", "employee_code", "first_work_date", "labor_type", "project_id", "recruiter_id", "worker_details",
   "employment_status", "payment",
 ] as const;
 
@@ -213,6 +213,17 @@ export function projectPrivilegedEditRequest(body: unknown): PrivilegedEditReque
       (typeof patch.labor_type !== "string" || !isCanonicalLaborTypeKey(patch.labor_type))) {
     return null;
   }
+  let normalizedCollaboratorId: string | null | undefined;
+  if (Object.hasOwn(patch, "collaborator_id")) {
+    if (patch.collaborator_id === null) {
+      normalizedCollaboratorId = null;
+    } else if (typeof patch.collaborator_id === "string" &&
+               BANK_ID.test(patch.collaborator_id.trim())) {
+      normalizedCollaboratorId = patch.collaborator_id.trim();
+    } else {
+      return null;
+    }
+  }
   if (patch.worker_details !== undefined) {
     if (!isRecord(patch.worker_details)) return null;
     const nationalId = patch.worker_details.national_id;
@@ -237,6 +248,9 @@ export function projectPrivilegedEditRequest(body: unknown): PrivilegedEditReque
     } else if (status.leave_reason !== undefined) return null;
   }
   const normalizedPatch: Record<string, unknown> = { ...patch };
+  if (normalizedCollaboratorId !== undefined) {
+    normalizedPatch.collaborator_id = normalizedCollaboratorId;
+  }
   if (patch.payment !== undefined) {
     const payment = projectPrivilegedEditPaymentPatch(patch.payment);
     if (!payment) {

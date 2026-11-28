@@ -187,7 +187,7 @@ type Props = {
   officialSubmitBusy: boolean;
   onActivateRow(rowId: string): void;
   onChange(rowId: string, field: string, value: string): void;
-  onProviderTypeChange(rowId: string, providerType: "hrp" | "vendor" | ""): void;
+  onProviderTypeChange(rowId: string, providerType: "hrp" | "vendor" | "ctv" | ""): void;
   onAddRow(): void;
   onDeleteRow(rowId: string): void;
   onSave(): void;
@@ -389,14 +389,17 @@ export function DirectEntryMultiEntryForm({
                         <option key={project.project_id} value={project.project_id}>{project.display_name}</option>)}
                     </select>
                   </Field>
-                  <Field label={fieldLabel("HRP/Vendor")}>
-                    <select required value={row.providerType}
+                  <Field label={fieldLabel("Nguồn tuyển")}>
+                    <select required aria-label="Nguồn" value={row.providerType}
                       onChange={(event) => onProviderTypeChange(rowId,
-                        event.currentTarget.value === "hrp" || event.currentTarget.value === "vendor"
+                        event.currentTarget.value === "hrp" ||
+                        event.currentTarget.value === "vendor" ||
+                        event.currentTarget.value === "ctv"
                           ? event.currentTarget.value : "")}>
-                      <option value="">Chọn HRP hoặc Vendor</option>
-                      <option value="hrp">HRP</option>
+                      <option value="">Chọn HRP, Vendor hoặc CTV</option>
+                      <option value="hrp">HRP (trực tiếp)</option>
                       <option value="vendor">Vendor</option>
+                      <option value="ctv">CTV</option>
                     </select>
                   </Field>
                   <Field label={fieldLabel("Người tuyển / Vendor")}>
@@ -404,9 +407,30 @@ export function DirectEntryMultiEntryForm({
                       onChange={handleChange(rowId, "recruiter_id")}>
                       <option value="">Chọn người tuyển / Vendor</option>
                       {(catalog?.recruiters ?? []).filter((recruiter) =>
-                        row.providerType === "" || recruiter.provider_type === row.providerType)
+                        row.providerType === "" ||
+                        recruiter.provider_type === (row.providerType === "ctv" ? "hrp" : row.providerType))
                         .map((recruiter) => <option key={recruiter.recruiter_id}
                           value={recruiter.recruiter_id}>{recruiter.display_name}</option>)}
+                    </select>
+                  </Field>
+                  <Field label={row.providerType === "ctv" ? fieldLabel("CTV") : "CTV"}>
+                    <select
+                      aria-label="CTV"
+                      required={row.providerType === "ctv"}
+                      disabled={row.providerType !== "ctv"}
+                      value={row.providerType === "ctv" ? (cells.collaborator_id ?? "") : ""}
+                      onChange={handleChange(rowId, "collaborator_id")}
+                    >
+                      <option value="">
+                        {row.providerType === "ctv" ? "Chọn CTV" : "Chỉ áp dụng khi nguồn là CTV"}
+                      </option>
+                      {(catalog?.collaborators ?? [])
+                        .filter((collaborator) => collaborator.active)
+                        .map((collaborator) => (
+                          <option key={collaborator.collaborator_id} value={collaborator.collaborator_id}>
+                            {collaborator.display_name} ({collaborator.collaborator_id})
+                          </option>
+                        ))}
                     </select>
                   </Field>
                   <Field label={fieldLabel("Loại hình LĐ")}>

@@ -19,8 +19,8 @@ export const WORKER_EXPORT_SCOPES = ["recruited", "managed", "team", "all"] as c
 export type WorkerExportScope = (typeof WORKER_EXPORT_SCOPES)[number];
 
 export const WORKER_EXPORT_EMPLOYMENT_STATUSES = ["UNCONFIRMED", "ON", "OFF"] as const;
-export const WORKER_EXPORT_PROVIDER_TYPES = ["HRP", "Vendor"] as const;
-export const WORKER_EXPORT_FILTER_PROVIDER_TYPES = ["hrp", "vendor"] as const;
+export const WORKER_EXPORT_PROVIDER_TYPES = ["HRP", "Vendor", "CTV"] as const;
+export const WORKER_EXPORT_FILTER_PROVIDER_TYPES = ["hrp", "hrp_direct", "hrp_ctv", "vendor"] as const;
 export type WorkerExportFilterProviderType = (typeof WORKER_EXPORT_FILTER_PROVIDER_TYPES)[number];
 export const WORKER_EXPORT_SEARCH_MAX_LENGTH = 100;
 
@@ -48,7 +48,7 @@ export const WORKER_EXPORT_TOO_MANY_KEYS = ["status", "limit"] as const;
 /** 20 cot XLSX theo dung thu tu; moi gia tri duoc giu dang text (numFmt "@"). */
 export const WORKER_EXPORT_COLUMNS: ReadonlyArray<{
   header: string;
-  key: (typeof WORKER_EXPORT_ROW_KEYS)[number];
+  key: (typeof WORKER_EXPORT_ROW_KEYS)[number] | "collaborator_display_name";
   text: boolean;
 }> = Object.freeze([
   { header: "Mã NLĐ", key: "employee_code", text: true },
@@ -63,6 +63,7 @@ export const WORKER_EXPORT_COLUMNS: ReadonlyArray<{
   { header: "Loại hình lao động", key: "labor_type_display", text: true },
   { header: "Người tuyển", key: "recruiter_display", text: true },
   { header: "Nhà cung cấp", key: "provider_type", text: true },
+  { header: "CTV", key: "collaborator_display_name", text: true },
   { header: "Trạng thái làm việc", key: "employment_status", text: true },
   { header: "Ngày nghỉ", key: "leave_date", text: true },
   { header: "Lý do nghỉ", key: "leave_reason", text: true },
@@ -198,6 +199,8 @@ export type WorkerExportRow = {
   labor_type_display: string | null;
   recruiter_display: string;
   provider_type: (typeof WORKER_EXPORT_PROVIDER_TYPES)[number] | null;
+  collaborator_id?: string | null;
+  collaborator_display_name?: string | null;
   employment_status: (typeof WORKER_EXPORT_EMPLOYMENT_STATUSES)[number] | null;
   leave_date: string | null;
   leave_reason: string | null;
@@ -212,8 +215,17 @@ export type WorkerExportEnvelope =
   | { status: "ok"; rows: WorkerExportRow[] }
   | { status: "too_many_rows"; limit: number };
 
+const WORKER_EXPORT_OPTIONAL_ROW_KEYS = ["collaborator_id", "collaborator_display_name"] as const;
+
 export function projectWorkerExportRow(value: unknown): WorkerExportRow | null {
-  if (!isRecord(value) || !hasExactKeys(value, WORKER_EXPORT_ROW_KEYS)) return null;
+  if (!isRecord(value)) return null;
+  const rowKeys = Object.keys(value);
+  const allowedKeys = new Set<string>([...WORKER_EXPORT_ROW_KEYS, ...WORKER_EXPORT_OPTIONAL_ROW_KEYS]);
+  if (!WORKER_EXPORT_ROW_KEYS.every((key) => Object.hasOwn(value, key)) ||
+      rowKeys.some((key) => !allowedKeys.has(key))) return null;
+  if (Object.hasOwn(value, "collaborator_id") && !isNullableText(value.collaborator_id, 128)) return null;
+  if (Object.hasOwn(value, "collaborator_display_name") &&
+      !isNullableText(value.collaborator_display_name, 256)) return null;
   if (!isNullableText(value.employee_code, 64)) return null;
   if (!isNullableText(value.display_name, 256)) return null;
   if (!isNullableText(value.date_of_birth, 64)) return null;
@@ -263,6 +275,12 @@ export function projectWorkerExportRow(value: unknown): WorkerExportRow | null {
     labor_type_display: value.labor_type_display,
     recruiter_display: value.recruiter_display,
     provider_type: value.provider_type as WorkerExportRow["provider_type"],
+    ...(Object.hasOwn(value, "collaborator_id")
+      ? { collaborator_id: value.collaborator_id as string | null }
+      : {}),
+    ...(Object.hasOwn(value, "collaborator_display_name")
+      ? { collaborator_display_name: value.collaborator_display_name as string | null }
+      : {}),
     employment_status: value.employment_status as WorkerExportRow["employment_status"],
     leave_date: value.leave_date,
     leave_reason: value.leave_reason,

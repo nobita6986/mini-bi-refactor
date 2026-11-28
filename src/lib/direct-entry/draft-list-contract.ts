@@ -56,6 +56,8 @@ export type OwnDraft = {
   recruiter_id: string;
   recruiter_display_name: string;
   provider_type: "hrp" | "vendor";
+  collaborator_id?: string | null;
+  collaborator_display_name?: string | null;
   team_id: string;
   team_display_name: string;
   labor_type: LaborType;
@@ -99,13 +101,22 @@ export function projectOwnDrafts(value: unknown): OwnDraft[] | null {
       value.drafts.length > 500) return null;
   const drafts: OwnDraft[] = [];
   const entryIds = new Set<string>();
+  const requiredDraftKeys = [
+    "submission_id", "submission_version", "entry_id", "entry_version", "employee_code",
+    "first_work_date", "worker_display_name", "project_id", "project_display_name",
+    "recruiter_id", "recruiter_display_name", "provider_type", "team_id", "team_display_name",
+    "labor_type", "labor_type_display", "employment_status", "created_at", "updated_at", "profile",
+  ];
+  const allowedDraftKeys = new Set([...requiredDraftKeys, "collaborator_id", "collaborator_display_name"]);
   for (const draft of value.drafts) {
-    if (!isRecord(draft) || !hasExactKeys(draft, [
-      "submission_id", "submission_version", "entry_id", "entry_version", "employee_code",
-      "first_work_date", "worker_display_name", "project_id", "project_display_name",
-      "recruiter_id", "recruiter_display_name", "provider_type", "team_id", "team_display_name",
-      "labor_type", "labor_type_display", "employment_status", "created_at", "updated_at", "profile",
-    ]) || typeof draft.submission_id !== "string" || !UUID.test(draft.submission_id) ||
+    if (!isRecord(draft) ||
+        !requiredDraftKeys.every((key) => Object.hasOwn(draft, key)) ||
+        Object.keys(draft).some((key) => !allowedDraftKeys.has(key)) ||
+        (Object.hasOwn(draft, "collaborator_id") && draft.collaborator_id !== null &&
+          (typeof draft.collaborator_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(draft.collaborator_id))) ||
+        (Object.hasOwn(draft, "collaborator_display_name") && draft.collaborator_display_name !== null &&
+          (typeof draft.collaborator_display_name !== "string" || draft.collaborator_display_name.trim().length === 0)) ||
+        typeof draft.submission_id !== "string" || !UUID.test(draft.submission_id) ||
         !isPositiveVersion(draft.submission_version) ||
         typeof draft.entry_id !== "string" || !UUID.test(draft.entry_id) ||
         !isPositiveVersion(draft.entry_version) ||
@@ -149,6 +160,10 @@ export function projectOwnDrafts(value: unknown): OwnDraft[] | null {
       recruiter_id: draft.recruiter_id,
       recruiter_display_name: draft.recruiter_display_name,
       provider_type: draft.provider_type,
+      ...(Object.hasOwn(draft, "collaborator_id") ? { collaborator_id: draft.collaborator_id as string | null } : {}),
+      ...(Object.hasOwn(draft, "collaborator_display_name")
+        ? { collaborator_display_name: draft.collaborator_display_name as string | null }
+        : {}),
       team_id: draft.team_id,
       team_display_name: draft.team_display_name,
       labor_type: draft.labor_type,

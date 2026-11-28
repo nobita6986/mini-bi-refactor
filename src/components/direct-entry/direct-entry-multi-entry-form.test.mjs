@@ -105,8 +105,9 @@ test("Form submission waits only for uploads bound to the submitted entries and 
 test("Requirement 1: Giới tính is placed at the end of the main personal info group (outside Thông tin thêm) and serializes Nam/Nữ/Khác", () => {
   for (const label of [
     "Dự án",
-    "HRP/Vendor",
+    "Nguồn tuyển",
     "Người tuyển / Vendor",
+    "CTV",
     "Loại hình LĐ",
     "Ngày bắt đầu làm việc",
     "Trạng thái làm việc",

@@ -58,11 +58,11 @@ test("mapper dat o theo anchor va phan loai write/validate-only/ignore ma khong 
   assert.equal(mapping.writeCells.length, 4);
   assert.equal(mapping.ignoredCells.length, 0);
 
-  // P1.7-H05: 28 cot tong, vi tri cot thay doi them provider_type. Vi tri 23
+  // P1.7-H05 + CTV: 29 cot tong (them provider_type va collaborator_id). Vi tri 24
   // (0-indexed) hien tai la bank_name.
   const crossingUiColumns = mapClipboardFromAnchor({
     matrix: [["Nguyễn Văn A", "front/back", "đã lưu", "xóa"]],
-    anchor: { rowIndex: 0, columnIndex: 23 },
+    anchor: { rowIndex: 0, columnIndex: 24 },
   });
   assert.equal(crossingUiColumns.ok, true);
   assert.deepEqual(crossingUiColumns.cells.map((cell) => [cell.columnKey, cell.pasteMode]), [
@@ -83,10 +83,10 @@ test("overflow va anchor sai bi reject atomic, khong tra ve partial cells", () =
     matrix: [["a"], ["b"]],
     anchor: { rowIndex: 99, columnIndex: 0 },
   }), { ok: false, code: "CLIPBOARD_ROW_OVERFLOW" });
-  // P1.7-H05: 28 cot tong, vi tri COLUMN_OVERFLOW la 27+ (0-indexed).
+  // P1.7-H05 + CTV: 29 cot tong, vi tri COLUMN_OVERFLOW la 28+ (0-indexed).
   assert.deepEqual(mapClipboardFromAnchor({
     matrix: [["a", "b"]],
-    anchor: { rowIndex: 0, columnIndex: 27 },
+    anchor: { rowIndex: 0, columnIndex: 28 },
   }), { ok: false, code: "CLIPBOARD_COLUMN_OVERFLOW" });
   assert.deepEqual(mapClipboardFromAnchor({
     matrix: [["a"]],

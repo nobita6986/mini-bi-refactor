@@ -41,7 +41,7 @@ export const SPREADSHEET_WRITABLE_FIELD_KEYS: readonly string[] = Object.freeze(
     .map((field) => field.key),
 );
 
-const WRITABLE_FIELD_KEYS = new Set(SPREADSHEET_WRITABLE_FIELD_KEYS);
+const WRITABLE_FIELD_KEYS = new Set([...SPREADSHEET_WRITABLE_FIELD_KEYS, "collaborator_id"]);
 
 export type SpreadsheetStagedRow = {
   /** Client-only stable identity. It is never a server entry identifier. */
@@ -66,7 +66,9 @@ export type SpreadsheetStagedRow = {
    */
   lazyDefaultsApplied: boolean;
   /** Client-only recruiter filter/assertion; never serialized as a worker-profile field. */
-  providerType: "hrp" | "vendor" | "";
+  providerType: "hrp" | "vendor" | "ctv" | "";
+  /** Client-only CTV collaborator ID when providerType === "ctv". */
+  collaboratorId?: string;
 };
 
 export type SpreadsheetRowModel = {
@@ -119,6 +121,8 @@ export function spreadsheetRowIsBlank(
   row: SpreadsheetStagedRow,
   now: Date = new Date(),
 ): boolean {
+  if ((row.collaboratorId ?? "").trim().length > 0 ||
+      (row.cells.collaborator_id ?? "").trim().length > 0) return false;
   const today = spreadsheetDefaultFirstWorkDate(now);
   return SPREADSHEET_WRITABLE_FIELD_KEYS.every((key) => {
     const value = (row.cells[key] ?? "").trim();
@@ -202,6 +206,7 @@ function nextBlankRow(sequence: number, laborTypeDefault = ""): SpreadsheetStage
     defaultLaborType: laborTypeDefault,
     lazyDefaultsApplied: false,
     providerType: "",
+    collaboratorId: "",
   };
 }
 
@@ -327,6 +332,9 @@ export function updateSpreadsheetRowCells(
     return {
       ...row,
       cells: { ...row.cells, ...patch },
+      ...(Object.hasOwn(patch, "collaborator_id")
+        ? { collaboratorId: patch.collaborator_id }
+        : {}),
       defaultLaborType: Object.hasOwn(patch, "labor_type") ? "" : row.defaultLaborType,
       lazyDefaultsApplied: true,
     };
@@ -360,10 +368,22 @@ export function updateSpreadsheetRowProviderType(
 
   const rows = baseModel.rows.map((row) => {
     if (row.clientRowId !== clientRowId || row.providerType === providerType) return row;
+    const prevRecruiterScope = row.providerType === "ctv" ? "hrp" : row.providerType;
+    const nextRecruiterScope = providerType === "ctv" ? "hrp" : providerType;
+    const keepRecruiter = prevRecruiterScope !== "" && prevRecruiterScope === nextRecruiterScope;
+    const nextCollaboratorId = providerType === "ctv" ? (row.collaboratorId ?? "") : "";
+    const nextCells: Record<string, string> = {
+      ...row.cells,
+      recruiter_id: keepRecruiter ? (row.cells.recruiter_id ?? "") : "",
+    };
+    if (providerType !== "ctv" && Object.hasOwn(nextCells, "collaborator_id")) {
+      nextCells.collaborator_id = "";
+    }
     return {
       ...row,
       providerType,
-      cells: { ...row.cells, recruiter_id: "" },
+      collaboratorId: nextCollaboratorId,
+      cells: nextCells,
       // P3-W07C-R1: danh dau activated de row khong reset ve placeholder.
       lazyDefaultsApplied: true,
     };
@@ -371,6 +391,40 @@ export function updateSpreadsheetRowProviderType(
   return rows.every((row, index) => row === baseModel.rows[index])
     ? baseModel
     : { ...baseModel, rows };
+}
+
+export function updateSpreadsheetRowCollaboratorId(
+  model: SpreadsheetRowModel,
+  clientRowId: string,
+  collaboratorId: string,
+  now: Date = new Date(),
+  laborTypeDefault = "",
+): SpreadsheetRowModel {
+  let needsActivation = false;
+  let found = false;
+  for (const row of model.rows) {
+    if (row.clientRowId !== clientRowId) continue;
+    found = true;
+    if (!row.lazyDefaultsApplied) needsActivation = true;
+    break;
+  }
+  if (!found) return model;
+  const baseModel = needsActivation
+    ? activateSpreadsheetRowLazyDefaults(model, clientRowId, now, laborTypeDefault)
+    : model;
+
+  const rows = baseModel.rows.map((row) => {
+    if (row.clientRowId !== clientRowId || (row.collaboratorId ?? "") === collaboratorId) return row;
+    return {
+      ...row,
+      collaboratorId,
+      cells: { ...row.cells, collaborator_id: collaboratorId },
+      lazyDefaultsApplied: true,
+    };
+  });
+  return rows.every((row, index) => row === baseModel.rows[index])
+    ? baseModel
+    : ensureSpreadsheetSpareRows({ ...baseModel, rows });
 }
 
 export function clearSpreadsheetRow(
@@ -382,7 +436,7 @@ export function clearSpreadsheetRow(
     if (row.clientRowId !== clientRowId) return row;
     found = true;
     // P3-W07C: clear row RONG + chua kich hoat.
-    return { ...row, cells: defaultCells(), lazyDefaultsApplied: false };
+    return { ...row, cells: defaultCells(), collaboratorId: "", lazyDefaultsApplied: false };
   });
   if (!found) return model;
 
@@ -421,6 +475,7 @@ export function duplicateSpreadsheetRow(
     defaultLaborType: source.defaultLaborType,
     lazyDefaultsApplied: source.lazyDefaultsApplied,
     providerType: source.providerType,
+    collaboratorId: source.collaboratorId ?? "",
   };
   const rows = [...model.rows];
   rows.splice(sourceIndex + 1, 0, duplicate);
@@ -459,6 +514,7 @@ export function importSpreadsheetRows(
       defaultLaborType: "",
       lazyDefaultsApplied: true,
       providerType: "",
+      collaboratorId: "",
     };
     if (spreadsheetRowIsBlank(candidate)) continue;
     newRows.push(candidate);

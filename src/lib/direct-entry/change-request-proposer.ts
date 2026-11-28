@@ -28,6 +28,7 @@ export const PROPOSER_FIELD_ORDER = [
   "first_work_date",
   "project_id",
   "recruiter_id",
+  "collaborator_id",
   "labor_type",
 ] as const;
 
@@ -38,6 +39,7 @@ export const PROPOSER_FIELD_LABELS: Readonly<Record<ProposerField, string>> = Ob
   first_work_date: "Ngày đầu tiên đi làm",
   project_id: "Dự án",
   recruiter_id: "Người tuyển",
+  collaborator_id: "CTV",
   labor_type: "Loại hình lao động",
 });
 
@@ -46,6 +48,7 @@ export type ProposerFields = {
   first_work_date: string;
   project_id: string;
   recruiter_id: string;
+  collaborator_id?: string | null;
   labor_type: LaborType;
 };
 
@@ -85,6 +88,9 @@ export type ProposerEntryProjection = ProposerFields & {
   entry_id: string;
   expected_version: number;
   labor_type_display: string;
+  provider_type?: "hrp" | "vendor";
+  collaborator_id?: string | null;
+  collaborator_display_name?: string | null;
 };
 
 export function projectProposerEntry(value: unknown): ProposerEntryProjection | null {
@@ -102,6 +108,24 @@ export function projectProposerEntry(value: unknown): ProposerEntryProjection | 
   if (typeof value.recruiter_id !== "string" || !UUID.test(value.recruiter_id)) return null;
   if (!isCanonicalLaborTypeKey(value.labor_type)) return null;
   if (typeof value.labor_type_display !== "string" || value.labor_type_display.length < 1) return null;
+  const collaboratorId = value.collaborator_id === undefined || value.collaborator_id === null
+    ? null
+    : typeof value.collaborator_id === "string" && value.collaborator_id.trim().length > 0
+      ? value.collaborator_id.trim()
+      : undefined;
+  if (collaboratorId === undefined) return null;
+  const collaboratorDisplayName =
+    value.collaborator_display_name === undefined || value.collaborator_display_name === null
+      ? null
+      : typeof value.collaborator_display_name === "string" &&
+          value.collaborator_display_name.trim().length > 0
+        ? value.collaborator_display_name.trim()
+        : undefined;
+  if (collaboratorDisplayName === undefined) return null;
+  const providerType =
+    value.provider_type === "hrp" || value.provider_type === "vendor"
+      ? value.provider_type
+      : undefined;
   return {
     entry_id: value.entry_id,
     expected_version: value.version,
@@ -109,6 +133,9 @@ export function projectProposerEntry(value: unknown): ProposerEntryProjection | 
     first_work_date: value.first_work_date,
     employee_code: value.employee_code,
     recruiter_id: value.recruiter_id,
+    collaborator_id: collaboratorId,
+    collaborator_display_name: collaboratorDisplayName,
+    ...(providerType ? { provider_type: providerType } : {}),
     labor_type: value.labor_type,
     labor_type_display: value.labor_type_display,
   };

@@ -65,6 +65,7 @@ export const DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS: readonly string[] = Object.f
   "project_id",
   "provider_type",
   "recruiter_id",
+  "collaborator_id",
   "labor_type",
   "first_work_date",
   "initial_status",
@@ -93,7 +94,7 @@ export const DIRECT_ENTRY_ACTION_RAIL_COLUMN_KEYS: readonly string[] = Object.fr
 ]);
 
 export const DIRECT_ENTRY_GENDER_OPTIONS: readonly string[] = Object.freeze(["Nam", "Nữ"]);
-export const DIRECT_ENTRY_PROVIDER_OPTIONS: readonly string[] = Object.freeze(["HRP", "Vendor"]);
+export const DIRECT_ENTRY_PROVIDER_OPTIONS: readonly string[] = Object.freeze(["HRP", "Vendor", "CTV"]);
 
 export type GridRecruiterOption = {
   id: string;
@@ -125,11 +126,11 @@ export function personnelPositionUiLabel(position: "STAFF" | "TEAM_LEADER" | nul
 
 export function recruitersForProvider(
   recruiters: readonly GridRecruiterOption[],
-  providerType: "hrp" | "vendor" | "",
+  providerType: "hrp" | "vendor" | "ctv" | "",
 ): readonly GridRecruiterOption[] {
-  return providerType === ""
-    ? []
-    : recruiters.filter((recruiter) => recruiter.provider_type === providerType);
+  if (providerType === "") return [];
+  const effectiveProvider = providerType === "ctv" ? "hrp" : providerType;
+  return recruiters.filter((recruiter) => recruiter.provider_type === effectiveProvider);
 }
 
 type FieldColumnOptions = Pick<DirectEntryGridColumn, "group" | "pasteMode" | "width" | "editor"> &
@@ -199,10 +200,12 @@ export const DIRECT_ENTRY_GRID_COLUMNS: readonly DirectEntryGridColumn[] = Objec
     editor: "text", label: "Số điện thoại" }),
   fieldColumn("provider_hint", { group: "derived", pasteMode: "validate-only", width: 150,
     editor: "readonly", editable: false, label: "HRP/Vendor" }),
-  uiColumn({ key: "provider_type", label: "HRP/Vendor", group: "entry", editable: true,
+  uiColumn({ key: "provider_type", label: "Nguồn", group: "entry", editable: true,
     pasteMode: "ignore", required: false, width: 140, visibleByDefault: true, editor: "select" }),
   fieldColumn("recruiter_id", { group: "entry", pasteMode: "write", width: 210,
     editor: "catalog", label: "Người tuyển / Vendor" }),
+  uiColumn({ key: "collaborator_id", label: "CTV", group: "entry", editable: true,
+    pasteMode: "ignore", required: false, width: 200, visibleByDefault: true, editor: "catalog" }),
   fieldColumn("team_hint", { group: "derived", pasteMode: "validate-only", width: 160,
     editor: "readonly", editable: false }),
   fieldColumn("labor_type", { group: "entry", pasteMode: "write", width: 140,

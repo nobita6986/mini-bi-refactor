@@ -160,7 +160,7 @@ test("persisted IDs, versions and fields hydrate from server; unsaved rows use t
   assert.equal(persisted.laborTypeDisplay, "Thử việc");
   assert.deepEqual(Object.keys(editableFields(persisted)), [
     "employeeCode", "firstWorkDate", "workerName", "projectId", "recruiterId", "laborType",
-    "providerType", "profile",
+    "providerType", "collaboratorId", "profile",
   ]);
   assert.deepEqual(persisted.profile, projection.profile);
   const unsaved = newDraftRow("local-temp-1", "2026-10-15");

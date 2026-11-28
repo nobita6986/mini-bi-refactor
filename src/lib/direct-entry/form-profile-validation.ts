@@ -81,10 +81,11 @@ export function buildFormProfileValidation(input: {
     });
 
     const catalog = input.catalogFor(previewRow.row.first_work_date || input.referenceDate);
+    const expectedRecruiterProvider = providerType === "ctv" ? "hrp" : providerType;
     const normalizedRecruiterKey = rawRecruiterId.toLocaleLowerCase("vi-VN");
     const recruiterProviderMismatch =
       recruiterReadyForCatalogCheck &&
-      ((previewRow.resolved !== null && previewRow.resolved.provider_type !== providerType) ||
+      ((previewRow.resolved !== null && previewRow.resolved.provider_type !== expectedRecruiterProvider) ||
         (catalog !== null &&
           catalog.recruiters.some(
             (recruiter) =>
@@ -95,7 +96,7 @@ export function buildFormProfileValidation(input: {
             (recruiter) =>
               (recruiter.id.trim().toLocaleLowerCase("vi-VN") === normalizedRecruiterKey ||
                 recruiter.label.trim().toLocaleLowerCase("vi-VN") === normalizedRecruiterKey) &&
-              recruiter.provider_type === providerType,
+              recruiter.provider_type === expectedRecruiterProvider,
           )));
 
     const nextIssues: WorkerProfileIssue[] = [...filteredIssues];
@@ -126,6 +127,7 @@ export function buildFormProfileValidation(input: {
             project_id: previewRow.resolved.project_id,
             recruiter_id: null,
             provider_type: null,
+            collaborator_id: previewRow.resolved.collaborator_id ?? null,
           }
         : previewRow.resolved;
 
@@ -137,7 +139,8 @@ export function buildFormProfileValidation(input: {
         nextIssues.length === 0 &&
         resolved.project_id !== null &&
         resolved.recruiter_id !== null &&
-        resolved.provider_type !== null,
+        resolved.provider_type !== null &&
+        (providerType !== "ctv" || typeof resolved.collaborator_id === "string" && resolved.collaborator_id.length > 0),
     };
   });
 
@@ -168,7 +171,11 @@ export function buildFormProfileValidation(input: {
       columnKey: item.field === null ? null : item.field,
       code: item.code,
       severity: item.severity,
-      message: workerProfileIssueMessage(item.code),
+      message: item.code === "CTV_REQUIRED"
+        ? "Vui lòng chọn CTV khi nguồn là CTV."
+        : item.field === "collaborator_id" && item.code === "PASTE_CATALOG_MISSING"
+          ? "CTV không tồn tại hoặc đã ngừng hoạt động."
+          : workerProfileIssueMessage(item.code),
     });
     if (item.row >= 2 && mapped.clientRowId !== null) cellIssues.push(mapped);
     else headerIssues.push(mapped);

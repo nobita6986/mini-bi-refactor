@@ -54,17 +54,17 @@ test("compact submission panel renders immediately before the grid while change-
   assert.doesNotMatch(live, /<details className=\{styles\.secondaryPanel\}/);
 });
 
-test("only the approved 18 data columns render; action rail is outside that set", () => {
-  // Canonical order theo DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS: provider/recruiter/labor
+test("only the approved 19 data columns render; action rail is outside that set", () => {
+  // Canonical order theo DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS: provider/recruiter/collaborator/labor
   // nam ngay sau Du an, va national_id_issued_place da bi loai khoi UI/grid (DB tu ghi
   // "Bộ Công An" cho ho so moi).
   assert.deepEqual(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS, [
-    "row_index", "project_id", "provider_type", "recruiter_id", "labor_type",
+    "row_index", "project_id", "provider_type", "recruiter_id", "collaborator_id", "labor_type",
     "first_work_date", "initial_status", "display_name", "phone", "national_id", "gender", "date_of_birth",
     "national_id_issued_at", "address", "account_number", "bank_name",
     "account_holder_name", "general_note",
   ]);
-  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.length, 18);
+  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.length, 19);
   assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.includes("national_id_issued_place"), false,
     "national_id_issued_place khong con la cot UI");
   // R1: DataGrid chi nhan 18 default columns. ACTION_RAIL chi con la tap

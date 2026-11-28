@@ -18,6 +18,8 @@ export type FullProfileRepositoryResult =
 const SAFE_INVALID_CODES = new Set([
   "BANK_NOT_ACTIVE",
   "BATCH_INVALID",
+  "COLLABORATOR_INVALID",
+  "COLLABORATOR_NOT_ACTIVE",
   "CONTRACT_VERSION_UNSUPPORTED",
   "EMPLOYEE_CODE_DUPLICATE",
   "EMPLOYEE_CODE_SEQUENCE_EXHAUSTED",
@@ -54,6 +56,8 @@ const SAFE_ERROR_ALIASES: Record<string, string> = {
   "team is not active": "RECRUITER_MEMBERSHIP_INVALID",
   "recruiter is not active": "RECRUITER_NOT_ACTIVE",
   "project is not active": "PROJECT_NOT_ACTIVE",
+  "collaborator is not active": "COLLABORATOR_NOT_ACTIVE",
+  "provider collaborator_id invalid": "COLLABORATOR_INVALID",
 };
 
 const SAFE_DENIAL_CATEGORIES: Readonly<Record<string, string>> = Object.freeze({

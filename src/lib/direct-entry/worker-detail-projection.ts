@@ -81,6 +81,8 @@ export type WorkerDetailProjection = {
   /** `hrp` | `vendor` do server quyet dinh (khong suy tu UI). */
   providerType: "hrp" | "vendor";
   providerLabel: string;
+  collaboratorId?: string | null;
+  collaboratorDisplayName?: string | null;
   documents: WorkerDetailDocument[];
   /** null khi actor thieu `document_view` (server khong tra du lieu portrait). */
   portrait: WorkerPortraitProjection | null;
@@ -299,6 +301,20 @@ export function projectWorkerDetail(value: unknown, expectedEntryId: string): Wo
   const documents = projectDocuments(entry.documents);
   if (documents === null) return null;
   if (entry.provider_type !== "hrp" && entry.provider_type !== "vendor") return null;
+  if (Object.hasOwn(entry, "collaborator_id") && entry.collaborator_id !== null &&
+      (typeof entry.collaborator_id !== "string" || entry.collaborator_id.trim().length === 0)) {
+    return null;
+  }
+  if (Object.hasOwn(entry, "collaborator_display_name") && entry.collaborator_display_name !== null &&
+      (typeof entry.collaborator_display_name !== "string" || entry.collaborator_display_name.trim().length === 0)) {
+    return null;
+  }
+  const collaboratorId = typeof entry.collaborator_id === "string"
+    ? entry.collaborator_id.trim()
+    : null;
+  const collaboratorDisplayName = typeof entry.collaborator_display_name === "string"
+    ? entry.collaborator_display_name.trim()
+    : null;
   if (!("worker_portrait" in entry)) return null;
   const portrait = entry.worker_portrait === null ? null : projectWorkerPortrait(entry.worker_portrait);
   if (entry.worker_portrait !== null && portrait === null) return null;
@@ -306,6 +322,11 @@ export function projectWorkerDetail(value: unknown, expectedEntryId: string): Wo
     isRecord(entry.payment) && typeof entry.payment.bank_name === "string"
       ? entry.payment.bank_name.trim() || null
       : null;
+  const providerLabel = entry.provider_type === "vendor"
+    ? "Vendor"
+    : collaboratorId
+      ? (collaboratorDisplayName ? `CTV · ${collaboratorDisplayName}` : "CTV")
+      : "HRP";
   return {
     entryId: entry.entry_id,
     entryVersion: entry.version,
@@ -314,7 +335,9 @@ export function projectWorkerDetail(value: unknown, expectedEntryId: string): Wo
     worker,
     employment,
     providerType: entry.provider_type,
-    providerLabel: entry.provider_type === "hrp" ? "HRP" : "Vendor",
+    providerLabel,
+    ...(Object.hasOwn(entry, "collaborator_id") ? { collaboratorId } : {}),
+    ...(Object.hasOwn(entry, "collaborator_display_name") ? { collaboratorDisplayName } : {}),
     documents,
     portrait,
     ...(paymentBankName !== null ? { paymentBankName } : {}),

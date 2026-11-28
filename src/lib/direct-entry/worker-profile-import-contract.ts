@@ -229,6 +229,7 @@ export const WORKER_PROFILE_ISSUE_MESSAGES: Readonly<Record<string, string>> = O
     "STK, tên ngân hàng và tên chủ tài khoản là thông tin để đối chiếu, không phải lệnh thanh toán.",
   PASTE_TEAM_CONFIRM: "Hệ thống sẽ xác nhận chi nhánh/team từ danh mục.",
   PASTE_PROVIDER_CONFIRM: "Hệ thống sẽ xác nhận HRP/Vendor từ danh mục.",
+  CTV_REQUIRED: "Vui lòng chọn CTV khi nguồn là CTV.",
   PASTE_CATALOG_UNAVAILABLE: "Chưa tải được danh mục cho ngày hiệu lực này.",
   PASTE_CATALOG_MISSING: "Không có trong danh mục của ngày hiệu lực.",
   PASTE_CATALOG_AMBIGUOUS: "Khớp nhiều mục trong danh mục; hãy dùng đúng mã hoặc tên đầy đủ.",

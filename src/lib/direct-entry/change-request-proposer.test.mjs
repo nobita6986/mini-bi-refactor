@@ -26,6 +26,7 @@ function fields(overrides = {}) {
     first_work_date: "2026-10-15",
     project_id: "project_synthetic_01",
     recruiter_id: "93000000-0000-4000-8000-000000000001",
+    collaborator_id: null,
     labor_type: "TEMPORARY",
     ...overrides,
   };
@@ -48,7 +49,7 @@ test("state labels cover the four change-request states", () => {
     WITHDRAWN: "Đã rút",
   });
   assert.deepEqual([...PROPOSER_FIELD_ORDER], [
-    "employee_code", "first_work_date", "project_id", "recruiter_id", "labor_type",
+    "employee_code", "first_work_date", "project_id", "recruiter_id", "collaborator_id", "labor_type",
   ]);
 });
 
@@ -142,6 +143,9 @@ test("entry projection reads only the five non-PII fields", () => {
     first_work_date: "2026-10-15",
     employee_code: "hrp-2026-000001",
     recruiter_id: "93000000-0000-4000-8000-000000000001",
+    collaborator_id: null,
+    collaborator_display_name: null,
+    provider_type: "hrp",
     labor_type: "TEMPORARY",
     labor_type_display: "Nhãn loại hình",
   });

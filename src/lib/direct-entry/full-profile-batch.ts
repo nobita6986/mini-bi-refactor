@@ -65,6 +65,7 @@ export type FullProfileRequestRow = {
   employee_code: string;
   recruiter_id: string;
   labor_type: LaborType;
+  collaborator_id?: string | null;
   display_name: string;
   worker: {
     gender: FullProfileOptionalText;
@@ -214,6 +215,7 @@ export function buildFullProfileRow(
     employee_code: profile.employee_code,
     recruiter_id: row.resolved.recruiter_id,
     labor_type: profile.labor_type,
+    ...(row.resolved.collaborator_id ? { collaborator_id: row.resolved.collaborator_id } : {}),
     display_name: profile.display_name,
     worker: {
       gender: optionalText(profile.worker.gender),

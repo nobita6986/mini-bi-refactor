@@ -17,7 +17,7 @@ import { isPaymentAccountNumber, isPaymentText } from "./payment-contract.ts";
 export const WORKER_DIRECTORY_SCOPES = ["recruited", "managed", "team", "all"] as const;
 export type WorkerDirectoryScope = (typeof WORKER_DIRECTORY_SCOPES)[number];
 
-export const WORKER_PROVIDER_TYPES = ["hrp", "vendor"] as const;
+export const WORKER_PROVIDER_TYPES = ["hrp", "hrp_direct", "hrp_ctv", "vendor"] as const;
 export type WorkerProviderType = (typeof WORKER_PROVIDER_TYPES)[number];
 
 export const WORKER_DIRECTORY_DEFAULT_PAGE_SIZE = 25;
@@ -225,6 +225,9 @@ export type WorkerDirectoryRow = {
   employment_status: (typeof WORKER_EMPLOYMENT_STATUSES)[number] | null;
   recruiter_id: string;
   recruiter_display: string;
+  provider_type?: "hrp" | "vendor";
+  collaborator_id?: string | null;
+  collaborator_display_name?: string | null;
   payment: WorkerDirectoryPayment | null;
   pending_request: WorkerDirectoryPendingRequest | null;
   last_decision: WorkerDirectoryLastDecision | null;
@@ -335,8 +338,29 @@ function projectActions(value: unknown): WorkerDirectoryAllowedActions | undefin
   };
 }
 
+const WORKER_DIRECTORY_OPTIONAL_ROW_KEYS = [
+  "provider_type", "collaborator_id", "collaborator_display_name",
+] as const;
+
 export function projectWorkerDirectoryRow(value: unknown): WorkerDirectoryRow | null {
-  if (!isRecord(value) || !hasExactKeys(value, WORKER_DIRECTORY_ROW_KEYS)) return null;
+  if (!isRecord(value)) return null;
+  const rowKeys = Object.keys(value);
+  const allowedRowKeys = new Set<string>([
+    ...WORKER_DIRECTORY_ROW_KEYS,
+    ...WORKER_DIRECTORY_OPTIONAL_ROW_KEYS,
+  ]);
+  if (!WORKER_DIRECTORY_ROW_KEYS.every((key) => Object.hasOwn(value, key)) ||
+      rowKeys.some((key) => !allowedRowKeys.has(key))) return null;
+  if (Object.hasOwn(value, "provider_type") &&
+      value.provider_type !== "hrp" && value.provider_type !== "vendor") return null;
+  if (Object.hasOwn(value, "collaborator_id") && value.collaborator_id !== null &&
+      (typeof value.collaborator_id !== "string" || !PROJECT_ID.test(value.collaborator_id))) {
+    return null;
+  }
+  if (Object.hasOwn(value, "collaborator_display_name") && value.collaborator_display_name !== null &&
+      (typeof value.collaborator_display_name !== "string" || value.collaborator_display_name.trim().length < 1)) {
+    return null;
+  }
   if (typeof value.entry_id !== "string" || !UUID.test(value.entry_id)) return null;
   if (typeof value.entry_version !== "number" || !Number.isSafeInteger(value.entry_version) ||
       value.entry_version < 1) {
@@ -391,6 +415,15 @@ export function projectWorkerDirectoryRow(value: unknown): WorkerDirectoryRow | 
     employment_status: value.employment_status as WorkerDirectoryRow["employment_status"],
     recruiter_id: value.recruiter_id,
     recruiter_display: value.recruiter_display,
+    ...(Object.hasOwn(value, "provider_type")
+      ? { provider_type: value.provider_type as "hrp" | "vendor" }
+      : {}),
+    ...(Object.hasOwn(value, "collaborator_id")
+      ? { collaborator_id: value.collaborator_id as string | null }
+      : {}),
+    ...(Object.hasOwn(value, "collaborator_display_name")
+      ? { collaborator_display_name: value.collaborator_display_name as string | null }
+      : {}),
     payment,
     pending_request: pending,
     last_decision: decision,

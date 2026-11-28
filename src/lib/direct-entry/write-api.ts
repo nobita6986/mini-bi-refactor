@@ -16,8 +16,9 @@ import { projectPaymentProjection } from "./payment-contract.ts";
 const MAX_BODY_BYTES = 64 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_UTC_MICROS = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$/;
+const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ROW_KEYS = new Set([
-  "project_id", "first_work_date", "employee_code", "worker", "recruiter_id", "labor_type",
+  "project_id", "first_work_date", "employee_code", "worker", "recruiter_id", "labor_type", "collaborator_id",
 ]);
 const BATCH_WORKER_KEYS = new Set([
   "display_name", "date_of_birth", "national_id", "address", "phone",
@@ -115,15 +116,28 @@ function projectRows(value: unknown): ProjectedBatchRow[] | null {
         !isWorkerDetails(worker) ||
         validateWorkerDetails(worker).length > 0 ||
         validateEmployeeCode(employee_code, first_work_date, codes).length > 0) return null;
+    let collaboratorId: string | null | undefined;
+    if (Object.hasOwn(item, "collaborator_id")) {
+      if (item.collaborator_id === null) {
+        collaboratorId = null;
+      } else if (typeof item.collaborator_id === "string" &&
+                 CATALOG_ID.test(item.collaborator_id.trim())) {
+        collaboratorId = item.collaborator_id.trim();
+      } else {
+        return null;
+      }
+    }
     codes.push(employee_code);
-    rows.push({
+    const row: ProjectedBatchRow = {
       project_id,
       first_work_date,
       employee_code,
       worker_details: worker,
       recruiter_id,
       labor_type,
-    });
+    };
+    if (collaboratorId !== undefined) row.collaborator_id = collaboratorId;
+    rows.push(row);
   }
   return rows;
 }
@@ -204,9 +218,15 @@ export async function postDirectEntryBatch(
         catalog = result.data;
         catalogs.set(date, catalog);
       }
-      if (!catalog.projects.some(({ project_id }) => project_id === row.project_id) ||
-          !catalog.recruiters.some(({ recruiter_id }) => recruiter_id === row.recruiter_id)) {
+      const recruiter = catalog.recruiters.find(({ recruiter_id }) => recruiter_id === row.recruiter_id);
+      if (!catalog.projects.some(({ project_id }) => project_id === row.project_id) || !recruiter) {
         return error("BATCH_MASTER_INVALID", 400);
+      }
+      if (typeof row.collaborator_id === "string") {
+        if (recruiter.provider_type !== "hrp" ||
+            !(catalog.collaborators ?? []).some((item) => item.collaborator_id === row.collaborator_id && item.active)) {
+          return error("BATCH_MASTER_INVALID", 400);
+        }
       }
     }
     const result = await dependencies.repository.createBatch({
@@ -237,8 +257,8 @@ export async function postDirectEntryBatch(
 const ENTRY_UUID = UUID;
 const ENTRY_KEYS = new Set([
   "entry_id", "submission_id", "created_at", "created_by", "project_id", "first_work_date", "employee_code",
-  "worker_details", "recruiter_id", "team_id", "provider_type", "labor_type",
-  "labor_type_display", "general_note", "version", "scope_kind", "payment", "employment_status",
+  "worker_details", "recruiter_id", "team_id", "provider_type", "collaborator_id", "collaborator_display_name",
+  "labor_type", "labor_type_display", "general_note", "version", "scope_kind", "payment", "employment_status",
   "documents", "worker_portrait",
 ]);
 const WORKER_PROJECTION_KEYS = new Set([
@@ -330,6 +350,10 @@ export function projectEntry(value: unknown): Record<string, unknown> | null {
       typeof value.recruiter_id !== "string" || !ENTRY_UUID.test(value.recruiter_id) ||
       typeof value.team_id !== "string" || !ENTRY_UUID.test(value.team_id) ||
       (value.provider_type !== "hrp" && value.provider_type !== "vendor") ||
+      (Object.hasOwn(value, "collaborator_id") && value.collaborator_id !== null &&
+        (typeof value.collaborator_id !== "string" || !CATALOG_ID.test(value.collaborator_id))) ||
+      (Object.hasOwn(value, "collaborator_display_name") && value.collaborator_display_name !== null &&
+        (typeof value.collaborator_display_name !== "string" || value.collaborator_display_name.trim().length === 0)) ||
       !isCanonicalLaborTypeKey(value.labor_type) ||
       // P3.1-W02C-R2: nhan do server resolve tu catalog theo key (ke ca key da inactive).
       // Thieu/rong => unavailable, khong de UI tu map key sang nhan.

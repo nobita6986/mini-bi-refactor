@@ -30,18 +30,20 @@ const H05_LABEL_OVERRIDES = Object.freeze({
 const EXPECTED_KEYS = [
   "row_index", "project_id", "first_work_date", "employee_code", "display_name", "gender",
   "date_of_birth", "age_years", "national_id", "national_id_issued_at",
-  "national_id_issued_place", "address", "phone", "provider_hint", "provider_type", "recruiter_id", "team_hint",
+  "national_id_issued_place", "address", "phone", "provider_hint", "provider_type", "recruiter_id",
+  "collaborator_id", "team_hint",
   "labor_type", "initial_status", "leave_date", "leave_reason_text", "general_note",
   "account_number", "bank_name", "account_holder_name", "cccd_documents", "save_status",
   "row_actions",
 ];
 
-test("registry khoa dung thu tu vat ly cua P1.7", () => {
-  assert.equal(DIRECT_ENTRY_GRID_COLUMNS.length, 28);
+test("registry khoa dung thu tu vat ly cua P1.7 + CTV", () => {
+  assert.equal(DIRECT_ENTRY_GRID_COLUMNS.length, 29);
   assert.deepEqual(DIRECT_ENTRY_GRID_COLUMNS.map((column) => column.key), EXPECTED_KEYS);
   assert.equal(new Set(EXPECTED_KEYS).size, EXPECTED_KEYS.length);
   assert.equal(directEntryGridColumnIndex("project_id"), 1);
-  assert.equal(directEntryGridColumnIndex("row_actions"), 27);
+  assert.equal(directEntryGridColumnIndex("collaborator_id"), 16);
+  assert.equal(directEntryGridColumnIndex("row_actions"), 28);
   assert.equal(directEntryGridColumnIndex("unknown"), -1);
 });
 
@@ -73,17 +75,18 @@ test("default grid includes employment status and excludes the action rail", () 
   // server-authoritative migration #46 ghi ("Bộ Công An") và cũng không
   // còn trong template Excel mới.
   assert.deepEqual(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS, [
-    "row_index", "project_id", "provider_type", "recruiter_id", "labor_type",
+    "row_index", "project_id", "provider_type", "recruiter_id", "collaborator_id", "labor_type",
     "first_work_date", "initial_status", "display_name", "phone", "national_id", "gender", "date_of_birth",
     "national_id_issued_at", "address", "account_number", "bank_name",
     "account_holder_name", "general_note",
   ]);
-  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.length, 18);
-  // Ba cột ngay sau `Dự án` phải đúng thứ tự theo brief R3.
+  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.length, 19);
+  // Bon cot ngay sau `Dự án`: Nguồn → Người tuyển / Vendor → CTV → Loại hình LĐ.
   const projectIndex = DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.indexOf("project_id");
   assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[projectIndex + 1], "provider_type");
   assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[projectIndex + 2], "recruiter_id");
-  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[projectIndex + 3], "labor_type");
+  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[projectIndex + 3], "collaborator_id");
+  assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[projectIndex + 4], "labor_type");
   const nameIndex = DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS.indexOf("display_name");
   assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[nameIndex + 1], "phone");
   assert.equal(DIRECT_ENTRY_DEFAULT_GRID_COLUMN_KEYS[nameIndex + 2], "national_id");
